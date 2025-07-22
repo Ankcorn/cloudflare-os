@@ -1,12 +1,23 @@
-interface Gatekeeper<T> {
+interface Gatekeeper<Session, Action = any, RevertInfo = any> {
   // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
   // specific Minion.
 
-  startSession(props: SessionProperties): Promise<T>;
+  startSession(approvalQueue: ApprovalQueue<Action>, props: SessionProperties): Promise<Session>;
   // Get the capability representing this resource's RPC interface which will be provided to the
   // Minion.
+  //
+  // Any side-effecting actions performed during this session must be submitted to the approval
+  // queue. Actions must not actually be performed until they are approved. Read-only actions can
+  // be executed immediately, without approval.
+  //
+  // It is suggested that the gatekeeper "simulate" actions that have not been approved yet, that
+  // is, the `Session` interface should reflect the state of the resource as if all actions had
+  // been applied. This allows the Minion to keep working, potentially queuing up additional
+  // dependent actions. That said, there is no strict requirement that a gatekeeper does such
+  // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
+  // particular API.
 
-  checkSafeUser(user: UserId): SafeUserLevel;
+  checkUserPermissions(user: UserId): {level: SafeUserLevel};
   // Checks whether the given user is able to perform actions equivalent to those provided by this
   // capability.
   //
@@ -23,15 +34,63 @@ interface Gatekeeper<T> {
   // Minion is able to perform actions that one or more of its influencers could not perform
   // directly, additional scrutiny may be needed. E.g. policies may require human review in this
   // case, and/or explicitly prohibit actions that are deemed dangerous.
+
+  // ---------------------------------------------------------------------------
+  // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
+  // for approval via the ApprovalCallback.
+  //
+  // The type `Action` is an arbitrary type defined by the gatekeeper to represent the actions
+  // it has queued for approval. It is passed to the Overseer via the ApprovalCallback, and will
+  // be passed back verbatim to these methods. The gatekeeper might choose to define `Action` to
+  // fully describe the action, or it might simply be an ID pointing into the gatekeeper's own
+  // storage; this is entirely up to the gatekeeper to decide.
+
+  applyAction(action: Action): Promise<void | {revertInfo?: RevertInfo}>;
+  // Action was approved. This call should apply the action (or schedule it to be applied).
+  //
+  // If this throws an exception, the user will be informed that the action failed and given the
+  // opportunity to retry or discard.
+  //
+  // Depending on policy conditions, an action may be approved and applied automatically. However,
+  // the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode
+  // in which it's OK to skip the check.
+  //
+  // If `revertInfo` is provided, this is an arbitrary value which the overseer should pass back to
+  // the gatekeeper if `revertAction()` is later called to attempt to revert this action.
+
+  rejectAction(action: Action): Promise<void | {restart?: boolean}>;
+  // Indicates that an action was rejected by the user. The gatekeeper should clean up any
+  // associated storage.
+  //
+  // If the returned `restart` flag is true, rejecting this action requires restarting the Minion.
+  // This is sometimes needed by gatekeepers that simulate actions as if they had been approved --
+  // the session may be in a state that is difficult to roll back without confusing the Minion.
+  // The Overseer will take care of the restart, possibly after rejecting other actions.
+
+  revertAction(action: Action, revertInfo: RevertInfo):
+      Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}>;
+  // Attempts to revert an action that was already applied.
+  //
+  // Gatekeepers are not required to implement this. If unimplemented, the user will be instructed
+  // that they need to perform the revert manually based on the action description. High-quality
+  // gatekeepers should almost always implement this, though.
+  //
+  // If the returned `message` is non-null, it is Markdown to be displayed to the user. This may
+  // be used, for example:
+  // - To give the user additional instructions on how to complete the revert, if not all of it
+  //   could be done automatically.
+  // - To explain to the user why a revert is not possible, e.g. if other stacked modifications
+  //   have been made on top which must be reverted first. (`canRetry` may be true in this case.)
+  //
+  // `canRetry` should be true if the revert failed (for a reason described in `message`), but
+  // it could make sense to retry later. In this case the UI will continue to give the user the
+  // option to revert.
+  //
+  // `restart` has the same meaning as for `rejectAction()`.
 }
 
 type SessionProperties = {
   // Information passed to a gatekeeper when a session starts.
-
-  approvalQueue: ApprovalQueue;
-  // Any "write" actions performed during this session must be submitted to this approval queue.
-  // Actions must not actually be performed until they are approved. Read-only actions can be
-  // executed immediately, without approval.
 
   readOnly :boolean;
   // If true, hints that `approvalQueue` will reject all actions, because the Minion is executing
@@ -68,58 +127,24 @@ type UserId = {
   email: string
 }
 
-interface ApprovalQueue {
+interface ApprovalQueue<Action> {
   // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
   // action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
   // actually required, the gatekeeper must still submit all actions and wait for apply() to be
   // called before applying them.
 
-  submit(description: ActionDescription, callback: ApprovalCallback): Promise<void>;
+  submit(action: Action, description: ActionDescription): Promise<void>;
   // Submit an action for approval.
-}
-
-interface ApprovalCallback {
-  // Callback which signals when a supervised action has been approved and should be performed.
-
-  apply(): Promise<void>;
-  // Action was approved. This callback should apply the action (or schedule it to be applied).
   //
-  // If this throws an exception, the user will be informed that the action failed and given the
-  // opportunity to retry or discard.
+  // `Action` is an arbitrary type defined by the gatekeeper, which describes the action to be
+  // performed. The value `action` will be passed back to the Gatekeeper's applyAction() or
+  // rejectAction() when the action is later approved or rejected.
   //
-  // If apply() is never called and the callback is deleted, then the action can be assumed to
-  // have been denied. (Note that callbacks are persistent -- denial should only be assumed when
-  // all persistent references are gone.)
+  // `description` describes the action in a way that can direct UI representation and policy
+  // enforcement details.
   //
-  // Depending on policy conditions, an action may be approved automatically. However, the
-  // gatekeeper is nevertheless expected to submit all actions for approval; there is no mode in
-  // which it's OK to skip the check.
-
-  simulate(): Promise<void>;
-  // Called in place of `apply()` to indicate that the action should not be applied because we are
-  // running in simulated test mode. The gatekeeper should behave as if the action did apply, but
-  // should not actually modify any external resource.
-  //
-  // Gatekeepers are not required to implement this. If unimplemented, the callback will simply be
-  // dropped without any other calls.
-
-  revert(): Promise<{message?: string, canRetry?: boolean} | void>;
-  // Attempt to revert an action that was already applied.
-  //
-  // Gatekeepers are not required to implement this. If unimplemented, the user will be instructed
-  // that they need to perform the revert manually based on the action description. High-quality
-  // gatekeepers should almost always implement this, though.
-  //
-  // If the returned `message` is non-null, it is Markdown to be displayed to the user. This may
-  // be used, for example:
-  // - To give the user additional instructions on how to complete the revert, if not all of it
-  //   could be done automatically.
-  // - To explain to the user why a revert is not possible, e.g. if other stacked modifications
-  //   have been made on top which must be reverted first. (`canRetry` may be true in this case.)
-  //
-  // `canRetry` should be true if the revert failed (for a reason described in `message`), but
-  // it could make sense to retry later. In this case the UI will continue to give the user the
-  // option to revert.
+  // TODO: It would be nice if we can link this with the output gate so that if the submission
+  //   does not complete, any SQL writes performed just before submit() are rolled back...
 }
 
 type ActionDescription = {
