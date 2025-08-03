@@ -2,13 +2,10 @@
   "name": "minions",
   "version": "1.0.0",
   "private": true,
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
-    "build": "npm run build --workspaces",
-    "dev": "npm run dev --workspaces",
-    "clean": "npm run clean --workspaces"
+    "build": "pnpm run --recursive build",
+    "dev": "pnpm run --recursive dev",
+    "clean": "pnpm run --recursive clean"
   },
   "devDependencies": {
     "typescript": "^5.9.2"
