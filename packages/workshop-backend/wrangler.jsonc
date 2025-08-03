@@ -1,0 +1,6 @@
+{
+  "name": "workshop-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["experimental"]
+}

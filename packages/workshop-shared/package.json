@@ -1,0 +1,24 @@
+{
+  "name": "@minions/workshop-shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "jsrpc": "file:../../../jsrpc"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}
