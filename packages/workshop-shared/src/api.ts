@@ -26,15 +26,18 @@
 import { RpcStub } from "jsrpc";
 
 // Public API exposed to the internet.
-interface PublicApi {
+export interface PublicApi {
   // Authenticates the user using an auth token (typically stored in localStorage).
   //
   // TODO: Is this right for Cloudflare Access?
   authenticate(token: string): Promise<AuthenticatedApi>;
+
+  // TODO(now): temporary test, remove this
+  greet(name: string): string;
 }
 
 // Top-level API exposed to the user after they have authenticated.
-interface AuthenticatedApi {
+export interface AuthenticatedApi {
   // Open an existing minion.
   openMinion(id: string): Promise<Overseer | null>;
 
@@ -51,7 +54,7 @@ interface AuthenticatedApi {
 
 // Metadata about a Minion. Includes everything needed to render the Minion list on the front
 // page.
-type MinionMetadata = {
+export type MinionMetadata = {
   // Unique ID for this Minion, used with `openMinion()`. This is a url-safe base64 value chosen
   // randomly when the Minion is created.
   id: string;
@@ -68,7 +71,7 @@ type MinionMetadata = {
 // Describes the client-side UI code for a Minion. Such code is intended to run inside an iframe
 // sandbox with no access to the outside world except through an RPC interface to the Workshop
 // and to the Minion's server.
-type UiCode = {
+export type UiCode = {
   // URL from which the main bundle of UI code can be downloaded. This download contains all the
   // Minion's client-side assets. The URL is content-addressed to make it highly cacheable, even
   // across multiple Minions sharing the same implementation (blueprint).
@@ -84,7 +87,7 @@ type UiCode = {
 
 // Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
 // Minion.
-interface Overseer {
+export interface Overseer {
   // Get metadata describing this minion.
   getMetadata(): Promise<MinionMetadata>;
 
@@ -120,12 +123,12 @@ interface Overseer {
 }
 
 // Information about one of a Minion's gatekeepers, for the purpose of displaying it in a list.
-type GatekeeperMetadata = {
+export type GatekeeperMetadata = {
   bindingName: string;
   resourceTitle: string;
 };
 
-interface GatekeeperClient<Session> {
+export interface GatekeeperClient<Session> {
   // Get and set the binding name.
   getBindingName(): Promise<string>;
   setBindingName(name: string): Promise<void>;

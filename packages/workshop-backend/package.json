@@ -10,6 +10,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "jsrpc": "file:../../../jsrpc",
     "@minions/workshop-shared": "workspace:*"
   },
   "devDependencies": {
