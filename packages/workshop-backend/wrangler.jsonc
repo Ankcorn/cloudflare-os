@@ -1,6 +1,6 @@
 {
   "name": "workshop-backend",
-  "main": "src/index.ts",
+  "main": "src/server.ts",
   "compatibility_date": "2025-07-01",
   "compatibility_flags": ["experimental"]
 }
