@@ -1,6 +1,6 @@
 import { RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata } from '@minions/workshop-shared/api';
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
 // Workers environment (bindings).
 interface Env {}
@@ -61,8 +61,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   constructor(private ctx: ExecutionContext) {
     super();
-
-    this.users = this.ctx.exports.UserManager;
+    this.users = this.ctx.exports.UserAccount;
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
