@@ -33,8 +33,14 @@ export interface PublicApi extends RpcTarget {
   // TODO: Is this right for Cloudflare Access?
   authenticate(token: string): Promise<AuthenticatedApi>;
 
-  // TODO(now): temporary test, remove this
-  greet(name: string): string;
+  // Login with username and password.
+  //
+  // Returns a token to store in local storage and pass to `authenticate()` in the future.
+  //
+  // Returns null if login failed (no such user or wrong password).
+  //
+  // TODO: This should be replaced with something based on an external identify provider.
+  login(username: string, password: string): Promise<string | null>;
 }
 
 // Top-level API exposed to the user after they have authenticated.

@@ -2,5 +2,11 @@
   "name": "workshop-backend",
   "main": "src/server.ts",
   "compatibility_date": "2025-07-01",
-  "compatibility_flags": ["experimental"]
+  "compatibility_flags": ["experimental"],
+  "migrations": [
+    {
+      "tag": "v0",
+      "new_sqlite_classes": [ "UserAccount" ]
+    }
+  ]
 }
