@@ -9,5 +9,10 @@
   },
   "devDependencies": {
     "typescript": "^5.9.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "workerd": ">=1.20250809.0"
+    }
   }
 }

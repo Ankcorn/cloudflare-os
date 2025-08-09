@@ -1,14 +1,11 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
-import { RpcSession, RpcStub, WebSocketTransport } from '@cloudflare/jsrpc'
+import { RpcStub, newWebSocketRpcSession } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
 
 function startConnection(url: string): RpcStub<PublicApi> {
-  const ws = new WebSocket(url);
-  let transport = new WebSocketTransport(ws);
-  let rpc = new RpcSession<PublicApi>(transport);
-  return rpc.getRemoteMain();
+  return newWebSocketRpcSession<PublicApi>(url);
 }
 
 // TODO: Figure out reconnect story.

@@ -123,7 +123,7 @@ type PermissionSchema = {
 }
 
 // Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe().
-type ResourceDescription = {
+export type ResourceDescription = {
   // The resource's canonical URL. This can differ from the one passed to `newGatekeeper()`, if the
   // resource has more than one possible URL. Visiting this URL in a browser should actually open
   // the resource's natural UI.

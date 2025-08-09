@@ -23,10 +23,11 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
-import { RpcStub } from "@cloudflare/jsrpc";
+import { RpcStub, RpcTarget } from "@cloudflare/jsrpc";
+import { ResourceDescription } from "./gatekeeper.js";
 
 // Public API exposed to the internet.
-export interface PublicApi {
+export interface PublicApi extends RpcTarget {
   // Authenticates the user using an auth token (typically stored in localStorage).
   //
   // TODO: Is this right for Cloudflare Access?
@@ -37,7 +38,7 @@ export interface PublicApi {
 }
 
 // Top-level API exposed to the user after they have authenticated.
-export interface AuthenticatedApi {
+export interface AuthenticatedApi extends RpcTarget {
   // Open an existing minion.
   openMinion(id: string): Promise<Overseer | null>;
 
@@ -87,7 +88,7 @@ export type UiCode = {
 
 // Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
 // Minion.
-export interface Overseer {
+export interface Overseer extends RpcTarget {
   // Get metadata describing this minion.
   getMetadata(): Promise<MinionMetadata>;
 
@@ -103,6 +104,7 @@ export interface Overseer {
   // Open an RPC interface to the Minion's server-side Durable Object facet. The frontend may pass
   // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
+  // @ts-ignore - TODO: Fix type instantiation issue
   connectToMinion(): RpcStub<any>;
 
   // List all the Minion's current gatekeepers.
@@ -128,7 +130,7 @@ export type GatekeeperMetadata = {
   resourceTitle: string;
 };
 
-export interface GatekeeperClient<Session> {
+export interface GatekeeperClient<Session> extends RpcTarget {
   // Get and set the binding name.
   getBindingName(): Promise<string>;
   setBindingName(name: string): Promise<void>;
