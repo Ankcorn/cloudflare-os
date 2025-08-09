@@ -23,7 +23,7 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
-import { RpcStub } from "jsrpc";
+import { RpcStub } from "@cloudflare/jsrpc";
 
 // Public API exposed to the internet.
 export interface PublicApi {

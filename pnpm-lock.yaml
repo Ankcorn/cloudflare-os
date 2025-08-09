@@ -14,6 +14,9 @@ importers:
 
   packages/workshop-backend:
     dependencies:
+      '@cloudflare/jsrpc':
+        specifier: file:../../../jsrpc
+        version: file:../jsrpc
       '@minions/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
@@ -30,6 +33,9 @@ importers:
 
   packages/workshop-frontend:
     dependencies:
+      '@cloudflare/jsrpc':
+        specifier: file:../../../jsrpc
+        version: file:../jsrpc
       '@minions/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
@@ -58,9 +64,9 @@ importers:
 
   packages/workshop-shared:
     dependencies:
-      jsrpc:
+      '@cloudflare/jsrpc':
         specifier: file:../../../jsrpc
-        version: '@cloudflare/jsrpc@file:../jsrpc'
+        version: file:../jsrpc
     devDependencies:
       typescript:
         specifier: ^5.9.2

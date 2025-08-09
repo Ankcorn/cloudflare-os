@@ -16,7 +16,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "jsrpc": "file:../../../jsrpc"
+    "@cloudflare/jsrpc": "file:../../../jsrpc"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

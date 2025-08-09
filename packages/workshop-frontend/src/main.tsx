@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
-import { RpcSession, RpcStub, WebSocketTransport } from 'jsrpc'
+import { RpcSession, RpcStub, WebSocketTransport } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
 
 function startConnection(url: string): RpcStub<PublicApi> {

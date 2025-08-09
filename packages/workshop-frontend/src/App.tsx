@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { RpcStub } from 'jsrpc'
+import { RpcStub } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
 
 interface AppProps {

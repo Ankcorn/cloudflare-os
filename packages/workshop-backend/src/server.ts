@@ -1,4 +1,4 @@
-import { RpcSession, RpcTarget, WebSocketTransport } from "jsrpc";
+import { RpcSession, RpcTarget, WebSocketTransport } from "@cloudflare/jsrpc";
 import { PublicApi, AuthenticatedApi } from '@minions/workshop-shared/api';
 
 interface Env {}

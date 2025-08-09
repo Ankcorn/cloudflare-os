@@ -9,7 +9,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "jsrpc": "file:../../../jsrpc",
+    "@cloudflare/jsrpc": "file:../../../jsrpc",
     "@minions/workshop-shared": "workspace:*",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
