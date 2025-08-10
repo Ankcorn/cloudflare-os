@@ -1,13 +1,15 @@
 import { Layout, Typography, Button, Table, Space } from 'antd'
 import { LogoutOutlined, PlusOutlined } from '@ant-design/icons'
+import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect } from 'react'
-import { MinionMetadata } from '@minions/workshop-shared/src/api'
+import { MinionMetadata } from '@minions/workshop-shared/api'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 
 export default function Home() {
+  const navigate = useNavigate()
   const { authenticatedApi, logout } = useAuthenticatedApi()
   const [minions, setMinions] = useState<MinionMetadata[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,6 +39,7 @@ export default function Home() {
       const newMinion = await authenticatedApi.newMinion()
       const metadata = await newMinion.getMetadata()
       setMinions(prev => [...prev, metadata])
+      navigate(`/minion/${metadata.id}`)
     } catch (error) {
       console.error('Failed to create minion:', error)
     }
@@ -119,8 +122,7 @@ export default function Home() {
             loading={loading}
             onRow={(record) => ({
               onClick: () => {
-                // TODO: Navigate to minion editor
-                console.log('Open minion:', record.id)
+                navigate(`/minion/${record.id}`)
               },
               style: { cursor: 'pointer' }
             })}

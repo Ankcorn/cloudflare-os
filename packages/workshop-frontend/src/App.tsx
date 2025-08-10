@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { RpcStub } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
 import Home from './Home'
+import MinionEditor from './MinionEditor'
 import ProtectedRoute from './ProtectedRoute'
 
 interface AppProps {
@@ -16,6 +17,15 @@ function App({ rpcStub }: AppProps) {
         element={
           <ProtectedRoute rpcStub={rpcStub}>
             <Home />
+          </ProtectedRoute>
+        }
+      />
+      
+      <Route
+        path="/minion/:id"
+        element={
+          <ProtectedRoute rpcStub={rpcStub}>
+            <MinionEditor />
           </ProtectedRoute>
         }
       />

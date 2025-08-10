@@ -27,7 +27,19 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }, [])
 
   const authenticateWithToken = (token: string) => {
-    setAuthState(prev => ({ ...prev, isLoading: true, error: null }))
+    setAuthState(prev => {
+      // Dispose the previous authenticated API stub if it exists
+      if (prev.authenticatedApi) {
+        prev.authenticatedApi[Symbol.dispose]()
+      }
+      return { 
+        ...prev, 
+        authenticatedApi: null, // Clear the disposed stub
+        isLoading: true, 
+        error: null 
+      }
+    })
+    
     // Use promise pipelining - we can use the returned promise as a stub immediately
     // without awaiting. Authentication errors will be handled when the stub is actually used.
     const authenticatedApi = publicApi.authenticate(token)
@@ -44,6 +56,11 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const logout = () => {
+    // Dispose the current authenticated API stub if it exists
+    if (authState.authenticatedApi) {
+      authState.authenticatedApi[Symbol.dispose]()
+    }
+    
     localStorage.removeItem('authToken')
     setAuthState({
       token: null,
