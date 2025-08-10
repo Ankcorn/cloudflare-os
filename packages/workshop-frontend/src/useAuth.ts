@@ -26,25 +26,17 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     }
   }, [])
 
-  const authenticateWithToken = async (token: string) => {
-    try {
-      setAuthState(prev => ({ ...prev, isLoading: true, error: null }))
-      const authenticatedApi = await publicApi.authenticate(token)
-      setAuthState({
-        token,
-        authenticatedApi,
-        isLoading: false,
-        error: null
-      })
-    } catch (error) {
-      localStorage.removeItem('authToken')
-      setAuthState({
-        token: null,
-        authenticatedApi: null,
-        isLoading: false,
-        error: error instanceof Error ? error.message : 'Authentication failed'
-      })
-    }
+  const authenticateWithToken = (token: string) => {
+    setAuthState(prev => ({ ...prev, isLoading: true, error: null }))
+    // Use promise pipelining - we can use the returned promise as a stub immediately
+    // without awaiting. Authentication errors will be handled when the stub is actually used.
+    const authenticatedApi = publicApi.authenticate(token)
+    setAuthState({
+      token,
+      authenticatedApi,
+      isLoading: false,
+      error: null
+    })
   }
 
   const login = (token: string) => {
