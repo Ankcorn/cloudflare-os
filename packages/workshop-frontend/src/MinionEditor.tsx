@@ -1,19 +1,19 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Layout, Typography, Button, Input, Space, Card, message } from 'antd'
+import { Layout, Typography, Button, Input, Space, Card, message, Tabs } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { RpcStub } from '@cloudflare/jsrpc'
 import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
 
-const { Header, Content } = Layout
+const { Header, Content, Sider } = Layout
 const { Title, Text } = Typography
 
 export default function MinionEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
-  
+
   const [overseer, setOverseer] = useState<{ stub: Overseer } | null>(null)
   const [metadata, setMetadata] = useState<MinionMetadata | null>(null)
   const [loading, setLoading] = useState(true)
@@ -35,7 +35,7 @@ export default function MinionEditor() {
         // Use promise pipelining - use the promise itself as the stub
         overseerStub = authenticatedApi.openMinion(id)
         setOverseer({ stub: overseerStub })
-        
+
         // Only await the metadata call
         const minionMetadata = await overseerStub.getMetadata()
         setMetadata(minionMetadata)
@@ -110,8 +110,8 @@ export default function MinionEditor() {
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Header 
-        style={{ 
+      <Header
+        style={{
           backgroundColor: 'white',
           borderBottom: '1px solid #f0f0f0',
           padding: '0 24px',
@@ -126,7 +126,7 @@ export default function MinionEditor() {
           type="text"
           size="large"
         />
-        
+
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 12 }}>
           {isEditingTitle ? (
             <Space.Compact>
@@ -165,73 +165,108 @@ export default function MinionEditor() {
         </div>
       </Header>
 
-      <Content style={{ padding: '24px' }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <Space direction="vertical" size="large" style={{ width: '100%' }}>
-            
-            {/* Chat Interface Placeholder */}
-            <Card title="AI Agent Chat" style={{ minHeight: 400 }}>
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'center', 
-                alignItems: 'center', 
-                height: 350,
-                color: '#999'
-              }}>
-                <Text type="secondary">
-                  Chat interface will be implemented here. Start a conversation with your AI minion.
-                </Text>
-              </div>
-            </Card>
+      <Layout style={{ height: 'calc(100vh - 64px)' }}>
+        {/* Chat Sidebar */}
+        <Sider
+          width={400}
+          style={{
+            backgroundColor: 'white',
+            borderRight: '1px solid #f0f0f0'
+          }}
+        >
+          <Card
+            title="AI Agent Chat"
+            variant="borderless"
+            style={{
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column'
+            }}
+            styles={{
+              body: {
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                padding: '16px'
+              }
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              flex: 1,
+              color: '#999'
+            }}>
+              <Text type="secondary">
+                Chat interface will be implemented here. Start a conversation with your AI minion.
+              </Text>
+            </div>
+          </Card>
+        </Sider>
 
-            {/* Code Editor Placeholder */}
-            <Card title="Code Editor" style={{ minHeight: 400 }}>
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'center', 
-                alignItems: 'center', 
-                height: 350,
-                color: '#999'
-              }}>
-                <Text type="secondary">
-                  Code editor will be implemented here. View and edit your minion's TypeScript code.
-                </Text>
-              </div>
-            </Card>
-
-            {/* Overseer Interface Placeholder */}
-            <Card title="Overseer & Connections" style={{ minHeight: 300 }}>
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'center', 
-                alignItems: 'center', 
-                height: 250,
-                color: '#999'
-              }}>
-                <Text type="secondary">
-                  Overseer interface will be implemented here. Monitor actions and manage external connections.
-                </Text>
-              </div>
-            </Card>
-
-            {/* Minion UI Placeholder */}
-            <Card title="Minion UI" style={{ minHeight: 300 }}>
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'center', 
-                alignItems: 'center', 
-                height: 250,
-                color: '#999'
-              }}>
-                <Text type="secondary">
-                  Custom minion UI will be displayed here in a sandboxed iframe when available.
-                </Text>
-              </div>
-            </Card>
-
-          </Space>
-        </div>
-      </Content>
+        {/* Main Content with Tabs */}
+        <Content style={{ backgroundColor: 'white' }}>
+          <Tabs
+            defaultActiveKey="code"
+            style={{ height: '100%' }}
+            tabBarStyle={{ paddingLeft: '16px' }}
+            items={[
+              {
+                key: 'code',
+                label: 'Code Editor',
+                children: (
+                  <div style={{
+                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    color: '#999'
+                  }}>
+                    <Text type="secondary">
+                      Code editor will be implemented here. View and edit your minion's TypeScript code.
+                    </Text>
+                  </div>
+                )
+              },
+              {
+                key: 'overseer',
+                label: 'Overseer & Connections',
+                children: (
+                  <div style={{
+                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    color: '#999'
+                  }}>
+                    <Text type="secondary">
+                      Overseer interface will be implemented here. Monitor actions and manage external connections.
+                    </Text>
+                  </div>
+                )
+              },
+              {
+                key: 'ui',
+                label: 'Minion UI',
+                children: (
+                  <div style={{
+                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    color: '#999'
+                  }}>
+                    <Text type="secondary">
+                      Custom minion UI will be displayed here in a sandboxed iframe when available.
+                    </Text>
+                  </div>
+                )
+              }
+            ]}
+          />
+        </Content>
+      </Layout>
     </Layout>
   )
 }
