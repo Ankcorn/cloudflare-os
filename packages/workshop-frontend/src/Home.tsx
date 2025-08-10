@@ -6,21 +6,64 @@ import {
   Button,
   Container,
   Paper,
-  Grid,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
 } from '@mui/material'
-import { LogoutOutlined } from '@mui/icons-material'
+import { LogoutOutlined, Add } from '@mui/icons-material'
 import { useAuthenticatedApi } from './AuthContext'
+import { useState, useEffect } from 'react'
+import { MinionMetadata } from '@minions/workshop-shared/src/api'
 
 export default function Home() {
   const { authenticatedApi, logout } = useAuthenticatedApi()
+  const [minions, setMinions] = useState<MinionMetadata[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchMinions = async () => {
+      try {
+        const minionList = await authenticatedApi.listMinions()
+        setMinions(minionList)
+      } catch (error) {
+        console.error('Failed to fetch minions:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchMinions()
+  }, [authenticatedApi])
 
   const handleLogout = () => {
     logout()
     // No navigation needed - ProtectedRoute will show login overlay
   }
+
+  const handleCreateMinion = async () => {
+    try {
+      const newMinion = await authenticatedApi.newMinion()
+      const metadata = await newMinion.getMetadata()
+      setMinions(prev => [...prev, metadata])
+    } catch (error) {
+      console.error('Failed to create minion:', error)
+    }
+  }
   return (
     <Box sx={{ flexGrow: 1 }}>
-      <AppBar position="static" sx={{ mb: 4 }}>
+      <AppBar 
+        position="static" 
+        elevation={0}
+        sx={{ 
+          mb: 4,
+          backgroundColor: 'white',
+          borderBottom: '1px solid #e0e0e0',
+          color: 'text.primary',
+        }}
+      >
         <Toolbar>
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
             Minions Workshop
@@ -36,68 +79,78 @@ export default function Home() {
       </AppBar>
 
       <Container maxWidth="lg">
-        <Paper
-          sx={{
-            p: 4,
-            mb: 4,
-            textAlign: 'center',
-            background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)',
-          }}
-        >
-          <Typography variant="h4" gutterBottom fontWeight="bold">
-            Welcome to your Workshop!
+        <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Typography variant="h4" fontWeight="bold">
+            Your Minions
           </Typography>
-          <Typography variant="h6" color="text.secondary" gutterBottom>
-            You are successfully logged in and authenticated.
-          </Typography>
-          <Typography variant="body1" color="text.secondary">
-            This is where you'll manage your minions and create new ones.
-          </Typography>
-        </Paper>
+          <Button
+            variant="contained"
+            startIcon={<Add />}
+            onClick={handleCreateMinion}
+            sx={{ minWidth: 150 }}
+          >
+            New Minion
+          </Button>
+        </Box>
 
-        <Grid container spacing={3}>
-          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
-            <Paper sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="h6" gutterBottom>
-                Your Minions
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Manage and view all your AI assistants
-              </Typography>
-              <Button variant="outlined" fullWidth>
-                View All Minions
-              </Button>
-            </Paper>
-          </Grid>
-
-          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
-            <Paper sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="h6" gutterBottom>
-                Create New Minion
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Start building a new AI assistant
-              </Typography>
-              <Button variant="contained" fullWidth>
-                Create Minion
-              </Button>
-            </Paper>
-          </Grid>
-
-          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
-            <Paper sx={{ p: 3, textAlign: 'center' }}>
-              <Typography variant="h6" gutterBottom>
-                Blueprints
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                Browse and use templates
-              </Typography>
-              <Button variant="outlined" fullWidth>
-                Browse Blueprints
-              </Button>
-            </Paper>
-          </Grid>
-        </Grid>
+        <TableContainer component={Paper}>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Name</TableCell>
+                <TableCell>Owner</TableCell>
+                <TableCell>Last Active</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading ? (
+                <TableRow>
+                  <TableCell colSpan={3} align="center">
+                    Loading minions...
+                  </TableCell>
+                </TableRow>
+              ) : minions.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={3} align="center" sx={{ py: 4 }}>
+                    <Typography variant="body2" color="text.secondary">
+                      No minions yet. Create your first minion to get started!
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                minions.map((minion) => (
+                  <TableRow 
+                    key={minion.id} 
+                    hover 
+                    sx={{ cursor: 'pointer' }}
+                    onClick={() => {
+                      // TODO: Navigate to minion editor
+                      console.log('Open minion:', minion.id)
+                    }}
+                  >
+                    <TableCell>
+                      <Typography variant="body1" fontWeight="medium">
+                        {minion.title}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" color="text.secondary">
+                        {/* TODO: Add owner information */}
+                        —
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" color="text.secondary">
+                        {/* TODO: Add last active information */}
+                        —
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
       </Container>
     </Box>
   )

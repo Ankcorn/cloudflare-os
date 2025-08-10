@@ -20,7 +20,7 @@ export class UserAccount extends DurableObject<Env> {
         this.sql.exec(`
           CREATE TABLE IF NOT EXISTS minions (
             id TEXT PRIMARY KEY,
-            title TEXT,
+            title TEXT
           )
         `);
 
