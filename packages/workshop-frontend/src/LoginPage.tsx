@@ -1,16 +1,9 @@
 import { useState } from 'react'
 import { RpcStub } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
-import {
-  Box,
-  Card,
-  CardContent,
-  TextField,
-  Button,
-  Typography,
-  Alert,
-  Container
-} from '@mui/material'
+import { Card, Form, Input, Button, Typography, Alert, Spin } from 'antd'
+
+const { Title, Text } = Typography
 
 interface LoginPageProps {
   rpcStub: RpcStub<PublicApi>
@@ -18,18 +11,15 @@ interface LoginPageProps {
 }
 
 export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleSubmit = async (values: { username: string; password: string }) => {
     setLoading(true)
     setError(null)
 
     try {
-      const token = await rpcStub.login(username, password)
+      const token = await rpcStub.login(values.username, values.password)
       if (token) {
         localStorage.setItem('authToken', token)
         // Trigger re-authentication check in parent
@@ -49,86 +39,81 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
   }
 
   return (
-    <Box
-      sx={{
+    <div
+      style={{
         minHeight: '100vh',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: '#f5f5f5',
+        padding: '0 16px',
       }}
     >
-      <Container maxWidth="sm">
-        <Card
-          sx={{
-            maxWidth: 400,
-            mx: 'auto',
-            boxShadow: 2,
-          }}
+      <Card
+        style={{
+          maxWidth: 400,
+          width: '100%',
+        }}
+      >
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <Title level={1} style={{ marginBottom: 8 }}>
+            Minions Workshop
+          </Title>
+          <Text type="secondary">
+            Sign in to your account
+          </Text>
+        </div>
+
+        <Form 
+          onFinish={handleSubmit} 
+          layout="vertical" 
+          size="large"
         >
-          <CardContent sx={{ p: 4 }}>
-            <Box sx={{ textAlign: 'center', mb: 4 }}>
-              <Typography variant="h4" component="h1" gutterBottom fontWeight="bold">
-                Minions Workshop
-              </Typography>
-              <Typography variant="body1" color="text.secondary">
-                Sign in to your account
-              </Typography>
-            </Box>
+          <Form.Item
+            label="Username"
+            name="username"
+            rules={[{ required: true, message: 'Please input your username!' }]}
+          >
+            <Input
+              disabled={loading}
+              autoFocus
+              autoComplete="username"
+            />
+          </Form.Item>
 
-            <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <TextField
-                label="Username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                disabled={loading}
-                autoFocus
-                fullWidth
-                variant="outlined"
-                inputProps={{
-                  autoComplete: "username"
-                }}
-              />
+          <Form.Item
+            label="Password"
+            name="password"
+            rules={[{ required: true, message: 'Please input your password!' }]}
+          >
+            <Input.Password
+              disabled={loading}
+              autoComplete="current-password"
+            />
+          </Form.Item>
 
-              <TextField
-                label="Password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                disabled={loading}
-                fullWidth
-                variant="outlined"
-                inputProps={{
-                  autoComplete: "current-password"
-                }}
-              />
+          {error && (
+            <Alert
+              message={error}
+              type="error"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
 
-              {error && (
-                <Alert severity="error" sx={{ mb: 1 }}>
-                  {error}
-                </Alert>
-              )}
-
-              <Button
-                type="submit"
-                loading={loading}
-                variant="contained"
-                size="large"
-                fullWidth
-                sx={{
-                  mt: 1,
-                  py: 1.5,
-                }}
-              >
-                Sign in
-              </Button>
-            </Box>
-          </CardContent>
-        </Card>
-      </Container>
-    </Box>
+          <Form.Item>
+            <Button
+              type="primary"
+              htmlType="submit"
+              loading={loading}
+              size="large"
+              block
+            >
+              Sign in
+            </Button>
+          </Form.Item>
+        </Form>
+      </Card>
+    </div>
   )
 }

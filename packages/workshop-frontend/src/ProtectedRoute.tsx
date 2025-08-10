@@ -4,7 +4,7 @@ import { PublicApi } from '@minions/workshop-shared/api'
 import { useAuth } from './useAuth'
 import { AuthProvider } from './AuthContext'
 import LoginPage from './LoginPage'
-import { Box, CircularProgress, Alert, Button } from '@mui/material'
+import { Spin, Alert, Button } from 'antd'
 
 interface ProtectedRouteProps {
   children: ReactNode
@@ -24,44 +24,46 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
 
   if (isLoading) {
     return (
-      <Box
-        sx={{
+      <div
+        style={{
           minHeight: '100vh',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexDirection: 'column',
-          gap: 2,
+          gap: 16,
         }}
       >
-        <CircularProgress />
-        <Box sx={{ textAlign: 'center' }}>
+        <Spin size="large" />
+        <div style={{ textAlign: 'center' }}>
           Loading...
-        </Box>
-      </Box>
+        </div>
+      </div>
     )
   }
 
   if (error) {
     return (
-      <Box
-        sx={{
+      <div
+        style={{
           minHeight: '100vh',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexDirection: 'column',
-          gap: 2,
-          p: 3,
+          gap: 16,
+          padding: 24,
         }}
       >
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Authentication error: {error}
-        </Alert>
-        <Button variant="contained" onClick={() => window.location.reload()}>
+        <Alert 
+          type="error" 
+          message={`Authentication error: ${error}`}
+          style={{ marginBottom: 16 }}
+        />
+        <Button type="primary" onClick={() => window.location.reload()}>
           Retry
         </Button>
-      </Box>
+      </div>
     )
   }
 

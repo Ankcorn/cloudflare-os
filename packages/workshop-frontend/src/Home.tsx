@@ -1,22 +1,11 @@
-import {
-  Box,
-  AppBar,
-  Toolbar,
-  Typography,
-  Button,
-  Container,
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-} from '@mui/material'
-import { LogoutOutlined, Add } from '@mui/icons-material'
+import { Layout, Typography, Button, Table, Space } from 'antd'
+import { LogoutOutlined, PlusOutlined } from '@ant-design/icons'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect } from 'react'
 import { MinionMetadata } from '@minions/workshop-shared/src/api'
+
+const { Header, Content } = Layout
+const { Title, Text } = Typography
 
 export default function Home() {
   const { authenticatedApi, logout } = useAuthenticatedApi()
@@ -52,106 +41,101 @@ export default function Home() {
       console.error('Failed to create minion:', error)
     }
   }
+
+  const columns = [
+    {
+      title: 'Name',
+      dataIndex: 'title',
+      key: 'title',
+      render: (title: string) => (
+        <Text strong>{title}</Text>
+      ),
+    },
+    {
+      title: 'Owner',
+      key: 'owner',
+      render: () => (
+        <Text type="secondary">—</Text>
+      ),
+    },
+    {
+      title: 'Last Active',
+      key: 'lastActive',
+      render: () => (
+        <Text type="secondary">—</Text>
+      ),
+    },
+  ]
+
   return (
-    <Box sx={{ flexGrow: 1 }}>
-      <AppBar 
-        position="static" 
-        elevation={0}
-        sx={{ 
-          mb: 4,
+    <Layout style={{ minHeight: '100vh' }}>
+      <Header 
+        style={{ 
           backgroundColor: 'white',
-          borderBottom: '1px solid #e0e0e0',
-          color: 'text.primary',
+          borderBottom: '1px solid #f0f0f0',
+          padding: '0 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
         }}
       >
-        <Toolbar>
-          <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-            Minions Workshop
-          </Typography>
-          <Button
-            color="inherit"
-            startIcon={<LogoutOutlined />}
-            onClick={handleLogout}
-          >
-            Logout
-          </Button>
-        </Toolbar>
-      </AppBar>
+        <Title level={4} style={{ margin: 0, color: 'inherit' }}>
+          Minions Workshop
+        </Title>
+        <Button
+          icon={<LogoutOutlined />}
+          onClick={handleLogout}
+          type="text"
+        >
+          Logout
+        </Button>
+      </Header>
 
-      <Container maxWidth="lg">
-        <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h4" fontWeight="bold">
-            Your Minions
-          </Typography>
-          <Button
-            variant="contained"
-            startIcon={<Add />}
-            onClick={handleCreateMinion}
-            sx={{ minWidth: 150 }}
-          >
-            New Minion
-          </Button>
-        </Box>
+      <Content style={{ padding: '24px' }}>
+        <div style={{ maxWidth: 1200, margin: '0 auto' }}>
+          <div style={{ 
+            marginBottom: 24, 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center' 
+          }}>
+            <Title level={2} style={{ margin: 0 }}>
+              Your Minions
+            </Title>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={handleCreateMinion}
+              size="large"
+            >
+              New Minion
+            </Button>
+          </div>
 
-        <TableContainer component={Paper}>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableCell>Name</TableCell>
-                <TableCell>Owner</TableCell>
-                <TableCell>Last Active</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {loading ? (
-                <TableRow>
-                  <TableCell colSpan={3} align="center">
-                    Loading minions...
-                  </TableCell>
-                </TableRow>
-              ) : minions.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={3} align="center" sx={{ py: 4 }}>
-                    <Typography variant="body2" color="text.secondary">
-                      No minions yet. Create your first minion to get started!
-                    </Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                minions.map((minion) => (
-                  <TableRow 
-                    key={minion.id} 
-                    hover 
-                    sx={{ cursor: 'pointer' }}
-                    onClick={() => {
-                      // TODO: Navigate to minion editor
-                      console.log('Open minion:', minion.id)
-                    }}
-                  >
-                    <TableCell>
-                      <Typography variant="body1" fontWeight="medium">
-                        {minion.title}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" color="text.secondary">
-                        {/* TODO: Add owner information */}
-                        —
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" color="text.secondary">
-                        {/* TODO: Add last active information */}
-                        —
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Container>
-    </Box>
+          <Table
+            columns={columns}
+            dataSource={minions}
+            rowKey="id"
+            loading={loading}
+            onRow={(record) => ({
+              onClick: () => {
+                // TODO: Navigate to minion editor
+                console.log('Open minion:', record.id)
+              },
+              style: { cursor: 'pointer' }
+            })}
+            locale={{
+              emptyText: loading ? 'Loading minions...' : (
+                <div style={{ padding: '32px 0' }}>
+                  <Text type="secondary">
+                    No minions yet. Create your first minion to get started!
+                  </Text>
+                </div>
+              )
+            }}
+          />
+        </div>
+      </Content>
+    </Layout>
   )
 }

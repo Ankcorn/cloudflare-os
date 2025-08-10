@@ -9,13 +9,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.0.0",
+    "@ant-design/v5-patch-for-react-19": "^1.0.3",
     "@cloudflare/jsrpc": "file:../../../jsrpc",
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.1",
     "@minions/workshop-shared": "workspace:*",
-    "@mui/icons-material": "^7.3.1",
-    "@mui/lab": "7.0.0-beta.16",
-    "@mui/material": "^7.3.1",
+    "antd": "^5.26.7",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.8.0"
