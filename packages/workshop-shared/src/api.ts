@@ -80,7 +80,7 @@ export type MinionMetadata = {
 // Describes the client-side UI code for a Minion. Such code is intended to run inside an iframe
 // sandbox with no access to the outside world except through an RPC interface to the Workshop
 // and to the Minion's server.
-export type UiCode = {
+export type UiBundle = {
   // URL from which the main bundle of UI code can be downloaded. This download contains all the
   // Minion's client-side assets. The URL is content-addressed to make it highly cacheable, even
   // across multiple Minions sharing the same implementation (blueprint).
@@ -94,6 +94,11 @@ export type UiCode = {
   // libraries should be loaded.
 };
 
+export type CodeFile = {
+  name: string;
+  content: string;
+}
+
 // Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
 // Minion.
 export interface Overseer extends RpcTarget {
@@ -103,11 +108,20 @@ export interface Overseer extends RpcTarget {
   // Change the title.
   setTitle(title: string): Promise<void>;
 
+  // Get/set source code.
+  //
+  // TODO:
+  // - Replace setCodeFile()/deleteCodeFile() with operational transforms stream.
+  // - Replace getCode() with some sort of streaming or on-demand interface.
+  getCode(): Promise<CodeFile[]>;
+  setCodeFile(name: string, content: string): Promise<void>;
+  deleteCodeFile(name: string): Promise<void>;
+
   // Get the Minion's deployed UI code, to be run inside an iframe sandbox.
   //
   // Returns null if the minion has no deployed UI code (e.g. if it's new, or if it's just an AI
   // agent with no code).
-  getUiCode(): Promise<UiCode | null>;
+  getUiBundle(): Promise<UiBundle | null>;
 
   // Open an RPC interface to the Minion's server-side Durable Object facet. The frontend may pass
   // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its

@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiCode, GatekeeperMetadata, GatekeeperClient } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile } from '@minions/workshop-shared/api';
 import { DurableObject } from "cloudflare:workers";
 
 // Workers environment (bindings).
@@ -58,6 +58,23 @@ export class UserDurableObject extends DurableObject<Env> {
 
 // =======================================================================================
 
+let DEFAULT_SERVER_CODE = `
+import { DurableObject } from "cloudflare:workers";
+
+export class Minion extends DurableObject {
+  greet(name) {
+    return \`Hello, \${name}!\`;
+  }
+}
+`.trim();
+
+let DEFAULT_CLIENT_CODE = `
+let greeting = await minion.greet("World");
+document.body.appendChild(document.createTextNode(greeting));
+`.trim();
+
+// =======================================================================================
+
 export class OverseerDurableObject extends DurableObject<Env> {
   private sql: SqlStorage;
 
@@ -90,9 +107,26 @@ export class OverseerDurableObject extends DurableObject<Env> {
 
         // Owner says we exist, so let's initialize ourselves.
         this.ownerId = ownerId;
-        await this.ctx.storage.put("ownerId", ownerId);
-        await this.ctx.storage.put("title", meta.title);
-        await this.ctx.storage.put("version", 1);
+
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.put("ownerId", ownerId);
+          this.ctx.storage.put("title", meta.title);
+          this.ctx.storage.put("version", 1);
+
+          this.sql.exec(`
+            CREATE TABLE files (
+              name TEXT PRIMARY KEY,
+              content TEXT
+            )
+          `);
+
+          this.sql.exec(`
+            INSERT INTO files(name, content) VALUES (?, ?)
+          `, "server.js", DEFAULT_SERVER_CODE);
+          this.sql.exec(`
+            INSERT INTO files(name, content) VALUES (?, ?)
+          `, "client.js", DEFAULT_CLIENT_CODE);
+        });
       });
     }
 
@@ -106,9 +140,12 @@ export class OverseerDurableObject extends DurableObject<Env> {
 }
 
 class OverseerImpl extends RpcTarget implements Overseer {
+  private sql: SqlStorage;
+
   constructor(private ctx: DurableObjectState,
               private owner: DurableObjectStub<UserDurableObject>) {
     super();
+    this.sql = ctx.storage.sql;
   }
 
   async getMetadata(): Promise<MinionMetadata> {
@@ -122,7 +159,24 @@ class OverseerImpl extends RpcTarget implements Overseer {
     await this.owner.updateTitle(this.ctx.id.toString(), title);
   }
 
-  async getUiCode(): Promise<UiCode | null> {
+  async getCode(): Promise<CodeFile[]> {
+    return <CodeFile[]>this.sql.exec(`
+      SELECT name, content FROM files
+    `).toArray();
+  }
+  async setCodeFile(name: string, content: string): Promise<void> {
+    this.sql.exec(`
+      INSERT INTO files(name, content) VALUES (?, ?))
+        ON CONFLICT DO UPDATE SET content = excluded.content
+    `, name, content);
+  }
+  async deleteCodeFile(name: string): Promise<void> {
+    this.sql.exec(`
+      DELETE FROM files WHERE name = ?
+    `, name);
+  }
+
+  async getUiBundle(): Promise<UiBundle | null> {
     return null;
   }
 
