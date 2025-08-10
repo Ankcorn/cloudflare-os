@@ -70,6 +70,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async login(username: string, password: string): Promise<string | null> {
+    await scheduler.wait(2000);
+
     // TODO: Either implement this properly or replace it.
     let id = this.users.idFromName(username);
     if (password == "hunter2") {

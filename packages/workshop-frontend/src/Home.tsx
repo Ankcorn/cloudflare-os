@@ -56,7 +56,7 @@ export default function Home() {
         </Paper>
 
         <Grid container spacing={3}>
-          <Grid item xs={12} md={6} lg={4}>
+          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
             <Paper sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="h6" gutterBottom>
                 Your Minions
@@ -70,7 +70,7 @@ export default function Home() {
             </Paper>
           </Grid>
 
-          <Grid item xs={12} md={6} lg={4}>
+          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
             <Paper sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="h6" gutterBottom>
                 Create New Minion
@@ -84,7 +84,7 @@ export default function Home() {
             </Paper>
           </Grid>
 
-          <Grid item xs={12} md={6} lg={4}>
+          <Grid size={{ xs: 12, md: 6, lg: 4 }}>
             <Paper sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="h6" gutterBottom>
                 Blueprints

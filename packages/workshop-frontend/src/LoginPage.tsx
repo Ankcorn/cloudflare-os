@@ -11,7 +11,6 @@ import {
   Alert,
   Container
 } from '@mui/material'
-import { LoadingButton } from '@mui/lab'
 
 interface LoginPageProps {
   rpcStub: RpcStub<PublicApi>
@@ -88,6 +87,9 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
                 autoFocus
                 fullWidth
                 variant="outlined"
+                inputProps={{
+                  autoComplete: "username"
+                }}
               />
 
               <TextField
@@ -99,6 +101,9 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
                 disabled={loading}
                 fullWidth
                 variant="outlined"
+                inputProps={{
+                  autoComplete: "current-password"
+                }}
               />
 
               {error && (
@@ -107,10 +112,9 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
                 </Alert>
               )}
 
-              <LoadingButton
+              <Button
                 type="submit"
                 loading={loading}
-                loadingIndicator="Signing in..."
                 variant="contained"
                 size="large"
                 fullWidth
@@ -119,8 +123,8 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
                   py: 1.5,
                 }}
               >
-                {loading ? 'Signing in...' : 'Sign in'}
-              </LoadingButton>
+                Sign in
+              </Button>
             </Box>
           </CardContent>
         </Card>
