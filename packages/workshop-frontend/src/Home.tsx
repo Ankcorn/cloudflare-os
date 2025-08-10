@@ -1,5 +1,3 @@
-import { RpcStub } from '@cloudflare/jsrpc'
-import { AuthenticatedApi } from '@minions/workshop-shared/api'
 import {
   Box,
   AppBar,
@@ -11,13 +9,15 @@ import {
   Grid,
 } from '@mui/material'
 import { LogoutOutlined } from '@mui/icons-material'
+import { useAuthenticatedApi } from './AuthContext'
 
-interface HomeProps {
-  authenticatedApi: RpcStub<AuthenticatedApi>
-  onLogout: () => void
-}
+export default function Home() {
+  const { authenticatedApi, logout } = useAuthenticatedApi()
 
-export default function Home({ onLogout }: HomeProps) {
+  const handleLogout = () => {
+    logout()
+    // No navigation needed - ProtectedRoute will show login overlay
+  }
   return (
     <Box sx={{ flexGrow: 1 }}>
       <AppBar position="static" sx={{ mb: 4 }}>
@@ -28,7 +28,7 @@ export default function Home({ onLogout }: HomeProps) {
           <Button
             color="inherit"
             startIcon={<LogoutOutlined />}
-            onClick={onLogout}
+            onClick={handleLogout}
           >
             Logout
           </Button>

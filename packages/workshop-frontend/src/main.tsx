@@ -5,6 +5,7 @@ import { RpcStub, newWebSocketRpcSession } from '@cloudflare/jsrpc'
 import { PublicApi } from '@minions/workshop-shared/api'
 import { ThemeProvider, createTheme } from '@mui/material/styles'
 import CssBaseline from '@mui/material/CssBaseline'
+import { BrowserRouter } from 'react-router-dom'
 
 function startConnection(url: string): RpcStub<PublicApi> {
   return newWebSocketRpcSession<PublicApi>(url);
@@ -40,9 +41,11 @@ const root = createRoot(document.getElementById('root')!)
 
 root.render(
   <StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <App rpcStub={globalApi} />
-    </ThemeProvider>
+    <BrowserRouter>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <App rpcStub={globalApi} />
+      </ThemeProvider>
+    </BrowserRouter>
   </StrictMode>
 )

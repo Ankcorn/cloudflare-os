@@ -15,10 +15,10 @@ import { LoadingButton } from '@mui/lab'
 
 interface LoginPageProps {
   rpcStub: RpcStub<PublicApi>
-  onLogin: (token: string) => void
+  onLoginSuccess?: () => void
 }
 
-export default function LoginPage({ rpcStub, onLogin }: LoginPageProps) {
+export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -33,7 +33,12 @@ export default function LoginPage({ rpcStub, onLogin }: LoginPageProps) {
       const token = await rpcStub.login(username, password)
       if (token) {
         localStorage.setItem('authToken', token)
-        onLogin(token)
+        // Trigger re-authentication check in parent
+        if (onLoginSuccess) {
+          onLoginSuccess()
+        } else {
+          window.location.reload()
+        }
       } else {
         setError('Invalid username or password')
       }
