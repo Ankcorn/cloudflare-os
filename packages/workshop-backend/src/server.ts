@@ -1,12 +1,12 @@
-import { RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata } from '@minions/workshop-shared/api';
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiCode, GatekeeperMetadata, GatekeeperClient } from '@minions/workshop-shared/api';
+import { DurableObject } from "cloudflare:workers";
 
 // Workers environment (bindings).
-interface Env {}
+export interface Env {}
 
 // Durable Object that stores information about a user.
-export class UserAccount extends DurableObject<Env> {
+export class UserDurableObject extends DurableObject<Env> {
   private sql: SqlStorage;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -30,25 +30,146 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async listMinions(): Promise<MinionMetadata[]> {
-    // TODO: Returning fake data for now while iterating on UI. Replace with real data later.
-    return [
-      {id: "fake1", title: "Fake Minion 1"},
-      {id: "fake2", title: "Fake Minion 2"},
-    ];
+    return <MinionMetadata[]>this.sql.exec(`
+      SELECT id, title FROM minions
+    `).toArray();
+  }
+
+  async updateTitle(minionId: string, title: string) {
+    this.sql.exec(`
+      UPDATE minions SET title = ? WHERE id = ?
+    `, title, minionId);
+  }
+
+  async getMinion(id: string): Promise<MinionMetadata | null> {
+    let record = this.sql.exec(`
+      SELECT id, title FROM minions WHERE id = ?
+    `, id).next().value || null;
+
+    return <MinionMetadata | null>record;
+  }
+
+  async newMinion(id: string, title: string): Promise<void> {
+    this.sql.exec(`
+      INSERT INTO minions(id, title) VALUES (?, ?)
+    `, id, title);
   }
 }
 
-class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
-  constructor(private ctx: ExecutionContext, private user: DurableObjectStub<UserAccount>) {
+// =======================================================================================
+
+export class OverseerDurableObject extends DurableObject<Env> {
+  private sql: SqlStorage;
+
+  // If not set, this minion doesn't exist yet.
+  private ownerId?: string;
+
+  private users: DurableObjectNamespace<UserDurableObject>;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.users = this.ctx.exports.UserDurableObject;
+
+    ctx.blockConcurrencyWhile(async () => {
+      this.ownerId = await ctx.storage.get("ownerId");
+    });
+  }
+
+  async open(ownerId: string): Promise<Overseer> {
+    if (!this.ownerId) {
+      // This Overseer hasn't been initialized yet.
+      await this.ctx.blockConcurrencyWhile(async () => {
+        // Verify that the owner believes it exists. The owner account must be initialized with
+        // any new minions first before the minion is actually opened.
+        let owner = this.users.get(this.users.idFromString(ownerId));
+        let meta = await owner.getMinion(this.ctx.id.toString());
+        if (!meta) {
+          throw new Error("Not Found");
+        }
+
+        // Owner says we exist, so let's initialize ourselves.
+        this.ownerId = ownerId;
+        await this.ctx.storage.put("ownerId", ownerId);
+        await this.ctx.storage.put("title", meta.title);
+        await this.ctx.storage.put("version", 1);
+      });
+    }
+
+    if (ownerId != this.ownerId) {
+      throw new Error("Unauthorized");
+    }
+
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    return new OverseerImpl(this.ctx, owner);
+  }
+}
+
+class OverseerImpl extends RpcTarget implements Overseer {
+  constructor(private ctx: DurableObjectState,
+              private owner: DurableObjectStub<UserDurableObject>) {
     super();
   }
 
-  async openMinion(id: string): Promise<Overseer | null> {
-    throw new Error("unimplemented");
+  async getMetadata(): Promise<MinionMetadata> {
+    let title: string = (await this.ctx.storage.get("title"))!;
+
+    return { id: this.ctx.id.toString(), title };
+  }
+
+  async setTitle(title: string): Promise<void> {
+    await this.ctx.storage.put("title", title);
+    await this.owner.updateTitle(this.ctx.id.toString(), title);
+  }
+
+  async getUiCode(): Promise<UiCode | null> {
+    return null;
+  }
+
+  async connectToMinion(): Promise<RpcStub<any>> {
+    throw new Error("unimplemented: connectToMinion()");
+  }
+
+  async listGatekeepers(): Promise<GatekeeperMetadata[]> {
+    return [];
+  }
+
+  async getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null> {
+    return null;
+  }
+
+  async newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
+    throw new Error("unimplemented: newGatekeeper()");
+  }
+}
+
+// =======================================================================================
+
+class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
+  constructor(private ctx: ExecutionContext, private user: DurableObjectStub<UserDurableObject>) {
+    super();
+
+    this.overseers = this.ctx.exports.OverseerDurableObject;
+  }
+
+  private overseers: DurableObjectNamespace<OverseerDurableObject>;
+
+  async openMinion(id: string): Promise<Overseer> {
+    let userId = this.user.id.toString();
+
+    let overseer = this.overseers.get(this.overseers.idFromString(id));
+
+    return overseer.open(userId);
   }
 
   async newMinion(): Promise<Overseer> {
-    throw new Error("unimplemented");
+    let id = this.overseers.newUniqueId().toString();
+    await this.user.newMinion(id, "Untitled Minion");
+    let result = await this.openMinion(id);
+    if (!result) {
+      throw new Error("Open failed despite newly-created minion?");
+    }
+    return result;
   }
 
   async listMinions(): Promise<MinionMetadata[]> {
@@ -57,11 +178,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 }
 
 class PublicApiImpl extends RpcTarget implements PublicApi {
-  users: DurableObjectNamespace<UserAccount>;
+  users: DurableObjectNamespace<UserDurableObject>;
 
   constructor(private ctx: ExecutionContext) {
     super();
-    this.users = this.ctx.exports.UserAccount;
+    this.users = this.ctx.exports.UserDurableObject;
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {

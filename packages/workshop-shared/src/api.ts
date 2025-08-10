@@ -46,7 +46,9 @@ export interface PublicApi extends RpcTarget {
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Open an existing minion.
-  openMinion(id: string): Promise<Overseer | null>;
+  //
+  // To allow for pipelining ,this throws an exception if the minion doesn't exist.
+  openMinion(id: string): Promise<Overseer>;
 
   // Create a new minion. It will start out titled "Untitled Minion".
   newMinion(): Promise<Overseer>;
@@ -111,7 +113,7 @@ export interface Overseer extends RpcTarget {
   // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
   // @ts-ignore - TODO: Fix type instantiation issue
-  connectToMinion(): RpcStub<any>;
+  connectToMinion(): Promise<RpcStub<any>>;
 
   // List all the Minion's current gatekeepers.
   listGatekeepers(): Promise<GatekeeperMetadata[]>;

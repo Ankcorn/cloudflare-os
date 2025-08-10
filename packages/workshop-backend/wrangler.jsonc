@@ -8,15 +8,21 @@
       {
         // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
         // is a bug -- it should use "migrations" instead.
-        "name": "DUMMY_TO_CONVINCE_WRANGLER_THE_CLASS_EXISTS",
-        "class_name": "UserAccount"
+        "name": "DUMMY_UserDurableObject",
+        "class_name": "UserDurableObject"
+      },
+      {
+        // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
+        // is a bug -- it should use "migrations" instead.
+        "name": "DUMMY_OverseerDurableObject",
+        "class_name": "OverseerDurableObject"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v0",
-      "new_sqlite_classes": [ "UserAccount" ]
+      "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
     }
   ]
 }
