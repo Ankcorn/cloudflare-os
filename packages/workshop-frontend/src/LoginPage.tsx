@@ -56,7 +56,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        backgroundColor: '#f5f5f5',
       }}
     >
       <Container maxWidth="sm">
@@ -64,7 +64,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           sx={{
             maxWidth: 400,
             mx: 'auto',
-            boxShadow: '0 20px 40px rgba(0, 0, 0, 0.15)',
+            boxShadow: 2,
           }}
         >
           <CardContent sx={{ p: 4 }}>
@@ -117,10 +117,6 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
                 sx={{
                   mt: 1,
                   py: 1.5,
-                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                  '&:hover': {
-                    background: 'linear-gradient(135deg, #5a6fd8 0%, #6a4190 100%)',
-                  }
                 }}
               >
                 {loading ? 'Signing in...' : 'Sign in'}
