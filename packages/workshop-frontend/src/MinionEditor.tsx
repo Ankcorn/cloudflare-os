@@ -20,6 +20,38 @@ export default function MinionEditor() {
   const [error, setError] = useState<string | null>(null)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
+  const [siderWidth, setSiderWidth] = useState(() => Math.floor(window.innerWidth / 3))
+  const [isResizing, setIsResizing] = useState(false)
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizing) {
+        e.preventDefault()
+        const newWidth = Math.max(200, Math.min(800, e.clientX))
+        setSiderWidth(newWidth)
+      }
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+
+    if (isResizing) {
+      document.body.style.userSelect = 'none'
+      document.body.style.cursor = 'col-resize'
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+    }
+    
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isResizing])
 
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
@@ -165,11 +197,11 @@ export default function MinionEditor() {
         </div>
       </Header>
 
-      <Layout style={{ height: 'calc(100vh - 64px)' }}>
+      <div style={{ height: 'calc(100vh - 64px)', display: 'flex' }}>
         {/* Chat Sidebar */}
-        <Sider
-          width={400}
+        <div
           style={{
+            width: siderWidth,
             backgroundColor: 'white',
             borderRight: '1px solid #f0f0f0'
           }}
@@ -203,10 +235,53 @@ export default function MinionEditor() {
               </Text>
             </div>
           </Card>
-        </Sider>
+        </div>
+
+        {/* Resize Handle */}
+        <div
+          style={{
+            width: '4px',
+            backgroundColor: '#f0f0f0',
+            cursor: 'col-resize',
+            position: 'relative',
+            zIndex: 1
+          }}
+          onMouseDown={() => setIsResizing(true)}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: '16px',
+              height: '40px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: '#f0f0f0',
+              borderRadius: '4px',
+              opacity: 0.7
+            }}
+          >
+            <div style={{
+              width: '2px',
+              height: '16px',
+              backgroundColor: '#999',
+              borderRadius: '1px',
+              marginRight: '2px'
+            }} />
+            <div style={{
+              width: '2px',
+              height: '16px',
+              backgroundColor: '#999',
+              borderRadius: '1px'
+            }} />
+          </div>
+        </div>
 
         {/* Main Content with Tabs */}
-        <Content style={{ backgroundColor: 'white' }}>
+        <div style={{ backgroundColor: 'white', flex: 1 }}>
           <Tabs
             defaultActiveKey="code"
             style={{ height: '100%' }}
@@ -265,8 +340,8 @@ export default function MinionEditor() {
               }
             ]}
           />
-        </Content>
-      </Layout>
+        </div>
+      </div>
     </Layout>
   )
 }
