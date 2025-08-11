@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Layout, Typography, Button, Input, Space, Card, message, Tabs } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
 import { RpcStub } from '@cloudflare/jsrpc'
 import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
@@ -116,6 +116,28 @@ export default function MinionEditor() {
     navigate('/')
   }
 
+  const handleDelete = () => {
+    Modal.confirm({
+      title: 'Delete Minion',
+      content: `Are you sure you want to delete "${metadata?.title}"? This action cannot be undone.`,
+      okText: 'Delete',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        if (!overseer) return
+        
+        try {
+          await overseer.stub.deleteSelf()
+          message.success('Minion deleted successfully')
+          navigate('/')
+        } catch (err) {
+          console.error('Failed to delete minion:', err)
+          message.error('Failed to delete minion')
+        }
+      }
+    })
+  }
+
   if (loading) {
     return (
       <Layout style={{ minHeight: '100vh' }}>
@@ -196,6 +218,15 @@ export default function MinionEditor() {
             </>
           )}
         </div>
+
+        <Button
+          icon={<DeleteOutlined />}
+          onClick={handleDelete}
+          danger
+          type="text"
+          size="large"
+          title="Delete Minion"
+        />
       </Header>
 
       <div style={{ height: 'calc(100vh - 64px)', display: 'flex' }}>

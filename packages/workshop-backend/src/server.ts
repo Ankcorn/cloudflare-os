@@ -54,6 +54,12 @@ export class UserDurableObject extends DurableObject<Env> {
       INSERT INTO minions(id, title) VALUES (?, ?)
     `, id, title);
   }
+
+  async deleteMinion(id: string): Promise<void> {
+    this.sql.exec(`
+      DELETE FROM minions WHERE id = ?
+    `, id);
+  }
 }
 
 // =======================================================================================
@@ -134,8 +140,12 @@ export class OverseerDurableObject extends DurableObject<Env> {
       throw new Error("Unauthorized");
     }
 
+    let notifyDeleted = () => {
+      this.ownerId = undefined;
+    };
+
     let owner = this.users.get(this.users.idFromString(this.ownerId));
-    return new OverseerImpl(this.ctx, owner);
+    return new OverseerImpl(this.ctx, owner, notifyDeleted);
   }
 }
 
@@ -143,7 +153,8 @@ class OverseerImpl extends RpcTarget implements Overseer {
   private sql: SqlStorage;
 
   constructor(private ctx: DurableObjectState,
-              private owner: DurableObjectStub<UserDurableObject>) {
+              private owner: DurableObjectStub<UserDurableObject>,
+              private notifyDeleted: () => void) {
     super();
     this.sql = ctx.storage.sql;
   }
@@ -157,6 +168,14 @@ class OverseerImpl extends RpcTarget implements Overseer {
   async setTitle(title: string): Promise<void> {
     await this.ctx.storage.put("title", title);
     await this.owner.updateTitle(this.ctx.id.toString(), title);
+  }
+
+  async deleteSelf(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.owner.deleteMinion(this.ctx.id.toString());
+      await this.ctx.storage.deleteAll();
+      this.notifyDeleted();
+    });
   }
 
   async getCode(): Promise<CodeFile[]> {

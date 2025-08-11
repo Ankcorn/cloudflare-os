@@ -108,6 +108,12 @@ export interface Overseer extends RpcTarget {
   // Change the title.
   setTitle(title: string): Promise<void>;
 
+  // Instruct Minion to delete itself, removing it from the User's minion list and deleting all
+  // data. Further method calls will fail.
+  //
+  // TODO: Implement undelete, maybe using PITR...
+  deleteSelf(): Promise<void>;
+
   // Get/set source code.
   //
   // TODO:
