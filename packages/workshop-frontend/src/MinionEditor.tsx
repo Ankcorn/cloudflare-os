@@ -5,8 +5,9 @@ import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@
 import { RpcStub } from '@cloudflare/jsrpc'
 import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
+import MinionCodeInterface from './MinionCodeInterface'
 
-const { Header, Content, Sider } = Layout
+const { Header, Content } = Layout
 const { Title, Text } = Typography
 
 export default function MinionEditor() {
@@ -14,7 +15,7 @@ export default function MinionEditor() {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
 
-  const [overseer, setOverseer] = useState<{ stub: Overseer } | null>(null)
+  const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<MinionMetadata | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -290,19 +291,12 @@ export default function MinionEditor() {
               {
                 key: 'code',
                 label: 'Code Editor',
-                children: (
-                  <div style={{
-                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
-                    display: 'flex',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    color: '#999'
-                  }}>
-                    <Text type="secondary">
-                      Code editor will be implemented here. View and edit your minion's TypeScript code.
-                    </Text>
-                  </div>
-                )
+                children: overseer ? (
+                  <MinionCodeInterface
+                    overseer={overseer.stub}
+                    height="calc(100vh - 64px - 46px)"
+                  />
+                ) : null
               },
               {
                 key: 'overseer',

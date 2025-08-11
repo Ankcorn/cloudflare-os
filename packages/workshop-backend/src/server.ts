@@ -166,7 +166,7 @@ class OverseerImpl extends RpcTarget implements Overseer {
   }
   async setCodeFile(name: string, content: string): Promise<void> {
     this.sql.exec(`
-      INSERT INTO files(name, content) VALUES (?, ?))
+      INSERT INTO files(name, content) VALUES (?, ?)
         ON CONFLICT DO UPDATE SET content = excluded.content
     `, name, content);
   }
