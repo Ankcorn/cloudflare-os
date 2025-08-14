@@ -2,8 +2,28 @@ import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile } from '@minions/workshop-shared/api';
 import { DurableObject } from "cloudflare:workers";
 
+// TODO: Figure out why this isn't present in workers-types/experimental
+interface WorkerCode {
+  compatibilityDate: string,
+  compatibilityFlags?: string[],
+  allowExperimental?: boolean,
+  mainModule: string,
+  modules: Record<string, string>,
+  env?: Object,
+  globalOutbound?: Fetcher | null,
+}
+interface WorkerStub {
+  getEntrypoint(name?: string | null, options?: {props: any}): Fetcher;
+  getDurableObjectClass(name?: string | null, options?: {props: any}): DurableObjectClass;
+}
+interface WorkerLoader {
+  get(name: string, load: () => Promise<WorkerCode>): WorkerStub;
+}
+
 // Workers environment (bindings).
-export interface Env {}
+export interface Env {
+  LOADER: WorkerLoader,
+}
 
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Env> {
@@ -145,7 +165,7 @@ export class OverseerDurableObject extends DurableObject<Env> {
     };
 
     let owner = this.users.get(this.users.idFromString(this.ownerId));
-    return new OverseerImpl(this.ctx, owner, notifyDeleted);
+    return new OverseerImpl(this.ctx, this.env, owner, notifyDeleted);
   }
 }
 
@@ -153,6 +173,7 @@ class OverseerImpl extends RpcTarget implements Overseer {
   private sql: SqlStorage;
 
   constructor(private ctx: DurableObjectState,
+              private env: Env,
               private owner: DurableObjectStub<UserDurableObject>,
               private notifyDeleted: () => void) {
     super();
@@ -188,6 +209,9 @@ class OverseerImpl extends RpcTarget implements Overseer {
       INSERT INTO files(name, content) VALUES (?, ?)
         ON CONFLICT DO UPDATE SET content = excluded.content
     `, name, content);
+
+    let codeVersion: number = await this.ctx.storage.get("codeVersion") || 0;
+    await this.ctx.storage.put("codeVersion", codeVersion + 1);
   }
   async deleteCodeFile(name: string): Promise<void> {
     this.sql.exec(`
@@ -196,11 +220,47 @@ class OverseerImpl extends RpcTarget implements Overseer {
   }
 
   async getUiBundle(): Promise<UiBundle | null> {
-    return null;
+    // TODO: Bundle the UI? For now we just return client.js.
+    let {value} = this.sql.exec(`
+      SELECT content FROM files WHERE name = ?
+    `, "client.js").next();
+
+    if (value) {
+      return { jsCode: <string>value.content };
+    } else {
+      return null;
+    }
   }
 
   async connectToMinion(): Promise<RpcStub<any>> {
-    throw new Error("unimplemented: connectToMinion()");
+    let codeVersion: number = await this.ctx.storage.get("codeVersion") || 0;
+
+    this.ctx.facets.get("minion", () => {
+      let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
+        let modules: Record<string, string> = {};
+        for (let row of this.sql.exec(`SELECT name, content FROM files`)) {
+          let file = <CodeFile>row;
+          // TODO: Better separation of client/server, etc.
+          if (file.name != "client.js") {
+            modules[file.name] = file.content;
+          }
+        }
+
+        return {
+          // TODO: compatibility date configuration
+          compatibilityDate: "2025-08-01",
+          mainModule: "server.js",
+          modules,
+          env: {},  // TODO: connections
+          globalOutbound: null,
+        };
+      });
+
+      return {
+        class: stub.getDurableObjectClass("Minion"),
+        id: "minion"
+      };
+    });
   }
 
   async listGatekeepers(): Promise<GatekeeperMetadata[]> {

@@ -24,5 +24,13 @@
       "tag": "v0",
       "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
     }
-  ]
+  ],
+  "unsafe": {
+		"bindings": [
+			{
+				"name": "LOADER",
+				"type": "worker-loader"
+			}
+		]
+	}
 }

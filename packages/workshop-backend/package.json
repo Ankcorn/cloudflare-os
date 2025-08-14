@@ -14,8 +14,8 @@
     "@minions/workshop-shared": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250803.0",
+    "@cloudflare/workers-types": "^4.20250813.0",
     "typescript": "^5.9.2",
-    "wrangler": "^4.28.1"
+    "wrangler": "https://pkg.pr.new/wrangler@10012"
   }
 }

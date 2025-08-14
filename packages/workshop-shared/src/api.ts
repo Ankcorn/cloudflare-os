@@ -88,7 +88,13 @@ export type UiBundle = {
   // TODO: Specify the format of what this URL returns. A raw HTML page doesn't quite work because
   //   the client needs to initialize the sandbox with some platform libraries before loading the
   //   Minion itself.
-  url: string;
+//  url: string;
+
+  // Returns the raw JS code to execute in the Minion iframe.
+  // TODO: For now we just return the code but we should switch to serving over HTTP as described
+  //   above, for caching. Or... maybe we should actually serve over RPC, but also employ the
+  //   Cache API in the browser? Or some other local storage?
+  jsCode: string;
 
   // Other metadata could be placed here in the future, e.g. to specify what version of support
   // libraries should be loaded.
