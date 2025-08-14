@@ -5,16 +5,35 @@ import { Overseer, UiBundle } from '@minions/workshop-shared/api'
 
 const { Text } = Typography
 
+// We want to inject JSRPC into the Minion. Luckily it has no dependencies, so we can just take
+// the whole module and embed it. We can import the module using ?raw to get a string of the
+// content.
+import JSRPC_BUNDLE from '@cloudflare/jsrpc/dist/index.js?raw'
+
+let JSRPC_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${JSRPC_BUNDLE}`
+
+// Unfortunately, we will have to embed the code as a data: URL, because our iframe is totally
+// sandboxed. Even more unfortuntaely, since it's a module which we need to import from, we can't
+// use the data URL as a <script> tag's source. Instead, we have to use it in an import statement.
+// And, guess what? That import statement is going to appear in code which is *also* embedded in
+// a data: URL, so we have a doubly-nested data: URL. We'll use base64 encoding for the inner
+// data: and URL encoding for the outer, as this lagely avoids double-escaping.
+//
+// In any case, we'll prefix the minion code with this prefix which imports the JSRPC library (from
+// a massive data URL) and sets up the RPC connection to the parent.
+let INJECTED_CODE_PREFIX = encodeURIComponent(`//# sourceURL=client.js
+import { RpcStub } from "data:text/javascript;charset=utf-8;base64,${btoa(JSRPC_BUNDLE_ANNOTATED)}";
+
+`);
+
 const createSandboxedHtml = (jsCode: string): string => {
-  return `
-<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head></head>
 <body>
-    <script src="data:text/javascript;charset=utf-8,${encodeURIComponent(jsCode)}"></script>
+    <script type="module" src="data:text/javascript;charset=utf-8,${INJECTED_CODE_PREFIX}${encodeURIComponent(jsCode)}"></script>
 </body>
-</html>
-  `.trim()
+</html>`.trim()
 }
 
 interface MinionUIProps {
