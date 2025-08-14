@@ -8,29 +8,10 @@ const { Text } = Typography
 const createSandboxedHtml = (jsCode: string): string => {
   return `
 <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Minion UI</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
-        }
-    </style>
-</head>
+<html>
+<head></head>
 <body>
-    <script>
-        // Minion UI code will be injected here
-        try {
-            ${jsCode}
-        } catch (error) {
-            console.error('Error executing Minion UI code:', error);
-            document.body.innerHTML = '<div style="padding: 20px; color: #ff4d4f;">Error loading Minion UI: ' + error.message + '</div>';
-        }
-    </script>
+    <script src="data:text/javascript;charset=utf-8,${encodeURIComponent(jsCode)}"></script>
 </body>
 </html>
   `.trim()
