@@ -6,6 +6,7 @@ import { RpcStub } from '@cloudflare/jsrpc'
 import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
 import MinionCodeInterface from './MinionCodeInterface'
+import MinionUI from './MinionUI'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -23,6 +24,8 @@ export default function MinionEditor() {
   const [titleInput, setTitleInput] = useState('')
   const [siderWidth, setSiderWidth] = useState(() => Math.floor(window.innerWidth / 3))
   const [isResizing, setIsResizing] = useState(false)
+  const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
+  const [activeTab, setActiveTab] = useState('code')
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -114,6 +117,10 @@ export default function MinionEditor() {
 
   const handleBack = () => {
     navigate('/')
+  }
+
+  const handleCodeChange = () => {
+    setUiReloadTrigger(prev => prev + 1)
   }
 
   const handleDelete = () => {
@@ -315,7 +322,8 @@ export default function MinionEditor() {
         {/* Main Content with Tabs */}
         <div style={{ backgroundColor: 'white', flex: 1 }}>
           <Tabs
-            defaultActiveKey="code"
+            activeKey={activeTab}
+            onChange={setActiveTab}
             style={{ height: '100%' }}
             tabBarStyle={{ paddingLeft: '16px' }}
             items={[
@@ -326,6 +334,7 @@ export default function MinionEditor() {
                   <MinionCodeInterface
                     overseer={overseer.stub}
                     height="calc(100vh - 64px - 46px)"
+                    onCodeChange={handleCodeChange}
                   />
                 ) : null
               },
@@ -349,19 +358,14 @@ export default function MinionEditor() {
               {
                 key: 'ui',
                 label: 'Minion UI',
-                children: (
-                  <div style={{
-                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
-                    display: 'flex',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    color: '#999'
-                  }}>
-                    <Text type="secondary">
-                      Custom minion UI will be displayed here in a sandboxed iframe when available.
-                    </Text>
-                  </div>
-                )
+                children: overseer ? (
+                  <MinionUI
+                    overseer={overseer.stub}
+                    height="calc(100vh - 64px - 46px)"
+                    reloadTrigger={uiReloadTrigger}
+                    isVisible={activeTab === 'ui'}
+                  />
+                ) : null
               }
             ]}
           />

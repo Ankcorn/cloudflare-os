@@ -8,9 +8,10 @@ import CodeEditor from './CodeEditor'
 interface MinionCodeInterfaceProps {
   overseer: RpcStub<Overseer>
   height?: string | number
+  onCodeChange?: () => void
 }
 
-export default function MinionCodeInterface({ overseer, height = '100%' }: MinionCodeInterfaceProps) {
+export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange }: MinionCodeInterfaceProps) {
   const [files, setFiles] = useState<CodeFile[]>([])
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -54,6 +55,7 @@ export default function MinionCodeInterface({ overseer, height = '100%' }: Minio
 
     try {
       await overseer.setCodeFile(filename, content)
+      onCodeChange?.()
     } catch (error) {
       console.error('Failed to save file:', error)
       // TODO: Could revert local state on error, but for now just log
@@ -71,6 +73,7 @@ export default function MinionCodeInterface({ overseer, height = '100%' }: Minio
       setFiles(prev => [...prev, newFile])
       setActiveFile(filename)
       
+      onCodeChange?.()
       message.success(`Created file: ${filename}`)
     } catch (error) {
       console.error('Failed to create file:', error)
@@ -95,6 +98,7 @@ export default function MinionCodeInterface({ overseer, height = '100%' }: Minio
         return remainingFiles
       })
       
+      onCodeChange?.()
       message.success(`Deleted file: ${filename}`)
     } catch (error) {
       console.error('Failed to delete file:', error)
@@ -129,6 +133,7 @@ export default function MinionCodeInterface({ overseer, height = '100%' }: Minio
         setActiveFile(newName)
       }
       
+      onCodeChange?.()
       message.success(`Renamed file: ${oldName} → ${newName}`)
     } catch (error) {
       console.error('Failed to rename file:', error)
