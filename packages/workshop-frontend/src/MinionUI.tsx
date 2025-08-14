@@ -29,7 +29,9 @@ import { RpcStub } from "data:text/javascript;charset=utf-8;base64,${btoa(JSRPC_
 const createSandboxedHtml = (jsCode: string): string => {
   return `<!DOCTYPE html>
 <html>
-<head></head>
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src 'none'; script-src data: 'unsafe-inline'; style-src data: 'unsafe-inline'; img-src data:; media-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none';">
+</head>
 <body>
     <script type="module" src="data:text/javascript;charset=utf-8,${INJECTED_CODE_PREFIX}${encodeURIComponent(jsCode)}"></script>
 </body>
@@ -82,7 +84,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
       try {
         setLoading(true)
         setError(null)
-        
+
         const bundle = await overseer.getUiBundle()
         if (bundle) {
           const html = createSandboxedHtml(bundle.jsCode)
