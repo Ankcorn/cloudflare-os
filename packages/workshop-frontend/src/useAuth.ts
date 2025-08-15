@@ -24,7 +24,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     } else {
       setAuthState(prev => ({ ...prev, isLoading: false }))
     }
-  }, [])
+  }, [publicApi])
 
   const authenticateWithToken = (token: string) => {
     setAuthState(prev => {

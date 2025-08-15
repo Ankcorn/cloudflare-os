@@ -19,10 +19,10 @@ export default function Home() {
       try {
         const minionList = await authenticatedApi.listMinions()
         setMinions(minionList)
+        setLoading(false) // Only set loading to false on successful fetch
       } catch (error) {
         console.error('Failed to fetch minions:', error)
-      } finally {
-        setLoading(false)
+        // Keep loading = true when fetch fails, so we show spinner instead of empty state
       }
     }
 

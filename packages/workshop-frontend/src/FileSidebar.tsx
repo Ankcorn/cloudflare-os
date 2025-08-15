@@ -6,6 +6,7 @@ import { CodeFile } from '@minions/workshop-shared/api'
 interface FileSidebarProps {
   files: CodeFile[]
   activeFile: string | null
+  dirtyFiles: Set<string>
   onFileSelect: (filename: string) => void
   onFileCreate: (filename: string) => void
   onFileDelete: (filename: string) => void
@@ -15,6 +16,7 @@ interface FileSidebarProps {
 export default function FileSidebar({
   files,
   activeFile,
+  dirtyFiles,
   onFileSelect,
   onFileCreate,
   onFileDelete,
@@ -64,28 +66,39 @@ export default function FileSidebar({
     setIsRenameModalOpen(true)
   }
 
-  const menuItems = files.map(file => ({
-    key: file.name,
-    icon: <FileOutlined />,
-    label: (
-      <div 
-        style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          width: '100%'
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-        }}
-      >
-        <span 
-          style={{ flex: 1, cursor: 'pointer' }}
-          onClick={() => onFileSelect(file.name)}
+  const menuItems = files.map(file => {
+    const isDirty = dirtyFiles.has(file.name)
+    
+    return {
+      key: file.name,
+      icon: <FileOutlined />,
+      label: (
+        <div 
+          style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center',
+            width: '100%',
+            backgroundColor: isDirty ? 'rgba(255, 77, 79, 0.1)' : 'transparent',
+            borderRadius: '4px',
+            padding: isDirty ? '2px 4px' : '0'
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
         >
-          {file.name}
-        </span>
+          <span 
+            style={{ 
+              flex: 1, 
+              cursor: 'pointer',
+              color: isDirty ? '#ff4d4f' : 'inherit'
+            }}
+            onClick={() => onFileSelect(file.name)}
+            title={isDirty ? 'File has unsaved changes' : ''}
+          >
+            {file.name}
+          </span>
         <div 
           style={{ 
             display: 'flex', 
@@ -138,7 +151,8 @@ export default function FileSidebar({
         </div>
       </div>
     )
-  }))
+  }
+  })
 
   return (
     <div style={{ width: 250, borderRight: '1px solid #f0f0f0', height: '100%' }}>

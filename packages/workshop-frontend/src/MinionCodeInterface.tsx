@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { message } from 'antd'
 import { CodeFile, Overseer } from '@minions/workshop-shared/api'
 import { RpcStub } from '@cloudflare/jsrpc'
@@ -15,9 +15,20 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   const [files, setFiles] = useState<CodeFile[]>([])
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [hasLoaded, setHasLoaded] = useState(false)
+  const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set())
+  
+  // Keep a ref to the current overseer so operations always use the latest stub
+  const currentOverseerRef = useRef(overseer)
+  currentOverseerRef.current = overseer
 
-  // Load files from the server - only called once on mount
+  // Load files from the server - only called once on mount or when we haven't loaded yet
   useEffect(() => {
+    // Don't reload if we already have files loaded
+    if (hasLoaded) {
+      return
+    }
+
     const loadFiles = async () => {
       try {
         setLoading(true)
@@ -28,6 +39,8 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
         if (codeFiles.length > 0) {
           setActiveFile(codeFiles[0].name)
         }
+        
+        setHasLoaded(true)
       } catch (error) {
         console.error('Failed to load files:', error)
         message.error('Failed to load code files')
@@ -37,7 +50,59 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
     }
 
     loadFiles()
-  }, [overseer])
+  }, [overseer, hasLoaded])
+
+  // Retry saving dirty files when overseer changes (after reconnection)
+  useEffect(() => {
+    if (dirtyFiles.size === 0) {
+      return
+    }
+
+    const retryDirtyFiles = async () => {
+      const filesToRetry = Array.from(dirtyFiles)
+      const successfulSaves = new Set<string>()
+
+      // Parallelize all save operations
+      const savePromises = filesToRetry.map(async (filename) => {
+        const file = files.find(f => f.name === filename)
+        if (file) {
+          try {
+            await currentOverseerRef.current.setCodeFile(filename, file.content)
+            successfulSaves.add(filename)
+            return { filename, success: true }
+          } catch (error) {
+            console.error(`Failed to retry save for ${filename}:`, error)
+            return { filename, success: false }
+          }
+        }
+        return { filename, success: false }
+      })
+
+      // Wait for all saves to complete
+      const results = await Promise.all(savePromises)
+      
+      // Show success messages for saved files
+      const savedFiles = results.filter(r => r.success)
+      if (savedFiles.length > 0) {
+        if (savedFiles.length === 1) {
+          message.success(`Saved ${savedFiles[0].filename}`)
+        } else {
+          message.success(`Saved ${savedFiles.length} files`)
+        }
+      }
+
+      // Batch update: remove all successfully saved files from dirty set
+      if (successfulSaves.size > 0) {
+        setDirtyFiles(prev => {
+          const newSet = new Set(prev)
+          successfulSaves.forEach(filename => newSet.delete(filename))
+          return newSet
+        })
+      }
+    }
+
+    retryDirtyFiles()
+  }, [overseer, files]) // Removed dirtyFiles from dependencies
 
   // Handle file selection
   const handleFileSelect = (filename: string) => {
@@ -54,11 +119,18 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
     ))
 
     try {
-      await overseer.setCodeFile(filename, content)
+      await currentOverseerRef.current.setCodeFile(filename, content)
+      // Mark file as clean on successful save
+      setDirtyFiles(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(filename)
+        return newSet
+      })
       onCodeChange?.()
     } catch (error) {
       console.error('Failed to save file:', error)
-      // TODO: Could revert local state on error, but for now just log
+      // Mark file as dirty on failed save
+      setDirtyFiles(prev => new Set(prev).add(filename))
       throw error // Re-throw so CodeEditor can handle the error
     }
   }
@@ -66,7 +138,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   // Handle file creation
   const handleFileCreate = async (filename: string) => {
     try {
-      await overseer.setCodeFile(filename, '')
+      await currentOverseerRef.current.setCodeFile(filename, '')
       
       // Add to local files state
       const newFile: CodeFile = { name: filename, content: '' }
@@ -84,7 +156,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   // Handle file deletion
   const handleFileDelete = async (filename: string) => {
     try {
-      await overseer.deleteCodeFile(filename)
+      await currentOverseerRef.current.deleteCodeFile(filename)
       
       // Remove from local files state and handle active file switching
       setFiles(prev => {
@@ -116,10 +188,10 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
       }
 
       // Create new file with new name
-      await overseer.setCodeFile(newName, file.content)
+      await currentOverseerRef.current.setCodeFile(newName, file.content)
       
       // Delete old file
-      await overseer.deleteCodeFile(oldName)
+      await currentOverseerRef.current.deleteCodeFile(oldName)
       
       // Update local state
       setFiles(prev => prev.map(f => 
@@ -164,6 +236,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
       <FileSidebar
         files={files}
         activeFile={activeFile}
+        dirtyFiles={dirtyFiles}
         onFileSelect={handleFileSelect}
         onFileCreate={handleFileCreate}
         onFileDelete={handleFileDelete}

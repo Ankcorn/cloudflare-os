@@ -20,6 +20,8 @@ export default function MinionEditor() {
   const [metadata, setMetadata] = useState<MinionMetadata | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [isInitialLoad, setIsInitialLoad] = useState(true)
+  const [connectionLost, setConnectionLost] = useState(false)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [siderWidth, setSiderWidth] = useState(() => Math.floor(window.innerWidth / 3))
@@ -67,6 +69,12 @@ export default function MinionEditor() {
         return
       }
 
+      // Only show loading/clear error on initial load
+      if (isInitialLoad) {
+        setError(null)
+        setLoading(true)
+      }
+
       try {
         // Use promise pipelining - use the promise itself as the stub
         overseerStub = authenticatedApi.openMinion(id)
@@ -76,11 +84,30 @@ export default function MinionEditor() {
         const minionMetadata = await overseerStub.getMetadata()
         setMetadata(minionMetadata)
         setTitleInput(minionMetadata.title)
+        
+        // Clear any error on successful load
+        setError(null)
+        setIsInitialLoad(false)
+        
+        // If this was a reconnection attempt, show success message
+        if (connectionLost) {
+          message.success('Connection restored')
+          setConnectionLost(false)
+        }
       } catch (err) {
         console.error('Failed to load minion:', err)
-        setError('Failed to load minion')
+        // Only set error on initial load - for reconnection attempts, keep the UI visible
+        if (isInitialLoad) {
+          setError('Failed to load minion')
+        } else if (!connectionLost) {
+          // Show connection lost toast only once
+          message.warning('Lost connection to server')
+          setConnectionLost(true)
+        }
       } finally {
-        setLoading(false)
+        if (isInitialLoad) {
+          setLoading(false)
+        }
       }
     }
 
