@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Typography, Spin, Alert } from 'antd'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub, newMessagePortRpcSession } from '@cloudflare/jsrpc'
 import { Overseer, UiBundle } from '@minions/workshop-shared/api'
 
 const { Text } = Typography
@@ -22,7 +22,14 @@ let JSRPC_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${JSRPC_BUNDLE}`
 // In any case, we'll prefix the minion code with this prefix which imports the JSRPC library (from
 // a massive data URL) and sets up the RPC connection to the parent.
 let INJECTED_CODE_PREFIX = encodeURIComponent(`//# sourceURL=client.js
-import { RpcStub } from "data:text/javascript;charset=utf-8;base64,${btoa(JSRPC_BUNDLE_ANNOTATED)}";
+import { RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(JSRPC_BUNDLE_ANNOTATED)}";
+
+let minion;  // RPC stub to the minion's server-side Durable Object.
+{
+  let {port1, port2} = new MessageChannel();
+  window.parent.postMessage("handshake", "*", [port2]);
+  minion = newMessagePortRpcSession(port1);
+}
 
 `);
 
@@ -53,6 +60,8 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
   const [isInvalidated, setIsInvalidated] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
+  const minionStubRef = useRef<RpcStub<any> | null>(null)
+  const rpcSessionRef = useRef<RpcStub<any> | null>(null)
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
@@ -104,6 +113,51 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
 
     loadUiBundle()
   }, [overseer, isVisible, hasLoaded, isInvalidated])
+
+  // Effect to handle iframe RPC handshake
+  useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      // Only handle messages from our iframe
+      if (event.source !== iframeRef.current?.contentWindow) {
+        return
+      }
+
+      if (event.data === 'handshake' && event.ports && event.ports[0]) {
+        try {
+          // Get the minion stub from overseer
+          const minionStub = await overseer.connectToMinion()
+          minionStubRef.current = minionStub
+
+          // Create RPC session using the MessagePort and expose the minion stub
+          const port = event.ports[0]
+          const rpcSession = newMessagePortRpcSession(port, minionStub)
+          rpcSessionRef.current = rpcSession
+        } catch (error) {
+          console.error('Failed to establish RPC connection:', error)
+        }
+      }
+    }
+
+    window.addEventListener('message', handleMessage)
+    return () => {
+      window.removeEventListener('message', handleMessage)
+    }
+  }, [overseer])
+
+  // Effect to handle cleanup when component unmounts or reloads
+  useEffect(() => {
+    return () => {
+      // Dispose of RPC resources
+      if (minionStubRef.current) {
+        minionStubRef.current[Symbol.dispose]?.()
+        minionStubRef.current = null
+      }
+      if (rpcSessionRef.current) {
+        rpcSessionRef.current[Symbol.dispose]?.()
+        rpcSessionRef.current = null
+      }
+    }
+  }, [reloadTrigger])
 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded
