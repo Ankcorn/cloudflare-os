@@ -235,7 +235,7 @@ class OverseerImpl extends RpcTarget implements Overseer {
   async connectToMinion(): Promise<RpcStub<any>> {
     let codeVersion: number = await this.ctx.storage.get("codeVersion") || 0;
 
-    this.ctx.facets.get("minion", () => {
+    let facet = this.ctx.facets.get("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
         let modules: Record<string, string> = {};
         for (let row of this.sql.exec(`SELECT name, content FROM files`)) {
@@ -260,6 +260,18 @@ class OverseerImpl extends RpcTarget implements Overseer {
         class: stub.getDurableObjectClass("Minion"),
         id: "minion"
       };
+    });
+
+    // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
+    return new Proxy(facet, {
+      get(target, prop, receiver) {
+        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
+        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
+        return Reflect.get(target, prop, target);
+      },
+      getPrototypeOf(target) {
+        return RpcTarget.prototype;
+      }
     });
   }
 
