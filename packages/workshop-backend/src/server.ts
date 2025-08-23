@@ -352,6 +352,18 @@ export default {
 
     if (url.pathname === "/api") {
       return newWorkersRpcResponse(req, new PublicApiImpl(ctx));
+    } else if (url.pathname === "/status") {
+      // A little debug endpoint to check if we can reach our gatekeepers.
+      let responses = [];
+      for (let name in env) {
+        if (name.startsWith("GATEKEEPER_")) {
+          responses.push((<any>env)[name].status().then((status: any) => {
+            return `${name}: ${status}`;
+          }));
+        }
+      }
+      let gatekeepersStatus = (await Promise.all(responses)).join("\n");
+      return new Response(`Available gatekeepers:\n\n${gatekeepersStatus}`);
     } else {
       return new Response("Not Found", {status: 404});
     }

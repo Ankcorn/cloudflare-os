@@ -1,0 +1,6 @@
+{
+  "name": "gatekeeper-google",
+  "main": "src/google.ts",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["experimental"]
+}

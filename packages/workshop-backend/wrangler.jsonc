@@ -3,6 +3,13 @@
   "main": "src/server.ts",
   "compatibility_date": "2025-07-01",
   "compatibility_flags": ["experimental"],
+  "services": [
+    {
+      "binding": "GATEKEEPER_GOOGLE",
+      "service": "gatekeeper-google",
+      "entrypoint": "GatekeeperVendor"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

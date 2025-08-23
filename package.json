@@ -4,11 +4,13 @@
   "private": true,
   "scripts": {
     "build": "pnpm run --recursive build",
-    "dev": "pnpm run --recursive dev",
+    "dev-client": "cd packages/workshop-frontend && pnpm run dev",
+    "dev-server": "wrangler dev -c wrangler.jsonc -c packages/workshop-backend/wrangler.jsonc -c packages/gatekeeper-google/wrangler.jsonc",
     "clean": "pnpm run --recursive clean"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "wrangler": "^4.32.0"
   },
   "pnpm": {
     "overrides": {

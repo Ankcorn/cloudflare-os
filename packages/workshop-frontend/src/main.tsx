@@ -23,7 +23,7 @@ let backoff: number = 1000;
 
 function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
-  return newWebSocketRpcSession<PublicApi>('ws://localhost:8787/api');
+  return newWebSocketRpcSession<PublicApi>('ws://api.localhost:8787/api');
 }
 async function handleBroken(error: any) {
   console.warn('RPC connection lost:', error);

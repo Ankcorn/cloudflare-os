@@ -1,0 +1,15 @@
+{
+  "name": "dev-router",
+  "main": "dev-router.js",
+  "compatibility_date": "2025-07-01",
+  "services": [
+    {
+      "binding": "WORKSHOP_BACKEND",
+      "service": "workshop-backend"
+    },
+    {
+      "binding": "GATEKEEPER_GOOGLE",
+      "service": "gatekeeper-google"
+    }
+  ]
+}

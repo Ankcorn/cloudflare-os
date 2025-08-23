@@ -1,8 +1,8 @@
 {
-  "name": "@minions/workshop-backend",
+  "name": "@minions/google-gatekeeper",
   "version": "1.0.0",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./src/google.ts",
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
     "deploy": "wrangler deploy",
