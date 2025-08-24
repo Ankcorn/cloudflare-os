@@ -18,7 +18,7 @@
 
 /// <reference types="@cloudflare/workers-types/experimental" />
 import type { DurableObjectClass as WorkerdDurableObjectClass } from "@cloudflare/workers-types/experimental";
-import type { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
+import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
 // =======================================================================================
 // Some basic types, not specific to adapters.
@@ -286,7 +286,8 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // dependent actions. That said, there is no strict requirement that a gatekeeper does such
   // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
   // particular API.
-  startSession(permissions: PermissionSet, approvalQueue: ApprovalQueue<Action>): Promise<Session>;
+  startSession(permissions: PermissionSet, approvalQueue: RpcStub<ApprovalQueue<Action>>)
+      : Promise<Session>;
 
   // Checks what permissions the given user has on the resource pointed to by this capability.
   //
@@ -368,7 +369,7 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
 // action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
-export interface ApprovalQueue<Action> {
+export interface ApprovalQueue<Action> extends RpcTarget {
   // Submit an action for approval.
   //
   // `Action` is an arbitrary type defined by the gatekeeper, which describes the action to be

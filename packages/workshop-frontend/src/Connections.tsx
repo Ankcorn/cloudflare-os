@@ -1,24 +1,28 @@
 import { useState, useEffect } from 'react'
-import { Button, Table, Input, Space, Typography, Modal, message, Card, Empty } from 'antd'
-import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
+import { Button, Table, Input, Space, Typography, Modal, message, Card, Empty, Tag } from 'antd'
+import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined } from '@ant-design/icons'
 import { RpcStub } from '@cloudflare/jsrpc'
-import { Overseer, GatekeeperMetadata } from '@minions/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, ActionLogEntry } from '@minions/workshop-shared/api'
 
 const { Title, Text } = Typography
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
   onConnectionsChange?: () => void
+  isVisible?: boolean
 }
 
-export default function Connections({ overseer, onConnectionsChange }: ConnectionsProps) {
+export default function Connections({ overseer, onConnectionsChange, isVisible }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
+  const [actions, setActions] = useState<ActionLogEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [actionsLoading, setActionsLoading] = useState(true)
   const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
   const [newConnectionUrl, setNewConnectionUrl] = useState('')
   const [creatingConnection, setCreatingConnection] = useState(false)
+  const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
 
   const loadGatekeepers = async () => {
     try {
@@ -32,9 +36,28 @@ export default function Connections({ overseer, onConnectionsChange }: Connectio
     }
   }
 
+  const loadActions = async () => {
+    try {
+      const actionsList = await overseer.listActions()
+      setActions(actionsList)
+    } catch (err) {
+      console.error('Failed to load actions:', err)
+      message.error('Failed to load actions')
+    } finally {
+      setActionsLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadGatekeepers()
+    loadActions()
   }, [overseer])
+
+  useEffect(() => {
+    if (isVisible) {
+      loadActions()
+    }
+  }, [isVisible])
 
   const handleEditStart = (bindingName: string) => {
     setEditingGatekeeper(bindingName)
@@ -116,6 +139,57 @@ export default function Connections({ overseer, onConnectionsChange }: Connectio
     }
   }
 
+  const handleApproveAction = async (actionId: number) => {
+    setProcessingActions(prev => new Set(prev).add(actionId))
+    try {
+      await overseer.approveAction(actionId)
+      await loadActions()
+    } catch (err) {
+      console.error('Failed to approve action:', err)
+      message.error('Failed to approve action')
+    } finally {
+      setProcessingActions(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(actionId)
+        return newSet
+      })
+    }
+  }
+
+  const handleRejectAction = async (actionId: number) => {
+    setProcessingActions(prev => new Set(prev).add(actionId))
+    try {
+      await overseer.rejectAction(actionId)
+      await loadActions()
+    } catch (err) {
+      console.error('Failed to reject action:', err)
+      message.error('Failed to reject action')
+    } finally {
+      setProcessingActions(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(actionId)
+        return newSet
+      })
+    }
+  }
+
+  const getStatusTag = (action: ActionLogEntry) => {
+    switch (action.state) {
+      case 'pending':
+        return <Tag color="orange">Pending</Tag>
+      case 'approved':
+        return <Tag color="green">Approved</Tag>
+      case 'rejected':
+        return <Tag color="red">Rejected</Tag>
+      default:
+        return <Tag>{action.state}</Tag>
+    }
+  }
+
+  const formatDate = (date: Date) => {
+    return new Date(date).toLocaleString()
+  }
+
   const columns = [
     {
       title: 'Binding Name',
@@ -182,6 +256,69 @@ export default function Connections({ overseer, onConnectionsChange }: Connectio
     }
   ]
 
+  const actionsColumns = [
+    {
+      title: 'Binding',
+      dataIndex: 'bindingName',
+      key: 'bindingName',
+      width: '15%',
+      render: (bindingName: string) => <Text code>{bindingName}</Text>
+    },
+    {
+      title: 'Created',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: '15%',
+      render: (date: Date) => <Text>{formatDate(date)}</Text>
+    },
+    {
+      title: 'Title',
+      dataIndex: ['description', 'title'],
+      key: 'title',
+      width: '45%',
+      render: (title: string) => <Text>{title}</Text>
+    },
+    {
+      title: 'Actions',
+      key: 'actions',
+      width: '25%',
+      render: (_, record: ActionLogEntry) => {
+        const isProcessing = processingActions.has(record.id)
+        
+        if (record.state === 'pending') {
+          return (
+            <Space>
+              <Button
+                size="small"
+                type="primary"
+                onClick={() => handleApproveAction(record.id)}
+                loading={isProcessing}
+                disabled={isProcessing}
+              >
+                Approve
+              </Button>
+              <Button
+                size="small"
+                danger
+                onClick={() => handleRejectAction(record.id)}
+                loading={isProcessing}
+                disabled={isProcessing}
+              >
+                Reject
+              </Button>
+            </Space>
+          )
+        } else if (record.state === 'approved') {
+          return <Text type="secondary">Approved {record.appliedAt ? formatDate(record.appliedAt) : ''}</Text>
+        } else if (record.state === 'rejected') {
+          return <Text type="secondary">Rejected</Text>
+        }
+        return null
+      }
+    }
+  ]
+
+
   return (
     <div style={{ padding: '24px', height: 'calc(100vh - 64px - 46px)', overflow: 'auto', backgroundColor: '#f5f5f5' }}>
       <div style={{ marginBottom: '24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -213,6 +350,46 @@ export default function Connections({ overseer, onConnectionsChange }: Connectio
                   Click "New Connection" to connect to external resources.
                 </span>
               }
+            />
+          )
+        }}
+      />
+
+      <div style={{ marginTop: '32px', marginBottom: '16px' }}>
+        <Title level={5} style={{ margin: 0 }}>
+          Action Log ({actions.length})
+        </Title>
+      </div>
+      <Table
+        columns={actionsColumns}
+        dataSource={actions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())}
+        rowKey="id"
+        loading={actionsLoading}
+        pagination={{ pageSize: 20 }}
+        expandable={{
+          expandedRowRender: (record: ActionLogEntry) => (
+            <div style={{ padding: '16px', backgroundColor: '#fafafa', borderRadius: '4px' }}>
+              <Typography.Paragraph>
+                <strong>Description:</strong>
+              </Typography.Paragraph>
+              <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                {record.description.description}
+              </Typography.Paragraph>
+            </div>
+          ),
+          rowExpandable: () => true,
+          expandIcon: ({ expanded, onExpand, record }) =>
+            expanded ? (
+              <CaretRightOutlined rotate={90} onClick={e => onExpand(record, e)} />
+            ) : (
+              <CaretRightOutlined onClick={e => onExpand(record, e)} />
+            )
+        }}
+        locale={{
+          emptyText: (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No actions yet. Actions will appear here as the minion interacts with external resources."
             />
           )
         }}

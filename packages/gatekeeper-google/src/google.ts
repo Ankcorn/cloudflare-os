@@ -1,4 +1,4 @@
-import { WorkerEntrypoint, DurableObject, RpcTarget } from "cloudflare:workers";
+import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { AdapterSchema, GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, DurableObjectClass, UserId, Gatekeeper, ResourceDescription, PermissionSet, ApprovalQueue, ResourceSchema } from '@minions/workshop-shared/gatekeeper';
 import { getAccessToken, GmailApi, GmailThreadContent, GmailThreadSummary, GoogleAccessToken } from "./google-api";
 
@@ -235,7 +235,7 @@ class GmailSession extends RpcTarget {
 
     let action: GmailAction = {type: "applyLabel", threadId, label};
 
-    this.#approvalQueue.submit(action, {
+    await this.#approvalQueue.submit(action, {
       title: `Apply the label ${label} to thread ${threadId}`,
       description: `Apply the label ${label} to thread ${threadId}`,
 
@@ -307,10 +307,12 @@ export class GmailGatekeeperImpl extends DurableObject<Env>
     };
   }
 
-  async startSession(permissions: PermissionSet, approvalQueue: ApprovalQueue<GmailAction>)
+  async startSession(permissions: PermissionSet,
+      approvalQueue: RpcStub<ApprovalQueue<GmailAction>>)
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());
-    return new GmailSession(this.#props.userId, gmailApi, permissions.permissions, approvalQueue);
+    return new GmailSession(
+        this.#props.userId, gmailApi, permissions.permissions, approvalQueue.dup());
   }
 
   checkUserPermissions(user: UserId): Promise<PermissionSet> {

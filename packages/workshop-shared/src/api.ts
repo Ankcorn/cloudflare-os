@@ -24,7 +24,7 @@
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
 import { RpcStub, RpcTarget } from "@cloudflare/jsrpc";
-import { ResourceDescription } from "./gatekeeper.js";
+import { ActionDescription, ResourceDescription } from "./gatekeeper.js";
 
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
@@ -105,6 +105,27 @@ export type CodeFile = {
   content: string;
 }
 
+// Specifies the state of an action in the action log:
+// * pending: Action has not been applied yet. It is waiting for approval.
+// * approved: Action was approved and applied.
+// * denied: Action was rejected by the user.
+export type ActionState = "pending" | "approved" | "rejected";
+
+export type ActionLogEntry = {
+  // Sequential ID number for the action. Counts up from when the minion was created.
+  id: number;
+
+  // Which binding produced this action?
+  bindingName: string;
+
+  createdAt: Date;
+  appliedAt?: Date;
+
+  state: ActionState;
+
+  description: ActionDescription;
+}
+
 // Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
 // Minion.
 export interface Overseer extends RpcTarget {
@@ -150,8 +171,19 @@ export interface Overseer extends RpcTarget {
   // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
   newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
 
+  // List history of actions.
+  // TODO: This should be paginated.
+  listActions(): Promise<ActionLogEntry[]>;
+
+  // Approve an action that is currently in the "pending" state. The action will be performed on
+  // approval.
+  approveAction(id: number): Promise<void>;
+
+  // Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not
+  // be approved in the future.
+  rejectAction(id: number): Promise<void>;
+
   // TODO:
-  // - Code editing API
   // - Agent chat API
   // - View action queue
   //   - Approve actions

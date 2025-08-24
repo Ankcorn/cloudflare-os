@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, DurableObjectClass, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
@@ -214,13 +214,24 @@ class OverseerImpl {
     return client.openSession();
   }
 
+  actionKey(actionId: number): string {
+    return `action:${actionId.toString(16).padStart(8, '0')}`;
+  }
+
   async submitAction(gatekeeperId: number, action: any, description: ActionDescription)
       : Promise<void> {
     let actionId = (await this.storage.get<number>("nextActionId")) || 0;
     await this.storage.put("nextActionId", actionId + 1);
 
-    let key = `action:${actionId}`;
-    await this.storage.put<ActionRecord>(key, {action, description});
+    let key = this.actionKey(actionId);
+    let record: ActionRecord = {
+      gatekeeperId,
+      action,
+      createdAt: new Date(),
+      state: "pending",
+      description
+    };
+    await this.storage.put<ActionRecord>(key, record);
   }
 
   async bumpVersion(): Promise<void> {
@@ -231,7 +242,11 @@ class OverseerImpl {
 }
 
 type ActionRecord = {
+  gatekeeperId: number;
   action: any;
+  createdAt: Date;
+  appliedAt?: Date;
+  state: ActionState;
   description: ActionDescription;
 };
 
@@ -452,6 +467,72 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.bumpVersion();
 
     return new GatekeeperClientImpl(this.impl, id!, this.impl.getGatekeeperFacet(id!));
+  }
+
+  async listActions(): Promise<ActionLogEntry[]> {
+    let bindingMap: Record<number, string> = {};
+    for (let {id, bindingName} of this.impl.sql.exec<{id: number, bindingName: string}>(`
+      SELECT id, bindingName FROM gatekeepers
+    `)) {
+      bindingMap[id] = bindingName;
+    }
+
+    let list = await this.impl.storage.list<ActionRecord>({prefix: "action:"});
+    let result: ActionLogEntry[] = [];
+    for (let [key, record] of list) {
+      let id = parseInt(key.slice("action:".length), 16);
+      result.push({
+        id,
+        bindingName: bindingMap[record.gatekeeperId] || "(deleted binding)",
+        createdAt: record.createdAt,
+        appliedAt: record.appliedAt,
+        state: record.state,
+        description: record.description,
+      });
+    }
+
+    return result;
+  }
+
+  async approveAction(id: number): Promise<void> {
+    let key = this.impl.actionKey(id);
+    let action = await this.impl.storage.get<ActionRecord>(key);
+    if (!action) {
+      throw new Error(`No such action: ${id}`);
+    }
+
+    if (action.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
+    }
+
+    let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
+
+    // TODO: Store `revertInfo`.
+    await gatekeeper.applyAction(action.action);
+
+    action.state = "approved";
+    action.appliedAt = new Date();
+    await this.impl.storage.put<ActionRecord>(key, action);
+  }
+
+  async rejectAction(id: number): Promise<void> {
+    let key = this.impl.actionKey(id);
+    let action = await this.impl.storage.get<ActionRecord>(key);
+    if (!action) {
+      throw new Error(`No such action: ${id}`);
+    }
+
+    if (action.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
+    }
+
+    let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
+
+    // TODO: Store `revertInfo`.
+    await gatekeeper.rejectAction(action.action);
+
+    action.state = "rejected";
+    await this.impl.storage.put<ActionRecord>(key, action);
   }
 }
 

@@ -370,7 +370,11 @@ export default function MinionEditor() {
                 key: 'connections',
                 label: 'Connections',
                 children: overseer ? (
-                  <Connections overseer={overseer.stub} onConnectionsChange={handleCodeChange} />
+                  <Connections 
+                    overseer={overseer.stub} 
+                    onConnectionsChange={handleCodeChange}
+                    isVisible={activeTab === 'connections'}
+                  />
                 ) : null
               },
               {
