@@ -16,11 +16,15 @@
 // with the adapter over JavaScript RPC. The types in this file define that RPC interface. The
 // `Adapter` type is the root interface implemented by the service binding.
 
+/// <reference types="@cloudflare/workers-types/experimental" />
+import type { DurableObjectClass as WorkerdDurableObjectClass } from "@cloudflare/workers-types/experimental";
+import type { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
+
 // =======================================================================================
 // Some basic types, not specific to adapters.
 
-// This type is actually provided by the Workers Runtime. It is the type of an "actor class binding"
-// for use with Durable Object Facets, implemented in this PR:
+// The Workers Runtime provides the type `DurableObjectClass`. It is the type of an "actor class
+// binding" for use with Durable Object Facets, implemented in this PR:
 //     https://github.com/cloudflare/workerd/pull/4123
 //
 // This is essentially a reference to some code implemented in an entirely different Worker. It
@@ -32,17 +36,21 @@
 // exactly the same as in a Durable Object implementation, hence the class on the callee side
 // implements `DurableObject`, even though it is not directly a member of a Durable Object
 // namespace.
-interface DurableObjectClass<T> {}
+//
+// At present, DurableObjectClass is not generic, but it really ought to be, taking the interface
+// implemented by the class as the parameter. Until that happens, we declare this alias with a
+// fake generic parameter to make code clearer.
+export interface DurableObjectClass<T> extends WorkerdDurableObjectClass {}
 
 // Represents some text which is to be presented to the human user, so may need localization.
-type Prose = {
+export type Prose = {
   text: string;
 
   // TODO: Expand to support localization.
 };
 
 // Identifies a user.
-type UserId = {
+export type UserId = {
   // All users are identified by email address. This is the most natural identifier as essentially
   // all services understand it, and we need to understand a user's permissions across multiple
   // services.
@@ -64,7 +72,7 @@ type UserId = {
 // These types are used by adapters to describe their own functionality.
 
 // Describes the capabilities of an adapter.
-type AdapterSchema = {
+export type AdapterSchema = {
   // Human-readable label and summary of what this adapter provides access to.
   title: Prose;
   summary: Prose;
@@ -77,7 +85,7 @@ type AdapterSchema = {
 //
 // For example, a Google Sheet might be a resource provided by the Google adapter. A
 // ResourceSchema would describe the common properties of all Google Sheets.
-type ResourceSchema = {
+export type ResourceSchema = {
   // Stable identifier for this resource, uniquely identifying it among resources exposed by the
   // adapter. Alphanumeric camelCase only.
   name: string;
@@ -106,7 +114,7 @@ type ResourceSchema = {
 //
 // For example, permission to read the content of a Google Sheet would be a permission, probably
 // just called "read".
-type PermissionSchema = {
+export type PermissionSchema = {
   // Stable identifier for this permission. Alphanumeric camelCase only.
   name: string;
 
@@ -184,7 +192,7 @@ export type ResourceDescription = {
 // Represents a list of permissions.
 //
 // (This is an object rather than just `string[]` to support future extension.)
-type PermissionSet = {
+export type PermissionSet = {
   // List of permission names.
   permissions: string[];
 }
@@ -197,7 +205,7 @@ type PermissionSet = {
 // should take.
 //
 // (This is an object rather than just `string` to support future extension.)
-type AuthRedirect = {
+export type AuthRedirect = {
   // URL to which the user can be redirected in order to request additional permissions on a
   // particular resource.
   //
@@ -212,7 +220,7 @@ type AuthRedirect = {
 //
 // An installation of the Minion Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
-interface Adapter {
+export interface GatekeeperVendor {
   // Get this adapter's full schema.
   describe(): Promise<AdapterSchema>;
 
@@ -225,7 +233,7 @@ interface Adapter {
   // Adapter will need to separately authenticate the user with respect to the external service
   // which it represents, e.g. through a OAuth flow. It is not strictly necessary that the user
   // authenticate with a matching email address, but some adapters may use the address as a hint.
-  newUser(id: UserId): Promise<DurableObjectClass<UserAdapter>>;
+  newUser(id: UserId): Promise<Fetcher<GatekeeperUser>>;
 }
 
 // RPC interface to an Adapter. This is a privileged interface exposed to the Minion Workshop UI
@@ -235,7 +243,7 @@ interface Adapter {
 // Adapter capability itself represents permission to access all of the user's data that is
 // available through it, so needs to be guarded carefully. Hence, only the Workshop itself should
 // ever have direct access to an Adapter object.
-interface UserAdapter {
+export interface GatekeeperUser extends WorkerEntrypoint {
   // Get a Durable Object class that can implement a gatekeeper for the given resource. This class
   // can be used to instantiate a Facet which implements the Gatekeeper interface.
   //
@@ -246,7 +254,7 @@ interface UserAdapter {
   //
   // The returned class is imbued (via `ctx.props`) with the user's credentials and the resource
   // ID.
-  newGatekeeper(url: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
+  getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
 }
 
 // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
@@ -254,7 +262,7 @@ interface UserAdapter {
 //
 // The Gatekeeper executes as a Durable Object Facet, where it is a child of the Overseer. This
 // interface is exposed to the Overseer, not directly to the Minion.
-interface Gatekeeper<Session, Action = any, RevertInfo = any> {
+export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends DurableObject {
   // Get more info on the specific resource without actually granting access. This information is
   // to be presented to the user in the UI, before the user actually confirms they want to grant
   // access.
@@ -360,7 +368,7 @@ interface Gatekeeper<Session, Action = any, RevertInfo = any> {
 // action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
-interface ApprovalQueue<Action> {
+export interface ApprovalQueue<Action> {
   // Submit an action for approval.
   //
   // `Action` is an arbitrary type defined by the gatekeeper, which describes the action to be
@@ -380,9 +388,9 @@ interface ApprovalQueue<Action> {
 // - Decide whether the action needs to be approved and who can approve it.
 // - Display the action to the approver for review.
 // - Store the action in an audit log.
-type ActionDescription = {
+export type ActionDescription = {
   // Brief one-line summary of the action, like an email subject line, to display in a list.
-  title: Text;
+  title: string;
 
   // A complete description of the action to be taken, in Markdown-formatted natural language.
   // This will be displayed to the approver. It must include all details that might be relevant to

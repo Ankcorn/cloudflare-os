@@ -165,6 +165,9 @@ export type GatekeeperMetadata = {
 };
 
 export interface GatekeeperClient<Session> extends RpcTarget {
+  // Remove this gatekeeper from the Minion.
+  remove(): Promise<void>;
+
   // Get and set the binding name.
   getBindingName(): Promise<string>;
   setBindingName(name: string): Promise<void>;
@@ -175,4 +178,6 @@ export interface GatekeeperClient<Session> extends RpcTarget {
   // Open a direct session to this gatekeeper. Particularly useful when using the AI agent to talk
   // to the resource directly.
   openSession(): Promise<Session>;
+
+  // TODO: Get/set permissions.
 }

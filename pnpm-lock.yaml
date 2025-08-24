@@ -110,6 +110,9 @@ importers:
       '@cloudflare/jsrpc':
         specifier: file:../../../jsrpc
         version: file:../jsrpc
+      '@cloudflare/workers-types':
+        specifier: ^4.20250813.0
+        version: 4.20250813.0
     devDependencies:
       typescript:
         specifier: ^5.9.2
