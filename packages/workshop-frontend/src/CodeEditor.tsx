@@ -15,13 +15,18 @@ export default function CodeEditor({ file, onSave, height = '100%' }: CodeEditor
   const autoSaveTimeoutRef = useRef<number | null>(null)
   const [content, setContent] = useState('')
 
-  // Update editor content when file changes
+  // Update editor content when file changes (but not when same file content updates)
   useEffect(() => {
+    const previousFile = currentFileRef.current
     currentFileRef.current = file // Store current file in ref for callbacks to access
-    if (file) {
-      setContent(file.content)
-    } else {
-      setContent('')
+    
+    // Only reset content if we're switching to a different file or loading for the first time
+    if (!previousFile || !file || previousFile.name !== file.name) {
+      if (file) {
+        setContent(file.content)
+      } else {
+        setContent('')
+      }
     }
   }, [file])
 
