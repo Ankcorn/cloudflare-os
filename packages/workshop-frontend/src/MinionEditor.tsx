@@ -7,6 +7,7 @@ import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
 import MinionCodeInterface from './MinionCodeInterface'
 import MinionUI from './MinionUI'
+import Connections from './Connections'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -352,7 +353,7 @@ export default function MinionEditor() {
             activeKey={activeTab}
             onChange={setActiveTab}
             style={{ height: '100%' }}
-            tabBarStyle={{ paddingLeft: '16px' }}
+            tabBarStyle={{ paddingLeft: '16px', marginBottom: 0 }}
             items={[
               {
                 key: 'code',
@@ -366,21 +367,11 @@ export default function MinionEditor() {
                 ) : null
               },
               {
-                key: 'overseer',
-                label: 'Overseer & Connections',
-                children: (
-                  <div style={{
-                    height: 'calc(100vh - 64px - 46px)', // Full height minus header and tab bar
-                    display: 'flex',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    color: '#999'
-                  }}>
-                    <Text type="secondary">
-                      Overseer interface will be implemented here. Monitor actions and manage external connections.
-                    </Text>
-                  </div>
-                )
+                key: 'connections',
+                label: 'Connections',
+                children: overseer ? (
+                  <Connections overseer={overseer.stub} onConnectionsChange={handleCodeChange} />
+                ) : null
               },
               {
                 key: 'ui',
