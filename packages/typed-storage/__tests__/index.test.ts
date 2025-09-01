@@ -517,22 +517,22 @@ describe("non-unique index by number", () => {
   let index: NonUniqueIndex<User, number> = storage.users.byLevel;
 
   it("supports get", () => {
-    expect([...index.get(8)]).toStrictEqual([CAROL, ALICE]);  // insertion order
+    expect([...index.get(8)]).toStrictEqual([ALICE, CAROL]);
     expect([...index.get(4)]).toStrictEqual([BOB]);
     expect([...index.get(1)]).toStrictEqual([DAVE]);
     expect([...index.get(3)]).toStrictEqual([]);
   });
 
   it("supports list", () => {
-    expect([...index.list()]).toStrictEqual([DAVE, BOB, CAROL, ALICE]);
-    expect([...index.list({reverse: true})]).toStrictEqual([ALICE, CAROL, BOB, DAVE]);
+    expect([...index.list()]).toStrictEqual([DAVE, BOB, ALICE, CAROL]);
+    expect([...index.list({reverse: true})]).toStrictEqual([CAROL, ALICE, BOB, DAVE]);
 
-    expect([...index.list({start: 4})]).toStrictEqual([BOB, CAROL, ALICE]);
-    expect([...index.list({startAfter: 4})]).toStrictEqual([CAROL, ALICE]);
+    expect([...index.list({start: 4})]).toStrictEqual([BOB, ALICE, CAROL]);
+    expect([...index.list({startAfter: 4})]).toStrictEqual([ALICE, CAROL]);
     expect([...index.list({end: 8})]).toStrictEqual([DAVE, BOB]);
     expect([...index.list({start: 4, end: 8})]).toStrictEqual([BOB]);
     expect([...index.list({limit: 2})]).toStrictEqual([DAVE, BOB]);
-    expect([...index.list({limit: 2, reverse: true})]).toStrictEqual([ALICE, CAROL, BOB]);
+    expect([...index.list({limit: 2, reverse: true})]).toStrictEqual([CAROL, ALICE, BOB]);
   });
 
   it("supports delete", () => {
@@ -568,25 +568,25 @@ describe("non-unique index by array", () => {
   let index: NonUniqueIndex<User, string> = storage.users.byGroup;
 
   it("supports get", () => {
-    expect([...index.get("admin")]).toStrictEqual([CAROL, ALICE]);  // insertion order
-    expect([...index.get("everyone")]).toStrictEqual([BOB, DAVE, CAROL, ALICE]);
+    expect([...index.get("admin")]).toStrictEqual([ALICE, CAROL]);
+    expect([...index.get("everyone")]).toStrictEqual([ALICE, BOB, CAROL, DAVE]);
     expect([...index.get("interns")]).toStrictEqual([DAVE]);
     expect([...index.get("nobody")]).toStrictEqual([]);
   });
 
   it("supports list", () => {
-    expect([...index.list()]).toStrictEqual([CAROL, ALICE, BOB, DAVE, CAROL, ALICE, DAVE]);
-    expect([...index.list({dedupe: true})]).toStrictEqual([CAROL, ALICE, BOB, DAVE]);
+    expect([...index.list()]).toStrictEqual([ALICE, CAROL, ALICE, BOB, CAROL, DAVE, DAVE]);
+    expect([...index.list({dedupe: true})]).toStrictEqual([ALICE, CAROL, BOB, DAVE]);
     expect([...index.list({reverse: true})]).toStrictEqual(
-        [DAVE, ALICE, CAROL, DAVE, BOB, ALICE, CAROL]);
+        [DAVE, DAVE, CAROL, BOB, ALICE, CAROL, ALICE]);
 
-    expect([...index.list({start: "everyone"})]).toStrictEqual([BOB, DAVE, CAROL, ALICE, DAVE]);
+    expect([...index.list({start: "everyone"})]).toStrictEqual([ALICE, BOB, CAROL, DAVE, DAVE]);
     expect([...index.list({startAfter: "everyone"})]).toStrictEqual([DAVE]);
-    expect([...index.list({end: "everyone"})]).toStrictEqual([CAROL, ALICE]);
-    expect([...index.list({start: "e", end: "f"})]).toStrictEqual([BOB, DAVE, CAROL, ALICE]);
-    expect([...index.list({limit: 2})]).toStrictEqual([CAROL, ALICE, BOB, DAVE, CAROL, ALICE]);
+    expect([...index.list({end: "everyone"})]).toStrictEqual([ALICE, CAROL]);
+    expect([...index.list({start: "e", end: "f"})]).toStrictEqual([ALICE, BOB, CAROL, DAVE]);
+    expect([...index.list({limit: 2})]).toStrictEqual([ALICE, CAROL, ALICE, BOB, CAROL, DAVE]);
     expect([...index.list({limit: 2, reverse: true})]).toStrictEqual(
-        [DAVE, ALICE, CAROL, DAVE, BOB]);
+        [DAVE, DAVE, CAROL, BOB, ALICE]);
   });
 
   it("supports delete", () => {

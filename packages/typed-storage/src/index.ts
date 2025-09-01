@@ -18,7 +18,6 @@ interface SyncKvStorage {
 }
 
 // TODO:
-// - improve non-unique indexes
 // - store metadata blob
 // - compress collection & index names
 // - (someday) versions and migrations
@@ -207,7 +206,7 @@ function keyString(key: Key): string {
 // `Key` (string | number) as the key type, encoding numbers so that they sort nicely.
 class KvPrefixedView<T extends Object> {
   #kv: SyncKvStorage;
-  #prefix: string;
+  #name: string;
 
   // If the key is itself a property of T, we'd like to avoid dulpicating it in storage. So, we
   // null out the property in the value before storing, and then put it back on load.
@@ -218,19 +217,19 @@ class KvPrefixedView<T extends Object> {
   // was nulled out. Integers won't take much storage space anyway.
   #keyPropName?: keyof T;
 
-  constructor(storage: DurableObjectStorage, name: string, keyPropName?: keyof T) {
-    this.#kv = storage.kv;
-    this.#prefix = `${name}:`;
+  constructor(kv: SyncKvStorage, name: string, keyPropName?: keyof T) {
+    this.#kv = kv;
+    this.#name = name;
     this.#keyPropName = keyPropName;
   }
 
   #rawKey(key: Key) {
-    return `${this.#prefix}${keyString(key)}`;
+    return `${this.#name}:${keyString(key)}`;
   }
 
   get(key: Key): T | undefined {
     let kstr = keyString(key);
-    let result = this.#kv.get<T>(`${this.#prefix}${kstr}`);
+    let result = this.#kv.get<T>(`${this.#name}:${kstr}`);
     if (this.#keyPropName && result !== undefined) {
       if (result[this.#keyPropName] === null) {
         result[this.#keyPropName] = <any>key;
@@ -244,16 +243,29 @@ class KvPrefixedView<T extends Object> {
       start: options.start !== undefined ? this.#rawKey(options.start) : undefined,
       startAfter: options.startAfter !== undefined ? this.#rawKey(options.startAfter) : undefined,
       end: options.end !== undefined ? this.#rawKey(options.end) : undefined,
-      prefix: options.prefix !== undefined ? this.#rawKey(options.prefix) : this.#prefix,
+      prefix: options.prefix !== undefined ? this.#rawKey(options.prefix) : `${this.#name}:`,
       reverse: options.reverse,
       limit: options.limit,
     })) {
       if (this.#keyPropName) {
         if (value[this.#keyPropName] === null) {
-          value[this.#keyPropName] = <any>key.slice(this.#prefix.length);
+          value[this.#keyPropName] = <any>key.slice(this.#name.length + 1);
         }
       }
       yield value;
+    }
+  }
+
+  *listKeys(options: ListOptions<Key> = {}): Generator<string, void> {
+    for (let [key, _] of this.#kv.list<T>({
+      start: options.start !== undefined ? this.#rawKey(options.start) : undefined,
+      startAfter: options.startAfter !== undefined ? this.#rawKey(options.startAfter) : undefined,
+      end: options.end !== undefined ? this.#rawKey(options.end) : undefined,
+      prefix: options.prefix !== undefined ? this.#rawKey(options.prefix) : `${this.#name}:`,
+      reverse: options.reverse,
+      limit: options.limit,
+    })) {
+      yield key.slice(this.#name.length + 1);
     }
   }
 
@@ -274,6 +286,17 @@ class KvPrefixedView<T extends Object> {
   delete(key: Key): boolean {
     return this.#kv.delete(this.#rawKey(key));
   }
+
+  getChild<U extends Object>(name: string): KvPrefixedView<U> {
+    return new KvPrefixedView(this.#kv, `${this.#name}.${name}`);
+  }
+
+  getUnidqueId(): number {
+    let key = `${this.#name}#`;
+    let id = this.#kv.get<number>(key) || 0;
+    this.#kv.put(key, id + 1);
+    return id;
+  }
 }
 
 function createCollection<
@@ -291,11 +314,11 @@ function createCollection<
   let mainKv: KvPrefixedView<T>;
   let pkForT: (record: T) => Key;
   if (typeof schema.primaryKey === "function") {
-    mainKv = new KvPrefixedView<T>(storage, name);
+    mainKv = new KvPrefixedView<T>(storage.kv, name);
     pkForT = schema.primaryKey;
   } else {
     let pk = <keyof T>schema.primaryKey;
-    mainKv = new KvPrefixedView<T>(storage, name, pk);
+    mainKv = new KvPrefixedView<T>(storage.kv, name, pk);
     pkForT = (record: T) => <Key>record[pk];
   }
 
@@ -445,7 +468,7 @@ function createCollection<
   // Unique indexes
 
   for (let [idxName, idx] of Object.entries(schema.uniqueIndexes || {})) {
-    let idxKv = new KvPrefixedView<Key>(storage, `${name}.${idxName}`);
+    let idxKv = new KvPrefixedView<Key>(storage.kv, `${name}.${idxName}`);
 
     let index: UniqueIndex<T, Key> = {
       get(key: Key): T | undefined {
@@ -495,22 +518,23 @@ function createCollection<
   // Non-unique indexes
 
   for (let [idxName, idx] of Object.entries(schema.nonUniqueIndexes || {})) {
-    let idxKv = new KvPrefixedView<Key[]>(storage, `${name}.${idxName}`);
+    let idxKv = new KvPrefixedView<number>(storage.kv, `${name}.${idxName}`);
 
     let index: NonUniqueIndex<T, Key> = {
       *get(key: Key): Generator<T, void> {
-        let pks = idxKv.get(key)
-        if (pks === undefined) pks = [];
-        for (let pk of pks) {
+        let id = idxKv.get(key)
+        if (id === undefined) return;
+        let child = idxKv.getChild(id.toString());
+        for (let pk of child.listKeys()) {
           yield collection.get(pk)!;
         }
       },
       *list(options: ListOptions<Key> = {}): Generator<T, void> {
         if (options.dedupe) {
           let seen = new Set<Key>();
-          for (let pks of idxKv.list(options)) {
-            if (options.reverse) pks.reverse();
-            for (let pk of pks) {
+          for (let id of idxKv.list(options)) {
+            let child = idxKv.getChild(id.toString());
+            for (let pk of child.listKeys({reverse: options.reverse})) {
               if (!seen.has(pk)) {
                 seen.add(pk);
                 yield collection.get(pk)!;
@@ -518,23 +542,26 @@ function createCollection<
             }
           }
         } else {
-          for (let pks of idxKv.list(options)) {
-            if (options.reverse) pks.reverse();
-            for (let pk of pks) {
+          for (let id of idxKv.list(options)) {
+            let child = idxKv.getChild(id.toString());
+            for (let pk of child.listKeys({reverse: options.reverse})) {
               yield collection.get(pk)!;
             }
           }
         }
       },
       delete(key: Key): number {
-        let pks = idxKv.get(key);
-        if (pks === undefined) {
+        let id = idxKv.get(key);
+        if (id === undefined) {
           return 0;
         } else {
-          for (let pk of pks) {
+          let child = idxKv.getChild(id.toString());
+          let count = 0;
+          for (let pk of child.listKeys()) {
             collection.delete(pk);
+            ++count;
           }
-          return pks.length;
+          return count;
         }
       },
     };
@@ -542,22 +569,27 @@ function createCollection<
 
     addIndexSubscriber(idx as IndexFunction<T>, {
       add(idxKey: Key, pk: Key, type: "Insertion" | "Update") {
-        let pks = idxKv.get(idxKey) || [];
-        if (pks.includes(pk)) {
-          throw new Error(
-              `Index '${name}.${idxName}' is inconsistent: added record already present.`);
+        let id = idxKv.get(idxKey);
+        if (id === undefined) {
+          id = idxKv.getUnidqueId();
+          idxKv.put(idxKey, id);
         }
-        pks.push(pk);
-        idxKv.put(idxKey, pks);
+
+        let child = idxKv.getChild(id.toString());
+        child.put(pk, {});
       },
       remove(idxKey: Key, pk: Key) {
-        let pks = idxKv.get(idxKey) || [];
-        let newPks = pks.filter(k => k !== pk);
-        if (pks.length - newPks.length !== 1) {
+        let id = idxKv.get(idxKey);
+        if (id === undefined) {
           throw new Error(
               `Index '${name}.${idxName}' is inconsistent: removed record is not present.`);
         }
-        idxKv.put(idxKey, newPks);
+
+        let child = idxKv.getChild(id.toString());
+        child.delete(pk);
+        if ([...child.list({limit: 1})].length == 0) {
+          idxKv.delete(idxKey);
+        }
       }
     });
   }
