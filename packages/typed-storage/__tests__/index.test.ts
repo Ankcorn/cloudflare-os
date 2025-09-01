@@ -8,6 +8,8 @@ function makeMockStorage(): DurableObjectStorage {
   // Storage is just backed by a Map.
   let map = new Map<string, any>();
 
+  let currentList: object | undefined;
+
   return {
     transactionSync<T>(f: () => T): T {
       // Implement transactions by cloning the entire database lol.
@@ -49,11 +51,23 @@ function makeMockStorage(): DurableObjectStorage {
           results = results.slice(0, options.limit);
         }
 
+        let me = {};
+        currentList = me;
+
         // To verify that the caller only iterates once, we don't simply return the array, but
         // rather generate the elements.
         for (let item of results) {
           yield [item.key, structuredClone(item.value)];
+
+          // The real kv.list() only allows one outstanding cursor at a time, so emulate that here.
+          if (currentList !== me) {
+            throw new Error(
+                "kv.list() iterator was invalidated because a new call to kv.list() was sarted. " +
+                "Only one kv.list() iterator can exist at a time.");
+          }
         }
+
+        currentList = undefined;
       },
       put<T>(key: string, value: T): void {
         map.set(key, structuredClone(value));

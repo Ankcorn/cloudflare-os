@@ -532,7 +532,11 @@ function createCollection<
       *list(options: ListOptions<Key> = {}): Generator<T, void> {
         if (options.dedupe) {
           let seen = new Set<Key>();
-          for (let id of idxKv.list(options)) {
+          // TODO(perf): Since we do nested list()s here, but only one list() operation is allowed
+          //   at a time by the KV storage interface, the outer list has to be buffered upfront.
+          //   But we could arguably buffer a few at a time and use `startAfter` to get more. But
+          //   it's probably rare to list() on a non-unique index anyway?
+          for (let id of [...idxKv.list(options)]) {
             let child = idxKv.getChild(id.toString());
             for (let pk of child.listKeys({reverse: options.reverse})) {
               if (!seen.has(pk)) {
@@ -542,7 +546,7 @@ function createCollection<
             }
           }
         } else {
-          for (let id of idxKv.list(options)) {
+          for (let id of [...idxKv.list(options)]) {
             let child = idxKv.getChild(id.toString());
             for (let pk of child.listKeys({reverse: options.reverse})) {
               yield collection.get(pk)!;
@@ -557,7 +561,11 @@ function createCollection<
         } else {
           let child = idxKv.getChild(id.toString());
           let count = 0;
-          for (let pk of child.listKeys()) {
+          // TODO(perf): Each call to delete() may invalidate the listKeys() cursor so we need
+          //   to buffer them upfront. But if we wanted to we could buffer a few at a time, delete
+          //   them, then list again, etc. But it's probably rare to delete() on a non-unique index
+          //   anyway?
+          for (let pk of [...child.listKeys()]) {
             collection.delete(pk);
             ++count;
           }
