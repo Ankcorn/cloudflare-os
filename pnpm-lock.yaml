@@ -51,6 +51,9 @@ importers:
       '@cloudflare/jsrpc':
         specifier: file:../../../jsrpc
         version: file:../jsrpc
+      '@minions/typed-storage':
+        specifier: workspace:*
+        version: link:../typed-storage
       '@minions/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared

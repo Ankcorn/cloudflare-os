@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@cloudflare/jsrpc": "file:../../../jsrpc",
-    "@minions/workshop-shared": "workspace:*"
+    "@minions/workshop-shared": "workspace:*",
+    "@minions/typed-storage": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250813.0",

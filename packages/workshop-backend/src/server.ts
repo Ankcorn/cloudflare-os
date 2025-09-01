@@ -2,6 +2,7 @@ import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, DurableObjectClass, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { createTypedStorage, collection } from "@minions/typed-storage";
 
 // TODO: Don't use this, use real user IDs.
 const FAKE_USER_ID: UserId = {email: "fake@example.com"}
@@ -29,69 +30,66 @@ export interface Env {
   LOADER: WorkerLoader,
 }
 
+type UserGatekeeperRecord = {
+  name: string;
+  vendor: Fetcher<GatekeeperUser>;
+};
+
+function makeUserStorage(storage: DurableObjectStorage) {
+  // TODO(cleanup): Remove <any> once workers-types are updated with sync KV interface.
+  return createTypedStorage(<any>storage, {
+    collections: {
+      minions: collection<MinionMetadata>()({
+        primaryKey: "id"
+      }),
+      gatekeepers: collection<UserGatekeeperRecord>()({
+        primaryKey: "name"
+      }),
+    }
+  });
+}
+
+type UserStorage = ReturnType<typeof makeUserStorage>;
+
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Env> {
-  private sql: SqlStorage;
+  private storage: UserStorage;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.sql = ctx.storage.sql;
-
-    ctx.blockConcurrencyWhile(async () => {
-      let version: number = await ctx.storage.get("version") || 0;
-
-      if (version < 1) {
-        this.sql.exec(`
-          CREATE TABLE IF NOT EXISTS minions (
-            id TEXT PRIMARY KEY,
-            title TEXT
-          )
-        `);
-
-        await ctx.storage.put("version", 1);
-      }
-    });
+    this.storage = makeUserStorage(ctx.storage);
   }
 
   async listMinions(): Promise<MinionMetadata[]> {
-    return <MinionMetadata[]>this.sql.exec(`
-      SELECT id, title FROM minions
-    `).toArray();
+    return [...this.storage.minions.list()];
   }
 
   async updateTitle(minionId: string, title: string) {
-    this.sql.exec(`
-      UPDATE minions SET title = ? WHERE id = ?
-    `, title, minionId);
+    let record = this.storage.minions.get(minionId);
+    if (!record) {
+      throw new Error("No such minion belonging to user.");
+    }
+    record.title = title;
+    this.storage.minions.put(record);
   }
 
   async getMinion(id: string): Promise<MinionMetadata | null> {
-    let record = this.sql.exec(`
-      SELECT id, title FROM minions WHERE id = ?
-    `, id).next().value || null;
-
-    return <MinionMetadata | null>record;
+    return this.storage.minions.get(id) || null;
   }
 
   async newMinion(id: string, title: string): Promise<void> {
-    this.sql.exec(`
-      INSERT INTO minions(id, title) VALUES (?, ?)
-    `, id, title);
+    this.storage.minions.put({id, title});
   }
 
   async deleteMinion(id: string): Promise<void> {
-    this.sql.exec(`
-      DELETE FROM minions WHERE id = ?
-    `, id);
+    this.storage.minions.delete(id);
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
     // TODO: Actually choose based on url.
     let name: string = "google";
 
-    let key: string = `gatekeeper:${name}`;
-    let result = await this.ctx.storage.get<Fetcher<GatekeeperUser>>(key);
-
+    let result = this.storage.gatekeepers.get(name)?.vendor;
     if (!result) {
       // TODO: Registry of gatekeepers that isn't just bindings.
       let vendor: GatekeeperVendor | undefined =
@@ -101,7 +99,7 @@ export class UserDurableObject extends DurableObject<Env> {
       }
       result = await vendor.newUser(FAKE_USER_ID);
 
-      await this.ctx.storage.put<Fetcher<GatekeeperUser>>(key, vendor);
+      this.storage.gatekeepers.put({name, vendor: result});
     }
 
     return await result.getGatekeeperClassFor(url);
@@ -129,11 +127,62 @@ document.body.appendChild(document.createTextNode(greeting));
 
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
+type GatekeeperRecord = {
+  id: number,
+  bindingName: string,
+  class: GatekeeperClass,
+};
+
+type ActionRecord = {
+  id: number,
+  gatekeeperId: number;
+  action: any;
+  createdAt: Date;
+  appliedAt?: Date;
+  state: ActionState;
+  description: ActionDescription;
+};
+
+function makeOverseerStorage(storage: DurableObjectStorage) {
+  // TODO(cleanup): Remove <any> once workers-types are updated with sync KV interface.
+  return createTypedStorage(<any>storage, {
+    singletons: {
+      // Initialized on first startup.
+      ownerId: <string | undefined>undefined,
+
+      title: "Untitled Minion",
+
+      codeVersion: 0,
+
+      nextGatekeeperId: 0,
+      nextActionId: 0,
+    },
+
+    collections: {
+      codeFiles: collection<CodeFile>()({
+        primaryKey: "name"
+      }),
+
+      gatekeepers: collection<GatekeeperRecord>()({
+        primaryKey: "id",
+        uniqueIndexes: {
+          byBindingName(gatekeeper: GatekeeperRecord) { return gatekeeper.bindingName; }
+        }
+      }),
+
+      actions: collection<ActionRecord>()({
+        primaryKey: "id"
+      })
+    }
+  });
+}
+
+type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
+
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
 class OverseerImpl {
-  storage: DurableObjectStorage;
-  sql: SqlStorage;
+  public storage: OverseerStorage;
 
   // If not set, this minion doesn't exist yet.
   ownerId?: string;
@@ -141,23 +190,19 @@ class OverseerImpl {
   users: DurableObjectNamespace<UserDurableObject>;
 
   constructor(public ctx: DurableObjectState, public env: Env) {
-    this.storage = ctx.storage;
-    this.sql = this.storage.sql;
+    this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
-
-    ctx.blockConcurrencyWhile(async () => {
-      this.ownerId = await ctx.storage.get("ownerId");
-    });
+    this.ownerId = this.storage.ownerId.get();
   }
 
   async getMinionFacet(): Promise<DurableObjectStub<any>> {
-    let codeVersion: number = await this.storage.get("codeVersion") || 0;
+    let codeVersion = this.storage.codeVersion.get();
 
     return this.ctx.facets.get("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
         let modules: Record<string, string> = {};
-        for (let row of this.sql.exec(`SELECT name, content FROM files`)) {
-          let file = <CodeFile>row;
+
+        for (let file of this.storage.codeFiles.list()) {
           // TODO: Better separation of client/server, etc.
           if (file.name != "client.js") {
             modules[file.name] = file.content;
@@ -165,9 +210,7 @@ class OverseerImpl {
         }
 
         let env: Record<string, Fetcher> = {}
-        for (let {id, bindingName} of this.sql.exec<{id: number, bindingName: string}>(`
-          SELECT id, bindingName FROM gatekeepers
-        `)) {
+        for (let {id, bindingName} of this.storage.gatekeepers.list()) {
           let props = {
             overseerId: this.ctx.id.toString(),
             gatekeeperId: id,
@@ -194,7 +237,7 @@ class OverseerImpl {
 
   getGatekeeperFacet(id: number): DurableObjectStub<Gatekeeper<any>> {
     return this.ctx.facets.get(`gatekeeper${id}`, async () => {
-      let cls = await this.storage.get<GatekeeperClass>(`gatekeeperClass:${id}`);
+      let cls = this.storage.gatekeepers.get(id)?.class;
       if (!cls) {
         throw new Error("no such gatekeeper?");
       }
@@ -204,9 +247,7 @@ class OverseerImpl {
 
   removeGatekeeper(id: number) {
     this.ctx.facets.delete(`gatekeeper${id}`);
-    this.sql.exec(`
-      DELETE FROM gatekeepers WHERE id = ?
-    `, id);
+    this.storage.gatekeepers.delete(id);
   }
 
   startGatekeeperSession(id: number): Promise<any> {
@@ -214,41 +255,28 @@ class OverseerImpl {
     return client.openSession();
   }
 
-  actionKey(actionId: number): string {
-    return `action:${actionId.toString(16).padStart(8, '0')}`;
-  }
-
   async submitAction(gatekeeperId: number, action: any, description: ActionDescription)
       : Promise<void> {
-    let actionId = (await this.storage.get<number>("nextActionId")) || 0;
-    await this.storage.put("nextActionId", actionId + 1);
+    let actionId = this.storage.nextActionId.get();
+    this.storage.nextActionId.put(actionId + 1);
 
-    let key = this.actionKey(actionId);
     let record: ActionRecord = {
+      id: actionId,
       gatekeeperId,
       action,
       createdAt: new Date(),
       state: "pending",
       description
     };
-    await this.storage.put<ActionRecord>(key, record);
+    this.storage.actions.put(record);
   }
 
-  async bumpVersion(): Promise<void> {
-    let codeVersion: number = await this.storage.get("codeVersion") || 0;
-    await this.storage.put("codeVersion", codeVersion + 1);
+  bumpVersion(): void {
+    let codeVersion = this.storage.codeVersion.get();
+    this.storage.codeVersion.put(codeVersion + 1);
     this.ctx.facets.abort("minion", new Error("Minion restarted due to code update."));
   }
 }
-
-type ActionRecord = {
-  gatekeeperId: number;
-  action: any;
-  createdAt: Date;
-  appliedAt?: Date;
-  state: ActionState;
-  description: ActionDescription;
-};
 
 export class OverseerDurableObject extends DurableObject<Env> {
   private impl: OverseerImpl;
@@ -273,32 +301,14 @@ export class OverseerDurableObject extends DurableObject<Env> {
         // Owner says we exist, so let's initialize ourselves.
         this.impl.ownerId = ownerId;
 
-        this.ctx.storage.transactionSync(() => {
-          this.ctx.storage.put("ownerId", ownerId);
-          this.ctx.storage.put("title", meta.title);
-          this.ctx.storage.put("version", 1);
-
-          this.impl.sql.exec(`
-            CREATE TABLE files (
-              name TEXT PRIMARY KEY,
-              content TEXT
-            )
-          `);
-
-          this.impl.sql.exec(`
-            INSERT INTO files(name, content) VALUES (?, ?)
-          `, "server.js", DEFAULT_SERVER_CODE);
-          this.impl.sql.exec(`
-            INSERT INTO files(name, content) VALUES (?, ?)
-          `, "client.js", DEFAULT_CLIENT_CODE);
-
-          this.impl.sql.exec(`
-            CREATE TABLE gatekeepers (
-              id INTEGER PRIMARY KEY,
-              bindingName TEXT
-            );
-            CREATE UNIQUE INDEX gatekeepersByName ON gatekeepers(bindingName)
-          `);
+        this.impl.storage.ownerId.put(ownerId);
+        this.impl.storage.codeFiles.put({
+          name: "server.js",
+          content: DEFAULT_SERVER_CODE
+        });
+        this.impl.storage.codeFiles.put({
+          name: "client.js",
+          content: DEFAULT_CLIENT_CODE
         });
       });
     }
@@ -355,51 +365,40 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async getMetadata(): Promise<MinionMetadata> {
-    let title: string = (await this.impl.ctx.storage.get("title"))!;
+    let title: string = this.impl.storage.title.get();
 
     return { id: this.impl.ctx.id.toString(), title };
   }
 
   async setTitle(title: string): Promise<void> {
-    await this.impl.storage.put("title", title);
+    this.impl.storage.title.put(title);
     await this.owner.updateTitle(this.impl.ctx.id.toString(), title);
   }
 
   async deleteSelf(): Promise<void> {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.owner.deleteMinion(this.impl.ctx.id.toString());
-      await this.impl.storage.deleteAll();
+      await this.impl.ctx.storage.deleteAll();
       this.notifyDeleted();
     });
   }
 
   async getCode(): Promise<CodeFile[]> {
-    return <CodeFile[]>this.impl.sql.exec(`
-      SELECT name, content FROM files
-    `).toArray();
+    return [...this.impl.storage.codeFiles.list()];
   }
   async setCodeFile(name: string, content: string): Promise<void> {
-    this.impl.sql.exec(`
-      INSERT INTO files(name, content) VALUES (?, ?)
-        ON CONFLICT DO UPDATE SET content = excluded.content
-    `, name, content);
-
-    await this.impl.bumpVersion();
+    this.impl.storage.codeFiles.put({name, content});
+    this.impl.bumpVersion();
   }
   async deleteCodeFile(name: string): Promise<void> {
-    this.impl.sql.exec(`
-      DELETE FROM files WHERE name = ?
-    `, name);
+    this.impl.storage.codeFiles.delete(name);
   }
 
   async getUiBundle(): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
-    let {value} = this.impl.sql.exec(`
-      SELECT content FROM files WHERE name = ?
-    `, "client.js").next();
-
-    if (value) {
-      return { jsCode: <string>value.content };
+    let file = this.impl.storage.codeFiles.get("client.js");
+    if (file) {
+      return { jsCode: file.content };
     } else {
       return null;
     }
@@ -422,9 +421,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listGatekeepers(): Promise<GatekeeperMetadata[]> {
-    let promises = this.impl.sql.exec<{id: number, bindingName: string}>(`
-      SELECT id, bindingName FROM gatekeepers
-    `).toArray().map(async ({id, bindingName}) => {
+    let promises = [...this.impl.storage.gatekeepers.list()].map(async ({id, bindingName}) => {
       let description = await this.impl.getGatekeeperFacet(id).describe();
 
       let result: GatekeeperMetadata = {
@@ -439,50 +436,39 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null> {
-    let id = this.impl.sql.exec<{id: number}>(`
-      SELECT id FROM gatekeepers WHERE bindingName = ?
-    `, bindingName).one().id;
-
-    return new GatekeeperClientImpl(this.impl, id!, this.impl.getGatekeeperFacet(id!));
+    let id = this.impl.storage.gatekeepers.byBindingName.get(bindingName)?.id;
+    if (id === undefined) {
+      throw new Error(`No such binding: ${bindingName}`);
+    }
+    return new GatekeeperClientImpl(this.impl, id, this.impl.getGatekeeperFacet(id));
   }
 
   async newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
     let cls: GatekeeperClass = await this.owner.getGatekeeperClassFor(resourceUrl);
 
-    let id: number;
-    this.impl.storage.transactionSync(() => {
-      let result = this.impl.sql.exec(`
-        INSERT INTO gatekeepers DEFAULT VALUES RETURNING id
-      `).one();
-      id = <number>result.id;
-
-      let bindingName = `NEW_BINDING_${id}`;
-      this.impl.sql.exec(`
-        UPDATE gatekeepers SET bindingName = ? WHERE id = ?
-      `, bindingName, id);
-
-      this.impl.storage.put<GatekeeperClass>(`gatekeeperClass:${id}`, cls )
+    let id = this.impl.storage.nextGatekeeperId.get();
+    this.impl.storage.nextGatekeeperId.put(id + 1);
+    this.impl.storage.gatekeepers.put({
+      id,
+      bindingName: `NEW_BINDING_${id}`,
+      class: cls
     });
 
-    await this.impl.bumpVersion();
+    this.impl.bumpVersion();
 
     return new GatekeeperClientImpl(this.impl, id!, this.impl.getGatekeeperFacet(id!));
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
     let bindingMap: Record<number, string> = {};
-    for (let {id, bindingName} of this.impl.sql.exec<{id: number, bindingName: string}>(`
-      SELECT id, bindingName FROM gatekeepers
-    `)) {
+    for (let {id, bindingName} of this.impl.storage.gatekeepers.list()) {
       bindingMap[id] = bindingName;
     }
 
-    let list = await this.impl.storage.list<ActionRecord>({prefix: "action:"});
     let result: ActionLogEntry[] = [];
-    for (let [key, record] of list) {
-      let id = parseInt(key.slice("action:".length), 16);
+    for (let record of this.impl.storage.actions.list()) {
       result.push({
-        id,
+        id: record.id,
         bindingName: bindingMap[record.gatekeeperId] || "(deleted binding)",
         createdAt: record.createdAt,
         appliedAt: record.appliedAt,
@@ -495,8 +481,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async approveAction(id: number): Promise<void> {
-    let key = this.impl.actionKey(id);
-    let action = await this.impl.storage.get<ActionRecord>(key);
+    let action = this.impl.storage.actions.get(id);
     if (!action) {
       throw new Error(`No such action: ${id}`);
     }
@@ -512,12 +497,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     action.state = "approved";
     action.appliedAt = new Date();
-    await this.impl.storage.put<ActionRecord>(key, action);
+    this.impl.storage.actions.put(action);
   }
 
   async rejectAction(id: number): Promise<void> {
-    let key = this.impl.actionKey(id);
-    let action = await this.impl.storage.get<ActionRecord>(key);
+    let action = this.impl.storage.actions.get(id);
     if (!action) {
       throw new Error(`No such action: ${id}`);
     }
@@ -532,7 +516,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await gatekeeper.rejectAction(action.action);
 
     action.state = "rejected";
-    await this.impl.storage.put<ActionRecord>(key, action);
+    this.impl.storage.actions.put(action);
   }
 }
 
@@ -547,16 +531,13 @@ class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClien
   }
 
   async getBindingName(): Promise<string> {
-    return this.impl.sql.exec<{bindingName: string}>(`
-      SELECT bindingName FROM gatekeepers WHERE id = ?
-    `, this.id).one().bindingName;
+    return this.impl.storage.gatekeepers.get(this.id)!.bindingName;
   }
   async setBindingName(name: string): Promise<void> {
-    this.impl.sql.exec(`
-      UPDATE gatekeepers SET bindingName = ? WHERE id = ?
-    `, name, this.id);
-
-    await this.impl.bumpVersion();
+    let record = this.impl.storage.gatekeepers.get(this.id)!;
+    record.bindingName = name;
+    this.impl.storage.gatekeepers.put(record);
+    this.impl.bumpVersion();
   }
 
   async describe(): Promise<ResourceDescription> {
