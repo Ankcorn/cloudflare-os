@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { PublicApi } from '@minions/workshop-shared/api'
 import { Card, Form, Input, Button, Typography, Alert, Spin } from 'antd'
 
@@ -64,9 +64,9 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           </Text>
         </div>
 
-        <Form 
-          onFinish={handleSubmit} 
-          layout="vertical" 
+        <Form
+          onFinish={handleSubmit}
+          layout="vertical"
           size="large"
         >
           <Form.Item

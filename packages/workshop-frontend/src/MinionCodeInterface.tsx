@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { message } from 'antd'
 import { CodeFile, Overseer } from '@minions/workshop-shared/api'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import FileSidebar from './FileSidebar'
 import CodeEditor from './CodeEditor'
 
@@ -17,7 +17,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   const [loading, setLoading] = useState(true)
   const [hasLoaded, setHasLoaded] = useState(false)
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set())
-  
+
   // Keep a ref to the current overseer so operations always use the latest stub
   const currentOverseerRef = useRef(overseer)
   currentOverseerRef.current = overseer
@@ -34,12 +34,12 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
         setLoading(true)
         const codeFiles = await overseer.getCode()
         setFiles(codeFiles)
-        
+
         // Set first file as active
         if (codeFiles.length > 0) {
           setActiveFile(codeFiles[0].name)
         }
-        
+
         setHasLoaded(true)
       } catch (error) {
         console.error('Failed to load files:', error)
@@ -80,7 +80,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
 
       // Wait for all saves to complete
       const results = await Promise.all(savePromises)
-      
+
       // Show success messages for saved files
       const savedFiles = results.filter(r => r.success)
       if (savedFiles.length > 0) {
@@ -112,9 +112,9 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   // Handle file saving
   const handleFileSave = async (filename: string, content: string) => {
     // Update local files state immediately to avoid race conditions
-    setFiles(prev => prev.map(file => 
-      file.name === filename 
-        ? { ...file, content } 
+    setFiles(prev => prev.map(file =>
+      file.name === filename
+        ? { ...file, content }
         : file
     ))
 
@@ -139,12 +139,12 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   const handleFileCreate = async (filename: string) => {
     try {
       await currentOverseerRef.current.setCodeFile(filename, '')
-      
+
       // Add to local files state
       const newFile: CodeFile = { name: filename, content: '' }
       setFiles(prev => [...prev, newFile])
       setActiveFile(filename)
-      
+
       onCodeChange?.()
       message.success(`Created file: ${filename}`)
     } catch (error) {
@@ -157,19 +157,19 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   const handleFileDelete = async (filename: string) => {
     try {
       await currentOverseerRef.current.deleteCodeFile(filename)
-      
+
       // Remove from local files state and handle active file switching
       setFiles(prev => {
         const remainingFiles = prev.filter(f => f.name !== filename)
-        
+
         // Switch to another file if the deleted file was active
         if (activeFile === filename) {
           setActiveFile(remainingFiles.length > 0 ? remainingFiles[0].name : null)
         }
-        
+
         return remainingFiles
       })
-      
+
       onCodeChange?.()
       message.success(`Deleted file: ${filename}`)
     } catch (error) {
@@ -189,22 +189,22 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
 
       // Create new file with new name
       await currentOverseerRef.current.setCodeFile(newName, file.content)
-      
+
       // Delete old file
       await currentOverseerRef.current.deleteCodeFile(oldName)
-      
+
       // Update local state
-      setFiles(prev => prev.map(f => 
-        f.name === oldName 
+      setFiles(prev => prev.map(f =>
+        f.name === oldName
           ? { ...f, name: newName }
           : f
       ))
-      
+
       // Update active file if it was the renamed file
       if (activeFile === oldName) {
         setActiveFile(newName)
       }
-      
+
       onCodeChange?.()
       message.success(`Renamed file: ${oldName} → ${newName}`)
     } catch (error) {

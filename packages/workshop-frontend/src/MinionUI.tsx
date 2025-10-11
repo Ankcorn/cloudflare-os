@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Typography, Spin, Alert } from 'antd'
-import { RpcStub, newMessagePortRpcSession } from '@cloudflare/jsrpc'
+import { RpcStub, newMessagePortRpcSession } from 'capnweb'
 import { Overseer, UiBundle } from '@minions/workshop-shared/api'
 
 const { Text } = Typography
@@ -8,7 +8,7 @@ const { Text } = Typography
 // We want to inject JSRPC into the Minion. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
 // content.
-import JSRPC_BUNDLE from '@cloudflare/jsrpc/dist/index.js?raw'
+import JSRPC_BUNDLE from 'capnweb?raw'
 
 let JSRPC_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${JSRPC_BUNDLE}`
 

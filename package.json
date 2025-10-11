@@ -10,11 +10,6 @@
   },
   "devDependencies": {
     "typescript": "^5.9.2",
-    "wrangler": "^4.32.0"
-  },
-  "pnpm": {
-    "overrides": {
-      "workerd": ">=1.20250813.0"
-    }
+    "wrangler": "^4.40.0"
   }
 }

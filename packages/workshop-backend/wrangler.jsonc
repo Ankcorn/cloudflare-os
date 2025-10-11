@@ -2,7 +2,7 @@
   "name": "workshop-backend",
   "main": "src/server.ts",
   "compatibility_date": "2025-07-01",
-  "compatibility_flags": ["experimental"],
+  "compatibility_flags": ["experimental", "enable_ctx_exports"],
   "services": [
     {
       "binding": "GATEKEEPER_GOOGLE",
@@ -10,34 +10,15 @@
       "entrypoint": "GatekeeperVendor"
     }
   ],
-  "durable_objects": {
-    "bindings": [
-      {
-        // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
-        // is a bug -- it should use "migrations" instead.
-        "name": "DUMMY_UserDurableObject",
-        "class_name": "UserDurableObject"
-      },
-      {
-        // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
-        // is a bug -- it should use "migrations" instead.
-        "name": "DUMMY_OverseerDurableObject",
-        "class_name": "OverseerDurableObject"
-      }
-    ]
-  },
   "migrations": [
     {
       "tag": "v0",
       "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
     }
   ],
-  "unsafe": {
-		"bindings": [
-			{
-				"name": "LOADER",
-				"type": "worker-loader"
-			}
-		]
-	}
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ]
 }

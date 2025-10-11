@@ -1,5 +1,5 @@
 import { ReactNode } from 'react'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { PublicApi } from '@minions/workshop-shared/api'
 import { useAuth } from './useAuth'
 import { AuthProvider } from './AuthContext'
@@ -55,8 +55,8 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
           padding: 24,
         }}
       >
-        <Alert 
-          type="error" 
+        <Alert
+          type="error"
           message={`Authentication error: ${error}`}
           style={{ marginBottom: 16 }}
         />

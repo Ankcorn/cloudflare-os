@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { PublicApi } from '@minions/workshop-shared/api'
 import Home from './Home'
 import MinionEditor from './MinionEditor'
@@ -20,7 +20,7 @@ function App({ rpcStub }: AppProps) {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/minion/:id"
         element={
@@ -29,7 +29,7 @@ function App({ rpcStub }: AppProps) {
           </ProtectedRoute>
         }
       />
-      
+
       {/* Redirect any unmatched routes to home for now */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -1,7 +1,7 @@
 import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
-import { RpcStub, newWebSocketRpcSession } from '@cloudflare/jsrpc'
+import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi } from '@minions/workshop-shared/api'
 import { BrowserRouter } from 'react-router-dom'
 import '@ant-design/v5-patch-for-react-19'

@@ -16,10 +16,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@cloudflare/jsrpc": "file:../../../jsrpc",
-    "@cloudflare/workers-types": "^4.20250813.0"
+    "@cloudflare/workers-types": "^4.20251111.0",
+    "capnweb": "^0.2.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.3"
   }
 }

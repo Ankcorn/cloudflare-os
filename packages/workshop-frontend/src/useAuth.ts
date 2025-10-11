@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@minions/workshop-shared/api'
 
 interface AuthState {
@@ -32,14 +32,14 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       if (prev.authenticatedApi) {
         prev.authenticatedApi[Symbol.dispose]()
       }
-      return { 
-        ...prev, 
+      return {
+        ...prev,
         authenticatedApi: null, // Clear the disposed stub
-        isLoading: true, 
-        error: null 
+        isLoading: true,
+        error: null
       }
     })
-    
+
     // Use promise pipelining - we can use the returned promise as a stub immediately
     // without awaiting. Authentication errors will be handled when the stub is actually used.
     const authenticatedApi = publicApi.authenticate(token)
@@ -60,7 +60,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     if (authState.authenticatedApi) {
       authState.authenticatedApi[Symbol.dispose]()
     }
-    
+
     localStorage.removeItem('authToken')
     setAuthState({
       token: null,

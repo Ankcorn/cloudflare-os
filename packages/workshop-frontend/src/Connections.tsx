@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Button, Table, Input, Space, Typography, Modal, message, Card, Empty, Tag } from 'antd'
 import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined } from '@ant-design/icons'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperMetadata, ActionLogEntry } from '@minions/workshop-shared/api'
 
 const { Title, Text } = Typography
@@ -284,7 +284,7 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
       width: '25%',
       render: (_, record: ActionLogEntry) => {
         const isProcessing = processingActions.has(record.id)
-        
+
         if (record.state === 'pending') {
           return (
             <Space>
@@ -410,7 +410,7 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
       >
         <div style={{ marginBottom: '16px' }}>
           <Text>
-            Enter the URL of the resource you want to connect to. This will create a new connection 
+            Enter the URL of the resource you want to connect to. This will create a new connection
             that your minion can use to interact with external services.
           </Text>
         </div>

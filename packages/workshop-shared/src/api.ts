@@ -23,7 +23,7 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
-import { RpcStub, RpcTarget } from "@cloudflare/jsrpc";
+import { RpcStub, RpcTarget } from "capnweb";
 import { ActionDescription, ResourceDescription } from "./gatekeeper.js";
 
 // Public API exposed to the internet.

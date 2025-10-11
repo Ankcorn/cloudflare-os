@@ -1,4 +1,4 @@
-import { RpcStub, RpcTarget, newWorkersRpcResponse } from "@cloudflare/jsrpc";
+import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, DurableObjectClass, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -20,9 +20,6 @@ interface WorkerCode {
 interface WorkerStub {
   getEntrypoint(name?: string | null, options?: {props: any}): Fetcher;
   getDurableObjectClass(name?: string | null, options?: {props: any}): DurableObjectClass<any>;
-}
-interface WorkerLoader {
-  get(name: string, load: () => Promise<WorkerCode>): WorkerStub;
 }
 
 // Workers environment (bindings).
@@ -229,13 +226,13 @@ class OverseerImpl {
       });
 
       return {
-        class: stub.getDurableObjectClass("Minion"),
+        class: stub.getDurableObjectClass<any>("Minion"),
         id: "minion"
       };
     });
   }
 
-  getGatekeeperFacet(id: number): DurableObjectStub<Gatekeeper<any>> {
+  getGatekeeperFacet(id: number): Fetcher<Gatekeeper<any>> {
     return this.ctx.facets.get(`gatekeeper${id}`, async () => {
       let cls = this.storage.gatekeepers.get(id)?.class;
       if (!cls) {
@@ -644,4 +641,4 @@ export default {
       return new Response("Not Found", {status: 404});
     }
   }
-}
+} satisfies ExportedHandler<Env>;

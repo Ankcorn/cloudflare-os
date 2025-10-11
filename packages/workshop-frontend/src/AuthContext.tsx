@@ -1,5 +1,5 @@
 import { createContext, useContext, ReactNode } from 'react'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@minions/workshop-shared/api'
 
 interface AuthContextType {

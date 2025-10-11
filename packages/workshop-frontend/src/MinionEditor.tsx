@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
-import { RpcStub } from '@cloudflare/jsrpc'
+import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
 import MinionCodeInterface from './MinionCodeInterface'
@@ -51,7 +51,7 @@ export default function MinionEditor() {
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
     }
-    
+
     return () => {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
@@ -85,11 +85,11 @@ export default function MinionEditor() {
         const minionMetadata = await overseerStub.getMetadata()
         setMetadata(minionMetadata)
         setTitleInput(minionMetadata.title)
-        
+
         // Clear any error on successful load
         setError(null)
         setIsInitialLoad(false)
-        
+
         // If this was a reconnection attempt, show success message
         if (connectionLost) {
           message.success('Connection restored')
@@ -160,7 +160,7 @@ export default function MinionEditor() {
       cancelText: 'Cancel',
       onOk: async () => {
         if (!overseer) return
-        
+
         try {
           await overseer.stub.deleteSelf()
           message.success('Minion deleted successfully')
@@ -370,8 +370,8 @@ export default function MinionEditor() {
                 key: 'connections',
                 label: 'Connections',
                 children: overseer ? (
-                  <Connections 
-                    overseer={overseer.stub} 
+                  <Connections
+                    overseer={overseer.stub}
                     onConnectionsChange={handleCodeChange}
                     isVisible={activeTab === 'connections'}
                   />
