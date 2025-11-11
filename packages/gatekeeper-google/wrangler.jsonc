@@ -1,8 +1,8 @@
 {
   "name": "gatekeeper-google",
   "main": "src/google.ts",
-  "compatibility_date": "2025-07-01",
-  "compatibility_flags": ["experimental"],
+  "compatibility_date": "2025-11-01",
+  "compatibility_flags": ["experimental", "enable_ctx_exports"],
   "durable_objects": {
     "bindings": [
       {
