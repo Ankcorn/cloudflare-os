@@ -18,97 +18,6 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
-// =======================================================================================
-// Some basic types, not specific to adapters.
-
-// Represents some text which is to be presented to the human user, so may need localization.
-export type Prose = {
-  text: string;
-
-  // TODO: Expand to support localization.
-};
-
-// Identifies a user.
-export type UserId = {
-  // All users are identified by email address. This is the most natural identifier as essentially
-  // all services understand it, and we need to understand a user's permissions across multiple
-  // services.
-  email: string;
-
-  // The email canonicalization style used by this email's domain, e.g. whether or not '.'s are
-  // ignored. If this field is not present, then no attempt has been made to determine the style.
-  // If present but "unknown", then an attempt was made but the host's email infrastructure
-  // couldn't be determined. (It's usually possible to tell which service a host uses by examining
-  // MX records.)
-  //
-  // TODO: Think more about how this would actually be used.
-  canonicalization?: "unknown" | "gmail" | "hotmail";
-}
-
-// =======================================================================================
-// Schema types
-//
-// These types are used by adapters to describe their own functionality.
-
-// Describes the capabilities of an adapter.
-export type AdapterSchema = {
-  // Human-readable label and summary of what this adapter provides access to.
-  title: Prose;
-  summary: Prose;
-
-  // All resource types implemented by this adapter.
-  resources: ResourceSchema[];
-}
-
-// Describes a resource type implemented by an adapter.
-//
-// For example, a Google Sheet might be a resource provided by the Google adapter. A
-// ResourceSchema would describe the common properties of all Google Sheets.
-export type ResourceSchema = {
-  // Stable identifier for this resource, uniquely identifying it among resources exposed by the
-  // adapter. Alphanumeric camelCase only.
-  name: string;
-
-  // Human-readable label and summary of what this resource represents.
-  title: Prose;
-  summary: Prose;
-
-  // URL patterns which this adapter recognizes as pointing to resources of this type. Any URL
-  // matching the pattern can be passed to `UserAdapter.newGatekeeper()`.
-  //
-  // These strings are in the format accepted by the URLPattern API.
-  urlPatterns: string[];
-
-  parent?: string;
-  children: string[];
-
-  // The set of permissions that a Minion might be granted on this resource.
-  permissions: PermissionSchema[];
-
-  apiType: string;
-  apiTsUrl: string;
-};
-
-// Describes a permission that applies to a resource.
-//
-// For example, permission to read the content of a Google Sheet would be a permission, probably
-// just called "read".
-export type PermissionSchema = {
-  // Stable identifier for this permission. Alphanumeric camelCase only.
-  name: string;
-
-  // Human-readable label and summary of what this permission represents.
-  title: Prose;
-  description: Prose;
-
-  // "property" permissions allow a Minion to read a property of the resource, but do not permit
-  // it to modify the resource in any observable way.
-  //
-  // "action" permissions allow the Minion to perform an action on the resource, changing it in
-  // some way. Any action may be subject to human approval before it takes effect.
-  type: "action" | "property";
-}
-
 // Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe().
 export type ResourceDescription = {
   // The resource's canonical URL. This can differ from the one passed to `newGatekeeper()`, if the
@@ -116,103 +25,55 @@ export type ResourceDescription = {
   // the resource's natural UI.
   url: string;
 
-  // Does this resource actually exist?
-  //
-  // If this is not present, then the adapter does not know yet whether the resource exists,
-  // presumably because of missing authorization; `authRedirect` should be used to request
-  // authorization.
-  //
-  // If this is present, but false, then this Gatekeeper points to a resource that does not exist.
-  // This can happen in particular if the user was not yet authorized at the time the facet was
-  // constructed, and after authorization, it was discovered that the resource doesn't exist.
-  exists?: boolean;
-
-  // Metadata for display, if the adapter has authorization to receive it. May be missing if the
-  // adapter itself needs additional authorization, in which `authRedirect` can be used to request
-  // authorization. This is meant to be displayed to the user in the UI in order to confirm that
-  // this is the resource they intend to connect to.
-  title?: Prose;
-  snippet?: Prose;
+  // Metadata for display.
+  title: string;
+  snippet: string;
 
   // TODO: Other display metadata? Thumbnail, icon, etc?
 
-  // The `ResourceSchema` which this resource implements. Note that the schema itself must not
-  // contain details about the specific resource, only the class of resource. This schema may be
-  // shared with the AI agent before any actual access to the resource has been granted; the agent
-  // may use this to decide what access it needs to request.
-  //
-  // TODO: Should this be the URL of a schema instead?
-  schema: ResourceSchema;
+  // TODO: Metadata about whether the gatekeeper itself has sufficient authorization to interact
+  //   with this resource, and what the user should do if it doesn't. E.g. if the user's OAuth
+  //   grant doesn't cover the necessary scopes, this could direct the user to expand their grant.
 
-  // Permissions which the user is known to have on this resource, if they were to access the
-  // resource directly.
-  //
-  // This may include permissions that are not actually available through the adapter (see
-  // `adapterPermissions`).
-  userPermissions: PermissionSet;
-
-  // Permissions which this adapter is able to implement on this resource. This is always strictly
-  // a subset of `userPermissions`.
-  //
-  // This list may differ from `userPermissions` in cases where the adapter itself has not been
-  // authorized by the user to provide this access. This can happen, for example, when the adapter
-  // is an OAuth client to an external service, and its OAuth grant does not include the necessary
-  // "scopes". If `authRedirect` is present, the Overseer can redirect the user there to request
-  // the additional permissions.
-  adapterPermissions: PermissionSet;
-
-  // URL to which the user can be redirected in order to request additional permissions, if the ones
-  // listed in `adapterPermissions` are insufficient, or if `title`, `snippet`, etc. are missing.
-  //
-  // If this is not present, it is not possible to request any additional permissions.
-  authRedirect?: AuthRedirect;
+  // TypeScript type name. Must be the name of one of the exports returned by this gatekeeper's
+  // `getTypeScriptTypes()` method.
+  tsType: string;
 }
-
-// Represents a list of permissions.
-//
-// (This is an object rather than just `string[]` to support future extension.)
-export type PermissionSet = {
-  // List of permission names.
-  permissions: string[];
-}
-
-// Sometimes the Adapter itself needs to request direct authorization from the user in order to
-// access resources. For example, the Adapter might be an OAuth client to a third-party service,
-// and it may not have requested access to everything initially. In that case, if the user tries
-// to request any permissions that the Adapter does not yet have permission to implement, the user
-// may need to visit an authorization UI to fix this. `AuthRedirect` describes the action the user
-// should take.
-//
-// (This is an object rather than just `string` to support future extension.)
-export type AuthRedirect = {
-  // URL to which the user can be redirected in order to request additional permissions on a
-  // particular resource.
-  //
-  // When redirecting, the system may add a query parameter `&permissions=bar,baz` to specify what
-  // additional permissions the user needs.
-  url: string;
-}
-
-// =======================================================================================
 
 // The root interface of an Adapter, as provided to the Minion Workshop.
 //
 // An installation of the Minion Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
 export interface GatekeeperVendor {
-  // Get this adapter's full schema.
-  describe(): Promise<AdapterSchema>;
-
   // Creates an instance of the adapter for a specific user.
   //
   // Or, rather, returns a DurableObjectClass which can be instantiated as a facet on the Durable
   // Object representing the user's account in the Minion Workshop.
+  newUser(): Promise<Fetcher<GatekeeperUser>>;
+
+  // Get a list of strings describing URL patterns for which this vendor may implement a
+  // gatekeeper. The Minion Workshop uses this as a hint to quickly find an appropriate gatekeeper
+  // implementation for an arbitrary URL entered by the user.
   //
-  // `id` is the user ID as understood by the Workshop itself. However, it is expected that the
-  // Adapter will need to separately authenticate the user with respect to the external service
-  // which it represents, e.g. through a OAuth flow. It is not strictly necessary that the user
-  // authenticate with a matching email address, but some adapters may use the address as a hint.
-  newUser(id: UserId): Promise<Fetcher<GatekeeperUser>>;
+  // The strings are in the format accepted by the `URLPattern` API.
+  //
+  // TODO: How does the Minion Workshop know when the supported URLs have changed, without polling?
+  getSupportedUrls(): Promise<string[]>;
+
+  // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
+  // The returned string is the content of a `.d.ts` file. All types refereced by
+  // `ResourceDescription` must be exported by this file. The types should ideally have complete
+  // JSDoc comments describing them.
+  //
+  // The Minions system will parse this file to construct a type database, which will be made
+  // available to the coding agent in a way that supports progressive discovery.
+  //
+  // TODO: Define exactly what global types and imports are available. I suppose capnweb should be
+  // importable, but is anything else needed?
+  // TODO: How does the Minion Workshop know when the types have changed, without polling?
+  // TODO: Should we somehow distinguish stable vs. unstable types? Unstable are safe to use in
+  //   one-off situations only.
+  getTypeScriptTypes(): Promise<string>;
 }
 
 // RPC interface to an Adapter. This is a privileged interface exposed to the Minion Workshop UI
@@ -250,14 +111,9 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // Get the capability representing this resource's RPC interface which will be provided to the
   // Minion.
   //
-  // The Gatekeeper is responsible for enforcing permissions. The session must throw if any calls
-  // are made that are not permitted by `permissions`. (The Overseer will ensure that these are
-  // a subset of `adapterPermissions` as returned by `describe()`, and also a subset of the
-  // permissions possessed by the Minion's users per `checkUserPermissions()`.)
-  //
-  // Any side-effecting actions performed during this session must be submitted to the approval
-  // queue. Actions must not actually be performed until they are approved. Read-only operations
-  // can be executed immediately, without approval (provided they are covered by `permissions`).
+  // Every operation performed through this session must be submitted to the approval queue.
+  // Observations (read-only operations) must be authorized before data is returned to the caller.
+  // Side-effecting actions must not actually be performed until they are approved.
   //
   // It is suggested that the gatekeeper "simulate" actions that have not been approved yet, that
   // is, the `Session` interface should reflect the state of the resource as if all actions had
@@ -265,26 +121,7 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // dependent actions. That said, there is no strict requirement that a gatekeeper does such
   // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
   // particular API.
-  startSession(permissions: PermissionSet, approvalQueue: RpcStub<ApprovalQueue<Action>>)
-      : Promise<Session>;
-
-  // Checks what permissions the given user has on the resource pointed to by this capability.
-  //
-  // This is used to prevent privilege escalation through a minion: If a user does not independently
-  // have the ability to do everything the Minion can do, then either the user cannot be allowed to
-  // interact with the Minion itself, or the Minion's permissions must be reduced to match the
-  // user's.
-  checkUserPermissions(user: UserId): Promise<PermissionSet>;
-
-  // Get the list of all users who are able to modify the data readable through this capability,
-  // that is, people who can influence what the Minion sees.
-  //
-  // This is used to track who might be able to influence the Minion's behavior indirectly, e.g.
-  // through propmt injection or otherwise tricking it into taking inappropriate actions. If the
-  // Minion is able to perform actions that one or more of its influencers could not perform
-  // directly, additional scrutiny may be needed. E.g. policies may require human review in this
-  // case, and/or explicitly prohibit actions that are deemed dangerous.
-  getInfluencers(): Promise<UserId[]>;
+  startSession(approvalQueue: RpcStub<ApprovalQueue<Action>>): Promise<Session>;
 
   // ---------------------------------------------------------------------------
   // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
@@ -349,7 +186,28 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
 export interface ApprovalQueue<Action> extends RpcTarget {
+  // TODO: Method to indicate that the minion tried to perform an action that the gatekeeper itself
+  //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
+  //   system should direct the user to the right UI to authorize the action.
+
+  // Check whether the minion should be permitted to make an observation (that is, to read some
+  // data from an external service). The gatekeeper calls this on every read operation, and must
+  // wait for the response before returning anything to the minion. The method will return normally
+  // if the operation is permitted, or throw an exception if not; the exception should propagate
+  // through to the minion.
+  //
+  // In many cases, the gatekeeper should actually call this *after* fetching the data from the
+  // remote service, so that the description can include details about the actual data. As long
+  // as the operation is strictly read-only, and the call is made before actually returning any
+  // data to the minion, this is OK.
+  authorizeObservation(description: ObservationDescription): Promise<void>;
+
   // Submit an action for approval.
+  //
+  // Unlike `authorizeObservation()`, `submitAction()` is fully asynchronous. It returns
+  // immediately (that is, the returned Promise resolves quickly), but the action may not actually
+  // be carried out until much later. It's intended that the user might not approve actions until
+  // hours or days later, but this shouldn't cause any problems.
   //
   // `Action` is an arbitrary type defined by the gatekeeper, which describes the action to be
   // performed. The value `action` will be passed back to the Gatekeeper's applyAction() or
@@ -360,7 +218,29 @@ export interface ApprovalQueue<Action> extends RpcTarget {
   //
   // TODO: It would be nice if we can link this with the output gate so that if the submission
   //   does not complete, any SQL writes performed just before submit() are rolled back...
-  submit(action: Action, description: ActionDescription): Promise<void>;
+  submitAction(action: Action, description: ActionDescription): Promise<void>;
+}
+
+export type ObservationDescription = {
+  // Brief one-line summary of the observation, like an email subject line, to display in a list.
+  title: string;
+
+  // A complete description of the action to be taken, in Markdown-formatted natural language.
+  // This will be displayed to the approver. It must include all details that might be relevant to
+  // consider before approving.
+  description: string;
+
+  // ----------------------------------------------------------------------------
+  // Policy hints
+  //
+  // TODO: Define policy hints that might allow a policy engine to make better decisions. A policy
+  // engine might want to know things like:
+  // - Does the observation include free-form content (that could include prompt injection
+  //   attacks)?
+  // - Who are the users who may have contributed to such free-from content (to judge if they are
+  //   prompt injection risks).
+  // - If this content may contain secrets, who are the users that are allowed to view it? This
+  //   can help detect situations where the minion could leak information.
 }
 
 // Describes an action submitted to the action approval queue. This contains all the information
@@ -377,69 +257,34 @@ export type ActionDescription = {
   // consider before approving.
   description: string;
 
+  // Does the Gatekeeper implement `revertAction()` for this action?
+  //
+  // It is recommended that all actions implement automatic revert. But, if an action is not able
+  // to do so, it should at least use this flag to let the UI know not to offer the option to the
+  // user.
+  //
+  // Note that this being true doesn't necessarily mean that reverting will always work. E.g. by
+  // the time the user tries to revert, too many other changes may have been made, making it hard
+  // to revert cleanly.
+  implementsRevert: boolean;
+
   // ----------------------------------------------------------------------------
   // Policy hints
   //
-  // These fields are meant to be consumed by policies which govern when auto-approval is allowed,
-  // who needs to approve, etc.
-
-  // Who is known to be able to observe this action?
-  //
-  // This is used to guard against data leaks. If the Minion has access to information that one or
-  // more observers don't have access to, then this action may be flagged as a data leak risk.
-  //
-  // TODO: How do we represent "the entire company" or "the entire internet" here?
-  observers: UserId[];
-
-  // Specifies the subset of properties of the resource which this action affects. These should
-  // match the names of "property"-type permissions in the resource's schema. Only users who have
-  // permission to read one or more of these properties will be able to observe the action's
-  // effects.
-  //
-  // This can be used by policies that need to determine who exactly can observe a Minion's
-  // actions, to control risk of data leaks. Policies might also use the property list directly
-  // to evalutae risk. For example, you might write a policy that says that changing labels on
-  // an email is not risky and can be auto-approved, whereas authoring an email can never be
-  // auto-approved.
-  affectedProperties: string[];
-
-  // If true, this action is inserting "arbitrary content" into the resource, e.g. blocks of text,
-  // which could contain arbitrary information leaks.
-  //
-  // If false, then the observable effects of this action do not contain arbitrary text. For
-  // example, the action might be toggling a flag on or off. It's theoretically possible to leak
-  // information through this as a covert channel, e.g. by encoding information in morse code.
-  // However, policies that aim to address only accidental leaks (rather than malicious ones) may
-  // reasonably ignore covert channels as a threat.
-  hasArbitraryContent: boolean;
-
-  // If true, the action only creates new data; it does not modify existing data.
-  //
-  // This is relevant to policy decisions since creating new data can often be presumed to be less
-  // harmful than modifying existing data. The worst the action can do is spam people.
-  //
-  // Examples:
-  // - Posting a new ticket (vs. modifying an existing one).
-  // - Adding comments to a doc (vs. editing a doc).
-  // - Sending a message to a chat room.
-  isAppendOnly: boolean;
-
-  // Can this action normally be reversed?
-  //
-  // It's strongly recommended that all actions be reversible. Non-reversible actions will be
-  // called out strongly in the approval UI, may not allow batch approval.
-  isReversible: boolean;
-
-  // Does the Gatekeeper implement `revertAction()` for this action?
-  //
-  // This doesn't necessarily mean the revert() method is expected to work fully automatically
-  // (see `isRevertUsuallyAutomatic`), but the existence of a revert method may significantly
-  // affect the UI presentation.
-  implementsRevert: boolean;
-
-  // Is the revert() method usually able to fully revert without human help?
-  //
-  // This is just a hint. For example, automatic revert is typically not possible after further
-  // changes have been stacked on top of the change, even if `isRevertUsuallyAutomatic` is true.
-  isRevertUsuallyAutomatic: boolean;
+  // TODO: Define policy hints that might allow a policy engine to make better decisions. A policy
+  // engine might want to know things like:
+  // - Which human users are allowed to perform this action directly? Can be used to detect if
+  //   the minion might be influenced by humans to perform actions that said humans couldn't
+  //   perform directly.
+  // - Which human users might observe the effects of this action? Can be used to track possibility
+  //   of leaking secrets.
+  // - Is this action reversible? Does reversing require manual intervention or is it fully
+  //   automatic?
+  // - Does this action strictly create content to be viewed (e.g. creating a Jira ticket), or does
+  //   it actively manipulate the world (e.g. flipping a light switch, or deploying a release)?
+  // - Does this action include writing free-form content (e.g. text), or only boolean/numeric
+  //   content (e.g. flipping a light switch)? Affects the risk of data leaks.
+  // - Does this action modify existing content or only create new content? The former is somewhat
+  //   riskier since it could damage existing information whereas posting new content is at worst
+  //   an annoyance.
 }
