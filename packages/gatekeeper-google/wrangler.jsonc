@@ -3,21 +3,8 @@
   "main": "src/google.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["experimental", "enable_ctx_exports"],
-  "durable_objects": {
-    "bindings": [
-      {
-        // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
-        // is a bug -- it should use "migrations" instead.
-        "name": "DUMMY_UserAccount",
-        "class_name": "UserAccount"
-      },
-      {
-        // Wrangler doesn't currently think a DO class exists unless there's a binding to it. This
-        // is a bug -- it should use "migrations" instead.
-        "name": "DUMMY_GmailGatekeeperImpl",
-        "class_name": "GmailGatekeeperImpl"
-      }
-    ]
+  "text_blobs": {
+    "TYPES_CODE": "src/types.d.ts"
   },
   "migrations": [
     {

@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@minions/typed-storage";
 
@@ -132,12 +132,17 @@ type GatekeeperRecord = {
 type ActionRecord = {
   id: number,
   gatekeeperId: number;
-  action: any;
   createdAt: Date;
-  appliedAt?: Date;
   state: ActionState;
+} & ({
+  type: "action";
+  appliedAt?: Date;
+  action: any;
   description: ActionDescription;
-};
+} | {
+  type: "observation";
+  description: ObservationDescription;
+});
 
 function makeOverseerStorage(storage: DurableObjectStorage) {
   // TODO(cleanup): Remove <any> once workers-types are updated with sync KV interface.
@@ -251,6 +256,22 @@ class OverseerImpl {
     return client.openSession();
   }
 
+  async authorizeObservation(
+      gatekeeperId: number, description: ObservationDescription): Promise<void> {
+    let actionId = this.storage.nextActionId.get();
+    this.storage.nextActionId.put(actionId + 1);
+
+    let record: ActionRecord = {
+      id: actionId,
+      gatekeeperId,
+      createdAt: new Date(),
+      state: "approved",
+      type: "observation",
+      description
+    };
+    this.storage.actions.put(record);
+  }
+
   async submitAction(gatekeeperId: number, action: any, description: ActionDescription)
       : Promise<void> {
     let actionId = this.storage.nextActionId.get();
@@ -262,6 +283,7 @@ class OverseerImpl {
       action,
       createdAt: new Date(),
       state: "pending",
+      type: "action",
       description
     };
     this.storage.actions.put(record);
@@ -427,7 +449,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       let result: GatekeeperMetadata = {
         bindingName,
-        resourceTitle: description.title?.text || "Unknown Title"
+        resourceTitle: description.title,
       };
 
       return result;
@@ -468,14 +490,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result: ActionLogEntry[] = [];
     for (let record of this.impl.storage.actions.list()) {
-      result.push({
-        id: record.id,
-        bindingName: bindingMap[record.gatekeeperId] || "(deleted binding)",
-        createdAt: record.createdAt,
-        appliedAt: record.appliedAt,
-        state: record.state,
-        description: record.description,
-      });
+      if (record.type === "observation") {
+        result.push({
+          id: record.id,
+          bindingName: bindingMap[record.gatekeeperId] || "(deleted binding)",
+          createdAt: record.createdAt,
+          state: record.state,
+          type: "observation",
+          description: record.description,
+        });
+      } else {
+        result.push({
+          id: record.id,
+          bindingName: bindingMap[record.gatekeeperId] || "(deleted binding)",
+          createdAt: record.createdAt,
+          appliedAt: record.appliedAt,
+          state: record.state,
+          type: "action",
+          description: record.description,
+        });
+      }
     }
 
     return result;
@@ -489,6 +523,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     if (action.state !== "pending") {
       throw new Error(`Action is not pending: ${id}`);
+    }
+    if (action.type === "observation") {
+      throw new Error("Observations can't have 'pending' state.");
     }
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
@@ -548,10 +585,7 @@ class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClien
   async openSession(): Promise<Session> {
     let description = await this.facet.describe();
 
-    // TODO: Track actual permissions.
-    let permissions = description.adapterPermissions;
-
-    return this.facet.startSession(permissions, new ApprovalQueueImpl(this.impl, this.id));
+    return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id));
   }
 }
 
@@ -560,7 +594,11 @@ class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Actio
     super();
   }
 
-  submit(action: Action, description: ActionDescription): Promise<void> {
+  authorizeObservation(description: ObservationDescription): Promise<void> {
+    return this.impl.authorizeObservation(this.gatekeeperId, description);
+  }
+
+  submitAction(action: Action, description: ActionDescription): Promise<void> {
     return this.impl.submitAction(this.gatekeeperId, action, description);
   }
 }

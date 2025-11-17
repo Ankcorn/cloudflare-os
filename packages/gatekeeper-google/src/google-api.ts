@@ -2,6 +2,8 @@
 //
 // This file was lagely vibe-coded based on an interface spec.
 
+import { GmailMessage, GmailThreadContent, GmailThreadSummary } from "./types";
+
 export type GoogleAccessToken = {
   token: string;
   expires: Date;
@@ -40,24 +42,6 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
 }
 
 // =======================================================================================
-
-export type GmailThreadSummary = {
-  id: string;
-  snippet: string;
-  historyId: string;
-}
-
-export type GmailMessage = {
-  from: string;
-  to: string[];
-  subject: string;
-  timestamp: Date;
-  body: string;
-}
-
-export type GmailThreadContent = {
-  messages: GmailMessage[];
-}
 
 export class GmailApi {
   // The getAccessToken() callback obtains a current access token. It should be called before

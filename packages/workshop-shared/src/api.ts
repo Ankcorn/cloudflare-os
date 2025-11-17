@@ -24,7 +24,7 @@
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
 import { RpcStub, RpcTarget } from "capnweb";
-import { ActionDescription, ResourceDescription } from "./gatekeeper.js";
+import { ActionDescription, ObservationDescription, ResourceDescription } from "./gatekeeper.js";
 
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
@@ -122,9 +122,13 @@ export type ActionLogEntry = {
   appliedAt?: Date;
 
   state: ActionState;
-
+} & ({
+  type: "action";
   description: ActionDescription;
-}
+} | {
+  type: "observation";
+  description: ObservationDescription;
+});
 
 // Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
 // Minion.
