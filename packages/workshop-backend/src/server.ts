@@ -1,11 +1,8 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@minions/typed-storage";
-
-// TODO: Don't use this, use real user IDs.
-const FAKE_USER_ID: UserId = {email: "fake@example.com"}
 
 // TODO: Figure out why this isn't present in workers-types/experimental
 interface WorkerCode {
@@ -93,7 +90,7 @@ export class UserDurableObject extends DurableObject<Env> {
       if (!vendor) {
         throw new Error(`No such gatekeeper installed: ${name}`);
       }
-      result = await vendor.newUser(FAKE_USER_ID);
+      result = await vendor.newUser();
 
       this.storage.gatekeepers.put({name, vendor: result});
     }
