@@ -1,22 +1,3 @@
-
-// TODO: Remove this once it's in workers-types.
-export interface DurableObjectStorage {
-  kv: SyncKvStorage;
-
-  transactionSync<T>(closure: () => T): T;
-}
-interface SyncKvStorage {
-  get<T>(key: string): T | undefined;
-  list<T = unknown>(
-    options?: DurableObjectListOptions,
-  ): Iterable<[string, T]>;
-  put<T>(
-    key: string,
-    value: T,
-  ): void;
-  delete(key: string): boolean;
-}
-
 // TODO:
 // - store metadata blob
 // - compress collection & index names

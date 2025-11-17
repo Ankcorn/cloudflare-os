@@ -1,6 +1,6 @@
 import { expect, it, describe } from "vitest"
-import { DurableObjectStorage, createTypedStorage, collection, UniqueIndex, NonUniqueIndex } from "../src/index.js";
-import { DurableObjectListOptions } from "@cloudflare/workers-types/experimental";
+import { createTypedStorage, collection, UniqueIndex, NonUniqueIndex } from "../src/index.js";
+import { DurableObjectListOptions, DurableObjectStorage } from "@cloudflare/workers-types/experimental";
 
 // We mock out DurableObjectStorage becaues otherwise we'd have to run the tests inside a
 // Durable Object which is a bit of a trek.
@@ -10,7 +10,7 @@ function makeMockStorage(): DurableObjectStorage {
 
   let currentList: object | undefined;
 
-  return {
+  return <DurableObjectStorage>{
     transactionSync<T>(f: () => T): T {
       // Implement transactions by cloning the entire database lol.
       let oldMap = structuredClone(map);

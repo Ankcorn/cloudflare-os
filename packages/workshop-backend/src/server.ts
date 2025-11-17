@@ -33,8 +33,7 @@ type UserGatekeeperRecord = {
 };
 
 function makeUserStorage(storage: DurableObjectStorage) {
-  // TODO(cleanup): Remove <any> once workers-types are updated with sync KV interface.
-  return createTypedStorage(<any>storage, {
+  return createTypedStorage(storage, {
     collections: {
       minions: collection<MinionMetadata>()({
         primaryKey: "id"
@@ -195,7 +194,7 @@ class OverseerImpl {
   async getMinionFacet(): Promise<Fetcher<DurableObject>> {
     let codeVersion = this.storage.codeVersion.get();
 
-    return this.ctx.facets.get("minion", () => {
+    return this.ctx.facets.get<DurableObject>("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
         let modules: Record<string, string> = {};
 
@@ -319,8 +318,7 @@ export class OverseerDurableObject extends DurableObject<Env> {
     };
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
-    let result: Overseer = new OverseerClientInterface(this.impl, owner, notifyDeleted);
-    return result;
+    return new OverseerClientInterface(this.impl, owner, notifyDeleted);
   }
 
   async startGatekeeperSession(id: number): Promise<any> {
