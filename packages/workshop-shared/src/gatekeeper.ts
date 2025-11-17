@@ -16,31 +16,10 @@
 // with the adapter over JavaScript RPC. The types in this file define that RPC interface. The
 // `Adapter` type is the root interface implemented by the service binding.
 
-/// <reference types="@cloudflare/workers-types/experimental" />
-import type { DurableObjectClass as WorkerdDurableObjectClass } from "@cloudflare/workers-types/experimental";
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
 // =======================================================================================
 // Some basic types, not specific to adapters.
-
-// The Workers Runtime provides the type `DurableObjectClass`. It is the type of an "actor class
-// binding" for use with Durable Object Facets, implemented in this PR:
-//     https://github.com/cloudflare/workerd/pull/4123
-//
-// This is essentially a reference to some code implemented in an entirely different Worker. It
-// can be bound with some metadata which will be delivered to that other worker whenever the code
-// is invoked.
-//
-// This is similar to a Workers service binding, except that the caller additionally provides the
-// callee with a sqlite database where it can store some state. The interface to this storage is
-// exactly the same as in a Durable Object implementation, hence the class on the callee side
-// implements `DurableObject`, even though it is not directly a member of a Durable Object
-// namespace.
-//
-// At present, DurableObjectClass is not generic, but it really ought to be, taking the interface
-// implemented by the class as the parameter. Until that happens, we declare this alias with a
-// fake generic parameter to make code clearer.
-export interface DurableObjectClass<T> extends WorkerdDurableObjectClass {}
 
 // Represents some text which is to be presented to the human user, so may need localization.
 export type Prose = {

@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, DurableObjectClass, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, UserId, ResourceDescription, ApprovalQueue, ActionDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@minions/typed-storage";
 
@@ -192,7 +192,7 @@ class OverseerImpl {
     this.ownerId = this.storage.ownerId.get();
   }
 
-  async getMinionFacet(): Promise<DurableObjectStub<any>> {
+  async getMinionFacet(): Promise<Fetcher<DurableObject>> {
     let codeVersion = this.storage.codeVersion.get();
 
     return this.ctx.facets.get("minion", () => {
@@ -319,7 +319,8 @@ export class OverseerDurableObject extends DurableObject<Env> {
     };
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
-    return new OverseerClientInterface(this.impl, owner, notifyDeleted);
+    let result: Overseer = new OverseerClientInterface(this.impl, owner, notifyDeleted);
+    return result;
   }
 
   async startGatekeeperSession(id: number): Promise<any> {
@@ -327,13 +328,18 @@ export class OverseerDurableObject extends DurableObject<Env> {
   }
 }
 
+type GatekeeperLoopbackProps = {
+  overseerId: string;
+  gatekeeperId: number;
+};
+
 // Horrible hack: At present the `env` of a dynamic isolate can contain ServiceStubs but cannot
 // contain RpcStubs. But if we ask the gatekeeper to open a session, we get an RpcStub. So we
 // actually initialize each binding to be a `ServiceStub` pointing at a `GatekeeperLoopback` whose
 // props identify the overseer ID and gatekeeper ID, so that on each method call, it can open
 // a gatekeeper session.
-export class GatekeeperLoopback extends WorkerEntrypoint<Env> {
-  constructor(ctx: ExecutionContext, env: Env) {
+export class GatekeeperLoopback extends WorkerEntrypoint<Env, GatekeeperLoopbackProps> {
+  constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Env) {
     super(ctx, env);
 
     let ns = ctx.exports.OverseerDurableObject;
@@ -519,7 +525,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
 class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClient<Session> {
   constructor(private impl: OverseerImpl, private id: number,
-      private facet: DurableObjectStub<Gatekeeper<Session>>) {
+      private facet: Fetcher<Gatekeeper<Session>>) {
     super();
   }
 

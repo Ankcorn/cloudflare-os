@@ -1,11 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { AdapterSchema, GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, DurableObjectClass, UserId, Gatekeeper, ResourceDescription, PermissionSet, ApprovalQueue, ResourceSchema } from '@minions/workshop-shared/gatekeeper';
+import { AdapterSchema, GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, UserId, Gatekeeper, ResourceDescription, PermissionSet, ApprovalQueue, ResourceSchema } from '@minions/workshop-shared/gatekeeper';
 import { getAccessToken, GmailApi, GmailThreadContent, GmailThreadSummary, GoogleAccessToken } from "./google-api";
-
-interface Env {
-  CLIENT_ID: string,
-  CLIENT_SECRET: string,
-}
 
 // =======================================================================================
 
@@ -179,16 +174,10 @@ type GatekeeperUserImplProps = {
   userId: UserId;
 }
 
-export class GatekeeperUserImpl extends WorkerEntrypoint<Env> implements GatekeeperUser {
-  #props: GatekeeperUserImplProps;
-
-  constructor(ctx: ExecutionContext, env: Env) {
-    super(ctx, env);
-    this.#props = ctx.props;
-  }
-
+export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
+                                implements GatekeeperUser {
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
-    let props: GmailGatekeeperImplProps = this.#props;
+    let props: GmailGatekeeperImplProps = this.ctx.props;
 
     return this.ctx.exports.GmailGatekeeperImpl({props});
   }
@@ -268,20 +257,14 @@ type GmailGatekeeperImplProps = {
 
 const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabel"];
 
-export class GmailGatekeeperImpl extends DurableObject<Env>
+export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
     implements Gatekeeper<GmailSession, GmailAction, GmailRevertInfo> {
-  #props: GmailGatekeeperImplProps;
   #accessToken: GoogleAccessToken | undefined;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.#props = ctx.props;
-  }
 
   async #getAccessToken(): Promise<string> {
     if (!this.#accessToken) {
       let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
-          this.ctx.exports.UserAccount.idFromString(this.#props.userObjectId));
+          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
       this.#accessToken = await stub.getAccessToken();
 
       let ttl = this.#accessToken.expires.valueOf() - Date.now();
@@ -312,7 +295,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env>
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());
     return new GmailSession(
-        this.#props.userId, gmailApi, permissions.permissions, approvalQueue.dup());
+        this.ctx.props.userId, gmailApi, permissions.permissions, approvalQueue.dup());
   }
 
   checkUserPermissions(user: UserId): Promise<PermissionSet> {
