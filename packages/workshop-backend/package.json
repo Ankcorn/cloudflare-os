@@ -12,7 +12,8 @@
   "dependencies": {
     "@minions/typed-storage": "workspace:*",
     "@minions/workshop-shared": "workspace:*",
-    "capnweb": "^0.2.0"
+    "capnweb": "^0.2.0",
+    "yjs": "^13.6.27"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

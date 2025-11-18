@@ -100,9 +100,35 @@ export type UiBundle = {
   // libraries should be loaded.
 };
 
-export type CodeFile = {
-  name: string;
-  content: string;
+// Represents an incremental update to the code.
+export type CodeUpdate = {
+  // Version number of the code AFTER this update has been applied.
+  version: number;
+
+  // Original timestamp of this update.
+  timestamp: Date;
+
+  // Yjs encoded update blob, encoding at least all changes since the previous version that the
+  // client is known to already have.
+  //
+  // All encoded updates use V2 format.
+  update: Uint8Array;
+}
+
+// Callback interface used to receive code updates from the server.
+export interface CodeSubscriber {
+  // Called any time the version on the server is newer than what the subscriber has.
+  //
+  // When the subscriber is multiple versions behind, the server may choose to send multiple
+  // incremental updates or one big update. The server may make several calls in rapid succession
+  // without waiting for previous calls to return. Cap'n Web guarantees that the calls will be
+  // delivered in order, but it is important that the subscriber either applies the updates or
+  // places them in some sort of queue synchronously to maintain ordering.
+  update(up: CodeUpdate): void;
+
+  // Called the first time the subscriber is up-to-date with the latest version known to the
+  // server.
+  ready(): void;
 }
 
 // Specifies the state of an action in the action log:
@@ -145,14 +171,20 @@ export interface Overseer extends RpcTarget {
   // TODO: Implement undelete, maybe using PITR...
   deleteSelf(): Promise<void>;
 
-  // Get/set source code.
+  // Subscribe to code updates.
   //
-  // TODO:
-  // - Replace setCodeFile()/deleteCodeFile() with operational transforms stream.
-  // - Replace getCode() with some sort of streaming or on-demand interface.
-  getCode(): Promise<CodeFile[]>;
-  setCodeFile(name: string, content: string): Promise<void>;
-  deleteCodeFile(name: string): Promise<void>;
+  // Code is represented as a Yjs doc. The top-level Y.Doc contains a Y.Map (with empty name) which
+  // maps file names to Y.Text instances.
+  //
+  // `subscriber` will receive updates whenever it becomes out-of-date. `fromVersion` is the
+  // version the subscriber already has before the subscription starts. To download the code from
+  // scratch, omit the version (or pass zero).
+  //
+  // Disposing the returned `RpcStub` will cancel the subscription.
+  subscribeToCode(subscriber: RpcStub<CodeSubscriber>, fromVersion?: number): Promise<RpcStub<{}>>;
+
+  // Send a Yjs update to the server.
+  updateCode(update: Uint8Array): Promise<void>;
 
   // Get the Minion's deployed UI code, to be run inside an iframe sandbox.
   //
