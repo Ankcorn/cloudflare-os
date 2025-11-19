@@ -1,8 +1,9 @@
-import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, CodeFile, ActionState, ActionLogEntry } from '@minions/workshop-shared/api';
+import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@minions/typed-storage";
+import * as Y from "yjs";
 
 // TODO: Figure out why this isn't present in workers-types/experimental
 interface WorkerCode {
@@ -157,8 +158,22 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
     },
 
     collections: {
-      codeFiles: collection<CodeFile>()({
-        primaryKey: "name"
+      // All incremental code changes from the beginning of time. This table is tightly-packed,
+      // starting from 1. (There's no entry for version 0 since it represents the starting empty
+      // state.)
+      code: collection<CodeUpdate>()({
+        primaryKey: "version"
+      }),
+
+      // "Snapshots" of the code. Each item in this collection contains an encoded update "from
+      // zero". This is an optimization so that it's not necessary to scan the whole code table
+      // to get caught up.
+      //
+      // We create a snapshot each time the total byte size of all encoded updates since the
+      // previous snapshot exceeds the size of the previous snapshot. This ensures that the total
+      // storage size of the DO is no more than 2x the size of the update history.
+      snapshots: collection<CodeUpdate>()({
+        primaryKey: "version"
       }),
 
       gatekeepers: collection<GatekeeperRecord>()({
@@ -177,6 +192,9 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
 type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 
+// Don't build a snapshot until we have at least 64k of logs since the last one.
+const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
+
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
 class OverseerImpl {
@@ -187,10 +205,96 @@ class OverseerImpl {
 
   users: DurableObjectNamespace<UserDurableObject>;
 
+  // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
+  // in order to help decide when to make a new snapshot.
+  #snapshotMetrics?: {snapshotSize: number, logSize: number};
+
   constructor(public ctx: DurableObjectState, public env: Env) {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
+  }
+
+  // Walk the list of updates to get from `fromVersion` to the current version, calling `apply`
+  // on each one. `fromVersion` can be zero to start from the beginning.
+  //
+  // This function in particular takes care of finding the best snapshot to start from, applying
+  // that first, followed by scanning the code updates table. It also opportunistically calculates
+  // and stashes some metrics on log sizes, useful to decide when to make a new snapshot.
+  replayUpdates(fromVersion: number, apply: (update: CodeUpdate) => void) {
+    let snapshot: CodeUpdate | undefined =
+        [...this.storage.snapshots.list({startAfter: fromVersion, reverse: true, limit: 1})][0];
+
+    if (!snapshot && fromVersion === 0) {
+      // We are starting from the beginning and we don't have a snapshot. But version 1 is itself
+      // sort of like a snapshot: it often contains a bunch of initial code. If we don't treat it
+      // as a snapshot, then we'll count it in the log size, and we'll immediately say "oh, we have
+      // a lot of logs, we need to make a snapshot", but then we might make a totally pointless
+      // snapshot at version 1, which will just be a copy of the actual version 1. To avoid this,
+      // treat version 1 itself as a snapshot, for metrics purposes.
+      snapshot = this.storage.code.get(1);
+
+      if (!snapshot) {
+        throw new Error("Code is uninitialized?");
+      }
+    }
+
+    let snapshotSize: number = 0;
+    if (snapshot) {
+      apply(snapshot);
+      fromVersion = snapshot.version;
+      snapshotSize = snapshot.update.length;
+    }
+
+    let logSize: number = 0;
+    for (let update of this.storage.code.list({startAfter: fromVersion})) {
+      apply(update);
+      logSize += update.update.length;
+    }
+
+    if (!this.#snapshotMetrics && (fromVersion === 0 || snapshot)) {
+      // We didn't previously have snapshot metrics, and this particular replay either started
+      // from zero or from a snapshot, so the metrics computed during this replay should be
+      // accurate. Let's take advantage and record the metrics now so we don't have to make a
+      // separate pass throught the data to build the metrics later.
+      this.#snapshotMetrics = {snapshotSize, logSize};
+    }
+  }
+
+  // Construct a `Y.Doc` for the current code version.
+  buildYDoc(): Y.Doc {
+    // TODO: Use snapshots.
+    let ydoc = new Y.Doc();
+    this.replayUpdates(0, (version: CodeUpdate) => {
+      Y.applyUpdateV2(ydoc, version.update);
+    });
+    return ydoc;
+  }
+
+  // Apply a Yjs-encoded (V2) update to the code, incrementing the code version.
+  updateCode(update: Uint8Array): void {
+    let version = this.bumpVersion();
+    let timestamp = new Date();
+    this.storage.code.put({version, timestamp, update});
+
+    if (this.#snapshotMetrics) {
+      this.#snapshotMetrics.logSize += update.length;
+      if (this.#snapshotMetrics.logSize >
+          Math.max(this.#snapshotMetrics.snapshotSize, MIN_SNAPSHOT_THRESHOLD)) {
+        let ydoc = this.buildYDoc();
+        let snapshotUpdate = Y.encodeStateAsUpdateV2(ydoc);
+        this.storage.snapshots.put({
+          version,
+          timestamp,
+          update: snapshotUpdate
+        });
+
+        this.#snapshotMetrics = {
+          snapshotSize: snapshotUpdate.length,
+          logSize: 0,
+        };
+      }
+    }
   }
 
   async getMinionFacet(): Promise<Fetcher<DurableObject>> {
@@ -198,13 +302,11 @@ class OverseerImpl {
 
     return this.ctx.facets.get<DurableObject>("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
-        let modules: Record<string, string> = {};
+        let ydoc = this.buildYDoc();
 
-        for (let file of this.storage.codeFiles.list()) {
-          // TODO: Better separation of client/server, etc.
-          if (file.name != "client.js") {
-            modules[file.name] = file.content;
-          }
+        let modules: Record<string, string> = {};
+        for (let [file, content] of ydoc.getMap<Y.Text>()) {
+          modules[file] = content.toString();
         }
 
         let env: Record<string, Fetcher> = {}
@@ -286,10 +388,11 @@ class OverseerImpl {
     this.storage.actions.put(record);
   }
 
-  bumpVersion(): void {
-    let codeVersion = this.storage.codeVersion.get();
-    this.storage.codeVersion.put(codeVersion + 1);
+  bumpVersion(): number {
+    let codeVersion = this.storage.codeVersion.get() + 1;
+    this.storage.codeVersion.put(codeVersion);
     this.ctx.facets.abort("minion", new Error("Minion restarted due to code update."));
+    return codeVersion;
   }
 }
 
@@ -317,14 +420,24 @@ export class OverseerDurableObject extends DurableObject<Env> {
         this.impl.ownerId = ownerId;
 
         this.impl.storage.ownerId.put(ownerId);
-        this.impl.storage.codeFiles.put({
-          name: "server.js",
-          content: DEFAULT_SERVER_CODE
+
+        let ydoc = new Y.Doc();
+        let ymap = ydoc.getMap<Y.Text>();
+        let initFile = (name: string, content: string) => {
+          let txt = new Y.Text();
+          txt.insert(0, content);
+          ymap.set(name, txt);
+        }
+        initFile("server.js", DEFAULT_SERVER_CODE);
+        initFile("client.js", DEFAULT_CLIENT_CODE);
+
+        this.impl.storage.code.put({
+          version: 1,
+          timestamp: new Date(),
+          update: Y.encodeStateAsUpdateV2(ydoc)
         });
-        this.impl.storage.codeFiles.put({
-          name: "client.js",
-          content: DEFAULT_CLIENT_CODE
-        });
+
+        this.impl.storage.codeVersion.put(1);
       });
     }
 
@@ -403,22 +516,64 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async getCode(): Promise<CodeFile[]> {
-    return [...this.impl.storage.codeFiles.list()];
+  async subscribeToCode(subscriber: RpcStub<CodeSubscriber>, fromVersion: number = 0)
+      : Promise<RpcStub<{}>> {
+    let codeVersions = this.impl.storage.code;
+
+    let dbSubscriber = {
+      add(record: CodeUpdate) {
+        subscriber.update(record).catch(err => { codeVersions.unsubscribe(dbSubscriber) });
+      },
+      update(oldRecord: CodeUpdate, newRecord: CodeUpdate): void {
+        // Never happens.
+      },
+      remove(record: CodeUpdate): void {
+        // Never happens.
+      }
+    }
+
+    let {promise, reject} = Promise.withResolvers<RpcStub<{}>>();
+    let unsubscribe = (err: Error) => {
+      codeVersions.unsubscribe(dbSubscriber);
+      if (err) {
+        reject(err);
+      }
+    };
+
+    this.impl.replayUpdates(fromVersion, (version: CodeUpdate) => {
+      // TODO: Do some flow control here.
+      subscriber.update(version).catch(unsubscribe);
+    });
+
+    subscriber.ready().catch(unsubscribe);
+
+    codeVersions.subscribe(dbSubscriber);
+
+    // TODO: HACK: There's a mismatch in ownership behavior of stubs passed as params between
+    // Cap'n Web and Workers RPC. As a result, when we return from this method, the stub passed
+    // in the param will be disposed in the stateless worker, no matter what dupes we make here.
+    // As a work-around, we simply don't return. We rely on the subscriber's update() method
+    // to throw when the subscriber is no longer connected, at which point we remove it.
+    return promise;
+
+    // return new RpcStub({
+    //   [Symbol.dispose]() {
+    //     unsubscribe();
+    //     subscriber[Symbol.dispose]();
+    //   }
+    // });
   }
-  async setCodeFile(name: string, content: string): Promise<void> {
-    this.impl.storage.codeFiles.put({name, content});
-    this.impl.bumpVersion();
-  }
-  async deleteCodeFile(name: string): Promise<void> {
-    this.impl.storage.codeFiles.delete(name);
+
+  async updateCode(update: Uint8Array): Promise<void> {
+    this.impl.updateCode(update);
   }
 
   async getUiBundle(): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
-    let file = this.impl.storage.codeFiles.get("client.js");
+    let ydoc = this.impl.buildYDoc();
+    let file = ydoc.getMap<Y.Text>().get("client.js");
     if (file) {
-      return { jsCode: file.content };
+      return { jsCode: file.toString() };
     } else {
       return null;
     }

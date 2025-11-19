@@ -90,9 +90,8 @@ export default function MinionEditor() {
         setError(null)
         setIsInitialLoad(false)
 
-        // If this was a reconnection attempt, show success message
+        // Clear connection lost flag on successful reconnection
         if (connectionLost) {
-          message.success('Connection restored')
           setConnectionLost(false)
         }
       } catch (err) {
@@ -101,8 +100,7 @@ export default function MinionEditor() {
         if (isInitialLoad) {
           setError('Failed to load minion')
         } else if (!connectionLost) {
-          // Show connection lost toast only once
-          message.warning('Lost connection to server')
+          // Track connection lost state but don't show toast
           setConnectionLost(true)
         }
       } finally {

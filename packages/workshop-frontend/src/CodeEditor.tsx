@@ -1,104 +1,59 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { Editor } from '@monaco-editor/react'
-import { message } from 'antd'
-import { CodeFile } from '@minions/workshop-shared/api'
+import type { editor } from 'monaco-editor'
+import * as Y from 'yjs'
+import { MonacoBinding } from 'y-monaco'
 
 interface CodeEditorProps {
-  file: CodeFile | null
-  onSave: (filename: string, content: string) => Promise<void>
+  filename: string | null
+  ytext: Y.Text | null
+  isReady: boolean
   height?: string | number
 }
 
-export default function CodeEditor({ file, onSave, height = '100%' }: CodeEditorProps) {
-  const editorRef = useRef<any>(null)
-  const currentFileRef = useRef<CodeFile | null>(null)
-  const autoSaveTimeoutRef = useRef<number | null>(null)
-  const [content, setContent] = useState('')
+export default function CodeEditor({ filename, ytext, isReady, height = '100%' }: CodeEditorProps) {
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
+  const bindingRef = useRef<MonacoBinding | null>(null)
+  const [editorReady, setEditorReady] = useState(false)
 
-  // Update editor content when file changes (but not when same file content updates)
+  // Set up Monaco binding when editor and ytext are available
   useEffect(() => {
-    const previousFile = currentFileRef.current
-    currentFileRef.current = file // Store current file in ref for callbacks to access
-    
-    // Only reset content if we're switching to a different file or loading for the first time
-    if (!previousFile || !file || previousFile.name !== file.name) {
-      if (file) {
-        setContent(file.content)
-      } else {
-        setContent('')
-      }
-    }
-  }, [file])
+    const editor = editorRef.current
+    const monaco = monacoRef.current
 
-  // Save function that can be called from blur or auto-save
-  const saveCurrentFile = async () => {
-    const currentFile = currentFileRef.current
-    if (!currentFile || !editorRef.current) return
-
-    const currentContent = editorRef.current.getValue()
-    if (currentContent !== currentFile.content) {
-      try {
-        await onSave(currentFile.name, currentContent)
-      } catch (error) {
-        console.error('Failed to save file:', error)
-        message.error(`Failed to save ${currentFile.name}`)
-      }
-    }
-  }
-
-  // Handle editor focus loss - trigger save
-  const handleEditorBlur = async () => {
-    // Clear any pending auto-save since we're saving now
-    if (autoSaveTimeoutRef.current) {
-      clearTimeout(autoSaveTimeoutRef.current)
-      autoSaveTimeoutRef.current = null
-    }
-    await saveCurrentFile()
-  }
-
-  // Handle content changes - set up auto-save timer
-  const handleContentChange = () => {
-    // Clear existing timeout
-    if (autoSaveTimeoutRef.current) {
-      clearTimeout(autoSaveTimeoutRef.current)
+    if (!editor || !monaco || !ytext || !editorReady) {
+      return
     }
 
-    // Set new timeout for 1 second
-    autoSaveTimeoutRef.current = setTimeout(() => {
-      saveCurrentFile()
-      autoSaveTimeoutRef.current = null
-    }, 1000)
-  }
+    // Get or create a model for this file
+    const model = editor.getModel()
+    if (!model) {
+      return
+    }
+
+    // Create the binding between Y.Text and Monaco
+    // The binding will sync the Y.Text content to the Monaco model
+    const binding = new MonacoBinding(
+      ytext,
+      model,
+      new Set([editor])
+    )
+    bindingRef.current = binding
+
+    return () => {
+      // Clean up binding when component unmounts or ytext changes
+      binding.destroy()
+      bindingRef.current = null
+    }
+  }, [ytext, editorReady])
 
   // Handle editor mount
-  const handleEditorDidMount = (editor: any, monaco: any) => {
+  const handleEditorDidMount = (editor: editor.IStandaloneCodeEditor, monaco: typeof import('monaco-editor')) => {
     editorRef.current = editor
-
-    // Add content change listener for auto-save
-    editor.onDidChangeModelContent(() => {
-      handleContentChange()
-    })
-
-    // Add blur event listener for auto-save
-    editor.onDidBlurEditorWidget(() => {
-      handleEditorBlur()
-    })
-
-    // Set up keyboard shortcuts
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      handleEditorBlur() // Just trigger the same save logic
-    })
+    monacoRef.current = monaco
+    setEditorReady(true)
   }
-
-  // Clean up auto-save timeout when component unmounts or file changes
-  useEffect(() => {
-    return () => {
-      if (autoSaveTimeoutRef.current) {
-        clearTimeout(autoSaveTimeoutRef.current)
-        autoSaveTimeoutRef.current = null
-      }
-    }
-  }, [file])
 
   // Get language from file extension
   const getLanguage = (filename: string): string => {
@@ -139,7 +94,7 @@ export default function CodeEditor({ file, onSave, height = '100%' }: CodeEditor
     }
   }
 
-  if (!file) {
+  if (!filename || !ytext) {
     return (
       <div
         style={{
@@ -151,18 +106,17 @@ export default function CodeEditor({ file, onSave, height = '100%' }: CodeEditor
           color: '#6c757d'
         }}
       >
-        Select a file to start editing
+        {!filename ? 'Select a file to start editing' : 'Loading file...'}
       </div>
     )
   }
 
   return (
     <div style={{ position: 'relative', height }}>
-
       <Editor
         height="100%"
-        language={getLanguage(file.name)}
-        value={content}
+        language={getLanguage(filename)}
+        defaultValue=""
         onMount={handleEditorDidMount}
         theme="vs"
         options={{
@@ -176,7 +130,7 @@ export default function CodeEditor({ file, onSave, height = '100%' }: CodeEditor
           renderLineHighlight: 'all',
           selectOnLineNumbers: true,
           roundedSelection: false,
-          readOnly: false,
+          readOnly: !isReady,
           cursorStyle: 'line',
           autoIndent: 'full',
           formatOnPaste: true,
