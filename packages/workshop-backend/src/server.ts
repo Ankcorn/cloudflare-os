@@ -4,26 +4,8 @@ import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, Appr
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
-
-// TODO: Figure out why this isn't present in workers-types/experimental
-interface WorkerCode {
-  compatibilityDate: string,
-  compatibilityFlags?: string[],
-  allowExperimental?: boolean,
-  mainModule: string,
-  modules: Record<string, string>,
-  env?: Object,
-  globalOutbound?: Fetcher | null,
-}
-interface WorkerStub {
-  getEntrypoint(name?: string | null, options?: {props: any}): Fetcher;
-  getDurableObjectClass(name?: string | null, options?: {props: any}): DurableObjectClass<any>;
-}
-
-// Workers environment (bindings).
-export interface Env {
-  LOADER: WorkerLoader,
-}
+import { generateText, ModelMessage } from "ai";
+import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
 
 type UserGatekeeperRecord = {
   name: string;
@@ -46,10 +28,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
 type UserStorage = ReturnType<typeof makeUserStorage>;
 
 // Durable Object that stores information about a user.
-export class UserDurableObject extends DurableObject<Env> {
+export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.storage = makeUserStorage(ctx.storage);
   }
@@ -228,14 +210,21 @@ class OverseerImpl {
 
   users: DurableObjectNamespace<UserDurableObject>;
 
+  #anthropicProvider: AnthropicProvider;
+
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
   #snapshotMetrics?: {snapshotSize: number, logSize: number};
 
-  constructor(public ctx: DurableObjectState, public env: Env) {
+  constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
+
+    this.#anthropicProvider = createAnthropic({
+      apiKey: this.env.ANTHROPIC_API_KEY,
+      baseURL: this.env.ANTHROPIC_BASE_URL,
+    });
   }
 
   // Walk the list of updates to get from `fromVersion` to the current version, calling `apply`
@@ -472,12 +461,90 @@ class OverseerImpl {
       id: "user@example.com",
     };
   }
+
+  async startAgent(chatId: number): Promise<void> {
+    try {
+      let modelMessages: ModelMessage[] = [];
+
+      for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+        if (msg.type === "message") {
+          switch (msg.author.type) {
+            case "user":
+              modelMessages.push({
+                role: "user",
+                content: msg.message,
+              });
+              break;
+
+            case "agent":
+              modelMessages.push({
+                role: "assistant",
+                content: msg.message,
+              });
+              break;
+
+            default:
+              msg.author.type satisfies never;
+              break;
+          }
+        }
+      }
+
+      let result = await generateText({
+        model: this.#anthropicProvider("claude-sonnet-4-5"),
+        messages: modelMessages
+      });
+
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta) {
+        // Chat thread deleted?
+        return;
+      }
+
+      let author: AiChatAuthorInfo = {
+        type: "agent",
+        id: "claude-sonnet-4.5",
+        name: "Claude",
+      };
+      this.postAgentChatMessage(chatId, author, result.text);
+    } catch (err) {
+      let author: AiChatAuthorInfo = {
+        type: "agent",
+        id: "error",
+        name: "Error",
+      };
+      let message = err instanceof Error ? (err.stack || err.message) : `${err}`;
+      this.postAgentChatMessage(chatId, author, message);
+    }
+  }
+
+  postAgentChatMessage(chatId: number, author: AiChatAuthorInfo, message: string) {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta) {
+      // Chat thread deleted?
+      return;
+    }
+
+    let timestamp = this.getChatTimestamp();
+    this.storage.chats.put({
+      chatId,
+      sequence: this.nextChatSequence(chatId),
+      timestamp,
+      author,
+      type: "message",
+      message
+    });
+
+    meta.agentActive = false;
+    meta.lastActive = timestamp;
+    this.storage.chatMeta.put(meta);
+  }
 }
 
-export class OverseerDurableObject extends DurableObject<Env> {
+export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   private impl: OverseerImpl;
 
-  constructor(ctx: DurableObjectState, env: Env) {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.impl = new OverseerImpl(ctx, env);
   }
@@ -546,8 +613,8 @@ type GatekeeperLoopbackProps = {
 // actually initialize each binding to be a `ServiceStub` pointing at a `GatekeeperLoopback` whose
 // props identify the overseer ID and gatekeeper ID, so that on each method call, it can open
 // a gatekeeper session.
-export class GatekeeperLoopback extends WorkerEntrypoint<Env, GatekeeperLoopbackProps> {
-  constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Env) {
+export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, GatekeeperLoopbackProps> {
+  constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);
 
     let ns = ctx.exports.OverseerDurableObject;
@@ -872,7 +939,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: "New Chat",   // filled in later by AI
       started: timestamp,
       lastActive: timestamp,
-      agentActive: false,
+      agentActive: true,
     });
 
     this.impl.storage.chats.put({
@@ -885,6 +952,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       message: initialMessage,
     });
 
+    this.impl.startAgent(chatId);
+
     return chatId;
   }
 
@@ -894,6 +963,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("No such chatId: " + chatId);
     }
     meta.lastActive = this.impl.getChatTimestamp();
+    let startAgent = !meta.agentActive;
+    meta.agentActive = true;
     this.impl.storage.chatMeta.put(meta);
 
     this.impl.storage.chats.put({
@@ -905,6 +976,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       type: "message",
       message,
     });
+
+    if (startAgent) {
+      this.impl.startAgent(chatId);
+    }
   }
 
   async stopAgent(chatId: number): Promise<void> {
@@ -1016,7 +1091,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 }
 
 export default {
-  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(req: Request, env: Cloudflare.Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
 
     if (url.pathname === "/api") {
@@ -1037,4 +1112,4 @@ export default {
       return new Response("Not Found", {status: 404});
     }
   }
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<Cloudflare.Env>;

@@ -10,10 +10,13 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.45",
     "@minions/typed-storage": "workspace:*",
     "@minions/workshop-shared": "workspace:*",
+    "ai": "^5.0.98",
     "capnweb": "^0.2.0",
-    "yjs": "^13.6.27"
+    "yjs": "^13.6.27",
+    "zod": "^4.1.8"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
