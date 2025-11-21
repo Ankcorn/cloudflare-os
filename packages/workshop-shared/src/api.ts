@@ -219,11 +219,109 @@ export interface Overseer extends RpcTarget {
   // be approved in the future.
   rejectAction(id: number): Promise<void>;
 
+  // List past AI chats.
+  listChats(): Promise<AiChatMetadata[]>;
+
+  // Fetch messages in the chat history for the given chat thread.
+  //
+  // Note that if you plan to subscribe to updates, you should initiate the subscription first,
+  // before fetching history. Otherwise, you could theoretically miss a message that is sent
+  // between when you fetch the history and when you subscribe.
+  //
+  // In typical usage, the client subscribes to all chat activity upfront, but only fetches
+  // histories if and when the user opens a specific.
+  getChatHistory(chatId: number): Promise<AiChatMessage[]>;
+
+  // Subscribe to all new chat messages (across all threads).
+  //
+  // If `startAt` is given, it must be a date in the past. All messages starting from that date
+  // will be sent upfront. This is intended to allow resubscribing after being disconnected. If
+  // `startAt` is omitted, only new messages will be sent.
+  //
+  // Generally, a client should subscribe to chats immediately on loading the minion editor. If
+  // the client needs to call any methods like `listChats()` to backfill content, it should make
+  // these calls after `subscribeToChat()`, so that there's no chance of missing a message. (It is
+  // not necessary to wait for `subscribeToChat()` to return -- only to initate the call before
+  // other read calls.)
+  subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
+
+  // Starts a new chat with the given initial message.
+  newChat(initialMessage: string): Promise<number>;
+
+  // Send a message to the chat from this client. Sending a message causes the LLM to start
+  // running if it isn't already.
+  sendChatMessage(chatId: number, message: string): Promise<void>;
+
+  // Request that any ongoing LLM session in the given chat immediately stop.
+  //
+  // If an LLM is running, the session is canceled subscribers will receive a metadata update
+  // reflecting this before `stop()` returns.
+  //
+  // If no LLM is running, `stop()` does nothing and returns immediately.
+  stopAgent(chatId: number): Promise<void>;
+
   // TODO:
-  // - Agent chat API
-  // - View action queue
-  //   - Approve actions
   // - Sharing / access control functions
+}
+
+export type AiChatMetadata = {
+  id: number,
+  title: string,
+  started: Date,
+  lastActive: Date,
+
+  // Is an LLM currently actively responding to this chat?
+  agentActive: boolean,
+};
+
+export type AiChatAuthorInfo = {
+  // Is the author a human or AI?
+  type: "user" | "agent";
+
+  // Unique user identifier, e.g. "kenton@cloudflare.com" or "chatgpt-5.1-pro".
+  id: string;
+
+  // Display name for author, e.g. "Kenton Varda" or "ChatGPT"
+  name: string;
+
+  // TODO: URL of author avatar?
+  // avatar: string;
+};
+
+export type AiChatMessage = {
+  chatId: number;
+  sequence: number;
+  timestamp: Date;
+  author: AiChatAuthorInfo;
+} & ({
+  // A regular chat message.
+  type: "message";
+  message: string;
+} | {
+  // AI observed something local to the minion, e.g. it read the code, looked at the list of
+  // bindings, requested type information about a binding, etc. This can be shown in the log
+  // to hint to the user what the AI is up to, or it can be omitted from display.
+  //
+  // This does NOT include invoking a binding.
+  type: "observation";
+  description: string;
+});
+
+// TODO: Extend AiChatMessage to propose code edits.
+
+// TODO: Extend AiChatMessage for code-mode tool calls.
+// - Includes inline audit logs from the action.
+// - Actions can be approved or rejected inline.
+
+// Interface implemented by the client to receive callback notifications whenever there is new
+// chat activity. Use Overseer.subscribeToChat() to register a subscriber.
+export interface AiChatSubscriber {
+  // Metadata for the given chat thread has changed, or a new chat thread was created.
+  metadata(chat: AiChatMetadata): void;
+
+  // Adds a message to the chat.
+  // TODO: Support streaming tokens into individual messages.
+  message(msg: AiChatMessage): void;
 }
 
 // Information about one of a Minion's gatekeepers, for the purpose of displaying it in a list.

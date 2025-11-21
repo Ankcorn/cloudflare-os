@@ -171,7 +171,7 @@ type TypedStorageImpl<Collections, Singletons> = TypedStorage
     [K in keyof Singletons]: Singleton<Singletons[K]>;
   };
 
-function keyString(key: Key): string {
+export function keyString(key: Key): string {
   if (typeof key === "string") {
     return key;
   } else if (Number.isInteger(key) && key < Number.MAX_SAFE_INTEGER) {

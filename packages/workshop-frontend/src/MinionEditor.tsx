@@ -8,6 +8,7 @@ import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
 import MinionCodeInterface from './MinionCodeInterface'
 import MinionUI from './MinionUI'
 import Connections from './Connections'
+import ChatInterface from './ChatInterface'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -268,38 +269,13 @@ export default function MinionEditor() {
           style={{
             width: siderWidth,
             backgroundColor: 'white',
-            borderRight: '1px solid #f0f0f0'
+            borderRight: '1px solid #f0f0f0',
+            height: '100%'
           }}
         >
-          <Card
-            title="AI Agent Chat"
-            variant="borderless"
-            style={{
-              height: '100%',
-              display: 'flex',
-              flexDirection: 'column'
-            }}
-            styles={{
-              body: {
-                flex: 1,
-                display: 'flex',
-                flexDirection: 'column',
-                padding: '16px'
-              }
-            }}
-          >
-            <div style={{
-              display: 'flex',
-              justifyContent: 'center',
-              alignItems: 'center',
-              flex: 1,
-              color: '#999'
-            }}>
-              <Text type="secondary">
-                Chat interface will be implemented here. Start a conversation with your AI minion.
-              </Text>
-            </div>
-          </Card>
+          {overseer ? (
+            <ChatInterface overseer={overseer.stub} />
+          ) : null}
         </div>
 
         {/* Resize Handle */}
