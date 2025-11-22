@@ -892,7 +892,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
-    console.log(Object.keys(subscriber));
 
     let metaSubscriber = {
       add(record: AiChatMetadata) {
