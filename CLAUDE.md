@@ -3,7 +3,7 @@ This project is building a platform for "vibe coded" personal applications and A
 The following files are commonly important to reference:
 
 * overview.md: Explains the product we are building.
-* packages/workshop-frontend/node_modules/@cloudflare/jsrpc/README.md: Explains how to use the RPC system.
+* packages/workshop-frontend/node_modules/capnweb/README.md: Explains how to use Cap'n Web RPC, which is used extensively for client-server communications.
 * packages/workshop-shared/src/api.ts: Defines the RPC API used between the frontend and backend.
 
 The project structure is:
@@ -16,13 +16,13 @@ The project structure is:
     * Runs on Cloudflare Workers.
 * packages/workshop-shared: Shared API definitions between client and server.
     * This defines the application's RPC interface.
-    * The RPC protocol is Cloudflare's JSRPC, which is not yet released, but has similar semantics to Worker-to-Worker RPC system, while being able to run in a browser over WebSocket. The code is found in ../jsrpc.
+    * The RPC protocol is Cap'n Web, which has similar semantics to Cloudflare's Worker-to-Worker RPC system, while being able to run in a browser over WebSocket. Read the readme for details.
 
 The dev server for the frontend runs at http://localhost:3000. Use Playwrite MCP to test the UI.
 
 IMPORTANT: This repository uses pnpm, not npm. Always use pnpm.
 
-IMPORTANT: Remember when using RPC to use promise pipelining whenever possible. The JSRPC system implements promise pipelining (similar to Cap'n Proto). This means that if an RPC returns a stub, it's not necessary to await the RPC -- the promise itself can be used in place of the stub. Also, JSRPC lets you use the promise for a future result (even if it isn't a stub) in the arguments for another call; the promise will be replaced with its resolution on the server side before delivering the arguments. See the JSRPC README.md for more details.
+IMPORTANT: Remember when using RPC to use promise pipelining whenever possible. Cap'n Web implements promise pipelining (similar to Cap'n Proto). This means that if an RPC returns a stub, it's not necessary to await the RPC -- the promise itself can be used in place of the stub. Also, Cap'n Web lets you use the promise for a future result (even if it isn't a stub) in the arguments for another call; the promise will be replaced with its resolution on the server side before delivering the arguments. See the Cap'n Web README.md for more details.
 
 IMPORTANT: When using React's useState(), the state value cannot be an RPC stub. At runtime, all stubs appear to be callable (because the system does't actually know if the stub points to a function on the server side or not). But the setter returned by useState() has different behavior if passed a function (including any callable object): it calls the function in order to get the state. In order to avoid this problem, whenever a useState() state will contain an RpcStub, it's important to wrap the stub in an object, and set the state to that object instead.
 

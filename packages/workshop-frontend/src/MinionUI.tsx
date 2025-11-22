@@ -5,12 +5,12 @@ import { Overseer, UiBundle } from '@minions/workshop-shared/api'
 
 const { Text } = Typography
 
-// We want to inject JSRPC into the Minion. Luckily it has no dependencies, so we can just take
+// We want to inject Cap'n Web into the Minion. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
 // content.
-import JSRPC_BUNDLE from 'capnweb?raw'
+import CAPNWEB_BUNDLE from 'capnweb?raw'
 
-let JSRPC_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${JSRPC_BUNDLE}`
+let CAPNWEB_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${CAPNWEB_BUNDLE}`
 
 // Unfortunately, we will have to embed the code as a data: URL, because our iframe is totally
 // sandboxed. Even more unfortuntaely, since it's a module which we need to import from, we can't
@@ -19,10 +19,10 @@ let JSRPC_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${JSRPC_BUNDLE}`
 // a data: URL, so we have a doubly-nested data: URL. We'll use base64 encoding for the inner
 // data: and URL encoding for the outer, as this lagely avoids double-escaping.
 //
-// In any case, we'll prefix the minion code with this prefix which imports the JSRPC library (from
-// a massive data URL) and sets up the RPC connection to the parent.
+// In any case, we'll prefix the minion code with this prefix which imports the Cap'n Web library
+// (from a massive data URL) and sets up the RPC connection to the parent.
 let INJECTED_CODE_PREFIX = encodeURIComponent(`//# sourceURL=client.js
-import { RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(JSRPC_BUNDLE_ANNOTATED)}";
+import { RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(CAPNWEB_BUNDLE_ANNOTATED)}";
 
 let minion;  // RPC stub to the minion's server-side Durable Object.
 {
