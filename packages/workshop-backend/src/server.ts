@@ -495,12 +495,6 @@ class OverseerImpl {
         messages: modelMessages
       });
 
-      let meta = this.storage.chatMeta.get(chatId);
-      if (!meta) {
-        // Chat thread deleted?
-        return;
-      }
-
       let author: AiChatAuthorInfo = {
         type: "agent",
         id: "claude-sonnet-4.5",
@@ -538,6 +532,32 @@ class OverseerImpl {
     meta.agentActive = false;
     meta.lastActive = timestamp;
     this.storage.chatMeta.put(meta);
+  }
+
+  async generateTitle(chatId: number, initialMessage: string): Promise<void> {
+    try {
+      let result = await generateText({
+        model: this.#anthropicProvider("claude-haiku-4-5"),
+        system: "Generate a brief, descriptive title (2-8 words) for this chat based on the " +
+                "user's first message. Return only the title, no quotes or extra text.",
+        messages: [{
+          role: "user",
+          content: initialMessage,
+        }]
+      });
+
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta) {
+        // Chat thread deleted?
+        return;
+      }
+
+      meta.title = result.text;
+      this.storage.chatMeta.put(meta);
+    } catch (err) {
+      // Oh well, just leave the title as "New Chat".
+      console.error("Error generating chat title:", err);
+    }
   }
 }
 
@@ -952,7 +972,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       message: initialMessage,
     });
 
+    // Fire off the agent (asynchronously).
     this.impl.startAgent(chatId);
+
+    // Also fire off a second LLM call to generate a title based on the first message.
+    this.impl.generateTitle(chatId, initialMessage);
 
     return chatId;
   }
