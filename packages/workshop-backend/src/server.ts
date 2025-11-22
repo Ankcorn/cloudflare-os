@@ -552,6 +552,7 @@ class OverseerImpl {
         return;
       }
 
+      meta.lastActive = this.getChatTimestamp();
       meta.title = result.text;
       this.storage.chatMeta.put(meta);
     } catch (err) {
@@ -1004,6 +1005,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (startAgent) {
       this.impl.startAgent(chatId);
     }
+  }
+
+  async setChatTitle(chatId: number, title: string): Promise<void> {
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    meta.lastActive = this.impl.getChatTimestamp();
+    meta.title = title;
+    this.impl.storage.chatMeta.put(meta);
   }
 
   async stopAgent(chatId: number): Promise<void> {

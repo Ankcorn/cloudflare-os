@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined } from '@ant-design/icons'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message } from 'antd'
+import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import {
   Overseer,
@@ -37,6 +37,8 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [, setForceUpdate] = useState(0) // Force re-render when cache updates
+  const [isEditingTitle, setIsEditingTitle] = useState(false)
+  const [titleInput, setTitleInput] = useState('')
 
   // Subscription stub (wrapped in object for useState)
   const subscriptionRef = useRef<RpcStub<{}> | null>(null)
@@ -67,6 +69,13 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [currentMessages])
+
+  // Initialize title input when selecting a chat
+  useEffect(() => {
+    if (currentChatMetadata) {
+      setTitleInput(currentChatMetadata.title)
+    }
+  }, [currentChatMetadata?.title])
 
   // Create stable subscriber implementation using useRef to hold the implementation
   const subscriberRef = useRef<AiChatSubscriber>({
@@ -231,6 +240,37 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
   const handleBack = () => {
     setSelectedChatId(null)
     setInputValue('')
+    setIsEditingTitle(false)
+  }
+
+  // Handle saving chat title
+  const handleSaveChatTitle = async () => {
+    if (selectedChatId === null || !titleInput.trim()) {
+      return
+    }
+
+    try {
+      await overseer.setChatTitle(selectedChatId, titleInput.trim())
+
+      // Update the cache with the new title
+      const chat = cacheRef.current.chats.get(selectedChatId)
+      if (chat) {
+        cacheRef.current.chats.set(selectedChatId, { ...chat, title: titleInput.trim() })
+        forceUpdate()
+      }
+
+      setIsEditingTitle(false)
+      message.success('Chat title updated successfully')
+    } catch (err) {
+      console.error('Failed to update chat title:', err)
+      message.error('Failed to update chat title')
+    }
+  }
+
+  // Handle canceling title edit
+  const handleCancelTitleEdit = () => {
+    setTitleInput(currentChatMetadata?.title || '')
+    setIsEditingTitle(false)
   }
 
   return (
@@ -333,9 +373,40 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
               <Button icon={<ArrowLeftOutlined />} onClick={handleBack}>
                 Back
               </Button>
-              <Title level={5} style={{ margin: 0 }}>
-                {currentChatMetadata?.title || 'Chat'}
-              </Title>
+              {isEditingTitle ? (
+                <Space.Compact>
+                  <Input
+                    value={titleInput}
+                    onChange={(e) => setTitleInput(e.target.value)}
+                    onPressEnter={handleSaveChatTitle}
+                    placeholder="Enter chat title"
+                    style={{ width: 200 }}
+                    autoFocus
+                  />
+                  <Button
+                    icon={<CheckOutlined />}
+                    onClick={handleSaveChatTitle}
+                    type="primary"
+                    disabled={!titleInput.trim()}
+                  />
+                  <Button
+                    icon={<CloseOutlined />}
+                    onClick={handleCancelTitleEdit}
+                  />
+                </Space.Compact>
+              ) : (
+                <>
+                  <Title level={5} style={{ margin: 0 }}>
+                    {currentChatMetadata?.title || 'Chat'}
+                  </Title>
+                  <Button
+                    icon={<EditOutlined />}
+                    onClick={() => setIsEditingTitle(true)}
+                    type="text"
+                    size="small"
+                  />
+                </>
+              )}
               {isAgentActive && <Spin size="small" />}
             </Space>
             <Button

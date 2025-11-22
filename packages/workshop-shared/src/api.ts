@@ -252,6 +252,10 @@ export interface Overseer extends RpcTarget {
   // running if it isn't already.
   sendChatMessage(chatId: number, message: string): Promise<void>;
 
+  // Update the title of a chat. Usually not needed as a title is generated automatically from
+  // the first message.
+  setChatTitle(chatId: number, title: string): Promise<void>;
+
   // Request that any ongoing LLM session in the given chat immediately stop.
   //
   // If an LLM is running, the session is canceled subscribers will receive a metadata update
