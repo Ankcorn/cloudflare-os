@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin, message } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined } from '@ant-design/icons'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
+import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import {
   Overseer,
@@ -40,6 +40,9 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
 
+  // Refs for accessing current values in subscriber callbacks
+  const selectedChatIdRef = useRef<number | null>(null)
+
   // Subscription stub (wrapped in object for useState)
   const subscriptionRef = useRef<RpcStub<{}> | null>(null)
 
@@ -77,10 +80,30 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
     }
   }, [currentChatMetadata?.title])
 
+  // Keep the ref in sync with selectedChatId state
+  useEffect(() => {
+    selectedChatIdRef.current = selectedChatId
+  }, [selectedChatId])
+
   // Create stable subscriber implementation using useRef to hold the implementation
   const subscriberRef = useRef<AiChatSubscriber>({
     metadata(chat: AiChatMetadata) {
       cacheRef.current.chats.set(chat.id, chat)
+      forceUpdate()
+    },
+
+    deleted(chatId: number) {
+      // Remove from cache
+      cacheRef.current.chats.delete(chatId)
+      cacheRef.current.messages.delete(chatId)
+
+      // If currently viewing this chat, go back to list
+      if (selectedChatIdRef.current === chatId) {
+        setSelectedChatId(null)
+        setInputValue('')
+        setIsEditingTitle(false)
+      }
+
       forceUpdate()
     },
 
@@ -273,6 +296,29 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
     setIsEditingTitle(false)
   }
 
+  // Handle deleting a chat
+  const handleDeleteChat = () => {
+    if (selectedChatId === null || !currentChatMetadata) return
+
+    Modal.confirm({
+      title: 'Delete Chat',
+      content: `Are you sure you want to delete "${currentChatMetadata.title}"? This action cannot be undone.`,
+      okText: 'Delete',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          await overseer.deleteChat(selectedChatId)
+          message.success('Chat deleted successfully')
+          // The subscription callback will handle navigation back to list
+        } catch (err) {
+          console.error('Failed to delete chat:', err)
+          message.error('Failed to delete chat')
+        }
+      }
+    })
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Chat list or new chat prompt */}
@@ -409,14 +455,23 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
               )}
               {isAgentActive && <Spin size="small" />}
             </Space>
-            <Button
-              icon={<StopOutlined />}
-              onClick={handleStop}
-              disabled={!isAgentActive}
-              danger
-            >
-              Stop
-            </Button>
+            <Space>
+              <Button
+                icon={<StopOutlined />}
+                onClick={handleStop}
+                disabled={!isAgentActive}
+                danger
+              >
+                Stop
+              </Button>
+              <Button
+                icon={<DeleteOutlined />}
+                onClick={handleDeleteChat}
+                danger
+                type="text"
+                title="Delete Chat"
+              />
+            </Space>
           </div>
 
           {/* Messages area */}

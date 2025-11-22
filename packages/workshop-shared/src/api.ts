@@ -256,6 +256,9 @@ export interface Overseer extends RpcTarget {
   // the first message.
   setChatTitle(chatId: number, title: string): Promise<void>;
 
+  // Delete a chat thread.
+  deleteChat(chatId: number): Promise<void>;
+
   // Request that any ongoing LLM session in the given chat immediately stop.
   //
   // If an LLM is running, the session is canceled subscribers will receive a metadata update
@@ -322,6 +325,9 @@ export type AiChatMessage = {
 export interface AiChatSubscriber {
   // Metadata for the given chat thread has changed, or a new chat thread was created.
   metadata(chat: AiChatMetadata): void;
+
+  // Indicates the chat thread was deleted.
+  deleted(chatId: number): void;
 
   // Adds a message to the chat.
   // TODO: Support streaming tokens into individual messages.

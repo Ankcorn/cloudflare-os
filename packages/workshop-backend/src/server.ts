@@ -888,6 +888,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
+    console.log(Object.keys(subscriber));
 
     let metaSubscriber = {
       add(record: AiChatMetadata) {
@@ -897,7 +898,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         subscriber.metadata(newRecord).catch(unsubscribe);
       },
       remove(record: AiChatMetadata): void {
-        // Never happens.
+        subscriber.deleted(record.id);
       }
     }
 
@@ -1015,6 +1016,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     meta.lastActive = this.impl.getChatTimestamp();
     meta.title = title;
     this.impl.storage.chatMeta.put(meta);
+  }
+
+  async deleteChat(chatId: number): Promise<void> {
+    this.impl.storage.chatMeta.delete(chatId);
   }
 
   async stopAgent(chatId: number): Promise<void> {
