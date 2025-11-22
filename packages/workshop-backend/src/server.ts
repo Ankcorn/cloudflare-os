@@ -102,6 +102,30 @@ document.body.appendChild(document.createTextNode(greeting));
 
 // =======================================================================================
 
+let SYSTEM_PROMPT = `
+You are a helpful coding assistant tasked with helping users write small personal applications known as "Minions". A Minion is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
+
+Minions execute on a restricted and heavily-sandboxed variant of Cloudflare Workers.
+
+A Minion has two main files: client.js and server.js.
+
+server.js defines the Minion's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Minion\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch hadler; the Minions platform automatically takes care of routing requests to the Minion. The Minion has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
+
+\`\`\`
+${DEFAULT_SERVER_CODE}
+\`\`\`
+
+client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`minion\`, which is an RPC stub pointing at the minion's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudlfare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`minion\` stub will invoke the same-samed method on the Durable Object class. A simple client.js might look like:
+
+\`\`\`
+${DEFAULT_CLIENT_CODE}
+\`\`\`
+
+Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Minion communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
+`.trim();
+
+// =======================================================================================
+
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
 type GatekeeperRecord = {
@@ -532,6 +556,7 @@ class OverseerImpl {
 
       await generateText({
         model: this.#anthropicProvider("claude-sonnet-4-5"),
+        system: SYSTEM_PROMPT,
         messages: modelMessages,
 
         // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
