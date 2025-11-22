@@ -1,0 +1,130 @@
+/* Markdown content styling */
+.markdownContent {
+  line-height: 1.6;
+}
+
+.markdownContent p {
+  margin: 0.5em 0;
+}
+
+.markdownContent p:first-child {
+  margin-top: 0;
+}
+
+.markdownContent p:last-child {
+  margin-bottom: 0;
+}
+
+.markdownContent h1,
+.markdownContent h2,
+.markdownContent h3,
+.markdownContent h4,
+.markdownContent h5,
+.markdownContent h6 {
+  margin: 1em 0 0.5em 0;
+  font-weight: 600;
+}
+
+.markdownContent h1:first-child,
+.markdownContent h2:first-child,
+.markdownContent h3:first-child,
+.markdownContent h4:first-child,
+.markdownContent h5:first-child,
+.markdownContent h6:first-child {
+  margin-top: 0;
+}
+
+.markdownContent code {
+  background-color: rgba(0, 0, 0, 0.06);
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+}
+
+.markdownContent pre {
+  background-color: #f6f8fa;
+  border-radius: 6px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.markdownContent pre code {
+  background-color: transparent;
+  padding: 0;
+  font-size: 0.875em;
+}
+
+.markdownContent ul,
+.markdownContent ol {
+  margin: 0.5em 0;
+  padding-left: 2em;
+}
+
+.markdownContent li {
+  margin: 0.25em 0;
+}
+
+.markdownContent blockquote {
+  margin: 0.5em 0;
+  padding-left: 1em;
+  border-left: 3px solid #d1d5db;
+  color: #6b7280;
+}
+
+.markdownContent a {
+  color: #1890ff;
+  text-decoration: none;
+}
+
+.markdownContent a:hover {
+  text-decoration: underline;
+}
+
+.markdownContent hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 1em 0;
+}
+
+.markdownContent table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+}
+
+.markdownContent th,
+.markdownContent td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5em;
+  text-align: left;
+}
+
+.markdownContent th {
+  background-color: #f9fafb;
+  font-weight: 600;
+}
+
+.markdownContent img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Observation message markdown styling */
+.observationMarkdown {
+  line-height: 1.6;
+}
+
+.observationMarkdown p {
+  margin: 0.25em 0;
+  display: inline;
+}
+
+.observationMarkdown code {
+  background-color: rgba(0, 0, 0, 0.08);
+  padding: 0.1em 0.3em;
+  border-radius: 2px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+}
