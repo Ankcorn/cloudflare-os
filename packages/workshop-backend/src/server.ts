@@ -1176,6 +1176,41 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(meta);
   }
 
+  async acceptProposedChanges(chatId: number): Promise<void> {
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+
+    if (meta.agentActive) {
+      throw new Error("Agent is running, wait for it to finish.");
+    }
+
+    if (meta.proposedChanges) {
+      this.impl.updateCode(meta.proposedChanges);
+      delete meta.proposedChanges;
+      meta.lastActive = this.impl.getChatTimestamp();
+      this.impl.storage.chatMeta.put(meta);
+    }
+  }
+
+  async rejectProposedChanges(chatId: number): Promise<void> {
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+
+    if (meta.agentActive) {
+      throw new Error("Agent is running, wait for it to finish.");
+    }
+
+    if (meta.proposedChanges) {
+      delete meta.proposedChanges;
+      meta.lastActive = this.impl.getChatTimestamp();
+      this.impl.storage.chatMeta.put(meta);
+    }
+  }
+
   async deleteChat(chatId: number): Promise<void> {
     this.impl.storage.chatMeta.delete(chatId);
   }

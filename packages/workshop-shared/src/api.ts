@@ -256,6 +256,10 @@ export interface Overseer extends RpcTarget {
   // the first message.
   setChatTitle(chatId: number, title: string): Promise<void>;
 
+  // Accept (merge) or reject (clear) proposed changes from a particular thread.
+  acceptProposedChanges(chatId: number): Promise<void>;
+  rejectProposedChanges(chatId: number): Promise<void>;
+
   // Delete a chat thread.
   deleteChat(chatId: number): Promise<void>;
 

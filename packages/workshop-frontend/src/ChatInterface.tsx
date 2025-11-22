@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import styles from './ChatInterface.module.css'
@@ -327,6 +327,30 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
     })
   }
 
+  // Handle accepting proposed changes
+  const handleAcceptChanges = async () => {
+    if (selectedChatId === null) return
+
+    try {
+      await overseer.acceptProposedChanges(selectedChatId)
+    } catch (err) {
+      console.error('Failed to accept changes:', err)
+      message.error('Failed to accept changes')
+    }
+  }
+
+  // Handle rejecting proposed changes
+  const handleRejectChanges = async () => {
+    if (selectedChatId === null) return
+
+    try {
+      await overseer.rejectProposedChanges(selectedChatId)
+    } catch (err) {
+      console.error('Failed to reject changes:', err)
+      message.error('Failed to reject changes')
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Chat list or new chat prompt */}
@@ -547,6 +571,36 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
               </>
             )}
           </div>
+
+          {/* Accept/Reject buttons for proposed changes */}
+          {currentChatMetadata?.proposedChanges && !isAgentActive && (
+            <div style={{
+              padding: '16px',
+              borderTop: '1px solid #f0f0f0',
+              backgroundColor: '#f0f7ff',
+              display: 'flex',
+              gap: '8px',
+              alignItems: 'center'
+            }}>
+              <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
+                The agent has proposed changes to the code
+              </span>
+              <Button
+                type="primary"
+                icon={<CheckCircleOutlined />}
+                onClick={handleAcceptChanges}
+              >
+                Accept Changes
+              </Button>
+              <Button
+                danger
+                icon={<CloseCircleOutlined />}
+                onClick={handleRejectChanges}
+              >
+                Reject Changes
+              </Button>
+            </div>
+          )}
 
           {/* Input area */}
           <div style={{ padding: '16px', borderTop: '1px solid #f0f0f0' }}>
