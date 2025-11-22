@@ -333,7 +333,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
       {hasUnsavedChanges && (
         <div
           style={{
@@ -361,7 +361,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
           onFileDelete={handleFileDelete}
           onFileRename={handleFileRename}
         />
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <CodeEditor
             filename={activeFile}
             ytext={activeFileYText}

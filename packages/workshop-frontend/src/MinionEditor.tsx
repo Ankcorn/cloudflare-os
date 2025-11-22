@@ -35,7 +35,7 @@ export default function MinionEditor() {
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizing) {
         e.preventDefault()
-        const newWidth = Math.max(200, Math.min(800, e.clientX))
+        const newWidth = Math.max(200, Math.min(window.innerWidth - 200, e.clientX))
         setSiderWidth(newWidth)
       }
     }
@@ -322,7 +322,7 @@ export default function MinionEditor() {
         </div>
 
         {/* Main Content with Tabs */}
-        <div style={{ backgroundColor: 'white', flex: 1 }}>
+        <div style={{ backgroundColor: 'white', flex: 1, minWidth: 0 }}>
           <Tabs
             activeKey={activeTab}
             onChange={setActiveTab}
