@@ -495,7 +495,14 @@ class OverseerImpl {
       // this session.
       let ydoc: Y.Doc | undefined;
       let getSessionYDoc = () => {
-        if (!ydoc) ydoc = this.buildYDoc();
+        if (!ydoc) {
+          ydoc = this.buildYDoc();
+
+          ydoc.on("updateV2", (update, origin) => {
+            // TODO: Send changes to client for approval. Don't apply instantly.
+            this.updateCode(update);
+          });
+        }
         return ydoc;
       };
 
@@ -504,6 +511,14 @@ class OverseerImpl {
         id: "claude-sonnet-4.5",
         name: "Claude",
       };
+
+      // TODO: I can't figure out how to get access to the agent's chat message *before* the tool
+      //   calls are invoked, but we want to log the tool call actions *after* sending the chat
+      //   message. For now I just store them in this buffer. This is fine as long as all tool
+      //   calls execute instantenously but once we start having tool calls that take time, it
+      //   would be better to send the chat message before the tool call starts. Perhaps the trick
+      //   is just to use streaming?
+      let observationLogs: string[] = [];
 
       await generateText({
         model: this.#anthropicProvider("claude-sonnet-4-5"),
@@ -518,10 +533,12 @@ class OverseerImpl {
             description: "List all files in the project.",
             inputSchema: z.object({}),
             execute: ({}) => {
-              console.log("listFiles");
+              console.log(`listFiles`);
+              observationLogs.push("List file names.");
               return [...getSessionYDoc().getMap<Y.Text>().keys()];
             }
           }),
+
           readFile: tool({
             description: "Read the content of a file in the project.",
             inputSchema: z.object({
@@ -532,20 +549,70 @@ class OverseerImpl {
               //   prefixes on each line. Is this worth doing?
             }),
             execute: ({filename}) => {
-              console.log("readFile:", filename);
+              console.log(`readFile: ${filename}`);
+              observationLogs.push(`Read file: ${filename}`);
               let text = getSessionYDoc().getMap<Y.Text>().get(filename);
               if (!text) {
                 throw new Error("File does not exist.");
               }
               return text.toString();
             }
-          })
+          }),
+
+          editFile: tool({
+            description: "Edit content of a file.",
+            inputSchema: z.object({
+              filename: z.string()
+                  .describe("Name of the file to edit. Use listFiles tool to enumerate files, " +
+                      "and readFile to read the existing content. You MUST read the file content " +
+                      "before attempting to edit it."),
+              textToReplace: z.string()
+                  .describe("Exact existing text which is to be replaced. This string must match " +
+                      "exactly one location in the file, or the edit will fail."),
+              replacement: z.string()
+                  .describe("Text which should be inserted, replacing the matched text."),
+              // TODO: Line number hint, to disambiguate multiple matches?
+            }),
+            execute: ({filename, textToReplace, replacement}) => {
+              console.log(`editFile: ${filename}`, textToReplace, replacement);
+
+              // TODO: This is not an observation. It needs to be approved.
+              observationLogs.push(`Edit file: ${filename}`);
+
+              // TODO: We need to verify that the agent read the file previously.
+
+              let ydoc = getSessionYDoc();
+              let text = ydoc.getMap<Y.Text>().get(filename);
+              if (!text) {
+                throw new Error("File does not exist.");
+              }
+
+              let content = text.toString();
+              let pos = content.indexOf(textToReplace);
+              if (pos < 0) {
+                throw new Error("No matching text was found in the file.");
+              }
+              if (content.indexOf(textToReplace, pos + 1) >= 0) {
+                throw new Error("Multiple matches were found. The text to match must be unique.");
+              }
+
+              ydoc.transact(tr => {
+                text.delete(pos, textToReplace.length);
+                text.insert(pos, replacement);
+              });
+            }
+          }),
         },
 
         onStepFinish: ({ text }) => {
           if (text.length > 0) {
             this.postAgentChatMessage(chatId, author, text);
           }
+
+          for (let obs of observationLogs) {
+            this.postAgentChatObservation(chatId, author, obs);
+          }
+          observationLogs = [];
         },
       });
     } catch (err) {
@@ -574,6 +641,28 @@ class OverseerImpl {
       author,
       type: "message",
       message
+    });
+
+    meta.agentActive = false;
+    meta.lastActive = timestamp;
+    this.storage.chatMeta.put(meta);
+  }
+
+  postAgentChatObservation(chatId: number, author: AiChatAuthorInfo, description: string) {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta) {
+      // Chat thread deleted?
+      return;
+    }
+
+    let timestamp = this.getChatTimestamp();
+    this.storage.chats.put({
+      chatId,
+      sequence: this.nextChatSequence(chatId),
+      timestamp,
+      author,
+      type: "observation",
+      description
     });
 
     meta.agentActive = false;
