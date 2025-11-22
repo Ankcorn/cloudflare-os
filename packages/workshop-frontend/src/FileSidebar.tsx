@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { Menu, Button, Input, Modal, message } from 'antd'
 import { FileOutlined, PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
-import { CodeFile } from '@minions/workshop-shared/api'
 
 interface FileSidebarProps {
-  files: CodeFile[]
+  files: string[]
   activeFile: string | null
   dirtyFiles: Set<string>
+  changedFiles?: Set<string>  // Files with proposed changes (for diff mode)
+  isDiffMode?: boolean         // Whether we're in diff mode
   onFileSelect: (filename: string) => void
   onFileCreate: (filename: string) => void
   onFileDelete: (filename: string) => void
@@ -17,6 +18,8 @@ export default function FileSidebar({
   files,
   activeFile,
   dirtyFiles,
+  changedFiles,
+  isDiffMode = false,
   onFileSelect,
   onFileCreate,
   onFileDelete,
@@ -32,12 +35,12 @@ export default function FileSidebar({
       message.error('Filename cannot be empty')
       return
     }
-    
-    if (files.some(f => f.name === newFileName.trim())) {
+
+    if (files.includes(newFileName.trim())) {
       message.error('A file with this name already exists')
       return
     }
-    
+
     onFileCreate(newFileName.trim())
     setNewFileName('')
     setIsCreateModalOpen(false)
@@ -48,12 +51,12 @@ export default function FileSidebar({
       message.error('Filename cannot be empty')
       return
     }
-    
-    if (files.some(f => f.name === newFileName.trim() && f.name !== renamingFile)) {
+
+    if (files.includes(newFileName.trim()) && newFileName.trim() !== renamingFile) {
       message.error('A file with this name already exists')
       return
     }
-    
+
     onFileRename(renamingFile, newFileName.trim())
     setNewFileName('')
     setRenamingFile(null)
@@ -66,42 +69,57 @@ export default function FileSidebar({
     setIsRenameModalOpen(true)
   }
 
-  const menuItems = files.map(file => {
-    const isDirty = dirtyFiles.has(file.name)
-    
+  const menuItems = files.map(filename => {
+    const isDirty = dirtyFiles.has(filename)
+    const hasChanges = changedFiles?.has(filename) || false
+    const isUnchanged = isDiffMode && !hasChanges
+
     return {
-      key: file.name,
+      key: filename,
       icon: <FileOutlined />,
       label: (
-        <div 
-          style={{ 
-            display: 'flex', 
-            justifyContent: 'space-between', 
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
             width: '100%',
-            backgroundColor: isDirty ? 'rgba(255, 77, 79, 0.1)' : 'transparent',
+            backgroundColor: isDirty
+              ? 'rgba(255, 77, 79, 0.1)'
+              : hasChanges
+                ? 'rgba(24, 144, 255, 0.1)'
+                : 'transparent',
             borderRadius: '4px',
-            padding: isDirty ? '2px 4px' : '0'
+            padding: (isDirty || hasChanges) ? '2px 4px' : '0',
+            opacity: isUnchanged ? 0.4 : 1
           }}
           onContextMenu={(e) => {
             e.preventDefault()
             e.stopPropagation()
           }}
         >
-          <span 
-            style={{ 
-              flex: 1, 
+          <span
+            style={{
+              flex: 1,
               cursor: 'pointer',
-              color: isDirty ? '#ff4d4f' : 'inherit'
+              color: isDirty
+                ? '#ff4d4f'
+                : hasChanges
+                  ? '#1890ff'
+                  : 'inherit'
             }}
-            onClick={() => onFileSelect(file.name)}
-            title={isDirty ? 'File has unsaved changes' : ''}
+            onClick={() => onFileSelect(filename)}
+            title={isDirty
+              ? 'File has unsaved changes'
+              : hasChanges
+                ? 'File has proposed changes'
+                : ''}
           >
-            {file.name}
+            {filename}
           </span>
-        <div 
-          style={{ 
-            display: 'flex', 
+        <div
+          style={{
+            display: 'flex',
             gap: 4,
             opacity: 0.6
           }}
@@ -113,11 +131,11 @@ export default function FileSidebar({
             icon={<EditOutlined />}
             onClick={(e) => {
               e.stopPropagation()
-              startRename(file.name)
+              startRename(filename)
             }}
-            style={{ 
-              width: 20, 
-              height: 20, 
+            style={{
+              width: 20,
+              height: 20,
               minWidth: 'unset',
               fontSize: '10px'
             }}
@@ -135,15 +153,15 @@ export default function FileSidebar({
               }
               Modal.confirm({
                 title: 'Delete File',
-                content: `Are you sure you want to delete "${file.name}"?`,
+                content: `Are you sure you want to delete "${filename}"?`,
                 okText: 'Delete',
                 okType: 'danger',
-                onOk: () => onFileDelete(file.name)
+                onOk: () => onFileDelete(filename)
               })
             }}
-            style={{ 
-              width: 20, 
-              height: 20, 
+            style={{
+              width: 20,
+              height: 20,
               minWidth: 'unset',
               fontSize: '10px'
             }}

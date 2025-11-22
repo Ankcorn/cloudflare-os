@@ -16,6 +16,7 @@ const { Text, Title } = Typography
 
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
+  onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -25,7 +26,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-export default function ChatInterface({ overseer }: ChatInterfaceProps) {
+export default function ChatInterface({ overseer, onProposedChangesChange }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -86,6 +87,11 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
   useEffect(() => {
     selectedChatIdRef.current = selectedChatId
   }, [selectedChatId])
+
+  // Notify parent when proposed changes change for the selected chat
+  useEffect(() => {
+    onProposedChangesChange?.(currentChatMetadata?.proposedChanges)
+  }, [currentChatMetadata?.proposedChanges, onProposedChangesChange])
 
   // Create stable subscriber implementation using useRef to hold the implementation
   const subscriberRef = useRef<AiChatSubscriber>({

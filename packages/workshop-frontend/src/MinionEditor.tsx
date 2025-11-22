@@ -30,6 +30,7 @@ export default function MinionEditor() {
   const [isResizing, setIsResizing] = useState(false)
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
   const [activeTab, setActiveTab] = useState('code')
+  const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -274,7 +275,10 @@ export default function MinionEditor() {
           }}
         >
           {overseer ? (
-            <ChatInterface overseer={overseer.stub} />
+            <ChatInterface
+              overseer={overseer.stub}
+              onProposedChangesChange={setProposedChanges}
+            />
           ) : null}
         </div>
 
@@ -337,6 +341,7 @@ export default function MinionEditor() {
                     overseer={overseer.stub}
                     height="calc(100vh - 64px - 46px)"
                     onCodeChange={handleCodeChange}
+                    proposedChanges={proposedChanges}
                   />
                 ) : null
               },

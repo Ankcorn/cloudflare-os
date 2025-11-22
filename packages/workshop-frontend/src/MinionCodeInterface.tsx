@@ -5,6 +5,7 @@ import { RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
 import CodeEditor from './CodeEditor'
+import CodeDiffEditor from './CodeDiffEditor'
 
 // RpcTarget implementation for receiving code updates from the server
 class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
@@ -12,6 +13,7 @@ class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
 
   constructor(
     private ydoc: Y.Doc,
+    private modifiedYdocRef: React.MutableRefObject<Y.Doc | null>,
     private onReady: () => void,
     private onVersionUpdate: (version: number) => void
   ) {
@@ -24,6 +26,12 @@ class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
     // Apply the Yjs update to our local document
     // Mark origin as 'server' so we don't echo it back
     Y.applyUpdateV2(this.ydoc, up.update, 'server')
+
+    // Also apply to the modified doc if it exists (diff mode)
+    // This ensures concurrent changes are reflected in both views
+    if (this.modifiedYdocRef.current) {
+      Y.applyUpdateV2(this.modifiedYdocRef.current, up.update, 'server')
+    }
 
     // Update version and pass the update to be applied to server shadow doc
     this.onVersionUpdate(up.version)
@@ -46,9 +54,10 @@ interface MinionCodeInterfaceProps {
   overseer: RpcStub<Overseer>
   height?: string | number
   onCodeChange?: () => void
+  proposedChanges?: Uint8Array
 }
 
-export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange }: MinionCodeInterfaceProps) {
+export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges }: MinionCodeInterfaceProps) {
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))
@@ -68,6 +77,11 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
   const [isReady, setIsReady] = useState(false)
   const [loading, setLoading] = useState(true)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+
+  // Diff mode state - modified Yjs document with proposed changes applied
+  const modifiedYdocRef = useRef<Y.Doc | null>(null)
+  const modifiedFilesMapRef = useRef<Y.Map<Y.Text> | null>(null)
+  const [changedFiles, setChangedFiles] = useState<Set<string>>(new Set())
 
   // Keep a ref to the current overseer so operations always use the latest stub
   const currentOverseerRef = useRef(overseer)
@@ -107,6 +121,61 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
       filesMap.unobserve(observer)
     }
   }, []) // Only run once on mount
+
+  // Build modified Yjs document when proposedChanges is present
+  useEffect(() => {
+    if (!proposedChanges) {
+      // No proposed changes - clear diff mode
+      modifiedYdocRef.current = null
+      modifiedFilesMapRef.current = null
+      setChangedFiles(new Set())
+      return
+    }
+
+    // Create a new Y.Doc and apply current state + proposed changes
+    const modifiedDoc = new Y.Doc()
+
+    // First, encode the current state
+    const currentState = Y.encodeStateAsUpdateV2(ydocRef.current)
+
+    // Apply current state to the modified doc
+    Y.applyUpdateV2(modifiedDoc, currentState)
+
+    // Apply the proposed changes
+    Y.applyUpdateV2(modifiedDoc, proposedChanges)
+
+    modifiedYdocRef.current = modifiedDoc
+    modifiedFilesMapRef.current = modifiedDoc.getMap<Y.Text>('')
+
+    // Compute which files have changed
+    const originalMap = filesMapRef.current
+    const modifiedMap = modifiedFilesMapRef.current
+    const changed = new Set<string>()
+
+    // Check all files in both original and modified
+    const allFiles = new Set([
+      ...Array.from(originalMap.keys()),
+      ...Array.from(modifiedMap.keys())
+    ])
+
+    for (const filename of allFiles) {
+      const originalText = originalMap.get(filename)?.toString() || ''
+      const modifiedText = modifiedMap.get(filename)?.toString() || ''
+
+      if (originalText !== modifiedText) {
+        changed.add(filename)
+      }
+    }
+
+    setChangedFiles(changed)
+
+    // Auto-select the first changed file when entering diff mode,
+    // but only if the currently selected file has no changes
+    if (changed.size > 0 && (!activeFile || !changed.has(activeFile))) {
+      const sortedChanged = Array.from(changed).sort()
+      setActiveFile(sortedChanged[0])
+    }
+  }, [proposedChanges, activeFile])
 
   // Helper to send updates to server based on what it's missing
   // Uses a loop to ensure all changes get sent, with only one send in flight at a time
@@ -162,6 +231,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
 
     const subscriberImpl = new CodeSubscriberImpl(
       ydoc,
+      modifiedYdocRef,
       () => {
         setIsReady(true)
         isReadyRef.current = true
@@ -313,8 +383,16 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
     message.success(`Renamed file: ${oldName} → ${newName}`)
   }
 
-  // Get the Y.Text for the active file
+  // Get the Y.Text for the active file (original version)
   const activeFileYText = activeFile ? filesMapRef.current.get(activeFile) || null : null
+
+  // Get the modified Y.Text when in diff mode
+  const activeFileModifiedYText = activeFile && modifiedFilesMapRef.current
+    ? modifiedFilesMapRef.current.get(activeFile) || null
+    : null
+
+  // Determine if we're in diff mode
+  const isDiffMode = proposedChanges !== undefined && modifiedYdocRef.current !== null
 
   if (loading) {
     return (
@@ -353,21 +431,32 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
       )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <FileSidebar
-          files={fileNames.map(name => ({ name, content: '' }))}
+          files={fileNames}
           activeFile={activeFile}
           dirtyFiles={new Set()}
+          changedFiles={changedFiles}
+          isDiffMode={isDiffMode}
           onFileSelect={handleFileSelect}
           onFileCreate={handleFileCreate}
           onFileDelete={handleFileDelete}
           onFileRename={handleFileRename}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <CodeEditor
-            filename={activeFile}
-            ytext={activeFileYText}
-            isReady={isReady}
-            height="100%"
-          />
+          {isDiffMode ? (
+            <CodeDiffEditor
+              filename={activeFile}
+              originalYText={activeFileYText}
+              modifiedYText={activeFileModifiedYText}
+              height="100%"
+            />
+          ) : (
+            <CodeEditor
+              filename={activeFile}
+              ytext={activeFileYText}
+              isReady={isReady}
+              height="100%"
+            />
+          )}
         </div>
       </div>
     </div>

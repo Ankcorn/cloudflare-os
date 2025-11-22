@@ -279,6 +279,10 @@ export type AiChatMetadata = {
 
   // Is an LLM currently actively responding to this chat?
   agentActive: boolean,
+
+  // In present, the agent in this chat is currently proposing some changes which have not yet been
+  // accepted. The changes are represented as a Yjs update (V2 format).
+  proposedChanges?: Uint8Array,
 };
 
 export type AiChatAuthorInfo = {

@@ -463,8 +463,14 @@ class OverseerImpl {
     };
   }
 
-  async startAgent(chatId: number): Promise<void> {
+  async startAgent(chatId: number, startingMeta: AiChatMetadata): Promise<void> {
+    let changes: Uint8Array[] = [];
+
     try {
+      if (startingMeta.proposedChanges) {
+        changes.push(startingMeta.proposedChanges);
+      }
+
       let modelMessages: ModelMessage[] = [];
 
       for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
@@ -496,11 +502,15 @@ class OverseerImpl {
       let ydoc: Y.Doc | undefined;
       let getSessionYDoc = () => {
         if (!ydoc) {
+          // TODO: Should we stick to a consistent starting code version, so that the user can
+          //   make edits concurrently without disrupting the AI?
           ydoc = this.buildYDoc();
+          for (let change of changes) {
+            Y.applyUpdateV2(ydoc, change);
+          }
 
           ydoc.on("updateV2", (update, origin) => {
-            // TODO: Send changes to client for approval. Don't apply instantly.
-            this.updateCode(update);
+            changes.push(update);
           });
         }
         return ydoc;
@@ -623,6 +633,18 @@ class OverseerImpl {
       };
       let message = err instanceof Error ? (err.stack || err.message) : `${err}`;
       this.postAgentChatMessage(chatId, author, message);
+    } finally {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta) {
+        meta.agentActive = false;
+        meta.lastActive = this.getChatTimestamp();
+        if (changes.length > 0) {
+          meta.proposedChanges = Y.mergeUpdatesV2(changes);
+        } else if ('proposedChanges' in meta) {
+          delete meta.proposedChanges;
+        }
+        this.storage.chatMeta.put(meta);
+      }
     }
   }
 
@@ -642,10 +664,6 @@ class OverseerImpl {
       type: "message",
       message
     });
-
-    meta.agentActive = false;
-    meta.lastActive = timestamp;
-    this.storage.chatMeta.put(meta);
   }
 
   postAgentChatObservation(chatId: number, author: AiChatAuthorInfo, description: string) {
@@ -664,10 +682,6 @@ class OverseerImpl {
       type: "observation",
       description
     });
-
-    meta.agentActive = false;
-    meta.lastActive = timestamp;
-    this.storage.chatMeta.put(meta);
   }
 
   async generateTitle(chatId: number, initialMessage: string): Promise<void> {
@@ -1099,13 +1113,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string): Promise<number> {
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
-    this.impl.storage.chatMeta.put({
+    let meta = {
       id: chatId,
       title: "New Chat",   // filled in later by AI
       started: timestamp,
       lastActive: timestamp,
       agentActive: true,
-    });
+    };
+    this.impl.storage.chatMeta.put(meta);
 
     this.impl.storage.chats.put({
       chatId,
@@ -1118,7 +1133,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
 
     // Fire off the agent (asynchronously).
-    this.impl.startAgent(chatId);
+    this.impl.startAgent(chatId, meta);
 
     // Also fire off a second LLM call to generate a title based on the first message.
     this.impl.generateTitle(chatId, initialMessage);
@@ -1147,7 +1162,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
 
     if (startAgent) {
-      this.impl.startAgent(chatId);
+      this.impl.startAgent(chatId, meta);
     }
   }
 
