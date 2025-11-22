@@ -1,5 +1,5 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChat, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
@@ -867,6 +867,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`Action is not pending: ${id}`);
     }
 
+    if (action.type !== "action") {
+      throw new Error(`Can't reject an observation: ${id}`);
+    }
+
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
     // TODO: Store `revertInfo`.
@@ -1052,8 +1056,6 @@ class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClien
   }
 
   async openSession(): Promise<Session> {
-    let description = await this.facet.describe();
-
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id));
   }
 }
