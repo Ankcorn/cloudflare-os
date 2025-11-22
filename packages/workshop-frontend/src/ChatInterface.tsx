@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
+import ReactMarkdown from 'react-markdown'
+import styles from './ChatInterface.module.css'
 import {
   Overseer,
   AiChatMetadata,
@@ -495,7 +497,8 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
                       padding: '16px 24px',
                       backgroundColor: msg.type === 'message' && msg.author.type === 'user'
                         ? '#f5f5f5'
-                        : 'white'
+                        : 'white',
+                      borderBottom: '1px solid #e8e8e8'
                     }}
                   >
                     {msg.type === 'message' ? (
@@ -504,9 +507,11 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
                           <Text strong style={{ fontSize: '13px' }}>
                             {msg.author.name}
                           </Text>
-                          <Text style={{ whiteSpace: 'pre-wrap', fontSize: '14px' }}>
-                            {msg.message}
-                          </Text>
+                          <div style={{ fontSize: '14px' }} className={styles.markdownContent}>
+                            <ReactMarkdown skipHtml={true}>
+                              {msg.message}
+                            </ReactMarkdown>
+                          </div>
                           <Text type="secondary" style={{ fontSize: '11px' }}>
                             {msg.timestamp.toLocaleTimeString()}
                           </Text>
@@ -515,16 +520,19 @@ export default function ChatInterface({ overseer }: ChatInterfaceProps) {
                     ) : (
                       // Observation message
                       <div style={{ maxWidth: '800px', margin: '0 auto' }}>
-                        <Text
-                          type="secondary"
+                        <div
                           style={{
                             fontSize: '12px',
                             fontStyle: 'italic',
-                            opacity: 0.6
+                            opacity: 0.6,
+                            color: 'rgba(0, 0, 0, 0.45)'
                           }}
+                          className={styles.observationMarkdown}
                         >
-                          {msg.description}
-                        </Text>
+                          <ReactMarkdown skipHtml={true}>
+                            {msg.description}
+                          </ReactMarkdown>
+                        </div>
                       </div>
                     )}
                   </div>
