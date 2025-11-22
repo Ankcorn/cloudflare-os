@@ -568,7 +568,6 @@ class OverseerImpl {
             description: "List all files in the project.",
             inputSchema: z.object({}),
             execute: ({}) => {
-              console.log(`listFiles`);
               observationLogs.push("List file names.");
               return [...getSessionYDoc().getMap<Y.Text>().keys()];
             }
@@ -584,7 +583,6 @@ class OverseerImpl {
               //   prefixes on each line. Is this worth doing?
             }),
             execute: ({filename}) => {
-              console.log(`readFile: ${filename}`);
               observationLogs.push(`Read file: ${filename}`);
               let text = getSessionYDoc().getMap<Y.Text>().get(filename);
               if (!text) {
@@ -609,8 +607,6 @@ class OverseerImpl {
               // TODO: Line number hint, to disambiguate multiple matches?
             }),
             execute: ({filename, textToReplace, replacement}) => {
-              console.log(`editFile: ${filename}`, textToReplace, replacement);
-
               // TODO: This is not an observation. It needs to be approved.
               observationLogs.push(`Edit file: ${filename}`);
 
