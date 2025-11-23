@@ -31,6 +31,7 @@ export default function MinionEditor() {
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
   const [activeTab, setActiveTab] = useState('code')
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
+  const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -149,6 +150,15 @@ export default function MinionEditor() {
 
   const handleCodeChange = () => {
     setUiReloadTrigger(prev => prev + 1)
+  }
+
+  const handleFileEdited = (filename: string) => {
+    // Switch to code tab if not already there
+    if (activeTab !== 'code') {
+      setActiveTab('code')
+    }
+    // Set the file to select
+    setFileToSelect(filename)
   }
 
   const handleDelete = () => {
@@ -278,6 +288,7 @@ export default function MinionEditor() {
             <ChatInterface
               overseer={overseer.stub}
               onProposedChangesChange={setProposedChanges}
+              onFileEdited={handleFileEdited}
             />
           ) : null}
         </div>
@@ -342,6 +353,7 @@ export default function MinionEditor() {
                     height="calc(100vh - 64px - 46px)"
                     onCodeChange={handleCodeChange}
                     proposedChanges={proposedChanges}
+                    fileToSelect={fileToSelect}
                   />
                 ) : null
               },

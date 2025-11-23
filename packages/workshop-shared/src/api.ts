@@ -256,9 +256,8 @@ export interface Overseer extends RpcTarget {
   // the first message.
   setChatTitle(chatId: number, title: string): Promise<void>;
 
-  // Accept (merge) or reject (clear) proposed changes from a particular thread.
+  // Accept (merge) all proposed changes so far from a particular thread.
   acceptProposedChanges(chatId: number): Promise<void>;
-  rejectProposedChanges(chatId: number): Promise<void>;
 
   // Delete a chat thread.
   deleteChat(chatId: number): Promise<void>;
@@ -284,9 +283,8 @@ export type AiChatMetadata = {
   // Is an LLM currently actively responding to this chat?
   agentActive: boolean,
 
-  // In present, the agent in this chat is currently proposing some changes which have not yet been
-  // accepted. The changes are represented as a Yjs update (V2 format).
-  proposedChanges?: Uint8Array,
+  // If true, this chat thread has proposed changes which have not been accepted yet.
+  hasProposedChanges?: boolean;
 };
 
 export type AiChatAuthorInfo = {
@@ -312,19 +310,47 @@ export type AiChatMessage = {
   // A regular chat message.
   type: "message";
   message: string;
+
+  // Messages from an AI agent can invoke tools.
+  toolCalls?: AiToolCall[];
 } | {
-  // AI observed something local to the minion, e.g. it read the code, looked at the list of
-  // bindings, requested type information about a binding, etc. This can be shown in the log
-  // to hint to the user what the AI is up to, or it can be omitted from display.
-  //
-  // This does NOT include invoking a binding.
-  type: "observation";
+  // Represents changes made to the code by an agent tool call or by a collaborating user as part
+  // of a chat. These changes are provisional until they are accepted.
+  type: "changes";
+  update: Uint8Array;
+})
+
+// Describes a tool call performed by an AI agent as part of a message.
+export type AiToolCall = {
+  // ID of the original tool call, useful to reproduce the model messages.
+  toolCallId: string;
+
+  // Basic human-readable description to place in the log.
   description: string;
+
+  // If present, this tool observed the code at the given version number.
+  //
+  // Note that generally once the agent observes code at a particular version, the server tries
+  // to stay at that version for the rest of the thread, to avoid confusing the agent.
+  observedCodeVersion?: number;
+} & ({
+  toolName: "listFiles";
+  input: {}
+  observedCodeVersion: number;
+} | {
+  toolName: "readFile";
+  input: {filename: string};
+  observedCodeVersion: number;
+} | {
+  toolName: "editFile";
+  input: {
+    filename: string;
+    textToReplace: string;
+    replacement: string;
+  };
 });
 
-// TODO: Extend AiChatMessage to propose code edits.
-
-// TODO: Extend AiChatMessage for code-mode tool calls.
+// TODO: Extend AiToolCall for code-mode tool calls.
 // - Includes inline audit logs from the action.
 // - Actions can be approved or rejected inline.
 

@@ -55,9 +55,10 @@ interface MinionCodeInterfaceProps {
   height?: string | number
   onCodeChange?: () => void
   proposedChanges?: Uint8Array
+  fileToSelect?: string
 }
 
-export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges }: MinionCodeInterfaceProps) {
+export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect }: MinionCodeInterfaceProps) {
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))
@@ -122,6 +123,13 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
     }
   }, []) // Only run once on mount
 
+  // Select file when requested from outside
+  useEffect(() => {
+    if (fileToSelect && filesMapRef.current.has(fileToSelect)) {
+      setActiveFile(fileToSelect)
+    }
+  }, [fileToSelect])
+
   // Build modified Yjs document when proposedChanges is present
   useEffect(() => {
     if (!proposedChanges) {
@@ -168,14 +176,7 @@ export default function MinionCodeInterface({ overseer, height = '100%', onCodeC
     }
 
     setChangedFiles(changed)
-
-    // Auto-select the first changed file when entering diff mode,
-    // but only if the currently selected file has no changes
-    if (changed.size > 0 && (!activeFile || !changed.has(activeFile))) {
-      const sortedChanged = Array.from(changed).sort()
-      setActiveFile(sortedChanged[0])
-    }
-  }, [proposedChanges, activeFile])
+  }, [proposedChanges])
 
   // Helper to send updates to server based on what it's missing
   // Uses a loop to ensure all changes get sent, with only one send in flight at a time

@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
+import * as Y from 'yjs'
 import styles from './ChatInterface.module.css'
 import {
   Overseer,
@@ -17,6 +18,7 @@ const { Text, Title } = Typography
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
+  onFileEdited?: (filename: string) => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -26,7 +28,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-export default function ChatInterface({ overseer, onProposedChangesChange }: ChatInterfaceProps) {
+export default function ChatInterface({ overseer, onProposedChangesChange, onFileEdited }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -42,6 +44,10 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
   const [, setForceUpdate] = useState(0) // Force re-render when cache updates
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
+  const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
+
+  // Track which tool calls we've already processed for file selection
+  const processedToolCallsRef = useRef<Set<string>>(new Set())
 
   // Refs for accessing current values in subscriber callbacks
   const selectedChatIdRef = useRef<number | null>(null)
@@ -88,10 +94,51 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
     selectedChatIdRef.current = selectedChatId
   }, [selectedChatId])
 
-  // Notify parent when proposed changes change for the selected chat
+  // Detect when files are edited via tool calls and notify parent
   useEffect(() => {
-    onProposedChangesChange?.(currentChatMetadata?.proposedChanges)
-  }, [currentChatMetadata?.proposedChanges, onProposedChangesChange])
+    if (!onFileEdited || selectedChatId === null) return
+
+    // Look through all messages for editFile tool calls
+    currentMessages.forEach(msg => {
+      if (msg.type === 'message' && msg.toolCalls) {
+        msg.toolCalls.forEach(toolCall => {
+          // If we haven't processed this tool call yet and it's an editFile
+          if (!processedToolCallsRef.current.has(toolCall.toolCallId) &&
+              toolCall.toolName === 'editFile') {
+            // Mark as processed
+            processedToolCallsRef.current.add(toolCall.toolCallId)
+            // Notify parent
+            onFileEdited(toolCall.input.filename)
+          }
+        })
+      }
+    })
+  }, [currentMessages, selectedChatId, onFileEdited])
+
+  // Notify parent when proposed changes change for the selected chat
+  // Aggregate all "changes" messages into a single merged update
+  useEffect(() => {
+    if (!currentChatMetadata?.hasProposedChanges) {
+      onProposedChangesChange?.(undefined)
+      return
+    }
+
+    // Find all messages with type: "changes"
+    const changeMessages = currentMessages.filter(
+      (msg): msg is AiChatMessage & { type: "changes" } => msg.type === "changes"
+    )
+
+    if (changeMessages.length === 0) {
+      onProposedChangesChange?.(undefined)
+      return
+    }
+
+    // Merge all the updates into a single update
+    const updates = changeMessages.map(msg => msg.update)
+    const mergedUpdate = updates.length === 1 ? updates[0] : Y.mergeUpdatesV2(updates)
+
+    onProposedChangesChange?.(mergedUpdate)
+  }, [currentChatMetadata?.hasProposedChanges, currentMessages, onProposedChangesChange])
 
   // Create stable subscriber implementation using useRef to hold the implementation
   const subscriberRef = useRef<AiChatSubscriber>({
@@ -194,6 +241,8 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
   // Load chat history when selecting a chat
   const selectChat = async (chatId: number) => {
     setSelectedChatId(chatId)
+    setExpandedToolCalls(new Set())
+    processedToolCallsRef.current = new Set()
 
     // If we don't have messages for this chat yet, load them
     if (!cacheRef.current.messages.has(chatId)) {
@@ -272,6 +321,8 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
     setSelectedChatId(null)
     setInputValue('')
     setIsEditingTitle(false)
+    setExpandedToolCalls(new Set())
+    processedToolCallsRef.current = new Set()
   }
 
   // Handle saving chat title
@@ -339,16 +390,17 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
     }
   }
 
-  // Handle rejecting proposed changes
-  const handleRejectChanges = async () => {
-    if (selectedChatId === null) return
-
-    try {
-      await overseer.rejectProposedChanges(selectedChatId)
-    } catch (err) {
-      console.error('Failed to reject changes:', err)
-      message.error('Failed to reject changes')
-    }
+  // Toggle tool call expansion
+  const toggleToolCallExpansion = (toolCallId: string) => {
+    setExpandedToolCalls(prev => {
+      const next = new Set(prev)
+      if (next.has(toolCallId)) {
+        next.delete(toolCallId)
+      } else {
+        next.add(toolCallId)
+      }
+      return next
+    })
   }
 
   return (
@@ -542,29 +594,90 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
                               {msg.message}
                             </ReactMarkdown>
                           </div>
+                          {/* Render tool calls if present */}
+                          {msg.toolCalls && msg.toolCalls.length > 0 && (
+                            <div style={{ marginTop: '8px' }}>
+                              {msg.toolCalls.map((toolCall, tcIdx) => {
+                                const isExpanded = expandedToolCalls.has(toolCall.toolCallId)
+                                return (
+                                  <div
+                                    key={`${msg.chatId}-${msg.sequence}-tool-${tcIdx}`}
+                                    onClick={() => toggleToolCallExpansion(toolCall.toolCallId)}
+                                    style={{
+                                      fontSize: '12px',
+                                      padding: '8px 12px',
+                                      backgroundColor: '#f9f9f9',
+                                      border: '1px solid #e8e8e8',
+                                      borderRadius: '4px',
+                                      marginBottom: '4px',
+                                      fontFamily: 'monospace',
+                                      cursor: 'pointer',
+                                      transition: 'background-color 0.2s'
+                                    }}
+                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f0f0f0'}
+                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#f9f9f9'}
+                                  >
+                                    <div style={{ color: 'rgba(0, 0, 0, 0.65)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                      <span style={{ fontSize: '10px' }}>{isExpanded ? '▼' : '▶'}</span>
+                                      <span style={{ fontWeight: 'bold' }}>{toolCall.toolName}</span>
+                                      {toolCall.toolName === 'readFile' && (
+                                        <span style={{ marginLeft: '4px' }}>
+                                          {toolCall.input.filename}
+                                        </span>
+                                      )}
+                                      {toolCall.toolName === 'editFile' && (
+                                        <span style={{ marginLeft: '4px' }}>
+                                          {toolCall.input.filename}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {isExpanded && (
+                                      <pre style={{
+                                        marginTop: '8px',
+                                        marginBottom: 0,
+                                        padding: '8px',
+                                        backgroundColor: '#ffffff',
+                                        border: '1px solid #e8e8e8',
+                                        borderRadius: '2px',
+                                        fontSize: '11px',
+                                        overflow: 'auto',
+                                        maxHeight: '300px'
+                                      }}>
+                                        {JSON.stringify(toolCall.input, null, 2)}
+                                      </pre>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )}
                           <Text type="secondary" style={{ fontSize: '11px' }}>
                             {msg.timestamp.toLocaleTimeString()}
                           </Text>
                         </Space>
                       </div>
-                    ) : (
-                      // Observation message
+                    ) : msg.type === 'changes' ? (
+                      // Changes message
                       <div style={{ maxWidth: '800px', margin: '0 auto' }}>
                         <div
                           style={{
                             fontSize: '12px',
                             fontStyle: 'italic',
-                            opacity: 0.6,
-                            color: 'rgba(0, 0, 0, 0.45)'
+                            opacity: 0.7,
+                            color: '#1890ff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px'
                           }}
-                          className={styles.observationMarkdown}
                         >
-                          <ReactMarkdown skipHtml={true}>
-                            {msg.description}
-                          </ReactMarkdown>
+                          <span>📝</span>
+                          <span>{msg.author.name} made changes to the code</span>
+                          <Text type="secondary" style={{ fontSize: '11px', fontStyle: 'normal' }}>
+                            {msg.timestamp.toLocaleTimeString()}
+                          </Text>
                         </div>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 ))}
                 <div ref={messagesEndRef} />
@@ -572,8 +685,8 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
             )}
           </div>
 
-          {/* Accept/Reject buttons for proposed changes */}
-          {currentChatMetadata?.proposedChanges && !isAgentActive && (
+          {/* Accept button for proposed changes */}
+          {currentChatMetadata?.hasProposedChanges && !isAgentActive && (
             <div style={{
               padding: '16px',
               borderTop: '1px solid #f0f0f0',
@@ -591,13 +704,6 @@ export default function ChatInterface({ overseer, onProposedChangesChange }: Cha
                 onClick={handleAcceptChanges}
               >
                 Accept Changes
-              </Button>
-              <Button
-                danger
-                icon={<CloseCircleOutlined />}
-                onClick={handleRejectChanges}
-              >
-                Reject Changes
               </Button>
             </div>
           )}

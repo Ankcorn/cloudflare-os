@@ -1,10 +1,10 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiChatToolMessage } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
-import { generateText, ModelMessage, stepCountIs, tool } from "ai";
+import { AssistantContent, AssistantModelMessage, generateText, JSONValue, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
 import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
 import z from "zod";
 
@@ -258,9 +258,18 @@ class OverseerImpl {
   // This function in particular takes care of finding the best snapshot to start from, applying
   // that first, followed by scanning the code updates table. It also opportunistically calculates
   // and stashes some metrics on log sizes, useful to decide when to make a new snapshot.
-  replayUpdates(fromVersion: number, apply: (update: CodeUpdate) => void) {
-    let snapshot: CodeUpdate | undefined =
-        [...this.storage.snapshots.list({startAfter: fromVersion, reverse: true, limit: 1})][0];
+  //
+  // Returns the final version number.
+  replayUpdates(fromVersion: number, toVersion: number | "current",
+                apply: (update: CodeUpdate) => void): number {
+    let endConstraint = toVersion === "current" ? {} : {end: toVersion + 1};
+
+    let snapshot: CodeUpdate | undefined = [...this.storage.snapshots.list({
+      startAfter: fromVersion,
+      reverse: true,
+      limit: 1,
+      ...endConstraint
+    })][0];
 
     if (!snapshot && fromVersion === 0) {
       // We are starting from the beginning and we don't have a snapshot. But version 1 is itself
@@ -283,10 +292,13 @@ class OverseerImpl {
       snapshotSize = snapshot.update.length;
     }
 
+    let finalVersion: number = snapshot ? snapshot.version : fromVersion;
+
     let logSize: number = 0;
-    for (let update of this.storage.code.list({startAfter: fromVersion})) {
+    for (let update of this.storage.code.list({startAfter: fromVersion, ...endConstraint})) {
       apply(update);
       logSize += update.update.length;
+      finalVersion = update.version;
     }
 
     if (!this.#snapshotMetrics && (fromVersion === 0 || snapshot)) {
@@ -296,16 +308,18 @@ class OverseerImpl {
       // separate pass throught the data to build the metrics later.
       this.#snapshotMetrics = {snapshotSize, logSize};
     }
+
+    return finalVersion;
   }
 
   // Construct a `Y.Doc` for the current code version.
-  buildYDoc(): Y.Doc {
+  buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number} {
     // TODO: Use snapshots.
     let ydoc = new Y.Doc();
-    this.replayUpdates(0, (version: CodeUpdate) => {
+    version = this.replayUpdates(0, version, (version: CodeUpdate) => {
       Y.applyUpdateV2(ydoc, version.update);
     });
-    return ydoc;
+    return {ydoc, version};
   }
 
   // Apply a Yjs-encoded (V2) update to the code, incrementing the code version.
@@ -318,7 +332,7 @@ class OverseerImpl {
       this.#snapshotMetrics.logSize += update.length;
       if (this.#snapshotMetrics.logSize >
           Math.max(this.#snapshotMetrics.snapshotSize, MIN_SNAPSHOT_THRESHOLD)) {
-        let ydoc = this.buildYDoc();
+        let {ydoc} = this.buildYDoc("current");
         let snapshotUpdate = Y.encodeStateAsUpdateV2(ydoc);
         this.storage.snapshots.put({
           version,
@@ -339,7 +353,7 @@ class OverseerImpl {
 
     return this.ctx.facets.get<DurableObject>("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
-        let ydoc = this.buildYDoc();
+        let {ydoc} = this.buildYDoc("current");
 
         let modules: Record<string, string> = {};
         for (let [file, content] of ydoc.getMap<Y.Text>()) {
@@ -488,57 +502,144 @@ class OverseerImpl {
   }
 
   async startAgent(chatId: number, startingMeta: AiChatMetadata): Promise<void> {
-    let changes: Uint8Array[] = [];
-
     try {
-      if (startingMeta.proposedChanges) {
-        changes.push(startingMeta.proposedChanges);
-      }
-
-      let modelMessages: ModelMessage[] = [];
-
-      for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
-        if (msg.type === "message") {
-          switch (msg.author.type) {
-            case "user":
-              modelMessages.push({
-                role: "user",
-                content: msg.message,
-              });
-              break;
-
-            case "agent":
-              modelMessages.push({
-                role: "assistant",
-                content: msg.message,
-              });
-              break;
-
-            default:
-              msg.author.type satisfies never;
-              break;
-          }
-        }
-      }
-
       // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
       // this session.
       let ydoc: Y.Doc | undefined;
+      let versionLock: number | undefined;
+      let capturedYdocChanges: Uint8Array[] = [];
       let getSessionYDoc = () => {
         if (!ydoc) {
           // TODO: Should we stick to a consistent starting code version, so that the user can
           //   make edits concurrently without disrupting the AI?
-          ydoc = this.buildYDoc();
-          for (let change of changes) {
-            Y.applyUpdateV2(ydoc, change);
-          }
+          let build = this.buildYDoc(versionLock === undefined ? "current" : versionLock);
+          versionLock = build.version;
+          ydoc = build.ydoc;
 
           ydoc.on("updateV2", (update, origin) => {
-            changes.push(update);
+            capturedYdocChanges.push(update);
           });
         }
         return ydoc;
       };
+
+      // Track which files have been read in this session. Edits aren't allowed before reading.
+      let filesRead = new Set<string>();
+
+      let modelMessages: ModelMessage[] = [];
+
+      for (let msg of [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})]) {
+        switch (msg.type) {
+          case "message": {
+            let modelMessage: ModelMessage;
+            switch (msg.author.type) {
+              case "user":
+                modelMessage = {
+                  role: "user",
+                  content: msg.message,
+                };
+                break;
+
+              case "agent":
+                modelMessage = {
+                  role: "assistant",
+                  content: msg.message,
+                };
+                break;
+
+              default:
+                msg.author.type satisfies never;
+                continue;
+            }
+
+            modelMessages.push(modelMessage);
+
+            if (msg.toolCalls) {
+              let modelToolCalls = msg.toolCalls.map<ToolCallPart>(toolCall => {
+                if (toolCall.observedCodeVersion !== undefined &&
+                    toolCall.observedCodeVersion !== versionLock) {
+                  if (versionLock === undefined) {
+                    versionLock = toolCall.observedCodeVersion;
+                  } else {
+                    throw new Error("observedCodeVersion version is inconsistent in chat history");
+                  }
+                }
+
+                // Recreate the tool output.
+                // TODO: Refactor so that we're not duplicating tool implementations...
+                let toolOutput: ToolResultPart["output"];
+                try {
+                  switch (toolCall.toolName) {
+                    case "listFiles":
+                      toolOutput = {
+                        type: "json",
+                        value: [...getSessionYDoc().getMap<Y.Text>().keys()],
+                      };
+                      break;
+                    case "readFile": {
+                      let text = getSessionYDoc().getMap<Y.Text>().get(toolCall.input.filename);
+                      if (!text) {
+                        throw new Error("File does not exist.");
+                      }
+                      toolOutput = {
+                        type: "text",
+                        value: text.toString()
+                      };
+                      filesRead.add(toolCall.input.filename);
+                      break;
+                    }
+                    case "editFile":
+                      toolOutput = {
+                        type: "json",
+                        value: null,
+                      };
+                      break;
+                    default:
+                      toolCall satisfies never;
+                      throw new Error("Unknown tool.");
+                  }
+                } catch (err) {
+                  toolOutput = {type: "error-text", value: `${err}`};
+                }
+
+                modelMessages.push({
+                  role: "tool",
+                  content: [{
+                    type: "tool-result",
+                    toolName: toolCall.toolName,
+                    toolCallId: toolCall.toolCallId,
+                    output: toolOutput,
+                  }]
+                });
+
+                return {
+                  type: "tool-call",
+                  toolCallId: toolCall.toolCallId,
+                  toolName: toolCall.toolName,
+                  input: toolCall.input,
+                };
+              });
+
+              if (modelMessage.role === "assistant") {
+                if (typeof modelMessage.content === "string") {
+                  modelMessage.content = [{type: "text", text: modelMessage.content}];
+                }
+                modelMessage.content = modelMessage.content.concat(modelToolCalls);
+              }
+            }
+
+            break;
+          }
+
+          case "changes":
+            Y.applyUpdateV2(getSessionYDoc(), msg.update);
+            break;
+
+          default:
+            msg satisfies never;
+            break;
+        }
+      }
 
       let author: AiChatAuthorInfo = {
         type: "agent",
@@ -552,7 +653,9 @@ class OverseerImpl {
       //   calls execute instantenously but once we start having tool calls that take time, it
       //   would be better to send the chat message before the tool call starts. Perhaps the trick
       //   is just to use streaming?
-      let observationLogs: string[] = [];
+      let toolLogs: AiChatToolMessage[] = [];
+
+      capturedYdocChanges = [];
 
       await generateText({
         model: this.#anthropicProvider("claude-sonnet-4-5"),
@@ -567,9 +670,17 @@ class OverseerImpl {
           listFiles: tool({
             description: "List all files in the project.",
             inputSchema: z.object({}),
-            execute: ({}) => {
-              observationLogs.push("List file names.");
-              return [...getSessionYDoc().getMap<Y.Text>().keys()];
+            execute: ({}, {toolCallId}) => {
+              let result = [...getSessionYDoc().getMap<Y.Text>().keys()];
+              toolLogs.push({
+                type: "tool",
+                toolCallId,
+                description: "List file names.",
+                toolName: "listFiles",
+                input: {},
+                observedCodeVersion: versionLock!
+              });
+              return result;
             }
           }),
 
@@ -582,12 +693,20 @@ class OverseerImpl {
               // TODO: Claude Code apparently presents the code to the agent with line number
               //   prefixes on each line. Is this worth doing?
             }),
-            execute: ({filename}) => {
-              observationLogs.push(`Read file: ${filename}`);
+            execute: ({filename}, {toolCallId}) => {
+              toolLogs.push({
+                type: "tool",
+                toolCallId,
+                description: `Read file: ${filename}`,
+                toolName: "readFile",
+                input: {filename},
+                observedCodeVersion: versionLock!
+              });
               let text = getSessionYDoc().getMap<Y.Text>().get(filename);
               if (!text) {
                 throw new Error("File does not exist.");
               }
+              filesRead.add(filename);
               return text.toString();
             }
           }),
@@ -606,11 +725,12 @@ class OverseerImpl {
                   .describe("Text which should be inserted, replacing the matched text."),
               // TODO: Line number hint, to disambiguate multiple matches?
             }),
-            execute: ({filename, textToReplace, replacement}) => {
-              // TODO: This is not an observation. It needs to be approved.
-              observationLogs.push(`Edit file: ${filename}`);
-
+            execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
               // TODO: We need to verify that the agent read the file previously.
+
+              if (!filesRead.has(filename)) {
+                throw new Error("You must read a file before you can edit it.");
+              }
 
               let ydoc = getSessionYDoc();
               let text = ydoc.getMap<Y.Text>().get(filename);
@@ -631,19 +751,58 @@ class OverseerImpl {
                 text.delete(pos, textToReplace.length);
                 text.insert(pos, replacement);
               });
+
+              toolLogs.push({
+                type: "tool",
+                toolCallId,
+                description: `Edit file: ${filename}`,
+                toolName: "editFile",
+                input: {filename, textToReplace, replacement},
+              });
             }
           }),
         },
 
         onStepFinish: ({ text }) => {
-          if (text.length > 0) {
-            this.postAgentChatMessage(chatId, author, text);
+          let meta = this.storage.chatMeta.get(chatId);
+          if (!meta) {
+            // Chat thread deleted?
+            return;
           }
 
-          for (let obs of observationLogs) {
-            this.postAgentChatObservation(chatId, author, obs);
+          if (text.length > 0 || toolLogs.length > 0) {
+            let msg: AiChatMessage = {
+              chatId,
+              sequence: this.nextChatSequence(chatId),
+              timestamp: this.getChatTimestamp(),
+              author,
+              type: "message",
+              message: text,
+            };
+            if (toolLogs.length > 0) {
+              msg.toolCalls = toolLogs;
+              toolLogs = [];
+            }
+            this.storage.chats.put(msg);
           }
-          observationLogs = [];
+
+          if (capturedYdocChanges.length > 0) {
+            meta.hasProposedChanges = true;
+            let update = Y.mergeUpdatesV2(capturedYdocChanges);
+            capturedYdocChanges = [];
+
+            this.storage.chats.put({
+              chatId,
+              sequence: this.nextChatSequence(chatId),
+              timestamp: this.getChatTimestamp(),
+              author,
+              type: "changes",
+              update
+            });
+          }
+
+          meta.lastActive = this.getChatTimestamp();
+          this.storage.chatMeta.put(meta);
         },
       });
     } catch (err) {
@@ -659,11 +818,6 @@ class OverseerImpl {
       if (meta) {
         meta.agentActive = false;
         meta.lastActive = this.getChatTimestamp();
-        if (changes.length > 0) {
-          meta.proposedChanges = Y.mergeUpdatesV2(changes);
-        } else if ('proposedChanges' in meta) {
-          delete meta.proposedChanges;
-        }
         this.storage.chatMeta.put(meta);
       }
     }
@@ -684,24 +838,6 @@ class OverseerImpl {
       author,
       type: "message",
       message
-    });
-  }
-
-  postAgentChatObservation(chatId: number, author: AiChatAuthorInfo, description: string) {
-    let meta = this.storage.chatMeta.get(chatId);
-    if (!meta) {
-      // Chat thread deleted?
-      return;
-    }
-
-    let timestamp = this.getChatTimestamp();
-    this.storage.chats.put({
-      chatId,
-      sequence: this.nextChatSequence(chatId),
-      timestamp,
-      author,
-      type: "observation",
-      description
     });
   }
 
@@ -882,7 +1018,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
 
-    this.impl.replayUpdates(fromVersion, (version: CodeUpdate) => {
+    this.impl.replayUpdates(fromVersion, "current", (version: CodeUpdate) => {
       // TODO: Do some flow control here.
       subscriber.update(version).catch(unsubscribe);
     });
@@ -912,7 +1048,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async getUiBundle(): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
-    let ydoc = this.impl.buildYDoc();
+    let {ydoc} = this.impl.buildYDoc("current");
     let file = ydoc.getMap<Y.Text>().get("client.js");
     if (file) {
       return { jsCode: file.toString() };
@@ -1207,26 +1343,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Agent is running, wait for it to finish.");
     }
 
-    if (meta.proposedChanges) {
-      this.impl.updateCode(meta.proposedChanges);
-      delete meta.proposedChanges;
-      meta.lastActive = this.impl.getChatTimestamp();
-      this.impl.storage.chatMeta.put(meta);
-    }
-  }
+    if (meta.hasProposedChanges) {
+      let updates: Uint8Array[] = [];
+      for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+        if (msg.type === "changes") {
+          updates.push(msg.update);
+        }
+      }
 
-  async rejectProposedChanges(chatId: number): Promise<void> {
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
-    }
-
-    if (meta.agentActive) {
-      throw new Error("Agent is running, wait for it to finish.");
-    }
-
-    if (meta.proposedChanges) {
-      delete meta.proposedChanges;
+      this.impl.updateCode(Y.mergeUpdatesV2(updates));
+      delete meta.hasProposedChanges;
       meta.lastActive = this.impl.getChatTimestamp();
       this.impl.storage.chatMeta.put(meta);
     }
