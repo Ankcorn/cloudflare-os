@@ -1,7 +1,8 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, PermissionSet, ApprovalQueue, ResourceSchema } from '@minions/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue } from '@minions/workshop-shared/gatekeeper';
 import { getAccessToken, GmailApi, GoogleAccessToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
+import TYPES_CODE from "./types.txt";
 
 // =======================================================================================
 
@@ -76,7 +77,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async newUser(): Promise<Fetcher<GatekeeperUser>> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
-    let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(userObjectId);
     let props: GatekeeperUserImplProps = { userObjectId: userObjectId.toString() };
     return this.ctx.exports.GatekeeperUserImpl({props});
   }
@@ -86,7 +86,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return this.env.TYPES_CODE;
+    return TYPES_CODE;
   }
 }
 

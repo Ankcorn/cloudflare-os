@@ -3,9 +3,6 @@
   "main": "src/google.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["experimental", "enable_ctx_exports"],
-  "text_blobs": {
-    "TYPES_CODE": "src/types.d.ts"
-  },
   "migrations": [
     {
       "tag": "v0",
