@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
@@ -41,7 +41,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   const [inputValue, setInputValue] = useState('')
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
-  const [, setForceUpdate] = useState(0) // Force re-render when cache updates
+  const [updateCounter, setUpdateCounter] = useState(0) // Force re-render when cache updates
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
@@ -59,16 +59,18 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Force a re-render when cache is updated
-  const forceUpdate = () => setForceUpdate(prev => prev + 1)
+  const forceUpdate = () => setUpdateCounter(prev => prev + 1)
 
   // Get sorted list of chats from cache
   const chatList = Array.from(cacheRef.current.chats.values())
     .sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime())
 
   // Get messages for selected chat (filter out any undefined slots in sparse array)
-  const currentMessages = selectedChatId !== null
-    ? (cacheRef.current.messages.get(selectedChatId) || []).filter(msg => msg !== undefined)
-    : []
+  // Memoized to prevent creating new array on every render
+  const currentMessages = useMemo(() => {
+    if (selectedChatId === null) return []
+    return (cacheRef.current.messages.get(selectedChatId) || []).filter(msg => msg !== undefined)
+  }, [selectedChatId, updateCounter])
 
   // Get metadata for selected chat
   const currentChatMetadata = selectedChatId !== null
