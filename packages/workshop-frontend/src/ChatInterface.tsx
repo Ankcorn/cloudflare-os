@@ -15,6 +15,51 @@ import {
 const { TextArea } = Input
 const { Text, Title } = Typography
 
+// Chat input component with internal state to prevent parent re-renders while typing
+const ChatInput = ({ onSend, isAgentActive }: {
+  onSend: (message: string) => void
+  isAgentActive: boolean
+}) => {
+  const [inputValue, setInputValue] = useState('')
+
+  const handleSend = () => {
+    if (!inputValue.trim()) return
+    onSend(inputValue.trim())
+    setInputValue('')
+  }
+
+  return (
+    <div style={{ padding: '16px', borderTop: '1px solid #f0f0f0' }}>
+      <Space.Compact style={{ width: '100%' }}>
+        <TextArea
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          placeholder={
+            isAgentActive
+              ? 'Waiting for agent to finish...'
+              : 'Type your message...'
+          }
+          autoSize={{ minRows: 1, maxRows: 4 }}
+          onPressEnter={(e) => {
+            if (e.shiftKey) return
+            e.preventDefault()
+            if (!isAgentActive) handleSend()
+          }}
+          style={{ flex: 1 }}
+        />
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          onClick={handleSend}
+          disabled={!inputValue.trim() || isAgentActive}
+        >
+          Send
+        </Button>
+      </Space.Compact>
+    </div>
+  )
+}
+
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
@@ -285,11 +330,15 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   }
 
   // Handle sending a message
-  const handleSend = async () => {
-    if (!inputValue.trim()) return
+  const handleSend = async (messageText?: string) => {
+    // If messageText is provided (from ChatInput), use it; otherwise use inputValue (from new chat form)
+    const message = messageText?.trim() || inputValue.trim()
+    if (!message) return
 
-    const message = inputValue.trim()
-    setInputValue('')
+    // Only clear inputValue if we're using it (new chat form)
+    if (!messageText) {
+      setInputValue('')
+    }
 
     try {
       if (selectedChatId === null) {
@@ -302,8 +351,10 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       }
     } catch (err) {
       console.error('Failed to send message:', err)
-      // Restore the input on error
-      setInputValue(message)
+      // Restore the input on error (only for new chat form)
+      if (!messageText) {
+        setInputValue(message)
+      }
     }
   }
 
@@ -711,34 +762,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
           )}
 
           {/* Input area */}
-          <div style={{ padding: '16px', borderTop: '1px solid #f0f0f0' }}>
-            <Space.Compact style={{ width: '100%' }}>
-              <TextArea
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                placeholder={
-                  isAgentActive
-                    ? 'Waiting for agent to finish...'
-                    : 'Type your message...'
-                }
-                autoSize={{ minRows: 1, maxRows: 4 }}
-                onPressEnter={(e) => {
-                  if (e.shiftKey) return
-                  e.preventDefault()
-                  if (!isAgentActive) handleSend()
-                }}
-                style={{ flex: 1 }}
-              />
-              <Button
-                type="primary"
-                icon={<SendOutlined />}
-                onClick={handleSend}
-                disabled={!inputValue.trim() || isAgentActive}
-              >
-                Send
-              </Button>
-            </Space.Compact>
-          </div>
+          <ChatInput onSend={handleSend} isAgentActive={isAgentActive} />
         </>
       )}
     </div>
