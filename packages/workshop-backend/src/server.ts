@@ -122,6 +122,24 @@ ${DEFAULT_CLIENT_CODE}
 \`\`\`
 
 Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Minion communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
+
+Note that Cap'n Web is a bidirectional object capability protocol, meaning, among other things, you can pass a function over RPC, in the params or results of another function. This actually passes the function "by reference": the receiving end actually receives an RPC stub, which can be used to call back over RPC to the original function. This, of course, causes the function to become async, even if the original was synchronous.
+
+Using functions this way is a great way to implement real-time updates. The client can "subscribe" to updates, passing a callback function to the server. The server can then call the function asynchronously whenever the state changes (perhaps due to activity of a different client). This technique should be used when implementing multiplayer collaboration.
+
+WARNING: Currently, there is a bug in Cap'n Web when passing functions this way. Functions received in the parameters of an RPC call will only be callable up until the point that the original RPC returns. As a work-around, you can design subscription methods so that they do not return until the client disconnects. You can detect disconnects using the \`onRpcBroken(callback)\` method that every RPC stub has. For example:
+
+\`\`\`
+async subscribe(callback) {
+  this.subscribers.add(callback);
+  return new Promise((resolve, reject) => {
+    callback.onRpcBroken(error => {
+      this.subscribers.delete(callback);
+      reject(error);
+    });
+  });
+}
+\`\`\`
 `.trim();
 
 // =======================================================================================
@@ -685,10 +703,11 @@ class OverseerImpl {
           }),
 
           readFile: tool({
-            description: "Read the content of a file in the project.",
+            description: "Read the content of a file in the project. Note that you will be " +
+                "informed any time a file changes, so it is not necessary to read a file again " +
+                "after you have already read it once.",
             inputSchema: z.object({
-              filename: z.string()
-                  .describe("Name of the file to read. Use listFiles tool to enumerate files."),
+              filename: z.string().describe("Name of the file to read."),
               // TODO: line range?
               // TODO: Claude Code apparently presents the code to the agent with line number
               //   prefixes on each line. Is this worth doing?
@@ -712,12 +731,11 @@ class OverseerImpl {
           }),
 
           editFile: tool({
-            description: "Edit content of a file.",
+            description: "Edit content of a file. If you need to edit multiple places in a file " +
+                "or across multiple files, you should issue multiple tool calls simultanously, " +
+                "rather than in series.",
             inputSchema: z.object({
-              filename: z.string()
-                  .describe("Name of the file to edit. Use listFiles tool to enumerate files, " +
-                      "and readFile to read the existing content. You MUST read the file content " +
-                      "before attempting to edit it."),
+              filename: z.string().describe("Name of the file to edit."),
               textToReplace: z.string()
                   .describe("Exact existing text which is to be replaced. This string must match " +
                       "exactly one location in the file, or the edit will fail."),
