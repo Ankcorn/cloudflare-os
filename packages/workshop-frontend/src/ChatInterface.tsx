@@ -489,7 +489,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                 <Button
                   type="primary"
                   icon={<SendOutlined />}
-                  onClick={handleSend}
+                  onClick={() => handleSend()}
                   disabled={!inputValue.trim()}
                   block
                   size="large"
