@@ -675,9 +675,28 @@ class OverseerImpl {
 
       capturedYdocChanges = [];
 
+      // Let's include the list of files in the system prompt so that the agent doesn't have to
+      // call a tool to list files at the start of every thread.
+      // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
+      //   will have been set, and this will list the files consistently with that version.
+      //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
+      //   agent doesn't acutally read any of the files, then the version won't end up being
+      //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
+      //   we don't actually lock in a version until the first time a file is actually read -- but
+      //   in the meantime, the system prompt can theoretically change on each request, if the
+      //   files are changing. That's fine.
+      let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
+      let systemPrompt: string;
+      if (currentFiles.length == 0) {
+        systemPrompt = `${SYSTEM_PROMPT}\n\nThe project currently has no code files.`
+      } else {
+        systemPrompt = `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
+            `\n* ${currentFiles.join("\n* ")}`;
+      }
+
       await generateText({
         model: this.#anthropicProvider("claude-sonnet-4-5"),
-        system: SYSTEM_PROMPT,
+        system: systemPrompt,
         messages: modelMessages,
 
         // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
@@ -685,23 +704,6 @@ class OverseerImpl {
         stopWhen: stepCountIs(5),
 
         tools: {
-          listFiles: tool({
-            description: "List all files in the project.",
-            inputSchema: z.object({}),
-            execute: ({}, {toolCallId}) => {
-              let result = [...getSessionYDoc().getMap<Y.Text>().keys()];
-              toolLogs.push({
-                type: "tool",
-                toolCallId,
-                description: "List file names.",
-                toolName: "listFiles",
-                input: {},
-                observedCodeVersion: versionLock!
-              });
-              return result;
-            }
-          }),
-
           readFile: tool({
             description: "Read the content of a file in the project. Note that you will be " +
                 "informed any time a file changes, so it is not necessary to read a file again " +

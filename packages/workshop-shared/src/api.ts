@@ -334,10 +334,6 @@ export type AiToolCall = {
   // to stay at that version for the rest of the thread, to avoid confusing the agent.
   observedCodeVersion?: number;
 } & ({
-  toolName: "listFiles";
-  input: {}
-  observedCodeVersion: number;
-} | {
   toolName: "readFile";
   input: {filename: string};
   observedCodeVersion: number;
