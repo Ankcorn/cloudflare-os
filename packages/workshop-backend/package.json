@@ -10,19 +10,19 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.45",
+    "@ai-sdk/anthropic": "^2.0.48",
     "@ai-sdk/google": "^2.0.43",
     "@ai-sdk/openai": "^2.0.72",
     "@minions/typed-storage": "workspace:*",
     "@minions/workshop-shared": "workspace:*",
-    "ai": "^5.0.98",
+    "ai": "^5.0.101",
     "capnweb": "^0.2.0",
     "workers-ai-provider": "^2.0.0",
     "yjs": "^13.6.27",
-    "zod": "^4.1.8"
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "wrangler": "^4.47.0"
+    "wrangler": "^4.50.0"
   }
 }
