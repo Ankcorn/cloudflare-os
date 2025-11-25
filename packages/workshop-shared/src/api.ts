@@ -358,6 +358,11 @@ export type AiToolCall = {
     textToReplace: string;
     replacement: string;
   };
+} | {
+  toolName: "describeBinding";
+  input: {
+    bindingName: string;
+  };
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.

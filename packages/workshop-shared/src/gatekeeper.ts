@@ -108,6 +108,9 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // access.
   describe(): Promise<ResourceDescription>;
 
+  // Returns the same TypeScript type bundle as GatekeeperVendor.getTypeScriptTypes().
+  getTypeScriptTypes(): Promise<string>;
+
   // Get the capability representing this resource's RPC interface which will be provided to the
   // Minion.
   //

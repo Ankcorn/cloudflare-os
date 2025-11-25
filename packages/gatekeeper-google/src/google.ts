@@ -211,6 +211,10 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     };
   }
 
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue<GmailAction>>)
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());

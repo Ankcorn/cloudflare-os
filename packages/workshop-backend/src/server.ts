@@ -610,6 +610,28 @@ class OverseerImpl {
     }
   }
 
+  async describeBinding(bindingName: string): Promise<string> {
+    let gatekeeper = this.storage.gatekeepers.byBindingName.get(bindingName);
+    if (!gatekeeper) {
+      throw new Error(`No such binding: ${bindingName}`);
+    }
+
+    let facet = this.getGatekeeperFacet(gatekeeper.id);
+
+    let desc = await facet.describe();
+    let types = await facet.getTypeScriptTypes();
+
+    return `Binding: env.${bindingName}\n` +
+        `Title: ${desc.title}\n` +
+        `TypeScript type: ${desc.tsType}\n` +
+        `\n` +
+        `The binding comes with the following bundle of TypeScript type definitions:\n` +
+        `\n` +
+        `\`\`\`\n` +
+        `${types}\n` +
+        `\`\`\`\n`;
+  }
+
   async startAgent(chatId: number, chosenModelId: string): Promise<void> {
     try {
       let chosenModel = this.#models[chosenModelId];
@@ -667,7 +689,9 @@ class OverseerImpl {
             modelMessages.push(modelMessage);
 
             if (msg.toolCalls) {
-              let modelToolCalls = msg.toolCalls.map<ToolCallPart>(toolCall => {
+              let modelToolCalls: ToolCallPart[] = [];
+
+              for (let toolCall of msg.toolCalls) {
                 if (toolCall.observedCodeVersion !== undefined &&
                     toolCall.observedCodeVersion !== versionLock) {
                   if (versionLock === undefined) {
@@ -681,7 +705,9 @@ class OverseerImpl {
                 // TODO: Refactor so that we're not duplicating tool implementations...
                 let toolOutput: ToolResultPart["output"];
                 try {
-                  switch (toolCall.toolName) {
+                  if (toolCall.error) {
+                    toolOutput = {type: "error-text", value: `${toolCall.error}`};
+                  } else switch (toolCall.toolName) {
                     case "readFile": {
                       let text = getSessionYDoc().getMap<Y.Text>().get(toolCall.input.filename);
                       if (!text) {
@@ -698,6 +724,12 @@ class OverseerImpl {
                       toolOutput = {
                         type: "json",
                         value: null,
+                      };
+                      break;
+                    case "describeBinding":
+                      toolOutput = {
+                        type: "text",
+                        value: await this.describeBinding(toolCall.input.bindingName),
                       };
                       break;
                     default:
@@ -718,13 +750,13 @@ class OverseerImpl {
                   }]
                 });
 
-                return {
+                modelToolCalls.push({
                   type: "tool-call",
                   toolCallId: toolCall.toolCallId,
                   toolName: toolCall.toolName,
                   input: toolCall.input,
-                };
-              });
+                });
+              }
 
               if (modelMessage.role === "assistant") {
                 if (typeof modelMessage.content === "string") {
@@ -772,13 +804,30 @@ class OverseerImpl {
       //   in the meantime, the system prompt can theoretically change on each request, if the
       //   files are changing. That's fine.
       let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
-      let systemPrompt: string;
+      let systemPromptFiles: string;
       if (currentFiles.length == 0) {
-        systemPrompt = `${SYSTEM_PROMPT}\n\nThe project currently has no code files.`
+        systemPromptFiles = "The project currently has no code files.";
       } else {
-        systemPrompt = `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
+        systemPromptFiles =
+            `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
             `\n* ${currentFiles.join("\n* ")}`;
       }
+
+      let bindingNames: string[] = [];
+      let systemPromptBindings: string;
+      for (let gk of this.storage.gatekeepers.list()) {
+        bindingNames.push(gk.bindingName);
+      }
+      if (bindingNames.length == 0) {
+        systemPromptBindings = "The project currently has no bindings.";
+      } else {
+        systemPromptBindings =
+            `The project is configured with the following Cloudflare Workers bindings:\n` +
+            `* ${bindingNames.join("\n* ")}`
+      }
+
+      let systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
+      console.log(systemPrompt);
 
       let controller = new AbortController();
       this.#cancelSignals.set(chatId, controller);
@@ -843,8 +892,6 @@ class OverseerImpl {
               // TODO: Line number hint, to disambiguate multiple matches?
             }),
             execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
-              // TODO: We need to verify that the agent read the file previously.
-
               try {
                 if (!filesRead.has(filename)) {
                   throw new Error("You must read a file before you can edit it.");
@@ -869,6 +916,24 @@ class OverseerImpl {
                   text.delete(pos, textToReplace.length);
                   text.insert(pos, replacement);
                 });
+              } catch (error) {
+                toolCallNotes.set(toolCallId, {
+                  error: `${error}`
+                });
+                throw error;
+              }
+            }
+          }),
+
+          describeBinding: tool({
+            description: "Describe one of the Minion's bindings (members of the Cloudflare " +
+                "Workers `env` object), including TypeScript types specifying the API it offers.",
+            inputSchema: z.object({
+              name: z.string().describe("Name of the binding (a property of `env`)."),
+            }),
+            execute: async ({name}, {toolCallId}) => {
+              try {
+                return await this.describeBinding(name);
               } catch (error) {
                 toolCallNotes.set(toolCallId, {
                   error: `${error}`
