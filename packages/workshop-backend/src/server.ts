@@ -88,20 +88,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
 // =======================================================================================
 
-let DEFAULT_SERVER_CODE = `
-import { DurableObject } from "cloudflare:workers";
+let DEFAULT_SERVER_CODE = `import { DurableObject } from "cloudflare:workers";
 
 export class Minion extends DurableObject {
   greet(name) {
     return \`Hello, \${name}!\`;
   }
 }
-`.trim();
+`;
 
-let DEFAULT_CLIENT_CODE = `
-let greeting = await minion.greet("World");
+let DEFAULT_CLIENT_CODE = `let greeting = await minion.greet("World");
 document.body.appendChild(document.createTextNode(greeting));
-`.trim();
+`;
 
 // =======================================================================================
 
@@ -305,6 +303,17 @@ class OverseerImpl {
       "gpt-5.1-codex": {
         displayName: "ChatGPT 5.1 Codex",
         model: openAiProvider("gpt-5.1-codex"),
+
+        // GPT tends to take a lot of turns where it's not producing any text, and meanwhile
+        // it takes FOREVER. It can be useful to see the reasoning, but unfortunately this requires
+        // that the API key belongs to a "verified" organization. I guess they are scared of
+        // distillers?
+        //
+        // providerOptions: {
+        //   openai: {
+        //     reasoningSummary: "auto"
+        //   }
+        // }
       },
       "gemini-pro": {
         displayName: "Gemini 3",
@@ -720,13 +729,15 @@ class OverseerImpl {
 
       let author = this.makeModelAuthorInfo(chosenModelId);
 
-      // TODO: I can't figure out how to get access to the agent's chat message *before* the tool
-      //   calls are invoked, but we want to log the tool call actions *after* sending the chat
-      //   message. For now I just store them in this buffer. This is fine as long as all tool
-      //   calls execute instantenously but once we start having tool calls that take time, it
-      //   would be better to send the chat message before the tool call starts. Perhaps the trick
-      //   is just to use streaming?
-      let toolLogs: AiToolCall[] = [];
+      // Additional information noted during execution of tool calls which we want to merge into
+      // the tool call logs later.
+      //
+      // As of this writing, if the tool call callback throws an error, the AI SDK renders the
+      // error back to the LLM, but does NOT indicate an error in the `toolCalls` array it returns
+      // to us. It only indicates an error there in cases where the AI failed to satisfy the
+      // parameter schema, seemingly. So we have to catch our own errors and log them to the
+      // side, ugh.
+      let toolCallNotes = new Map<string, {observedCodeVersion?: number, error?: string}>();
 
       capturedYdocChanges = [];
 
@@ -774,19 +785,23 @@ class OverseerImpl {
               //   prefixes on each line. Is this worth doing?
             }),
             execute: ({filename}, {toolCallId}) => {
-              toolLogs.push({
-                toolCallId,
-                description: `Read file: ${filename}`,
-                toolName: "readFile",
-                input: {filename},
-                observedCodeVersion: versionLock!
-              });
-              let text = getSessionYDoc().getMap<Y.Text>().get(filename);
-              if (!text) {
-                throw new Error("File does not exist.");
+              try {
+                let text = getSessionYDoc().getMap<Y.Text>().get(filename);
+                if (!text) {
+                  throw new Error("File does not exist.");
+                }
+                filesRead.add(filename);
+                toolCallNotes.set(toolCallId, {
+                  observedCodeVersion: versionLock!
+                });
+                return text.toString();
+              } catch (error) {
+                toolCallNotes.set(toolCallId, {
+                  observedCodeVersion: versionLock!,
+                  error: `${error}`
+                });
+                throw error;
               }
-              filesRead.add(filename);
-              return text.toString();
             }
           }),
 
@@ -806,48 +821,48 @@ class OverseerImpl {
             execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
               // TODO: We need to verify that the agent read the file previously.
 
-              if (!filesRead.has(filename)) {
-                throw new Error("You must read a file before you can edit it.");
-              }
+              try {
+                if (!filesRead.has(filename)) {
+                  throw new Error("You must read a file before you can edit it.");
+                }
 
-              let ydoc = getSessionYDoc();
-              let text = ydoc.getMap<Y.Text>().get(filename);
-              if (!text) {
-                throw new Error("File does not exist.");
-              }
+                let ydoc = getSessionYDoc();
+                let text = ydoc.getMap<Y.Text>().get(filename);
+                if (!text) {
+                  throw new Error("File does not exist.");
+                }
 
-              let content = text.toString();
-              let pos = content.indexOf(textToReplace);
-              if (pos < 0) {
-                throw new Error("No matching text was found in the file.");
-              }
-              if (content.indexOf(textToReplace, pos + 1) >= 0) {
-                throw new Error("Multiple matches were found. The text to match must be unique.");
-              }
+                let content = text.toString();
+                let pos = content.indexOf(textToReplace);
+                if (pos < 0) {
+                  throw new Error("No matching text was found in the file.");
+                }
+                if (content.indexOf(textToReplace, pos + 1) >= 0) {
+                  throw new Error("Multiple matches were found. The text to match must be unique.");
+                }
 
-              ydoc.transact(tr => {
-                text.delete(pos, textToReplace.length);
-                text.insert(pos, replacement);
-              });
-
-              toolLogs.push({
-                toolCallId,
-                description: `Edit file: ${filename}`,
-                toolName: "editFile",
-                input: {filename, textToReplace, replacement},
-              });
+                ydoc.transact(tr => {
+                  text.delete(pos, textToReplace.length);
+                  text.insert(pos, replacement);
+                });
+              } catch (error) {
+                toolCallNotes.set(toolCallId, {
+                  error: `${error}`
+                });
+                throw error;
+              }
             }
           }),
         },
 
-        onStepFinish: ({ text, reasoningText }) => {
+        onStepFinish: ({ text, reasoningText, toolCalls }) => {
           let meta = this.storage.chatMeta.get(chatId);
           if (!meta) {
             // Chat thread deleted?
             return;
           }
 
-          if (text.length > 0 || reasoningText || toolLogs.length > 0) {
+          {
             let msg: AiChatMessage = {
               chatId,
               sequence: this.nextChatSequence(chatId),
@@ -859,9 +874,22 @@ class OverseerImpl {
             if (reasoningText) {
               msg.reasoning = reasoningText;
             }
-            if (toolLogs.length > 0) {
-              msg.toolCalls = toolLogs;
-              toolLogs = [];
+            if (toolCalls.length > 0) {
+              msg.toolCalls = toolCalls.map(tool => {
+                let result = <AiToolCall>{
+                  toolCallId: tool.toolCallId,
+                  toolName: tool.toolName,
+                  input: tool.input
+                };
+                if (tool.error) {
+                  result.error = `${tool.error}`;
+                }
+                let notes = toolCallNotes.get(tool.toolCallId);
+                if (notes) {
+                  Object.assign(result, notes);
+                }
+                return result;
+              });
             }
             this.storage.chats.put(msg);
           }

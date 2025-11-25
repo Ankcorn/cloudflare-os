@@ -340,18 +340,17 @@ export type AiToolCall = {
   // ID of the original tool call, useful to reproduce the model messages.
   toolCallId: string;
 
-  // Basic human-readable description to place in the log.
-  description: string;
-
   // If present, this tool observed the code at the given version number.
   //
   // Note that generally once the agent observes code at a particular version, the server tries
   // to stay at that version for the rest of the thread, to avoid confusing the agent.
   observedCodeVersion?: number;
+
+  // If the tool failed, the error.
+  error?: string;
 } & ({
   toolName: "readFile";
   input: {filename: string};
-  observedCodeVersion: number;
 } | {
   toolName: "editFile";
   input: {

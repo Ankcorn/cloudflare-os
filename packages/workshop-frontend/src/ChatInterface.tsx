@@ -801,22 +801,27 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                                 return (
                                   <div
                                     key={`${msg.chatId}-${msg.sequence}-tool-${tcIdx}`}
-                                    onClick={() => toggleToolCallExpansion(toolCall.toolCallId)}
                                     style={{
                                       fontSize: '12px',
                                       padding: '8px 12px',
-                                      backgroundColor: '#f9f9f9',
-                                      border: '1px solid #e8e8e8',
+                                      backgroundColor: toolCall.error ? '#fff2f0' : '#f9f9f9',
+                                      border: toolCall.error ? '1px solid #ffccc7' : '1px solid #e8e8e8',
                                       borderRadius: '4px',
                                       marginBottom: '4px',
                                       fontFamily: 'monospace',
-                                      cursor: 'pointer',
-                                      transition: 'background-color 0.2s'
                                     }}
-                                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f0f0f0'}
-                                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#f9f9f9'}
                                   >
-                                    <div style={{ color: 'rgba(0, 0, 0, 0.65)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <div
+                                      onClick={() => toggleToolCallExpansion(toolCall.toolCallId)}
+                                      style={{
+                                        color: 'rgba(0, 0, 0, 0.65)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        cursor: 'pointer',
+                                        userSelect: 'none'
+                                      }}
+                                    >
                                       <span style={{ fontSize: '10px' }}>{isExpanded ? '▼' : '▶'}</span>
                                       <span style={{ fontWeight: 'bold' }}>{toolCall.toolName}</span>
                                       {toolCall.toolName === 'readFile' && (
@@ -829,21 +834,42 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                                           {toolCall.input.filename}
                                         </span>
                                       )}
+                                      {toolCall.error && (
+                                        <span style={{ marginLeft: 'auto', color: '#cf1322', fontWeight: 'bold' }}>
+                                          ⚠ ERROR
+                                        </span>
+                                      )}
                                     </div>
                                     {isExpanded && (
-                                      <pre style={{
-                                        marginTop: '8px',
-                                        marginBottom: 0,
-                                        padding: '8px',
-                                        backgroundColor: '#ffffff',
-                                        border: '1px solid #e8e8e8',
-                                        borderRadius: '2px',
-                                        fontSize: '11px',
-                                        overflow: 'auto',
-                                        maxHeight: '300px'
-                                      }}>
-                                        {JSON.stringify(toolCall.input, null, 2)}
-                                      </pre>
+                                      <>
+                                        {toolCall.error && (
+                                          <div style={{
+                                            marginTop: '8px',
+                                            padding: '8px',
+                                            backgroundColor: '#fff1f0',
+                                            border: '1px solid #ffa39e',
+                                            borderRadius: '2px',
+                                            color: '#cf1322',
+                                            fontSize: '11px'
+                                          }}>
+                                            <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>Error:</div>
+                                            <div style={{ whiteSpace: 'pre-wrap' }}>{toolCall.error}</div>
+                                          </div>
+                                        )}
+                                        <pre style={{
+                                          marginTop: '8px',
+                                          marginBottom: 0,
+                                          padding: '8px',
+                                          backgroundColor: '#ffffff',
+                                          border: '1px solid #e8e8e8',
+                                          borderRadius: '2px',
+                                          fontSize: '11px',
+                                          overflow: 'auto',
+                                          maxHeight: '300px'
+                                        }}>
+                                          {JSON.stringify(toolCall.input, null, 2)}
+                                        </pre>
+                                      </>
                                     )}
                                   </div>
                                 )
