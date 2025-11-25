@@ -363,6 +363,14 @@ export type AiToolCall = {
   input: {
     bindingName: string;
   };
+} | {
+  toolName: "executeCode";
+  input: {
+    code: string;
+  };
+
+  // Output, if the code actually ran. (Otherwise, `error` should be present.)
+  output?: string;
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.

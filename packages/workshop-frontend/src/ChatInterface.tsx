@@ -848,19 +848,71 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                                             <div style={{ whiteSpace: 'pre-wrap' }}>{toolCall.error}</div>
                                           </div>
                                         )}
-                                        <pre style={{
-                                          marginTop: '8px',
-                                          marginBottom: 0,
-                                          padding: '8px',
-                                          backgroundColor: '#ffffff',
-                                          border: '1px solid #e8e8e8',
-                                          borderRadius: '2px',
-                                          fontSize: '11px',
-                                          overflow: 'auto',
-                                          maxHeight: '300px'
-                                        }}>
-                                          {JSON.stringify(toolCall.input, null, 2)}
-                                        </pre>
+                                        {toolCall.toolName === 'executeCode' ? (
+                                          <>
+                                            <div style={{
+                                              marginTop: '8px',
+                                              fontSize: '11px',
+                                              color: 'rgba(0, 0, 0, 0.45)',
+                                              fontWeight: 'bold'
+                                            }}>
+                                              Code:
+                                            </div>
+                                            <pre style={{
+                                              marginTop: '4px',
+                                              marginBottom: 0,
+                                              padding: '8px',
+                                              backgroundColor: '#ffffff',
+                                              border: '1px solid #e8e8e8',
+                                              borderRadius: '2px',
+                                              fontSize: '11px',
+                                              overflow: 'auto',
+                                              maxHeight: '300px'
+                                            }}>
+                                              {toolCall.input.code}
+                                            </pre>
+                                            {toolCall.output && (
+                                              <>
+                                                <div style={{
+                                                  marginTop: '8px',
+                                                  fontSize: '11px',
+                                                  color: 'rgba(0, 0, 0, 0.45)',
+                                                  fontWeight: 'bold'
+                                                }}>
+                                                  Output:
+                                                </div>
+                                                <pre style={{
+                                                  marginTop: '4px',
+                                                  marginBottom: 0,
+                                                  padding: '8px',
+                                                  backgroundColor: '#f5f5f5',
+                                                  border: '1px solid #d9d9d9',
+                                                  borderRadius: '2px',
+                                                  fontSize: '11px',
+                                                  overflow: 'auto',
+                                                  maxHeight: '300px',
+                                                  color: '#262626'
+                                                }}>
+                                                  {toolCall.output}
+                                                </pre>
+                                              </>
+                                            )}
+                                          </>
+                                        ) : (
+                                          <pre style={{
+                                            marginTop: '8px',
+                                            marginBottom: 0,
+                                            padding: '8px',
+                                            backgroundColor: '#ffffff',
+                                            border: '1px solid #e8e8e8',
+                                            borderRadius: '2px',
+                                            fontSize: '11px',
+                                            overflow: 'auto',
+                                            maxHeight: '300px'
+                                          }}>
+                                            {JSON.stringify(toolCall.input, null, 2)}
+                                          </pre>
+                                        )}
                                       </>
                                     )}
                                   </div>
