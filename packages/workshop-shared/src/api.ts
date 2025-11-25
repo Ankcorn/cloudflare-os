@@ -222,6 +222,10 @@ export interface Overseer extends RpcTarget {
   // List past AI chats.
   listChats(): Promise<AiChatMetadata[]>;
 
+  // List available models. The first listed model should be the default, unless the user has
+  // chosen something else.
+  listModels(): Promise<AiChatAuthorInfo[]>;
+
   // Fetch messages in the chat history for the given chat thread.
   //
   // Note that if you plan to subscribe to updates, you should initiate the subscription first,
@@ -246,11 +250,17 @@ export interface Overseer extends RpcTarget {
   subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
 
   // Starts a new chat with the given initial message.
-  newChat(initialMessage: string): Promise<number>;
+  //
+  // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
+  // (useful when using chat to talk between humans).
+  newChat(initialMessage: string, modelId: string | null): Promise<number>;
 
   // Send a message to the chat from this client. Sending a message causes the LLM to start
   // running if it isn't already.
-  sendChatMessage(chatId: number, message: string): Promise<void>;
+  //
+  // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
+  // (useful when using chat to talk between humans).
+  sendChatMessage(chatId: number, message: string, modelId: string | null): Promise<void>;
 
   // Update the title of a chat. Usually not needed as a title is generated automatically from
   // the first message.
@@ -280,8 +290,9 @@ export type AiChatMetadata = {
   started: Date,
   lastActive: Date,
 
-  // Is an LLM currently actively responding to this chat?
-  agentActive: boolean,
+  // If present, an LLM (described by the author info) is currently actively responding to the
+  // chat.
+  activeAgent?: AiChatAuthorInfo,
 
   // If true, this chat thread has proposed changes which have not been accepted yet.
   hasProposedChanges?: boolean;

@@ -1,10 +1,10 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiChatToolMessage } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
-import { AssistantContent, AssistantModelMessage, generateText, JSONValue, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
+import { AssistantContent, AssistantModelMessage, generateText, JSONValue, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
 import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
 import z from "zod";
 
@@ -243,6 +243,11 @@ type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 // Don't build a snapshot until we have at least 64k of logs since the last one.
 const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 
+type ModelOption = {
+  displayName: string;
+  model: LanguageModel;
+};
+
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
 class OverseerImpl {
@@ -254,6 +259,7 @@ class OverseerImpl {
   users: DurableObjectNamespace<UserDurableObject>;
 
   #anthropicProvider: AnthropicProvider;
+  #models: Record<string, ModelOption>;
 
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
@@ -268,6 +274,25 @@ class OverseerImpl {
       apiKey: this.env.ANTHROPIC_API_KEY,
       baseURL: this.env.ANTHROPIC_BASE_URL,
     });
+
+    this.#models = {
+      "claude-haiku-4-5": {
+        displayName: "Claude Haiku 4.5",
+        model: this.#anthropicProvider("claude-haiku-4-5"),
+      },
+      "claude-sonnet-4-5": {
+        displayName: "Claude Sonnet 4.5",
+        model: this.#anthropicProvider("claude-sonnet-4-5"),
+      },
+      "claude-opus-4-5": {
+        displayName: "Claude Opus 4.5",
+        model: this.#anthropicProvider("claude-opus-4-5"),
+      },
+    };
+  }
+
+  listModels(): AiChatAuthorInfo[] {
+    return Object.keys(this.#models).map(id => this.makeModelAuthorInfo(id));
   }
 
   // Walk the list of updates to get from `fromVersion` to the current version, calling `apply`
@@ -519,8 +544,22 @@ class OverseerImpl {
     };
   }
 
-  async startAgent(chatId: number, startingMeta: AiChatMetadata): Promise<void> {
+  makeModelAuthorInfo(chosenModelId: string): AiChatAuthorInfo {
+    let chosenModel = this.#models[chosenModelId];
+    if (!chosenModel) throw new Error(`Unknown model: ${chosenModelId}`);
+
+    return {
+      type: "agent",
+      id: chosenModelId,
+      name: chosenModel.displayName,
+    };
+  }
+
+  async startAgent(chatId: number, chosenModelId: string): Promise<void> {
     try {
+      let chosenModel = this.#models[chosenModelId];
+      if (!chosenModel) throw new Error(`Unknown model: ${chosenModelId}`);
+
       // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
       // this session.
       let ydoc: Y.Doc | undefined;
@@ -588,12 +627,6 @@ class OverseerImpl {
                 let toolOutput: ToolResultPart["output"];
                 try {
                   switch (toolCall.toolName) {
-                    case "listFiles":
-                      toolOutput = {
-                        type: "json",
-                        value: [...getSessionYDoc().getMap<Y.Text>().keys()],
-                      };
-                      break;
                     case "readFile": {
                       let text = getSessionYDoc().getMap<Y.Text>().get(toolCall.input.filename);
                       if (!text) {
@@ -659,11 +692,7 @@ class OverseerImpl {
         }
       }
 
-      let author: AiChatAuthorInfo = {
-        type: "agent",
-        id: "claude-sonnet-4.5",
-        name: "Claude",
-      };
+      let author = this.makeModelAuthorInfo(chosenModelId);
 
       // TODO: I can't figure out how to get access to the agent's chat message *before* the tool
       //   calls are invoked, but we want to log the tool call actions *after* sending the chat
@@ -671,7 +700,7 @@ class OverseerImpl {
       //   calls execute instantenously but once we start having tool calls that take time, it
       //   would be better to send the chat message before the tool call starts. Perhaps the trick
       //   is just to use streaming?
-      let toolLogs: AiChatToolMessage[] = [];
+      let toolLogs: AiToolCall[] = [];
 
       capturedYdocChanges = [];
 
@@ -695,7 +724,7 @@ class OverseerImpl {
       }
 
       await generateText({
-        model: this.#anthropicProvider("claude-sonnet-4-5"),
+        model: chosenModel.model,
         system: systemPrompt,
         messages: modelMessages,
 
@@ -716,7 +745,6 @@ class OverseerImpl {
             }),
             execute: ({filename}, {toolCallId}) => {
               toolLogs.push({
-                type: "tool",
                 toolCallId,
                 description: `Read file: ${filename}`,
                 toolName: "readFile",
@@ -773,7 +801,6 @@ class OverseerImpl {
               });
 
               toolLogs.push({
-                type: "tool",
                 toolCallId,
                 description: `Edit file: ${filename}`,
                 toolName: "editFile",
@@ -836,7 +863,7 @@ class OverseerImpl {
     } finally {
       let meta = this.storage.chatMeta.get(chatId);
       if (meta) {
-        meta.agentActive = false;
+        delete meta.activeAgent;
         meta.lastActive = this.getChatTimestamp();
         this.storage.chatMeta.put(meta);
       }
@@ -1215,6 +1242,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return [...this.impl.storage.chatMeta.list({reverse: true})];
   }
 
+  async listModels(): Promise<AiChatAuthorInfo[]> {
+    return this.impl.listModels();
+  }
+
   async getChatHistory(chatId: number): Promise<AiChatMessage[]> {
     return [...this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})];
   }
@@ -1287,16 +1318,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // });
   }
 
-  async newChat(initialMessage: string): Promise<number> {
+  async newChat(initialMessage: string, chosenModelId: string | null): Promise<number> {
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
-    let meta = {
+    let meta: AiChatMetadata = {
       id: chatId,
       title: "New Chat",   // filled in later by AI
       started: timestamp,
       lastActive: timestamp,
-      agentActive: true,
     };
+    if (chosenModelId !== null) {
+      meta.activeAgent = this.impl.makeModelAuthorInfo(chosenModelId);
+    }
     this.impl.storage.chatMeta.put(meta);
 
     this.impl.storage.chats.put({
@@ -1309,8 +1342,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       message: initialMessage,
     });
 
-    // Fire off the agent (asynchronously).
-    this.impl.startAgent(chatId, meta);
+    if (chosenModelId !== null) {
+      // Fire off the agent (asynchronously).
+      this.impl.startAgent(chatId, chosenModelId);
+    }
 
     // Also fire off a second LLM call to generate a title based on the first message.
     this.impl.generateTitle(chatId, initialMessage);
@@ -1318,14 +1353,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return chatId;
   }
 
-  async sendChatMessage(chatId: number, message: string): Promise<void> {
+  async sendChatMessage(
+      chatId: number, message: string, chosenModelId: string | null): Promise<void> {
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) {
       throw new Error("No such chatId: " + chatId);
     }
     meta.lastActive = this.impl.getChatTimestamp();
-    let startAgent = !meta.agentActive;
-    meta.agentActive = true;
+    if (meta.activeAgent) {
+      // Inhibit starting another agent.
+      chosenModelId = null;
+    }
+    if (chosenModelId !== null) {
+      meta.activeAgent = this.impl.makeModelAuthorInfo(chosenModelId);
+    }
     this.impl.storage.chatMeta.put(meta);
 
     this.impl.storage.chats.put({
@@ -1338,8 +1379,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       message,
     });
 
-    if (startAgent) {
-      this.impl.startAgent(chatId, meta);
+    if (chosenModelId !== null) {
+      this.impl.startAgent(chatId, chosenModelId);
     }
   }
 
@@ -1359,7 +1400,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("No such chatId: " + chatId);
     }
 
-    if (meta.agentActive) {
+    if (meta.activeAgent) {
       throw new Error("Agent is running, wait for it to finish.");
     }
 

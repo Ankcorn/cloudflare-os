@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal } from 'antd'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
@@ -9,53 +9,72 @@ import {
   Overseer,
   AiChatMetadata,
   AiChatMessage,
-  AiChatSubscriber
+  AiChatSubscriber,
+  AiChatAuthorInfo
 } from '@minions/workshop-shared/api'
 
 const { TextArea } = Input
 const { Text, Title } = Typography
 
 // Chat input component with internal state to prevent parent re-renders while typing
-const ChatInput = ({ onSend, isAgentActive }: {
-  onSend: (message: string) => void
+const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange }: {
+  onSend: (message: string, modelId: string | null) => void
   isAgentActive: boolean
+  models: AiChatAuthorInfo[]
+  selectedModel: string | null
+  onModelChange: (modelId: string | null) => void
 }) => {
   const [inputValue, setInputValue] = useState('')
 
   const handleSend = () => {
     if (!inputValue.trim()) return
-    onSend(inputValue.trim())
+    onSend(inputValue.trim(), selectedModel)
     setInputValue('')
   }
 
   return (
     <div style={{ padding: '16px', borderTop: '1px solid #f0f0f0' }}>
-      <Space.Compact style={{ width: '100%' }}>
-        <TextArea
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder={
-            isAgentActive
-              ? 'Waiting for agent to finish...'
-              : 'Type your message...'
-          }
-          autoSize={{ minRows: 1, maxRows: 4 }}
-          onPressEnter={(e) => {
-            if (e.shiftKey) return
-            e.preventDefault()
-            if (!isAgentActive) handleSend()
-          }}
-          style={{ flex: 1 }}
-        />
-        <Button
-          type="primary"
-          icon={<SendOutlined />}
-          onClick={handleSend}
-          disabled={!inputValue.trim() || isAgentActive}
-        >
-          Send
-        </Button>
-      </Space.Compact>
+      <Space direction="vertical" style={{ width: '100%' }} size="small">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Text type="secondary" style={{ fontSize: '12px' }}>Model:</Text>
+          <Select
+            value={selectedModel}
+            onChange={onModelChange}
+            style={{ width: 200 }}
+            size="small"
+            options={[
+              { label: '(none)', value: null },
+              ...models.map(model => ({ label: model.name, value: model.id }))
+            ]}
+          />
+        </div>
+        <Space.Compact style={{ width: '100%' }}>
+          <TextArea
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder={
+              isAgentActive
+                ? 'Waiting for agent to finish...'
+                : 'Type your message...'
+            }
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            onPressEnter={(e) => {
+              if (e.shiftKey) return
+              e.preventDefault()
+              if (!isAgentActive) handleSend()
+            }}
+            style={{ flex: 1 }}
+          />
+          <Button
+            type="primary"
+            icon={<SendOutlined />}
+            onClick={handleSend}
+            disabled={!inputValue.trim() || isAgentActive}
+          >
+            Send
+          </Button>
+        </Space.Compact>
+      </Space>
     </div>
   )
 }
@@ -90,6 +109,8 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
+  const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
+  const [selectedModel, setSelectedModel] = useState<string | null>(null)
 
   // Track which tool calls we've already processed for file selection
   const processedToolCallsRef = useRef<Set<string>>(new Set())
@@ -122,7 +143,8 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     ? cacheRef.current.chats.get(selectedChatId)
     : null
 
-  const isAgentActive = currentChatMetadata?.agentActive || false
+  const isAgentActive = !!currentChatMetadata?.activeAgent
+  const activeAgent = currentChatMetadata?.activeAgent
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -135,6 +157,41 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       setTitleInput(currentChatMetadata.title)
     }
   }, [currentChatMetadata?.title])
+
+  // Update selected model when switching chats
+  useEffect(() => {
+    if (selectedChatId === null) {
+      // For new chats, use localStorage or first model
+      const lastSelectedModel = localStorage.getItem('lastSelectedModel')
+      if (lastSelectedModel && availableModels.some(m => m.id === lastSelectedModel)) {
+        setSelectedModel(lastSelectedModel)
+      } else if (availableModels.length > 0) {
+        setSelectedModel(availableModels[0].id)
+      }
+    } else {
+      // For existing threads:
+      // 1. If an AI agent is currently active, use that agent's model
+      if (activeAgent) {
+        setSelectedModel(activeAgent.id)
+      } else {
+        // 2. Otherwise, check the last message in the thread
+        const messageMessages = currentMessages.filter(msg => msg.type === 'message')
+        if (messageMessages.length > 0) {
+          const lastMessage = messageMessages[messageMessages.length - 1]
+          if (lastMessage.author.type === 'agent') {
+            // Last message was from AI, use that model
+            setSelectedModel(lastMessage.author.id)
+          } else {
+            // Last message was from human with no AI responding, so it must have been sent with null model
+            setSelectedModel(null)
+          }
+        } else {
+          // No messages yet, set to null
+          setSelectedModel(null)
+        }
+      }
+    }
+  }, [selectedChatId, availableModels, currentMessages, activeAgent])
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -254,12 +311,26 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
         if (isMounted) {
           setIsSubscribed(true)
 
-          // After subscribing, load the list of chats
+          // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const chats = await overseer.listChats()
+          const [chats, models] = await Promise.all([
+            overseer.listChats(),
+            overseer.listModels()
+          ])
+
           chats.forEach(chat => {
             cacheRef.current.chats.set(chat.id, chat)
           })
+
+          setAvailableModels(models)
+
+          // Set default model: first try localStorage, then fall back to first model
+          const lastSelectedModel = localStorage.getItem('lastSelectedModel')
+          if (lastSelectedModel && models.some(m => m.id === lastSelectedModel)) {
+            setSelectedModel(lastSelectedModel)
+          } else if (models.length > 0) {
+            setSelectedModel(models[0].id)
+          }
 
           forceUpdate()
         }
@@ -330,10 +401,13 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   }
 
   // Handle sending a message
-  const handleSend = async (messageText?: string) => {
+  const handleSend = async (messageText?: string, modelId?: string | null) => {
     // If messageText is provided (from ChatInput), use it; otherwise use inputValue (from new chat form)
     const message = messageText?.trim() || inputValue.trim()
     if (!message) return
+
+    // Use provided modelId or fall back to selectedModel
+    const model = modelId !== undefined ? modelId : selectedModel
 
     // Only clear inputValue if we're using it (new chat form)
     if (!messageText) {
@@ -343,11 +417,11 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     try {
       if (selectedChatId === null) {
         // Create a new chat
-        const newChatId = await overseer.newChat(message)
+        const newChatId = await overseer.newChat(message, model)
         setSelectedChatId(newChatId)
       } else {
         // Send message to existing chat
-        await overseer.sendChatMessage(selectedChatId, message)
+        await overseer.sendChatMessage(selectedChatId, message, model)
       }
     } catch (err) {
       console.error('Failed to send message:', err)
@@ -355,6 +429,14 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       if (!messageText) {
         setInputValue(message)
       }
+    }
+  }
+
+  // Handle model change
+  const handleModelChange = (modelId: string | null) => {
+    setSelectedModel(modelId)
+    if (modelId !== null) {
+      localStorage.setItem('lastSelectedModel', modelId)
     }
   }
 
@@ -475,6 +557,18 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                 <Title level={4} style={{ margin: 0, textAlign: 'center' }}>
                   Start a New Chat
                 </Title>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Text type="secondary" style={{ fontSize: '12px' }}>Model:</Text>
+                  <Select
+                    value={selectedModel}
+                    onChange={handleModelChange}
+                    style={{ flex: 1 }}
+                    options={[
+                      { label: '(none)', value: null },
+                      ...availableModels.map(model => ({ label: model.name, value: model.id }))
+                    ]}
+                  />
+                </div>
                 <TextArea
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
@@ -518,7 +612,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                       title={
                         <Space>
                           <Text strong>{chat.title}</Text>
-                          {chat.agentActive && (
+                          {chat.activeAgent && (
                             <Spin size="small" />
                           )}
                         </Space>
@@ -590,7 +684,6 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                   />
                 </>
               )}
-              {isAgentActive && <Spin size="small" />}
             </Space>
             <Space>
               <Button
@@ -733,6 +826,28 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                     ) : null}
                   </div>
                 ))}
+                {/* Typing indicator when agent is active */}
+                {isAgentActive && activeAgent && (
+                  <div
+                    style={{
+                      width: '100%',
+                      padding: '16px 24px',
+                      backgroundColor: 'white',
+                      borderBottom: '1px solid #e8e8e8'
+                    }}
+                  >
+                    <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                        <Text strong style={{ fontSize: '13px' }}>
+                          {activeAgent.name}
+                        </Text>
+                        <div>
+                          <Spin size="small" />
+                        </div>
+                      </Space>
+                    </div>
+                  </div>
+                )}
                 <div ref={messagesEndRef} />
               </>
             )}
@@ -762,7 +877,13 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
           )}
 
           {/* Input area */}
-          <ChatInput onSend={handleSend} isAgentActive={isAgentActive} />
+          <ChatInput
+            onSend={handleSend}
+            isAgentActive={isAgentActive}
+            models={availableModels}
+            selectedModel={selectedModel}
+            onModelChange={handleModelChange}
+          />
         </>
       )}
     </div>
