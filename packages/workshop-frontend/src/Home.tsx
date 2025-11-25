@@ -120,6 +120,7 @@ export default function Home() {
             dataSource={minions}
             rowKey="id"
             loading={loading}
+            pagination={{ pageSize: 50 }}
             onRow={(record) => ({
               onClick: () => {
                 navigate(`/minion/${record.id}`)
