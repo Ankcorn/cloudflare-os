@@ -267,10 +267,23 @@ class OverseerImpl {
   // in order to help decide when to make a new snapshot.
   #snapshotMetrics?: {snapshotSize: number, logSize: number};
 
+  // Use to cancel running agents.
+  #cancelSignals = new Map<number, AbortController>();
+
   constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
+
+    // If any chat agents were left running by the last instance of this DO, cancel them.
+    for (let thread of [...this.storage.chatMeta.list()]) {
+      if (thread.activeAgent) {
+        this.postAgentChatMessage(thread.id, thread.activeAgent,
+            "Error: Agent interrupted due to server restart.");
+        delete thread.activeAgent;
+        this.storage.chatMeta.put(thread);
+      }
+    }
 
     this.#anthropicProvider = createAnthropic({
       apiKey: this.env.ANTHROPIC_API_KEY,
@@ -590,6 +603,13 @@ class OverseerImpl {
     };
   }
 
+  cancelAgent(chatId: number) {
+    let controller = this.#cancelSignals.get(chatId);
+    if (controller) {
+      controller.abort(new Error("User requested to stop agent."));
+    }
+  }
+
   async startAgent(chatId: number, chosenModelId: string): Promise<void> {
     try {
       let chosenModel = this.#models[chosenModelId];
@@ -760,10 +780,14 @@ class OverseerImpl {
             `\n* ${currentFiles.join("\n* ")}`;
       }
 
+      let controller = new AbortController();
+      this.#cancelSignals.set(chatId, controller);
+
       await generateText({
         model: chosenModel.model,
         system: systemPrompt,
         messages: modelMessages,
+        abortSignal: controller.signal,
 
         providerOptions: this.#models[chosenModelId]?.providerOptions,
 
@@ -914,14 +938,9 @@ class OverseerImpl {
         },
       });
     } catch (err) {
-      let author: AiChatAuthorInfo = {
-        type: "agent",
-        id: "error",
-        name: "Error",
-      };
-      let message = err instanceof Error ? (err.stack || err.message) : `${err}`;
-      this.postAgentChatMessage(chatId, author, message);
+      this.postAgentChatMessage(chatId, this.makeModelAuthorInfo(chosenModelId), `${err}`);
     } finally {
+      this.#cancelSignals.delete(chatId);
       let meta = this.storage.chatMeta.get(chatId);
       if (meta) {
         delete meta.activeAgent;
@@ -1485,7 +1504,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async stopAgent(chatId: number): Promise<void> {
-    // TODO: agents
+    this.impl.cancelAgent(chatId);
   }
 }
 

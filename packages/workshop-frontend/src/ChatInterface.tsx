@@ -703,14 +703,6 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
             </Space>
             <Space>
               <Button
-                icon={<StopOutlined />}
-                onClick={handleStop}
-                disabled={!isAgentActive}
-                danger
-              >
-                Stop
-              </Button>
-              <Button
                 icon={<DeleteOutlined />}
                 onClick={handleDeleteChat}
                 danger
@@ -920,9 +912,17 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                         <Text strong style={{ fontSize: '13px' }}>
                           {activeAgent.name}
                         </Text>
-                        <div>
+                        <Space>
                           <Spin size="small" />
-                        </div>
+                          <Button
+                            icon={<StopOutlined />}
+                            onClick={handleStop}
+                            danger
+                            size="small"
+                          >
+                            Stop
+                          </Button>
+                        </Space>
                       </Space>
                     </div>
                   </div>
