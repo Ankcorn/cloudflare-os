@@ -322,6 +322,10 @@ export type AiChatMessage = {
   type: "message";
   message: string;
 
+  // If the AI produces any thinking/reasoning text, this is it. This should be hidden by default
+  // but the user should have the option to expand it.
+  reasoning?: string;
+
   // Messages from an AI agent can invoke tools.
   toolCalls?: AiToolCall[];
 } | {

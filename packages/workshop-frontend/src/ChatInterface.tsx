@@ -109,6 +109,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
+  const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(new Set())
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
 
@@ -360,6 +361,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   const selectChat = async (chatId: number) => {
     setSelectedChatId(chatId)
     setExpandedToolCalls(new Set())
+    setExpandedReasoning(new Set())
     processedToolCallsRef.current = new Set()
 
     // If we don't have messages for this chat yet, load them
@@ -457,6 +459,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     setInputValue('')
     setIsEditingTitle(false)
     setExpandedToolCalls(new Set())
+    setExpandedReasoning(new Set())
     processedToolCallsRef.current = new Set()
   }
 
@@ -533,6 +536,19 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
         next.delete(toolCallId)
       } else {
         next.add(toolCallId)
+      }
+      return next
+    })
+  }
+
+  // Toggle reasoning expansion
+  const toggleReasoningExpansion = (messageKey: string) => {
+    setExpandedReasoning(prev => {
+      const next = new Set(prev)
+      if (next.has(messageKey)) {
+        next.delete(messageKey)
+      } else {
+        next.add(messageKey)
       }
       return next
     })
@@ -735,6 +751,43 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                           <Text strong style={{ fontSize: '13px' }}>
                             {msg.author.name}
                           </Text>
+                          {/* Render reasoning if present */}
+                          {msg.reasoning && (
+                            <div style={{ marginBottom: '8px' }}>
+                              {(() => {
+                                const messageKey = `${msg.chatId}-${msg.sequence}`
+                                const isExpanded = expandedReasoning.has(messageKey)
+                                return (
+                                  <div>
+                                    <div
+                                      onClick={() => toggleReasoningExpansion(messageKey)}
+                                      style={{
+                                        fontSize: '12px',
+                                        color: 'rgba(0, 0, 0, 0.45)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      <span style={{ fontFamily: 'monospace' }}>{isExpanded ? '▼' : '▶'}</span>
+                                      <span style={{ fontWeight: 'bold', fontStyle: 'italic' }}>Reasoning</span>
+                                    </div>
+                                    {isExpanded && (
+                                      <div style={{
+                                        marginTop: '4px',
+                                        fontSize: '14px',
+                                        color: 'rgba(0, 0, 0, 0.65)',
+                                        whiteSpace: 'pre-wrap',
+                                      }}>
+                                        {msg.reasoning}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })()}
+                            </div>
+                          )}
                           <div style={{ fontSize: '14px' }} className={styles.markdownContent}>
                             <ReactMarkdown skipHtml={true}>
                               {msg.message}

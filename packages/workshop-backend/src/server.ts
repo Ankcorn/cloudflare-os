@@ -249,6 +249,7 @@ const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 type ModelOption = {
   displayName: string;
   model: LanguageModel;
+  providerOptions?: any;
 };
 
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
@@ -753,6 +754,8 @@ class OverseerImpl {
         system: systemPrompt,
         messages: modelMessages,
 
+        providerOptions: this.#models[chosenModelId]?.providerOptions,
+
         // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
         //   you want to support multiple steps at all? What if you don't want to set a limit?
         // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
@@ -837,14 +840,14 @@ class OverseerImpl {
           }),
         },
 
-        onStepFinish: ({ text }) => {
+        onStepFinish: ({ text, reasoningText }) => {
           let meta = this.storage.chatMeta.get(chatId);
           if (!meta) {
             // Chat thread deleted?
             return;
           }
 
-          if (text.length > 0 || toolLogs.length > 0) {
+          if (text.length > 0 || reasoningText || toolLogs.length > 0) {
             let msg: AiChatMessage = {
               chatId,
               sequence: this.nextChatSequence(chatId),
@@ -853,6 +856,9 @@ class OverseerImpl {
               type: "message",
               message: text,
             };
+            if (reasoningText) {
+              msg.reasoning = reasoningText;
+            }
             if (toolLogs.length > 0) {
               msg.toolCalls = toolLogs;
               toolLogs = [];
