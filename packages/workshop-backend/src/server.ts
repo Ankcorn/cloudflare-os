@@ -759,7 +759,9 @@ class OverseerImpl {
 
         // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
         //   you want to support multiple steps at all? What if you don't want to set a limit?
-        stopWhen: stepCountIs(5),
+        // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
+        //   anything.
+        stopWhen: stepCountIs(30),
 
         tools: {
           readFile: tool({
