@@ -305,13 +305,9 @@ class OverseerImpl {
         displayName: "ChatGPT 5.1 Codex",
         model: openAiProvider("gpt-5.1-codex"),
       },
-      "gemini-flash": {
-        displayName: "Gemini Flash",
-        model: geminiProvider("gemini-flash-latest")
-      },
       "gemini-pro": {
-        displayName: "Gemini Pro",
-        model: geminiProvider("gemini-pro-latest")
+        displayName: "Gemini 3",
+        model: geminiProvider("gemini-3-pro-preview")
       },
       "qwen": {
         displayName: "Qwen 3 Coder 480B",
