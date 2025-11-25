@@ -1,4 +1,5 @@
 {
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "workshop-backend",
   "main": "src/server.ts",
   "compatibility_date": "2025-11-01",
@@ -20,5 +21,8 @@
     {
       "binding": "LOADER"
     }
-  ]
+  ],
+  "ai": {
+    "binding": "WORKERS_AI"
+  }
 }

@@ -4,8 +4,11 @@ import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, Appr
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
-import { AssistantContent, AssistantModelMessage, generateText, JSONValue, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
+import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
 import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createWorkersAI } from "workers-ai-provider";
 import z from "zod";
 
 type UserGatekeeperRecord = {
@@ -275,6 +278,16 @@ class OverseerImpl {
       baseURL: this.env.ANTHROPIC_BASE_URL,
     });
 
+    let openAiProvider = createOpenAI({
+      apiKey: this.env.OPENAI_API_KEY,
+    });
+    let geminiProvider = createGoogleGenerativeAI({
+      apiKey: this.env.GEMINI_API_KEY,
+    });
+    let workersAiProvider = createWorkersAI({
+      binding: this.env.WORKERS_AI,
+    });
+
     this.#models = {
       "claude-haiku-4-5": {
         displayName: "Claude Haiku 4.5",
@@ -287,6 +300,22 @@ class OverseerImpl {
       "claude-opus-4-5": {
         displayName: "Claude Opus 4.5",
         model: this.#anthropicProvider("claude-opus-4-5"),
+      },
+      "gpt-5.1-codex": {
+        displayName: "ChatGPT 5.1 Codex",
+        model: openAiProvider("gpt-5.1-codex"),
+      },
+      "gemini-flash": {
+        displayName: "Gemini Flash",
+        model: geminiProvider("gemini-flash-latest")
+      },
+      "gemini-pro": {
+        displayName: "Gemini Pro",
+        model: geminiProvider("gemini-pro-latest")
+      },
+      "qwen": {
+        displayName: "Qwen 3 Coder 480B",
+        model: workersAiProvider("@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8"),
       },
     };
   }
