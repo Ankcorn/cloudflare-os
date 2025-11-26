@@ -17,6 +17,7 @@
     "@minions/workshop-shared": "workspace:*",
     "ai": "^5.0.101",
     "capnweb": "^0.2.0",
+    "ollama-ai-provider-v2": "^1.5.5",
     "workers-ai-provider": "^2.0.0",
     "yjs": "^13.6.27",
     "zod": "^4.1.13"

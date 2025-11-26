@@ -9,6 +9,7 @@ import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createWorkersAI } from "workers-ai-provider";
+import { createOllama } from 'ollama-ai-provider-v2';
 import z from "zod";
 
 type UserGatekeeperRecord = {
@@ -277,7 +278,7 @@ class OverseerImpl {
 
   users: DurableObjectNamespace<UserDurableObject>;
 
-  #anthropicProvider: AnthropicProvider;
+  #chatTitleModel: LanguageModel;
   #models: Record<string, ModelOption>;
 
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
@@ -302,11 +303,10 @@ class OverseerImpl {
       }
     }
 
-    this.#anthropicProvider = createAnthropic({
+    let anthropicProvider = createAnthropic({
       apiKey: this.env.ANTHROPIC_API_KEY,
       baseURL: this.env.ANTHROPIC_BASE_URL,
     });
-
     let openAiProvider = createOpenAI({
       apiKey: this.env.OPENAI_API_KEY,
     });
@@ -316,19 +316,24 @@ class OverseerImpl {
     let workersAiProvider = createWorkersAI({
       binding: this.env.WORKERS_AI,
     });
+    let ollamaProvider = createOllama({
+      baseURL: "http://localhost:11434/api"
+    });
+
+    this.#chatTitleModel = ollamaProvider("qwen3-coder:30b");
 
     this.#models = {
       "claude-haiku-4-5": {
         displayName: "Claude Haiku 4.5",
-        model: this.#anthropicProvider("claude-haiku-4-5"),
+        model: anthropicProvider("claude-haiku-4-5"),
       },
       "claude-sonnet-4-5": {
         displayName: "Claude Sonnet 4.5",
-        model: this.#anthropicProvider("claude-sonnet-4-5"),
+        model: anthropicProvider("claude-sonnet-4-5"),
       },
       "claude-opus-4-5": {
         displayName: "Claude Opus 4.5",
-        model: this.#anthropicProvider("claude-opus-4-5"),
+        model: anthropicProvider("claude-opus-4-5"),
       },
       "gpt-5.1-codex": {
         displayName: "ChatGPT 5.1 Codex",
@@ -349,10 +354,14 @@ class OverseerImpl {
         displayName: "Gemini 3",
         model: geminiProvider("gemini-3-pro-preview")
       },
-      "qwen": {
+      "qwen-workersai": {
         displayName: "Qwen 3 Coder 480B",
         model: workersAiProvider("@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8"),
       },
+      "qwen-ollama": {
+        displayName: "Qwen 3 Coder 30B",
+        model: ollamaProvider("qwen3-coder:30b"),
+      }
     };
   }
 
@@ -1101,7 +1110,7 @@ class OverseerImpl {
   async generateTitle(chatId: number, initialMessage: string): Promise<void> {
     try {
       let result = await generateText({
-        model: this.#anthropicProvider("claude-haiku-4-5"),
+        model: this.#chatTitleModel,
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
         //   instrurctions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
