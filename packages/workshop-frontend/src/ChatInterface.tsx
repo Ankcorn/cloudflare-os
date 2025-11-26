@@ -959,13 +959,12 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                       borderBottom: '1px solid #e8e8e8'
                     }}
                   >
-                    <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                    <div style={{ maxWidth: '800px', margin: '0 auto', position: 'relative' }}>
                       <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                        <Text strong style={{ fontSize: '13px' }}>
-                          {activeAgent.name}
-                        </Text>
-                        <Space>
-                          <Spin size="small" />
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Text strong style={{ fontSize: '13px' }}>
+                            {activeAgent.name}
+                          </Text>
                           <Button
                             icon={<StopOutlined />}
                             onClick={handleStop}
@@ -974,6 +973,9 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                           >
                             Stop
                           </Button>
+                        </div>
+                        <Space>
+                          <Spin size="small" />
                         </Space>
                       </Space>
                     </div>
