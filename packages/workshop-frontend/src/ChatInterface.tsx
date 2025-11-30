@@ -79,6 +79,66 @@ const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange
   )
 }
 
+// Helper to compute the state of messages (merged/reverted status and active changes)
+interface MessageState {
+  // Map from sequence number to status for change messages
+  changeStatus: Map<number, 'pending' | 'merged' | 'reverted'>
+
+  // Map from merge/revert sequence to the timestamp they reference
+  mergeTimestamps: Map<number, Date>     // sequence -> timestamp of merged-through message
+  revertTimestamps: Map<number, Date>    // sequence -> timestamp of reverted-from message
+
+  // The accumulated unmerged/unreverted changes (for the proposed changes view)
+  activeChanges: Uint8Array[]
+}
+
+function computeMessageStates(messages: AiChatMessage[]): MessageState {
+  const changeStatus = new Map<number, 'pending' | 'merged' | 'reverted'>()
+  const mergeTimestamps = new Map<number, Date>()
+  const revertTimestamps = new Map<number, Date>()
+
+  // Track active updates as we scan (for proposed changes computation)
+  let updates: {sequence: number, update: Uint8Array}[] = []
+
+  for (let msg of messages) {
+    if (msg.type === "changes") {
+      updates.push({sequence: msg.sequence, update: msg.update})
+      changeStatus.set(msg.sequence, 'pending')
+
+    } else if (msg.type === "merge") {
+      // Mark changes as merged and drop from active set
+      while (updates.length > 0 && updates[0].sequence <= msg.mergeThrough) {
+        const merged = updates.shift()!
+        changeStatus.set(merged.sequence, 'merged')
+      }
+      // Find timestamp for the merged-through message
+      const refMsg = messages.find(m => m.sequence === msg.mergeThrough)
+      if (refMsg) {
+        mergeTimestamps.set(msg.sequence, refMsg.timestamp)
+      }
+
+    } else if (msg.type === "revert") {
+      // Mark changes as reverted and drop from active set
+      while (updates.length > 0 && updates[updates.length - 1].sequence >= msg.revertFrom) {
+        const reverted = updates.pop()!
+        changeStatus.set(reverted.sequence, 'reverted')
+      }
+      // Find timestamp for the reverted-from message
+      const refMsg = messages.find(m => m.sequence === msg.revertFrom)
+      if (refMsg) {
+        revertTimestamps.set(msg.sequence, refMsg.timestamp)
+      }
+    }
+  }
+
+  return {
+    changeStatus,
+    mergeTimestamps,
+    revertTimestamps,
+    activeChanges: updates.map(u => u.update)
+  }
+}
+
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
@@ -221,26 +281,23 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   }, [currentMessages, selectedChatId, onFileEdited])
 
   // Notify parent when proposed changes change for the selected chat
-  // Aggregate all "changes" messages into a single merged update
+  // Compute active (unmerged/unreverted) changes and send to parent
   useEffect(() => {
     if (!currentChatMetadata?.hasProposedChanges) {
       onProposedChangesChange?.(undefined)
       return
     }
 
-    // Find all messages with type: "changes"
-    const changeMessages = currentMessages.filter(
-      (msg): msg is AiChatMessage & { type: "changes" } => msg.type === "changes"
-    )
+    const { activeChanges } = computeMessageStates(currentMessages)
 
-    if (changeMessages.length === 0) {
+    if (activeChanges.length === 0) {
       onProposedChangesChange?.(undefined)
       return
     }
 
-    // Merge all the updates into a single update
-    const updates = changeMessages.map(msg => msg.update)
-    const mergedUpdate = updates.length === 1 ? updates[0] : Y.mergeUpdatesV2(updates)
+    const mergedUpdate = activeChanges.length === 1
+      ? activeChanges[0]
+      : Y.mergeUpdatesV2(activeChanges)
 
     onProposedChangesChange?.(mergedUpdate)
   }, [currentChatMetadata?.hasProposedChanges, currentMessages, onProposedChangesChange])
@@ -516,15 +573,29 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     })
   }
 
-  // Handle accepting proposed changes
-  const handleAcceptChanges = async () => {
+  // Handle merging changes up to a specific sequence number
+  const handleMergeChanges = async (mergeThrough: number) => {
     if (selectedChatId === null) return
 
     try {
-      await overseer.acceptProposedChanges(selectedChatId)
+      await overseer.mergeChanges(selectedChatId, mergeThrough)
+      message.success('Changes merged successfully')
     } catch (err) {
-      console.error('Failed to accept changes:', err)
-      message.error('Failed to accept changes')
+      console.error('Failed to merge changes:', err)
+      message.error('Failed to merge changes')
+    }
+  }
+
+  // Handle reverting changes from a specific sequence number onward
+  const handleRevertChanges = async (revertFrom: number) => {
+    if (selectedChatId === null) return
+
+    try {
+      await overseer.revertChanges(selectedChatId, revertFrom)
+      message.success('Changes reverted successfully')
+    } catch (err) {
+      console.error('Failed to revert changes:', err)
+      message.error('Failed to revert changes')
     }
   }
 
@@ -553,6 +624,12 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       return next
     })
   }
+
+  // Compute message states (merged/reverted status)
+  const messageStates = useMemo(
+    () => computeMessageStates(currentMessages),
+    [currentMessages]
+  )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -927,25 +1004,135 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                       </div>
                     ) : msg.type === 'changes' ? (
                       // Changes message
-                      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
-                        <div
-                          style={{
-                            fontSize: '12px',
-                            fontStyle: 'italic',
-                            opacity: 0.7,
-                            color: '#1890ff',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px'
-                          }}
-                        >
-                          <span>📝</span>
-                          <span>{msg.author.name} made changes to the code</span>
-                          <Text type="secondary" style={{ fontSize: '11px', fontStyle: 'normal' }}>
-                            {msg.timestamp.toLocaleTimeString()}
-                          </Text>
-                        </div>
-                      </div>
+                      (() => {
+                        const status = messageStates.changeStatus.get(msg.sequence) || 'pending'
+                        return (
+                          <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                            <div
+                              style={{
+                                fontSize: '12px',
+                                padding: '8px 12px',
+                                backgroundColor: status === 'merged' ? '#f6ffed' : status === 'reverted' ? '#fff7e6' : '#e6f7ff',
+                                border: status === 'merged' ? '1px solid #b7eb8f' : status === 'reverted' ? '1px solid #ffd591' : '1px solid #91d5ff',
+                                borderRadius: '4px'
+                              }}
+                            >
+                              <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '8px',
+                                marginBottom: status === 'pending' ? '8px' : '0'
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+                                  <span>📝</span>
+                                  <span style={{
+                                    fontStyle: 'italic',
+                                    color: status === 'merged' ? '#52c41a' : status === 'reverted' ? '#fa8c16' : '#1890ff',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap'
+                                  }}>
+                                    {msg.author.name} made changes
+                                  </span>
+                                  {status === 'merged' && (
+                                    <span style={{ fontSize: '11px', color: '#52c41a', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                                      ✓ merged
+                                    </span>
+                                  )}
+                                  {status === 'reverted' && (
+                                    <span style={{ fontSize: '11px', color: '#fa8c16', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                                      ↩ reverted
+                                    </span>
+                                  )}
+                                </div>
+                                <Text type="secondary" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                                  {msg.timestamp.toLocaleTimeString()}
+                                </Text>
+                              </div>
+
+                              {status === 'pending' && (
+                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    disabled={isAgentActive}
+                                    onClick={() => handleMergeChanges(msg.sequence)}
+                                  >
+                                    Accept through here
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    danger
+                                    disabled={isAgentActive}
+                                    onClick={() => handleRevertChanges(msg.sequence)}
+                                  >
+                                    Revert from here
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })()
+                    ) : msg.type === 'merge' ? (
+                      // Merge action message
+                      (() => {
+                        const timestamp = messageStates.mergeTimestamps.get(msg.sequence)
+                        return (
+                          <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                            <div
+                              style={{
+                                fontSize: '12px',
+                                fontStyle: 'italic',
+                                opacity: 0.7,
+                                color: '#52c41a',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}
+                            >
+                              <span>✅</span>
+                              <span>
+                                {msg.author.name} merged all changes through{' '}
+                                {timestamp ? timestamp.toLocaleString() : 'unknown time'}
+                              </span>
+                              <Text type="secondary" style={{ fontSize: '11px', fontStyle: 'normal' }}>
+                                {msg.timestamp.toLocaleTimeString()}
+                              </Text>
+                            </div>
+                          </div>
+                        )
+                      })()
+                    ) : msg.type === 'revert' ? (
+                      // Revert action message
+                      (() => {
+                        const timestamp = messageStates.revertTimestamps.get(msg.sequence)
+                        return (
+                          <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                            <div
+                              style={{
+                                fontSize: '12px',
+                                fontStyle: 'italic',
+                                opacity: 0.7,
+                                color: '#fa8c16',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}
+                            >
+                              <span>↩️</span>
+                              <span>
+                                {msg.author.name} reverted changes from{' '}
+                                {timestamp ? timestamp.toLocaleString() : 'unknown time'} onward
+                              </span>
+                              <Text type="secondary" style={{ fontSize: '11px', fontStyle: 'normal' }}>
+                                {msg.timestamp.toLocaleTimeString()}
+                              </Text>
+                            </div>
+                          </div>
+                        )
+                      })()
                     ) : null}
                   </div>
                 ))}
@@ -987,27 +1174,41 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
           </div>
 
           {/* Accept button for proposed changes */}
-          {currentChatMetadata?.hasProposedChanges && !isAgentActive && (
-            <div style={{
-              padding: '16px',
-              borderTop: '1px solid #f0f0f0',
-              backgroundColor: '#f0f7ff',
-              display: 'flex',
-              gap: '8px',
-              alignItems: 'center'
-            }}>
-              <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
-                The agent has proposed changes to the code
-              </span>
-              <Button
-                type="primary"
-                icon={<CheckCircleOutlined />}
-                onClick={handleAcceptChanges}
-              >
-                Accept Changes
-              </Button>
-            </div>
-          )}
+          {(() => {
+            if (!currentChatMetadata?.hasProposedChanges || isAgentActive) return null
+
+            const { activeChanges } = messageStates
+            if (activeChanges.length === 0) return null
+
+            // Find the last change message that's still active
+            const lastActiveChange = [...currentMessages]
+              .reverse()
+              .find(m => m.type === 'changes' && messageStates.changeStatus.get(m.sequence) === 'pending')
+
+            if (!lastActiveChange) return null
+
+            return (
+              <div style={{
+                padding: '16px',
+                borderTop: '1px solid #f0f0f0',
+                backgroundColor: '#f0f7ff',
+                display: 'flex',
+                gap: '8px',
+                alignItems: 'center'
+              }}>
+                <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
+                  The agent has proposed changes to the code
+                </span>
+                <Button
+                  type="primary"
+                  icon={<CheckCircleOutlined />}
+                  onClick={() => handleMergeChanges(lastActiveChange.sequence)}
+                >
+                  Accept All Changes
+                </Button>
+              </div>
+            )
+          })()}
 
           {/* Input area */}
           <ChatInput

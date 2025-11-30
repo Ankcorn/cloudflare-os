@@ -270,8 +270,13 @@ export interface Overseer extends RpcTarget {
   // the first message.
   setChatTitle(chatId: number, title: string): Promise<void>;
 
-  // Accept (merge) all proposed changes so far from a particular thread.
-  acceptProposedChanges(chatId: number): Promise<void>;
+  // Indicates that the user has requested that proposed changes through the given sequence number
+  // in the chat thread be merged into the mainline.
+  mergeChanges(chatId: number, mergeThrough: number): Promise<void>;
+
+  // Indicates that the user has requested that proposed changes starting from the given sequence
+  // number in the chat thread be reverted.
+  revertChanges(chatId: number, revertFrom: number): Promise<void>;
 
   // Delete a chat thread.
   deleteChat(chatId: number): Promise<void>;
@@ -337,6 +342,21 @@ export type AiChatMessage = {
   // of a chat. These changes are provisional until they are accepted.
   type: "changes";
   update: Uint8Array;
+} | {
+  // Indicates that at this point in the chat, the user chose to merge all (non-reverted) changes
+  // in this chat up to and including the given sequence number.
+  type: "merge";
+  mergeThrough: number;
+
+  // Code version at which the merge was applied.
+  version: number;
+} | {
+  // Indicates that at this point in the chat, the user chose to revert all changes starting at the
+  // given sequence number through the end of the chat as of that time. These changes are
+  // completely erased from the Yjs history. Subsequent changes will be based only on what existed
+  // before this point, and any later merge will not include the reverted changes.
+  type: "revert";
+  revertFrom: number;
 })
 
 // Describes a tool call performed by an AI agent as part of a message.
@@ -375,6 +395,10 @@ export type AiToolCall = {
 
   // Output, if the code actually ran. (Otherwise, `error` should be present.)
   output?: string;
+} | {
+  // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
+  toolName: "observeUserChanges";
+  input: {};
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.
