@@ -207,6 +207,10 @@ export interface Overseer extends RpcTarget {
   // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
   newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
 
+  // Create a new gatekeeper for an AI model binding. The model can be any returned by
+  // listModels().
+  newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>>;
+
   // List history of actions.
   // TODO: This should be paginated.
   listActions(): Promise<ActionLogEntry[]>;

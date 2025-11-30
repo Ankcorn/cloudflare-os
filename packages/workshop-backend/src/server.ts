@@ -5,12 +5,10 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
 import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
-import { AnthropicProvider, createAnthropic } from "@ai-sdk/anthropic";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createWorkersAI } from "workers-ai-provider";
-import { createOllama } from 'ollama-ai-provider-v2';
 import z from "zod";
+import { getModels, ModelOption, LanguageModelGatekeeper, LanguageModelGatekeeperProps } from "./ai-models";
+
+export { LanguageModelGatekeeper };
 
 type UserGatekeeperRecord = {
   name: string;
@@ -262,12 +260,6 @@ type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 // Don't build a snapshot until we have at least 64k of logs since the last one.
 const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 
-type ModelOption = {
-  displayName: string;
-  model: LanguageModel;
-  providerOptions?: any;
-};
-
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
 class OverseerImpl {
@@ -303,66 +295,8 @@ class OverseerImpl {
       }
     }
 
-    let anthropicProvider = createAnthropic({
-      apiKey: this.env.ANTHROPIC_API_KEY,
-      baseURL: this.env.ANTHROPIC_BASE_URL,
-    });
-    let openAiProvider = createOpenAI({
-      apiKey: this.env.OPENAI_API_KEY,
-    });
-    let geminiProvider = createGoogleGenerativeAI({
-      apiKey: this.env.GEMINI_API_KEY,
-    });
-    let workersAiProvider = createWorkersAI({
-      binding: this.env.WORKERS_AI,
-    });
-    let ollamaProvider = createOllama({
-      baseURL: "http://localhost:11434/api"
-    });
-
-    this.#chatTitleModel = ollamaProvider("qwen3-coder:30b");
-
-    this.#models = {
-      "claude-haiku-4-5": {
-        displayName: "Claude Haiku 4.5",
-        model: anthropicProvider("claude-haiku-4-5"),
-      },
-      "claude-sonnet-4-5": {
-        displayName: "Claude Sonnet 4.5",
-        model: anthropicProvider("claude-sonnet-4-5"),
-      },
-      "claude-opus-4-5": {
-        displayName: "Claude Opus 4.5",
-        model: anthropicProvider("claude-opus-4-5"),
-      },
-      "gpt-5.1-codex": {
-        displayName: "ChatGPT 5.1 Codex",
-        model: openAiProvider("gpt-5.1-codex"),
-
-        // GPT tends to take a lot of turns where it's not producing any text, and meanwhile
-        // it takes FOREVER. It can be useful to see the reasoning, but unfortunately this requires
-        // that the API key belongs to a "verified" organization. I guess they are scared of
-        // distillers?
-        //
-        // providerOptions: {
-        //   openai: {
-        //     reasoningSummary: "auto"
-        //   }
-        // }
-      },
-      "gemini-pro": {
-        displayName: "Gemini 3",
-        model: geminiProvider("gemini-3-pro-preview")
-      },
-      "qwen-workersai": {
-        displayName: "Qwen 3 Coder 480B",
-        model: workersAiProvider("@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8"),
-      },
-      "qwen-ollama": {
-        displayName: "Qwen 3 Coder 30B",
-        model: ollamaProvider("qwen3-coder:30b"),
-      }
-    };
+    this.#models = getModels(this.env);
+    this.#chatTitleModel = this.#models["claude-haiku-4-5"].model;
   }
 
   listModels(): AiChatAuthorInfo[] {
@@ -514,6 +448,20 @@ class OverseerImpl {
       }
       return {class: cls};
     });
+  }
+
+  addGatekeeper(cls: GatekeeperClass): GatekeeperClient<any> {
+    let id = this.storage.nextGatekeeperId.get();
+    this.storage.nextGatekeeperId.put(id + 1);
+    this.storage.gatekeepers.put({
+      id,
+      bindingName: `NEW_BINDING_${id}`,
+      class: cls
+    });
+
+    this.bumpVersion();
+
+    return new GatekeeperClientImpl(this, id!, this.getGatekeeperFacet(id!));
   }
 
   removeGatekeeper(id: number) {
@@ -1477,19 +1425,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
-    let cls: GatekeeperClass = await this.owner.getGatekeeperClassFor(resourceUrl);
+    return this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(resourceUrl));
+  }
 
-    let id = this.impl.storage.nextGatekeeperId.get();
-    this.impl.storage.nextGatekeeperId.put(id + 1);
-    this.impl.storage.gatekeepers.put({
-      id,
-      bindingName: `NEW_BINDING_${id}`,
-      class: cls
-    });
-
-    this.impl.bumpVersion();
-
-    return new GatekeeperClientImpl(this.impl, id!, this.impl.getGatekeeperFacet(id!));
+  async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
+    return this.impl.addGatekeeper(
+        this.impl.ctx.exports.LanguageModelGatekeeper({props: {modelId}}));
   }
 
   async listActions(): Promise<ActionLogEntry[]> {

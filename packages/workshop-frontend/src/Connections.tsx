@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import { Button, Table, Input, Space, Typography, Modal, message, Card, Empty, Tag } from 'antd'
+import { Button, Table, Input, Space, Typography, Modal, message, Card, Empty, Tag, Tabs, Select } from 'antd'
 import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
-import { Overseer, GatekeeperMetadata, ActionLogEntry } from '@minions/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo } from '@minions/workshop-shared/api'
 
 const { Title, Text } = Typography
 
@@ -23,6 +23,9 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
   const [newConnectionUrl, setNewConnectionUrl] = useState('')
   const [creatingConnection, setCreatingConnection] = useState(false)
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
+  const [connectionTabKey, setConnectionTabKey] = useState<'resource' | 'ai-model'>('resource')
+  const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
+  const [selectedModelId, setSelectedModelId] = useState<string | undefined>()
 
   const loadGatekeepers = async () => {
     try {
@@ -45,6 +48,20 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
       message.error('Failed to load actions')
     } finally {
       setActionsLoading(false)
+    }
+  }
+
+  const loadModels = async () => {
+    try {
+      const models = await overseer.listModels()
+      setAvailableModels(models)
+      // Set the first model as default if available
+      if (models.length > 0 && !selectedModelId) {
+        setSelectedModelId(models[0].id)
+      }
+    } catch (err) {
+      console.error('Failed to load models:', err)
+      message.error('Failed to load AI models')
     }
   }
 
@@ -114,29 +131,67 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
   }
 
   const handleNewConnection = async () => {
-    if (!newConnectionUrl.trim()) {
-      message.error('Please enter a URL')
-      return
-    }
-
-    setCreatingConnection(true)
-    try {
-      const gatekeeper = await overseer.newGatekeeper(newConnectionUrl.trim())
-      if (gatekeeper) {
-        message.success('Connection created successfully')
-        setIsNewConnectionModalVisible(false)
-        setNewConnectionUrl('')
-        await loadGatekeepers()
-        onConnectionsChange?.()
-      } else {
-        message.error('Failed to create connection - unsupported URL or invalid resource')
+    if (connectionTabKey === 'resource') {
+      if (!newConnectionUrl.trim()) {
+        message.error('Please enter a URL')
+        return
       }
-    } catch (err) {
-      console.error('Failed to create gatekeeper:', err)
-      message.error('Failed to create connection')
-    } finally {
-      setCreatingConnection(false)
+
+      setCreatingConnection(true)
+      try {
+        const gatekeeper = await overseer.newGatekeeper(newConnectionUrl.trim())
+        if (gatekeeper) {
+          message.success('Connection created successfully')
+          setIsNewConnectionModalVisible(false)
+          setNewConnectionUrl('')
+          await loadGatekeepers()
+          onConnectionsChange?.()
+        } else {
+          message.error('Failed to create connection - unsupported URL or invalid resource')
+        }
+      } catch (err) {
+        console.error('Failed to create gatekeeper:', err)
+        message.error('Failed to create connection')
+      } finally {
+        setCreatingConnection(false)
+      }
+    } else if (connectionTabKey === 'ai-model') {
+      if (!selectedModelId) {
+        message.error('Please select an AI model')
+        return
+      }
+
+      setCreatingConnection(true)
+      try {
+        const gatekeeper = await overseer.newAiModelGatekeeper(selectedModelId)
+        if (gatekeeper) {
+          message.success('AI model connection created successfully')
+          setIsNewConnectionModalVisible(false)
+          await loadGatekeepers()
+          onConnectionsChange?.()
+        } else {
+          message.error('Failed to create AI model connection')
+        }
+      } catch (err) {
+        console.error('Failed to create AI model gatekeeper:', err)
+        message.error('Failed to create AI model connection')
+      } finally {
+        setCreatingConnection(false)
+      }
     }
+  }
+
+  const handleModalOpen = () => {
+    setIsNewConnectionModalVisible(true)
+    setConnectionTabKey('resource')
+    setNewConnectionUrl('')
+    loadModels()
+  }
+
+  const handleModalClose = () => {
+    setIsNewConnectionModalVisible(false)
+    setNewConnectionUrl('')
+    setConnectionTabKey('resource')
   }
 
   const handleApproveAction = async (actionId: number) => {
@@ -328,7 +383,7 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
         <Button
           type="primary"
           icon={<PlusOutlined />}
-          onClick={() => setIsNewConnectionModalVisible(true)}
+          onClick={handleModalOpen}
         >
           New Connection
         </Button>
@@ -399,27 +454,66 @@ export default function Connections({ overseer, onConnectionsChange, isVisible }
         title="Create New Connection"
         open={isNewConnectionModalVisible}
         onOk={handleNewConnection}
-        onCancel={() => {
-          setIsNewConnectionModalVisible(false)
-          setNewConnectionUrl('')
-        }}
+        onCancel={handleModalClose}
         okText="Create Connection"
         cancelText="Cancel"
         confirmLoading={creatingConnection}
-        okButtonProps={{ disabled: !newConnectionUrl.trim() }}
+        okButtonProps={{
+          disabled: connectionTabKey === 'resource'
+            ? !newConnectionUrl.trim()
+            : !selectedModelId
+        }}
       >
-        <div style={{ marginBottom: '16px' }}>
-          <Text>
-            Enter the URL of the resource you want to connect to. This will create a new connection
-            that your minion can use to interact with external services.
-          </Text>
-        </div>
-        <Input
-          placeholder="https://example.com/api"
-          value={newConnectionUrl}
-          onChange={(e) => setNewConnectionUrl(e.target.value)}
-          onPressEnter={handleNewConnection}
-          autoFocus
+        <Tabs
+          activeKey={connectionTabKey}
+          onChange={(key) => setConnectionTabKey(key as 'resource' | 'ai-model')}
+          items={[
+            {
+              key: 'resource',
+              label: 'Resource',
+              children: (
+                <>
+                  <div style={{ marginBottom: '16px' }}>
+                    <Text>
+                      Enter the URL of the resource you want to connect to. This will create a new connection
+                      that your minion can use to interact with external services.
+                    </Text>
+                  </div>
+                  <Input
+                    placeholder="https://example.com/api"
+                    value={newConnectionUrl}
+                    onChange={(e) => setNewConnectionUrl(e.target.value)}
+                    onPressEnter={handleNewConnection}
+                    autoFocus={connectionTabKey === 'resource'}
+                  />
+                </>
+              )
+            },
+            {
+              key: 'ai-model',
+              label: 'AI Model',
+              children: (
+                <>
+                  <div style={{ marginBottom: '16px' }}>
+                    <Text>
+                      Select an AI model to create a connection. This allows your minion to interact
+                      with AI capabilities as a binding.
+                    </Text>
+                  </div>
+                  <Select
+                    style={{ width: '100%' }}
+                    placeholder="Select an AI model"
+                    value={selectedModelId}
+                    onChange={setSelectedModelId}
+                    options={availableModels.map(model => ({
+                      label: model.name,
+                      value: model.id
+                    }))}
+                  />
+                </>
+              )
+            }
+          ]}
         />
       </Modal>
     </div>
