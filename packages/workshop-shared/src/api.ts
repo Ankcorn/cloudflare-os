@@ -190,7 +190,7 @@ export interface Overseer extends RpcTarget {
   //
   // Returns null if the minion has no deployed UI code (e.g. if it's new, or if it's just an AI
   // agent with no code).
-  getUiBundle(): Promise<UiBundle | null>;
+  getUiBundle(chatId?: number): Promise<UiBundle | null>;
 
   // Open an RPC interface to the Minion's server-side Durable Object facet. The frontend may pass
   // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its
