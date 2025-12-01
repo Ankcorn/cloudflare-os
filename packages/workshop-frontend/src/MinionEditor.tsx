@@ -32,6 +32,7 @@ export default function MinionEditor() {
   const [activeTab, setActiveTab] = useState('code')
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
+  const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -122,6 +123,11 @@ export default function MinionEditor() {
       }
     }
   }, [id, authenticatedApi])
+
+  // Invalidate Minion UI when the selected chat changes or proposed changes update
+  useEffect(() => {
+    setUiReloadTrigger(prev => prev + 1)
+  }, [selectedChatId, proposedChanges])
 
   const handleSaveTitle = async () => {
     if (!overseer || !titleInput.trim()) {
@@ -289,6 +295,7 @@ export default function MinionEditor() {
               overseer={overseer.stub}
               onProposedChangesChange={setProposedChanges}
               onFileEdited={handleFileEdited}
+              onSelectedChatChange={setSelectedChatId}
             />
           ) : null}
         </div>
@@ -377,6 +384,7 @@ export default function MinionEditor() {
                     height="calc(100vh - 64px - 46px)"
                     reloadTrigger={uiReloadTrigger}
                     isVisible={activeTab === 'ui'}
+                    chatId={selectedChatId ?? undefined}
                   />
                 ) : null
               }

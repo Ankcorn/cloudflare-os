@@ -143,6 +143,7 @@ interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
   onFileEdited?: (filename: string) => void
+  onSelectedChatChange?: (chatId: number | null) => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -152,7 +153,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-export default function ChatInterface({ overseer, onProposedChangesChange, onFileEdited }: ChatInterfaceProps) {
+export default function ChatInterface({ overseer, onProposedChangesChange, onFileEdited, onSelectedChatChange }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -258,6 +259,11 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
   useEffect(() => {
     selectedChatIdRef.current = selectedChatId
   }, [selectedChatId])
+
+  // Notify parent when selected chat changes
+  useEffect(() => {
+    onSelectedChatChange?.(selectedChatId)
+  }, [selectedChatId, onSelectedChatChange])
 
   // Detect when files are edited via tool calls and notify parent
   useEffect(() => {

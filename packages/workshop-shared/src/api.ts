@@ -195,8 +195,12 @@ export interface Overseer extends RpcTarget {
   // Open an RPC interface to the Minion's server-side Durable Object facet. The frontend may pass
   // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
+  //
+  // If `chatId` is specified, then the minion will include changes currently proposed in the given
+  // chat.
+  //
   // @ts-ignore - TODO: Fix type instantiation issue
-  connectToMinion(): Promise<RpcStub<any>>;
+  connectToMinion(chatId?: number): Promise<RpcStub<any>>;
 
   // List all the Minion's current gatekeepers.
   listGatekeepers(): Promise<GatekeeperMetadata[]>;

@@ -50,9 +50,10 @@ interface MinionUIProps {
   height: string
   reloadTrigger?: number
   isVisible?: boolean
+  chatId?: number
 }
 
-export default function MinionUI({ overseer, height, reloadTrigger, isVisible = true }: MinionUIProps) {
+export default function MinionUI({ overseer, height, reloadTrigger, isVisible = true, chatId }: MinionUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -94,7 +95,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
         setLoading(true)
         setError(null)
 
-        const bundle = await overseer.getUiBundle()
+        const bundle = await overseer.getUiBundle(chatId)
         if (bundle) {
           const html = createSandboxedHtml(bundle.jsCode)
           setSandboxedHtml(html)
@@ -112,7 +113,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
     }
 
     loadUiBundle()
-  }, [overseer, isVisible, hasLoaded, isInvalidated])
+  }, [overseer, isVisible, hasLoaded, isInvalidated, chatId])
 
   // Effect to handle iframe RPC handshake
   useEffect(() => {
@@ -125,7 +126,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
       if (event.data === 'handshake' && event.ports && event.ports[0]) {
         try {
           // Get the minion stub from overseer
-          const minionStub = await overseer.connectToMinion()
+          const minionStub = await overseer.connectToMinion(chatId)
           minionStubRef.current = minionStub
 
           // Create RPC session using the MessagePort and expose the minion stub
@@ -142,7 +143,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
     return () => {
       window.removeEventListener('message', handleMessage)
     }
-  }, [overseer])
+  }, [overseer, chatId])
 
   // Effect to handle cleanup when component unmounts or reloads
   useEffect(() => {
@@ -227,6 +228,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
   return (
     <div style={{ height, width: '100%' }}>
       <iframe
+        key={reloadTrigger}
         ref={iframeRef}
         srcDoc={sandboxedHtml}
         style={{

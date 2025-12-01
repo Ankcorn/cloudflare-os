@@ -413,12 +413,44 @@ class OverseerImpl {
     return env;
   }
 
-  async getMinionFacet(): Promise<Fetcher<DurableObject>> {
-    let codeVersion = this.storage.codeVersion.get();
+  // Which chat ID is the minion facet currently running from?
+  #runningChatId: number | undefined;
+
+  proposedChangesChanged(chatId: number) {
+    if (this.#runningChatId === chatId) {
+      this.ctx.facets.abort("minion", new Error(
+          "Minion restarted because the proposed changes changed."));
+    }
+  }
+
+  async getMinionFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
+    let codeVersion = `${this.storage.codeVersion.get()}`;
+    let sequence: number | undefined;
+    if (chatId !== undefined) {
+      if (!this.storage.chatMeta.get(chatId)) {
+        throw new Error("No such chat");
+      }
+      sequence = this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
+      codeVersion += `.${sequence}`;
+    }
+
+    if (chatId !== this.#runningChatId) {
+      this.ctx.facets.abort("minion", new Error(
+          chatId === undefined
+            ? "Minion restarted to switch back to main version."
+            : "Minion restarted to test proposed changes."));
+      this.#runningChatId = chatId;
+    }
 
     return this.ctx.facets.get<DurableObject>("minion", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
         let {ydoc} = this.buildYDoc("current");
+
+        if (chatId !== undefined) {
+          this.getProposedChanges(chatId, sequence).forEach(({update}) => {
+            Y.applyUpdateV2(ydoc, update);
+          });
+        }
 
         let modules: Record<string, string> = {};
         for (let [file, content] of ydoc.getMap<Y.Text>()) {
@@ -557,9 +589,14 @@ class OverseerImpl {
 
   // For the given chat ID, return all code changes that are still in the "proposed" state, i.e.
   // they are neither merged nor reverted.
-  getProposedChanges(chatId: number): {sequence: number, update: Uint8Array}[] {
+  getProposedChanges(chatId: number, endBefore?: number): {sequence: number, update: Uint8Array}[] {
     let updates: {sequence: number, update: Uint8Array}[] = [];
-    for (let msg of this.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+    let listOptions = {
+      prefix: `${keyString(chatId)}.`,
+      endBefore: endBefore === undefined ? undefined :
+          `${keyString(chatId)}.${keyString(endBefore)}`
+    };
+    for (let msg of this.storage.chats.list(listOptions)) {
       if (msg.type === "changes") {
         updates.push({sequence: msg.sequence, update: msg.update});
       } else if (msg.type === "merge") {
@@ -1163,6 +1200,8 @@ class OverseerImpl {
               type: "changes",
               update
             });
+
+            this.proposedChangesChanged(chatId);
           }
 
           meta.lastActive = this.getChatTimestamp();
@@ -1519,9 +1558,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.updateCode(update);
   }
 
-  async getUiBundle(): Promise<UiBundle | null> {
+  async getUiBundle(chatId?: number): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
     let {ydoc} = this.impl.buildYDoc("current");
+
+    if (chatId !== undefined) {
+      this.impl.getProposedChanges(chatId).forEach(({update}) => {
+        Y.applyUpdateV2(ydoc, update);
+      });
+    }
+
     let file = ydoc.getMap<Y.Text>().get("client.js");
     if (file) {
       return { jsCode: file.toString() };
@@ -1530,8 +1576,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
   }
 
-  async connectToMinion(): Promise<RpcStub<any>> {
-    let facet = await this.impl.getMinionFacet();
+  async connectToMinion(chatId?: number): Promise<RpcStub<any>> {
+    let facet = await this.impl.getMinionFacet(chatId);
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     return new Proxy(facet, {
@@ -1909,6 +1955,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     meta.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(meta);
+    this.impl.proposedChangesChanged(chatId);
   }
 
   async deleteChat(chatId: number): Promise<void> {
