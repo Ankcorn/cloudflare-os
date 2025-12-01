@@ -159,11 +159,7 @@ export default function MinionEditor() {
   }
 
   const handleFileEdited = (filename: string) => {
-    // Switch to code tab if not already there
-    if (activeTab !== 'code') {
-      setActiveTab('code')
-    }
-    // Set the file to select
+    // Set the file to select (user can manually switch to code tab if needed)
     setFileToSelect(filename)
   }
 
