@@ -495,18 +495,30 @@ class OverseerImpl {
     });
   }
 
-  addGatekeeper(cls: GatekeeperClass): GatekeeperClient<any> {
+  async addGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
     this.storage.nextGatekeeperId.put(id + 1);
-    this.storage.gatekeepers.put({
+    let gatekeeperRecord = {
       id,
       bindingName: `NEW_BINDING_${id}`,
       class: cls
-    });
+    };
+    this.storage.gatekeepers.put(gatekeeperRecord);
 
     this.bumpVersion();
 
-    return new GatekeeperClientImpl(this, id!, this.getGatekeeperFacet(id!));
+    let facet = this.getGatekeeperFacet(id!);
+
+    // Update binding name to the suggested name, avoiding conflicts.
+    let suggestedName = await facet.describe().suggestedBindingName;
+    gatekeeperRecord.bindingName = suggestedName;
+    let i = 1;
+    while (this.storage.gatekeepers.byBindingName.get(gatekeeperRecord.bindingName) !== undefined) {
+      gatekeeperRecord.bindingName = `${suggestedName}_${++i}`;
+    }
+    this.storage.gatekeepers.put(gatekeeperRecord);
+
+    return new GatekeeperClientImpl(this, id!, facet);
   }
 
   removeGatekeeper(id: number) {
@@ -1628,11 +1640,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
-    return this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(resourceUrl));
+    return await this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(resourceUrl));
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
-    return this.impl.addGatekeeper(
+    return await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props: {modelId}}));
   }
 

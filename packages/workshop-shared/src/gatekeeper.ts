@@ -31,6 +31,16 @@ export type ResourceDescription = {
 
   // TODO: Other display metadata? Thumbnail, icon, etc?
 
+  // When the binding is first created, it will be given this name (but the user can change it).
+  // This is just a convenience so that the user doesn't have to type their own name, although
+  // they are free to rename it.
+  //
+  // This name should usually be based on the binding's type, not the specific resource title,
+  // since the coding agent will be able to see the name and the user may or may not intend to
+  // reveal the resource title to the agent, or may intend the same Minion to be connected to
+  // different resources (of the same type) at different times.
+  suggestedBindingName: string;
+
   // TODO: Metadata about whether the gatekeeper itself has sufficient authorization to interact
   //   with this resource, and what the user should do if it doesn't. E.g. if the user's OAuth
   //   grant doesn't cover the necessary scopes, this could direct the user to expand their grant.

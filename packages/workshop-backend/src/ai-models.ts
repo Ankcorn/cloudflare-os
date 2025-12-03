@@ -110,6 +110,8 @@ export class LanguageModelGatekeeper
       title: displayName,
       snippet: "An AI large language model.",
 
+      suggestedBindingName: "LLM",
+
       tsType: "LanguageModelBinding",
     };
   }

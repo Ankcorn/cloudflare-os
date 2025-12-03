@@ -207,6 +207,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       url: "https://mail.google.com/mail/",
       title: "Gmail Inbox",
       snippet: "Your personal Gmail inbox",
+      suggestedBindingName: "GMAIL_INBOX",
       tsType: "GmailSession",
     };
   }
