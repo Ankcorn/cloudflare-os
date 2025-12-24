@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
-import { RpcStub } from 'capnweb'
+import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
 import styles from './ChatInterface.module.css'
@@ -308,12 +308,14 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     onProposedChangesChange?.(mergedUpdate)
   }, [currentChatMetadata?.hasProposedChanges, currentMessages, onProposedChangesChange])
 
-  // Create stable subscriber implementation using useRef to hold the implementation
-  const subscriberRef = useRef<AiChatSubscriber>({
+  // Proper class implementation of AiChatSubscriber
+  // This is necessary so the server receives a single stub for the object,
+  // not separate stubs for each method
+  class ChatSubscriberImpl extends RpcTarget implements AiChatSubscriber{
     metadata(chat: AiChatMetadata) {
       cacheRef.current.chats.set(chat.id, chat)
       forceUpdate()
-    },
+    }
 
     deleted(chatId: number) {
       // Remove from cache
@@ -328,7 +330,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       }
 
       forceUpdate()
-    },
+    }
 
     message(msg: AiChatMessage) {
       // Use sequence number as index to make this idempotent
@@ -352,7 +354,10 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
 
       forceUpdate()
     }
-  })
+  }
+
+  // Keep stable subscriber instance across re-renders
+  const subscriberRef = useRef(new ChatSubscriberImpl())
 
   // Subscribe to chat updates
   useEffect(() => {
@@ -365,6 +370,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
 
         // Don't await - subscribeToChat returns a promise that doesn't resolve until disconnect
         // Store the promise itself as the subscription
+        // Pass the subscriber instance (which is now a proper class instance)
         const subscription = overseer.subscribeToChat(
           subscriberRef.current,
           startAfter
@@ -417,6 +423,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       if (subscriptionRef.current) {
         subscriptionRef.current[Symbol.dispose]()
       }
+      // Note: subscriberRef.current stays alive for potential resubscription
     }
   }, [overseer])
 

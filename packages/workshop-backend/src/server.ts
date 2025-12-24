@@ -147,16 +147,14 @@ Note that Cap'n Web is a bidirectional object capability protocol, meaning, amon
 
 Using functions this way is a great way to implement real-time updates. The client can "subscribe" to updates, passing a callback function to the server. The server can then call the function asynchronously whenever the state changes (perhaps due to activity of a different client). This technique should be used when implementing multiplayer collaboration.
 
-WARNING: Currently, there is a bug in Cap'n Web when passing functions this way. Functions received in the parameters of an RPC call will only be callable up until the point that the original RPC returns. As a work-around, you can design subscription methods so that they do not return until the client disconnects. You can detect disconnects using the \`onRpcBroken(callback)\` method that every RPC stub has. For example:
+When implementing such a subscription, it is important to call \`.dup()\` on the callback stub, in order to obtain a long-lived stub. Otherwise, the stub received as a parameter is implicitly disposed at the end of the function. You should also use \`onRpcBroken\` to monitor for client disconnects, like:
 
 \`\`\`
 async subscribe(callback) {
-  this.subscribers.add(callback);
-  return new Promise((resolve, reject) => {
-    callback.onRpcBroken(error => {
-      this.subscribers.delete(callback);
-      reject(error);
-    });
+  let callbackDup = callback.dup();
+  this.subscribers.add(callbackDup);
+  callbackDup.onRpcBroken(error => {
+    this.subscribers.delete(callbackDup);
   });
 }
 \`\`\`
@@ -1533,6 +1531,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     let codeVersions = this.impl.storage.code;
 
+    subscriber = subscriber.dup();  // keep stub after return
+
     let dbSubscriber = {
       add(record: CodeUpdate) {
         subscriber.update(record).catch(err => { codeVersions.unsubscribe(dbSubscriber) });
@@ -1545,13 +1545,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
-    let {promise, reject} = Promise.withResolvers<RpcStub<{}>>();
-    let unsubscribe = (err: Error) => {
+    let unsubscribe = () => {
       codeVersions.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
-      if (err) {
-        reject(err);
-      }
     };
 
     this.impl.replayUpdates(fromVersion, "current", (version: CodeUpdate) => {
@@ -1563,19 +1559,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     codeVersions.subscribe(dbSubscriber);
 
-    // TODO: HACK: There's a mismatch in ownership behavior of stubs passed as params between
-    // Cap'n Web and Workers RPC. As a result, when we return from this method, the stub passed
-    // in the param will be disposed in the stateless worker, no matter what dupes we make here.
-    // As a work-around, we simply don't return. We rely on the subscriber's update() method
-    // to throw when the subscriber is no longer connected, at which point we remove it.
-    return promise;
-
-    // return new RpcStub({
-    //   [Symbol.dispose]() {
-    //     unsubscribe();
-    //     subscriber[Symbol.dispose]();
-    //   }
-    // });
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+        subscriber[Symbol.dispose]();
+      }
+    });
   }
 
   async updateCode(update: Uint8Array): Promise<void> {
@@ -1744,6 +1733,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
 
+    subscriber = subscriber.dup();  // keep stub after return
+
     let metaSubscriber = {
       add(record: AiChatMetadata) {
         subscriber.metadata(record).catch(unsubscribe);
@@ -1768,14 +1759,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
-    let {promise, reject} = Promise.withResolvers<RpcStub<{}>>();
-    function unsubscribe(err: Error) {
+    function unsubscribe() {
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       subscriber[Symbol.dispose]();
-      if (err) {
-        reject(err);
-      }
     };
 
     if (startAfter !== undefined) {
@@ -1792,19 +1779,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     chatMeta.subscribe(metaSubscriber);
     chats.subscribe(msgSubscriber);
 
-    // TODO: HACK: There's a mismatch in ownership behavior of stubs passed as params between
-    // Cap'n Web and Workers RPC. As a result, when we return from this method, the stub passed
-    // in the param will be disposed in the stateless worker, no matter what dupes we make here.
-    // As a work-around, we simply don't return. We rely on the subscriber's update() method
-    // to throw when the subscriber is no longer connected, at which point we remove it.
-    return promise;
-
-    // return new RpcStub({
-    //   [Symbol.dispose]() {
-    //     unsubscribe();
-    //     subscriber[Symbol.dispose]();
-    //   }
-    // });
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+        subscriber[Symbol.dispose]();
+      }
+    });
   }
 
   async newChat(initialMessage: string, chosenModelId: string | null): Promise<number> {
