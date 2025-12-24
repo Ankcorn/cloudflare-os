@@ -10,20 +10,20 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.48",
-    "@ai-sdk/google": "^2.0.43",
-    "@ai-sdk/openai": "^2.0.72",
+    "@ai-sdk/anthropic": "^2.0.56",
+    "@ai-sdk/google": "^2.0.51",
+    "@ai-sdk/openai": "^2.0.88",
     "@minions/typed-storage": "workspace:*",
     "@minions/workshop-shared": "workspace:*",
-    "ai": "^5.0.101",
-    "capnweb": "^0.2.0",
+    "ai": "^5.0.116",
+    "capnweb": "^0.4.0",
     "ollama-ai-provider-v2": "^1.5.5",
-    "workers-ai-provider": "^2.0.0",
-    "yjs": "^13.6.27",
-    "zod": "^4.1.13"
+    "workers-ai-provider": "^2.0.2",
+    "yjs": "^13.6.28",
+    "zod": "^4.2.1"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "wrangler": "^4.50.0"
+    "wrangler": "^4.56.0"
   }
 }
