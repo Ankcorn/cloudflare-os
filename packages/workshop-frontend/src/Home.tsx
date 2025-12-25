@@ -1,9 +1,10 @@
-import { Layout, Typography, Button, Table, Space } from 'antd'
-import { LogoutOutlined, PlusOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Table, Space, Dropdown, Avatar } from 'antd'
+import { LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect } from 'react'
-import { MinionMetadata } from '@minions/workshop-shared/api'
+import { MinionMetadata, AiChatAuthorInfo } from '@minions/workshop-shared/api'
+import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -13,6 +14,7 @@ export default function Home() {
   const { authenticatedApi, logout } = useAuthenticatedApi()
   const [minions, setMinions] = useState<MinionMetadata[]>([])
   const [loading, setLoading] = useState(true)
+  const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
   useEffect(() => {
     const fetchMinions = async () => {
@@ -27,6 +29,19 @@ export default function Home() {
     }
 
     fetchMinions()
+  }, [authenticatedApi])
+
+  useEffect(() => {
+    const fetchUserInfo = async () => {
+      try {
+        const info = await authenticatedApi.whoami()
+        setUserInfo(info)
+      } catch (error) {
+        console.error('Failed to fetch user info:', error)
+      }
+    }
+
+    fetchUserInfo()
   }, [authenticatedApi])
 
   const handleLogout = () => {
@@ -70,10 +85,28 @@ export default function Home() {
     },
   ]
 
+  const accountMenuItems: MenuProps['items'] = [
+    {
+      key: 'settings',
+      label: 'Settings',
+      icon: <SettingOutlined />,
+      onClick: () => navigate('/settings'),
+    },
+    {
+      type: 'divider',
+    },
+    {
+      key: 'logout',
+      label: 'Logout',
+      icon: <LogoutOutlined />,
+      onClick: handleLogout,
+    },
+  ]
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Header 
-        style={{ 
+      <Header
+        style={{
           backgroundColor: 'white',
           borderBottom: '1px solid #f0f0f0',
           padding: '0 24px',
@@ -85,13 +118,14 @@ export default function Home() {
         <Title level={4} style={{ margin: 0, color: 'inherit' }}>
           Minions Workshop
         </Title>
-        <Button
-          icon={<LogoutOutlined />}
-          onClick={handleLogout}
-          type="text"
-        >
-          Logout
-        </Button>
+        <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
+          <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
+            <Space>
+              <Avatar size="small" icon={<UserOutlined />} />
+              <span>{userInfo?.name || 'Account'}</span>
+            </Space>
+          </Button>
+        </Dropdown>
       </Header>
 
       <Content style={{ padding: '24px' }}>

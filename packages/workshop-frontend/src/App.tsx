@@ -3,6 +3,7 @@ import { RpcStub } from 'capnweb'
 import { PublicApi } from '@minions/workshop-shared/api'
 import Home from './Home'
 import MinionEditor from './MinionEditor'
+import SettingsPage from './SettingsPage'
 import ProtectedRoute from './ProtectedRoute'
 
 interface AppProps {
@@ -17,6 +18,15 @@ function App({ rpcStub }: AppProps) {
         element={
           <ProtectedRoute rpcStub={rpcStub}>
             <Home />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute rpcStub={rpcStub}>
+            <SettingsPage />
           </ProtectedRoute>
         }
       />

@@ -1,12 +1,12 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall, AiModelConfig } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
 import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
 import z from "zod";
-import { getModels, ModelOption, LanguageModelGatekeeper, LanguageModelGatekeeperProps } from "./ai-models";
+import { LanguageModelGatekeeper, LanguageModelGatekeeperProps, getModel } from "./ai-models";
 
 export { LanguageModelGatekeeper };
 
@@ -15,15 +15,37 @@ type UserGatekeeperRecord = {
   vendor: Fetcher<GatekeeperUser>;
 };
 
+type UserAiModelRecord = {
+  profile: AiChatAuthorInfo;
+  config: AiModelConfig;
+}
+
+type UserChatContext = {
+  profile: AiChatAuthorInfo;
+  aiModel?: UserAiModelRecord;
+  quickModel?: AiModelConfig;
+}
+
 function makeUserStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
+      aiModels: collection<UserAiModelRecord>()({
+        primaryKey: record => record.profile.id,
+      }),
       minions: collection<MinionMetadata>()({
         primaryKey: "id"
       }),
       gatekeepers: collection<UserGatekeeperRecord>()({
         primaryKey: "name"
       }),
+    },
+    singletons: {
+      profile: <AiChatAuthorInfo>{
+        type: "user",
+        name: "User",
+        id: "user@example.com",
+      },
+      quickModel: <string | null>null,
     }
   });
 }
@@ -37,6 +59,65 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.storage = makeUserStorage(ctx.storage);
+  }
+
+  async whoami(): Promise<AiChatAuthorInfo> {
+    return this.storage.profile.get();
+  }
+
+  async setOwnDisplayName(name: string): Promise<void> {
+    let profile = this.storage.profile.get();
+    profile.name = name;
+    this.storage.profile.put(profile);
+  }
+
+  async listModels(): Promise<AiChatAuthorInfo[]> {
+    let result: AiChatAuthorInfo[] = [];
+    for (let model of this.storage.aiModels.list()) {
+      result.push(model.profile);
+    }
+    return result;
+  }
+
+  async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    profile.type = "agent";
+    this.storage.aiModels.put({profile, config});
+  }
+
+  async deleteModel(id: string): Promise<void> {
+    this.storage.aiModels.delete(id);
+  }
+
+  async setQuickModel(id: string | null): Promise<void> {
+    this.storage.quickModel.put(id);
+  }
+
+  async getQuickModel(): Promise<null | string> {
+    let result = this.storage.quickModel.get();
+    if (result && this.storage.aiModels.get(result)) {
+      return result;
+    } else {
+      return null;
+    }
+  }
+
+  // DO NOT MAKE PUBLIC -- returns API keys.
+  async getChatContext(modelId: string | null): Promise<UserChatContext> {
+    let result: UserChatContext = {
+      profile: this.storage.profile.get()
+    };
+    if (modelId) {
+      result.aiModel = this.storage.aiModels.get(modelId);
+      if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
+    }
+    let quickModelId = this.storage.quickModel.get();
+    if (quickModelId) {
+      let quickModel = this.storage.aiModels.get(quickModelId);
+      if (quickModel) {
+        result.quickModel = quickModel.config;
+      }
+    }
+    return result;
   }
 
   async listMinions(): Promise<MinionMetadata[]> {
@@ -277,9 +358,6 @@ class OverseerImpl {
 
   users: DurableObjectNamespace<UserDurableObject>;
 
-  #chatTitleModel: LanguageModel;
-  #models: Record<string, ModelOption>;
-
   // Tracks the size of the most-recent snapshot, and the size of all incremental updates since,
   // in order to help decide when to make a new snapshot.
   #snapshotMetrics?: {snapshotSize: number, logSize: number};
@@ -301,13 +379,6 @@ class OverseerImpl {
         this.storage.chatMeta.put(thread);
       }
     }
-
-    this.#models = getModels(this.env);
-    this.#chatTitleModel = this.#models["claude-haiku-4-5"].model;
-  }
-
-  listModels(): AiChatAuthorInfo[] {
-    return Object.keys(this.#models).map(id => this.makeModelAuthorInfo(id));
   }
 
   // Walk the list of updates to get from `fromVersion` to the current version, calling `apply`
@@ -642,26 +713,6 @@ class OverseerImpl {
     return result;
   }
 
-  getUserAuthorInfo(): AiChatAuthorInfo {
-    return {
-      // TODO: Actual user info.
-      type: "user",
-      name: "User",
-      id: "user@example.com",
-    };
-  }
-
-  makeModelAuthorInfo(chosenModelId: string): AiChatAuthorInfo {
-    let chosenModel = this.#models[chosenModelId];
-    if (!chosenModel) throw new Error(`Unknown model: ${chosenModelId}`);
-
-    return {
-      type: "agent",
-      id: chosenModelId,
-      name: chosenModel.displayName,
-    };
-  }
-
   cancelAgent(chatId: number) {
     let controller = this.#cancelSignals.get(chatId);
     if (controller) {
@@ -691,10 +742,9 @@ class OverseerImpl {
         `\`\`\`\n`;
   }
 
-  async startAgent(chatId: number, chosenModelId: string): Promise<void> {
+  async startAgent(chatId: number, aiModel: UserAiModelRecord): Promise<void> {
     try {
-      let chosenModel = this.#models[chosenModelId];
-      if (!chosenModel) throw new Error(`Unknown model: ${chosenModelId}`);
+      let chosenModel = getModel(this.env, aiModel.config);
 
       // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
       // this session.
@@ -930,7 +980,7 @@ class OverseerImpl {
         }
       }
 
-      let author = this.makeModelAuthorInfo(chosenModelId);
+      let author = aiModel.profile;
 
       // Additional information noted during execution of tool calls which we want to merge into
       // the tool call logs later.
@@ -983,12 +1033,10 @@ class OverseerImpl {
       this.#cancelSignals.set(chatId, controller);
 
       await generateText({
-        model: chosenModel.model,
+        model: chosenModel,
         system: systemPrompt,
         messages: modelMessages,
         abortSignal: controller.signal,
-
-        providerOptions: this.#models[chosenModelId]?.providerOptions,
 
         // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
         //   you want to support multiple steps at all? What if you don't want to set a limit?
@@ -1230,7 +1278,7 @@ class OverseerImpl {
         },
       });
     } catch (err) {
-      this.postAgentChatMessage(chatId, this.makeModelAuthorInfo(chosenModelId), `${err}`);
+      this.postAgentChatMessage(chatId, aiModel.profile, `${err}`);
     } finally {
       this.#cancelSignals.delete(chatId);
       let meta = this.storage.chatMeta.get(chatId);
@@ -1260,10 +1308,13 @@ class OverseerImpl {
     });
   }
 
-  async generateTitle(chatId: number, initialMessage: string): Promise<void> {
+  async generateTitle(chatId: number, initialMessage: string,
+                      modelConfig: AiModelConfig): Promise<void> {
     try {
+      let model = getModel(this.env, modelConfig);
+
       let result = await generateText({
-        model: this.#chatTitleModel,
+        model,
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
         //   instrurctions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
@@ -1502,10 +1553,15 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
 }
 
 class OverseerClientInterface extends RpcTarget implements Overseer {
+  private clientUser: DurableObjectStub<UserDurableObject>;
+
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
               private notifyDeleted: () => void) {
     super();
+
+    // TODO: When sharing is supported, set this to the client user, not the owner.
+    this.clientUser = owner;
   }
 
   async getMetadata(): Promise<MinionMetadata> {
@@ -1633,8 +1689,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
-    return await this.impl.addGatekeeper(
-        this.impl.ctx.exports.LanguageModelGatekeeper({props: {modelId}}));
+    let chatMeta = await this.clientUser.getChatContext(modelId);
+    let props: LanguageModelGatekeeperProps = {
+      displayName: chatMeta.aiModel!.profile.name,
+      config: chatMeta.aiModel!.config,
+    }
+
+    return await this.impl.addGatekeeper(this.impl.ctx.exports.LanguageModelGatekeeper({props}));
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -1721,7 +1782,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
-    return this.impl.listModels();
+    return this.clientUser.listModels();
   }
 
   async getChatHistory(chatId: number): Promise<AiChatMessage[]> {
@@ -1788,6 +1849,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newChat(initialMessage: string, chosenModelId: string | null): Promise<number> {
+    let userMeta = await this.clientUser.getChatContext(chosenModelId);
+
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
     let meta: AiChatMetadata = {
@@ -1796,8 +1859,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       started: timestamp,
       lastActive: timestamp,
     };
-    if (chosenModelId !== null) {
-      meta.activeAgent = this.impl.makeModelAuthorInfo(chosenModelId);
+    if (userMeta.aiModel) {
+      meta.activeAgent = userMeta.aiModel.profile;
     }
     this.impl.storage.chatMeta.put(meta);
 
@@ -1805,25 +1868,29 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId,
       sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
       timestamp,
-      author: this.impl.getUserAuthorInfo(),
+      author: userMeta.profile,
 
       type: "message",
       message: initialMessage,
     });
 
-    if (chosenModelId !== null) {
+    if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, chosenModelId);
+      this.impl.startAgent(chatId, userMeta.aiModel);
     }
 
     // Also fire off a second LLM call to generate a title based on the first message.
-    this.impl.generateTitle(chatId, initialMessage);
+    if (userMeta.quickModel) {
+      this.impl.generateTitle(chatId, initialMessage, userMeta.quickModel);
+    }
 
     return chatId;
   }
 
   async sendChatMessage(
       chatId: number, message: string, chosenModelId: string | null): Promise<void> {
+    let userMeta = await this.clientUser.getChatContext(chosenModelId);
+
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) {
       throw new Error("No such chatId: " + chatId);
@@ -1831,10 +1898,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     meta.lastActive = this.impl.getChatTimestamp();
     if (meta.activeAgent) {
       // Inhibit starting another agent.
-      chosenModelId = null;
+      delete userMeta.aiModel;
     }
-    if (chosenModelId !== null) {
-      meta.activeAgent = this.impl.makeModelAuthorInfo(chosenModelId);
+    if (userMeta.aiModel) {
+      meta.activeAgent = userMeta.aiModel.profile;
     }
     this.impl.storage.chatMeta.put(meta);
 
@@ -1842,14 +1909,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId,
       sequence: this.impl.nextChatSequence(chatId),
       timestamp: meta.lastActive,
-      author: this.impl.getUserAuthorInfo(),
+      author: userMeta.profile,
 
       type: "message",
       message,
     });
 
-    if (chosenModelId !== null) {
-      this.impl.startAgent(chatId, chosenModelId);
+    if (userMeta.aiModel) {
+      this.impl.startAgent(chatId, userMeta.aiModel);
     }
   }
 
@@ -1864,6 +1931,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async mergeChanges(chatId: number, mergeThrough: number): Promise<void> {
+    let author = await this.clientUser.whoami();
+
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) {
       throw new Error("No such chatId: " + chatId);
@@ -1900,7 +1969,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId,
       sequence: this.impl.nextChatSequence(chatId),
       timestamp: meta.lastActive,
-      author: this.impl.getUserAuthorInfo(),
+      author,
 
       type: "merge",
       mergeThrough,
@@ -1912,6 +1981,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revertChanges(chatId: number, revertFrom: number): Promise<void> {
+    let author = await this.clientUser.whoami();
+
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) {
       throw new Error("No such chatId: " + chatId);
@@ -1945,7 +2016,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId,
       sequence: this.impl.nextChatSequence(chatId),
       timestamp: meta.lastActive,
-      author: this.impl.getUserAuthorInfo(),
+      author,
 
       type: "revert",
       revertFrom,
@@ -2024,6 +2095,28 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
+
+  whoami(): Promise<AiChatAuthorInfo> {
+    return this.user.whoami();
+  }
+  setOwnDisplayName(name: string): Promise<void> {
+    return this.user.setOwnDisplayName(name);
+  }
+  listModels(): Promise<AiChatAuthorInfo[]> {
+    return this.user.listModels();
+  }
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    return this.user.addModel(profile, config);
+  }
+  deleteModel(id: string): Promise<void> {
+    return this.user.deleteModel(id);
+  }
+  setQuickModel(id: string | null): Promise<void> {
+    return this.user.setQuickModel(id);
+  }
+  getQuickModel(): Promise<null | string> {
+    return this.user.getQuickModel();
+  }
 
   async openMinion(id: string): Promise<Overseer> {
     let userId = this.user.id.toString();

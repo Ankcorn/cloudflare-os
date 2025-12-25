@@ -2,12 +2,16 @@
   "name": "@minions/workshop-shared",
   "version": "1.0.0",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/api.js",
+  "types": "./dist/api.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+    "./api": {
+      "types": "./src/api.ts",
+      "import": "./src/api.ts"
+    },
+    "./gatekeeper": {
+      "types": "./src/gatekeeper.ts",
+      "import": "./src/gatekeeper.ts"
     }
   },
   "scripts": {

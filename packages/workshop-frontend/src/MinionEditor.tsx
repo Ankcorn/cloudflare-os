@@ -1,14 +1,15 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
-import { Overseer, MinionMetadata } from '@minions/workshop-shared/api'
+import { Overseer, MinionMetadata, AiChatAuthorInfo } from '@minions/workshop-shared/api'
 import MinionCodeInterface from './MinionCodeInterface'
 import MinionUI from './MinionUI'
 import Connections from './Connections'
 import ChatInterface from './ChatInterface'
+import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -16,7 +17,7 @@ const { Title, Text } = Typography
 export default function MinionEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { authenticatedApi } = useAuthenticatedApi()
+  const { authenticatedApi, logout } = useAuthenticatedApi()
 
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<MinionMetadata | null>(null)
@@ -33,6 +34,7 @@ export default function MinionEditor() {
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
+  const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -129,6 +131,19 @@ export default function MinionEditor() {
     setUiReloadTrigger(prev => prev + 1)
   }, [selectedChatId, proposedChanges])
 
+  useEffect(() => {
+    const fetchUserInfo = async () => {
+      try {
+        const info = await authenticatedApi.whoami()
+        setUserInfo(info)
+      } catch (error) {
+        console.error('Failed to fetch user info:', error)
+      }
+    }
+
+    fetchUserInfo()
+  }, [authenticatedApi])
+
   const handleSaveTitle = async () => {
     if (!overseer || !titleInput.trim()) {
       return
@@ -184,6 +199,28 @@ export default function MinionEditor() {
       }
     })
   }
+
+  const handleLogout = () => {
+    logout()
+  }
+
+  const accountMenuItems: MenuProps['items'] = [
+    {
+      key: 'settings',
+      label: 'Settings',
+      icon: <SettingOutlined />,
+      onClick: () => navigate('/settings'),
+    },
+    {
+      type: 'divider',
+    },
+    {
+      key: 'logout',
+      label: 'Logout',
+      icon: <LogoutOutlined />,
+      onClick: handleLogout,
+    },
+  ]
 
   if (loading) {
     return (
@@ -266,14 +303,24 @@ export default function MinionEditor() {
           )}
         </div>
 
-        <Button
-          icon={<DeleteOutlined />}
-          onClick={handleDelete}
-          danger
-          type="text"
-          size="large"
-          title="Delete Minion"
-        />
+        <Space>
+          <Button
+            icon={<DeleteOutlined />}
+            onClick={handleDelete}
+            danger
+            type="text"
+            size="large"
+            title="Delete Minion"
+          />
+          <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
+            <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
+              <Space>
+                <Avatar size="small" icon={<UserOutlined />} />
+                <span>{userInfo?.name || 'Account'}</span>
+              </Space>
+            </Button>
+          </Dropdown>
+        </Space>
       </Header>
 
       <div style={{ height: 'calc(100vh - 64px)', display: 'flex' }}>

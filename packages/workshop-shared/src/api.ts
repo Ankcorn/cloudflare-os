@@ -45,6 +45,32 @@ export interface PublicApi extends RpcTarget {
 
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
+  // Get profile info for the user who is logged in.
+  whoami(): Promise<AiChatAuthorInfo>;
+
+  // Set the user's own display name, seen in chats, etc.
+  setOwnDisplayName(name: string): Promise<void>;
+
+  // List the user's configured AI models.
+  //
+  // Note that the list returned here could be different from a particular minion's Overseer,
+  // especially if the minion is owned by someone else.
+  listModels(): Promise<AiChatAuthorInfo[]>;
+
+  // Adds a new model to the user's configured set. The ID must be unique among the user's
+  // configured models.
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void>;
+
+  // Deletes a configured model.
+  deleteModel(id: string): Promise<void>;
+
+  // Set the model to use for simple quick tasks, like generating chat titles. Set null to
+  // disable quick model use (e.g. chats will be titled "New Chat").
+  setQuickModel(id: string | null): Promise<void>;
+
+  // Get the quick model setting.
+  getQuickModel(): Promise<null | string>;
+
   // Open an existing minion.
   //
   // To allow for pipelining ,this throws an exception if the minion doesn't exist.
@@ -60,6 +86,54 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // TODO: Configure adapters
 }
+
+// Supported AI providers.
+type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+
+// Configuration specifying how to connect to an AI model provider.
+export type AiModelConfig = {
+  // Which AI provider hosts the model?
+  provider: AiModelProvider;
+
+  // Name of the specific model, as specified to the provider's API.
+  model: string;
+
+  // Secret API token for the respective provider, for billing purposes.
+  apiToken: string;
+
+  // URL of the API. If not specified, use the default for the provider. Overriding the URL is
+  // useful in order to use AI proxy products like Cloudflare's AI gateway, or even to use an
+  // alternative provider that provides a compatible API.
+  apiUrl?: string;
+};
+
+// These well-known model identifiers are provided to make the UI simpler. The user can either
+// choose one of these or can choose a provider and then specify the model name manually.
+//
+// This map maps provider name -> model ID -> display name. When the user chooses one of these,
+// the model ID should be used both for `AiModelConfig.model` and `AiChatAuthorInfo.id`.
+export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
+  "anthropic": {
+    "claude-haiku-4-5": "Claude Haiku 4.5",
+    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "claude-opus-4-5": "Claude Opus 4.5",
+  },
+  "cloudflare": {
+    "@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8": "Qwen 3 Coder 480B (Workers AI)",
+    "@cf/moonshotai/kimi-k2-instruct": "Kimi K2 Instruct (Workers AI)",
+  },
+  "google": {
+    "gemini-3-pro-preview": "Gemini 3 Pro",
+    "gemini-3-flash-preview": "Gemini 3 Flash",
+  },
+  "ollama": {
+    "qwen3-coder:30b": "Qwen 3 Coder 30B (ollama)",
+  },
+  "openai": {
+    "gpt-5.1-codex": "ChatGPT 5.1 Codex",
+    "gpt-5.1-codex-max": "ChatGPT 5.1 Codex Max",
+  },
+};
 
 // Metadata about a Minion. Includes everything needed to render the Minion list on the front
 // page.

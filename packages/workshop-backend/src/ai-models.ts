@@ -8,84 +8,49 @@ import { createOllama } from 'ollama-ai-provider-v2';
 import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@minions/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
+import { AiModelConfig } from "@minions/workshop-shared/api";
 
-export type ModelOption = {
-  displayName: string;
-  model: LanguageModel;
-  providerOptions?: any;
-};
-
-export function getModels(env: Cloudflare.Env): Record<string, ModelOption> {
-  // TODO: Allow users to configure models with their own API keys, local ollama, etc.
-
-  let anthropicProvider = createAnthropic({
-    apiKey: env.ANTHROPIC_API_KEY,
-    baseURL: env.ANTHROPIC_BASE_URL,
-  });
-  let openAiProvider = createOpenAI({
-    apiKey: env.OPENAI_API_KEY,
-  });
-  let geminiProvider = createGoogleGenerativeAI({
-    apiKey: env.GEMINI_API_KEY,
-  });
-  let workersAiProvider = createWorkersAI({
-    binding: env.WORKERS_AI,
-  });
-  let ollamaProvider = createOllama({
-    baseURL: "http://localhost:11434/api"
-  });
-
-  return {
-    "claude-haiku-4-5": {
-      displayName: "Claude Haiku 4.5",
-      model: anthropicProvider("claude-haiku-4-5"),
-    },
-    "claude-sonnet-4-5": {
-      displayName: "Claude Sonnet 4.5",
-      model: anthropicProvider("claude-sonnet-4-5"),
-    },
-    "claude-opus-4-5": {
-      displayName: "Claude Opus 4.5",
-      model: anthropicProvider("claude-opus-4-5"),
-    },
-    "gpt-5.1-codex": {
-      displayName: "ChatGPT 5.1 Codex",
-      model: openAiProvider("gpt-5.1-codex"),
-
-      // GPT tends to take a lot of turns where it's not producing any text, and meanwhile
-      // it takes FOREVER. It can be useful to see the reasoning, but unfortunately this requires
-      // that the API key belongs to a "verified" organization. I guess they are scared of
-      // distillers?
-      //
-      // providerOptions: {
-      //   openai: {
-      //     reasoningSummary: "auto"
-      //   }
-      // }
-    },
-    "gemini-pro": {
-      displayName: "Gemini 3",
-      model: geminiProvider("gemini-3-pro-preview")
-    },
-    "qwen-workersai": {
-      displayName: "Qwen 3 Coder 480B",
-      model: workersAiProvider("@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8"),
-    },
-    "qwen-ollama": {
-      displayName: "Qwen 3 Coder 30B (local)",
-      model: ollamaProvider("qwen3-coder:30b"),
-    },
-    "gemma3-ollama": {
-      displayName: "Gemma 3 4B (local)",
-      model: ollamaProvider("gemma3:latest"),
-    },
-  };
+export function getModel(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
+  switch (config.provider) {
+    case "anthropic":
+      return createAnthropic({
+        apiKey: config.apiToken,
+        baseURL: config.apiUrl,
+      })(config.model);
+    case "cloudflare":
+      return createWorkersAI({
+        // TODO: This bills to the workshop's own account rather than the user, do we need to
+        //   change this?
+        binding: env.WORKERS_AI,
+      })(config.model as any);
+    case "google":
+      return createGoogleGenerativeAI({
+        apiKey: config.apiToken,
+        baseURL: config.apiUrl,
+      })(config.model);
+    case "ollama":
+      // The ollama provider doesn't currently have an explicit apiKey option, but ollama
+      // definitely supports API keys. That said, if the API key was left empty, we'll assume
+      // we're using local auth.
+      return createOllama({
+        headers: config.apiToken === '' ? undefined : {
+          "Authorization": `Bearer ${config.apiToken}`
+        },
+        baseURL: config.apiUrl,
+      })(config.model);
+    case "openai":
+      return createOpenAI({
+        apiKey: config.apiToken,
+        baseURL: config.apiUrl,
+      })(config.model);
+  }
 }
 
 // =======================================================================================
 
 export type LanguageModelGatekeeperProps = {
-  modelId: string
+  displayName: string,
+  config: AiModelConfig,
 };
 
 type LanguageModelAction = {
@@ -99,13 +64,12 @@ export class LanguageModelGatekeeper
     extends DurableObject<Cloudflare.Env, LanguageModelGatekeeperProps>
     implements Gatekeeper<LanguageModelBinding, LanguageModelAction, LanguageModelRevertInfo> {
   async describe(): Promise<ResourceDescription> {
-    let modelId = this.ctx.props.modelId;
-    let model = getModels(this.env)[modelId];
-    let displayName = model ? model.displayName : "Error: Unknown Model";
+    let modelConfig = this.ctx.props.config;
+    let displayName = this.ctx.props.displayName;
 
     return {
       // TODO: Decide if we need real URLs or if `url` should stop being part of the description.
-      url: `http://models.local/${modelId}`,
+      url: `http://models.local/${modelConfig.provider}/${modelConfig.model}`,
 
       title: displayName,
       snippet: "An AI large language model.",
@@ -122,12 +86,8 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue<LanguageModelAction>>)
       : Promise<LanguageModelBinding> {
-    let modelId = this.ctx.props.modelId;
-    let model = getModels(this.env)[modelId];
-    if (!model) {
-      throw new Error(`Unknown model: ${modelId}`);
-    }
-    return new LanguageModelBindingImpl(modelId, model);
+    let model = getModel(this.env, this.ctx.props.config);
+    return new LanguageModelBindingImpl(model);
   }
 
   applyAction(action: LanguageModelAction): Promise<void | {revertInfo?: LanguageModelRevertInfo}> {
@@ -143,7 +103,7 @@ export class LanguageModelGatekeeper
 }
 
 class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding {
-  constructor(private modelId: string, private model: ModelOption) {
+  constructor(private model: LanguageModel) {
     super();
   }
 
@@ -151,8 +111,7 @@ class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding
     // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
     //   but you might want the audit logs?
     let { text } = await generateText({
-      model: this.model.model,
-      providerOptions: this.model.providerOptions,
+      model: this.model,
       prompt: options.prompt,
       system: options.systemPrompt
     });
