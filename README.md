@@ -7,8 +7,10 @@
 5. Start the client: `pnpm run dev-client`
 6. Visit `localhost:3000`
 7. Log in with any username with the password "hunter2".
-8. In the UI, go to your user profile and configure one or more AI models.
+8. In the UI, go to your user profile and configure one or more AI models. (At present I recommend Claude, it performs better than any others in this environment.)
 9. Make a minion. Have fun.
+
+Hint: Try "Make me a tic tac toe game."
 
 # FAQ
 
