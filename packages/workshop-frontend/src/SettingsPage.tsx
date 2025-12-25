@@ -1,4 +1,4 @@
-import { Layout, Typography, Button, Tabs, Space, Input, Avatar, Table, Modal, message, Card, Select } from 'antd'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
@@ -161,137 +161,6 @@ export default function SettingsPage() {
     },
   ]
 
-  const profileTab = (
-    <div style={{ maxWidth: 600, margin: '0 auto', padding: '24px 0' }}>
-      <Card>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          {/* Avatar Section - Placeholder for future */}
-          <div style={{ textAlign: 'center' }}>
-            <Avatar size={80} icon={<UserOutlined />} style={{ backgroundColor: '#1890ff' }} />
-            <div style={{ marginTop: 8 }}>
-              <Text type="secondary" style={{ fontSize: '12px' }}>
-                Avatar customization coming soon
-              </Text>
-            </div>
-          </div>
-
-          {/* Display Name Section */}
-          <div>
-            <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              Display Name
-            </Text>
-            {isEditingName ? (
-              <Space.Compact style={{ width: '100%' }}>
-                <Input
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  onPressEnter={handleSaveName}
-                  placeholder="Enter display name"
-                  autoFocus
-                />
-                <Button
-                  icon={<CheckOutlined />}
-                  onClick={handleSaveName}
-                  type="primary"
-                  disabled={!nameInput.trim()}
-                />
-                <Button
-                  icon={<CloseOutlined />}
-                  onClick={handleCancelEdit}
-                />
-              </Space.Compact>
-            ) : (
-              <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-                <Text style={{ fontSize: '16px' }}>{userInfo?.name}</Text>
-                <Button
-                  icon={<EditOutlined />}
-                  onClick={() => setIsEditingName(true)}
-                  type="text"
-                  size="small"
-                />
-              </Space>
-            )}
-          </div>
-
-          {/* User ID Section */}
-          <div>
-            <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              User ID
-            </Text>
-            <Text type="secondary">{userInfo?.id}</Text>
-          </div>
-        </Space>
-      </Card>
-    </div>
-  )
-
-  const modelsTab = (
-    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '24px 0' }}>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Title level={4} style={{ margin: 0 }}>Your AI Models</Title>
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setAddModalVisible(true)}
-        >
-          Add Model
-        </Button>
-      </div>
-
-      <Table
-        columns={modelColumns}
-        dataSource={models}
-        rowKey="id"
-        loading={modelsLoading}
-        pagination={false}
-        locale={{
-          emptyText: (
-            <div style={{ padding: '32px 0' }}>
-              <Text type="secondary">
-                No AI models configured. Add a model to get started.
-              </Text>
-            </div>
-          )
-        }}
-      />
-
-      <Card style={{ marginTop: 24 }}>
-        <div>
-          <Text strong style={{ display: 'block', marginBottom: 8 }}>
-            Quick Model
-          </Text>
-          <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-            Used for simple tasks like generating chat titles. Choose a fast, inexpensive model.
-          </Text>
-          <Select
-            style={{ width: 300 }}
-            value={quickModel}
-            onChange={handleQuickModelChange}
-            loading={quickModelLoading}
-            placeholder="Select a model"
-            options={[
-              { value: null, label: 'None' },
-              ...models.map(model => ({
-                value: model.id,
-                label: model.name,
-              }))
-            ]}
-          />
-        </div>
-      </Card>
-
-      <AddModelModal
-        visible={addModalVisible}
-        onCancel={() => setAddModalVisible(false)}
-        onSuccess={() => {
-          setAddModalVisible(false)
-          fetchModels()
-        }}
-        authenticatedApi={authenticatedApi}
-      />
-    </div>
-  )
-
   if (loading) {
     return (
       <Layout style={{ minHeight: '100vh' }}>
@@ -325,21 +194,129 @@ export default function SettingsPage() {
         </Title>
       </Header>
 
-      <Content style={{ padding: '24px' }}>
-        <Tabs
-          defaultActiveKey="profile"
-          items={[
-            {
-              key: 'profile',
-              label: 'Profile',
-              children: profileTab,
-            },
-            {
-              key: 'models',
-              label: 'AI Models',
-              children: modelsTab,
-            },
-          ]}
+      <Content style={{ padding: '24px', maxWidth: 800, margin: '0 auto' }}>
+        <Card style={{ marginBottom: 24 }}>
+          <Title level={4} style={{ marginTop: 0 }}>Profile</Title>
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            {/* Avatar Section - Placeholder for future */}
+            <div style={{ textAlign: 'center' }}>
+              <Avatar size={80} icon={<UserOutlined />} style={{ backgroundColor: '#1890ff' }} />
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary" style={{ fontSize: '12px' }}>
+                  Avatar customization coming soon
+                </Text>
+              </div>
+            </div>
+
+            {/* Display Name Section */}
+            <div>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>
+                Display Name
+              </Text>
+              {isEditingName ? (
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    onPressEnter={handleSaveName}
+                    placeholder="Enter display name"
+                    autoFocus
+                  />
+                  <Button
+                    icon={<CheckOutlined />}
+                    onClick={handleSaveName}
+                    type="primary"
+                    disabled={!nameInput.trim()}
+                  />
+                  <Button
+                    icon={<CloseOutlined />}
+                    onClick={handleCancelEdit}
+                  />
+                </Space.Compact>
+              ) : (
+                <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Text style={{ fontSize: '16px' }}>{userInfo?.name}</Text>
+                  <Button
+                    icon={<EditOutlined />}
+                    onClick={() => setIsEditingName(true)}
+                    type="text"
+                    size="small"
+                  />
+                </Space>
+              )}
+            </div>
+
+            {/* User ID Section */}
+            <div>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>
+                User ID
+              </Text>
+              <Text type="secondary">{userInfo?.id}</Text>
+            </div>
+          </Space>
+        </Card>
+
+        <Card>
+          <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Title level={4} style={{ margin: 0 }}>AI Models</Title>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setAddModalVisible(true)}
+            >
+              Add Model
+            </Button>
+          </div>
+
+          <Table
+            columns={modelColumns}
+            dataSource={models}
+            rowKey="id"
+            loading={modelsLoading}
+            pagination={false}
+            locale={{
+              emptyText: (
+                <div style={{ padding: '32px 0' }}>
+                  <Text type="secondary">
+                    No AI models configured. Add a model to get started.
+                  </Text>
+                </div>
+              )
+            }}
+          />
+
+          <div style={{ marginTop: 24 }}>
+            <Text strong style={{ display: 'block', marginBottom: 8 }}>
+              Quick Model
+            </Text>
+            <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+              Used for simple tasks like generating chat titles. Choose a fast, inexpensive model.
+            </Text>
+            <Select
+              style={{ width: 300 }}
+              value={quickModel}
+              onChange={handleQuickModelChange}
+              loading={quickModelLoading}
+              placeholder="Select a model"
+              options={[
+                { value: null, label: 'None' },
+                ...models.map(model => ({
+                  value: model.id,
+                  label: model.name,
+                }))
+              ]}
+            />
+          </div>
+        </Card>
+
+        <AddModelModal
+          visible={addModalVisible}
+          onCancel={() => setAddModalVisible(false)}
+          onSuccess={() => {
+            setAddModalVisible(false)
+            fetchModels()
+          }}
+          authenticatedApi={authenticatedApi}
         />
       </Content>
     </Layout>
