@@ -8,6 +8,7 @@
 6. Visit `localhost:3000`
 7. Log in with any username with the password "hunter2".
 8. In the UI, go to your user profile and configure one or more AI models.
+9. Make a minion. Have fun.
 
 # FAQ
 
