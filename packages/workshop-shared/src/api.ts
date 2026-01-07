@@ -24,7 +24,7 @@
 // Minion a stub pointing to the Minion's server-side Durable Object interface.
 
 import { RpcStub, RpcTarget } from "capnweb";
-import { ActionDescription, ObservationDescription, ResourceDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, VendorDescription } from "./gatekeeper.js";
 
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
@@ -41,6 +41,15 @@ export interface PublicApi extends RpcTarget {
   //
   // TODO: This should be replaced with something based on an external identify provider.
   login(username: string, password: string): Promise<string | null>;
+}
+
+// Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
+export interface ConnenctedAccountsSubscriber {
+  add(id: number, description: AccountDescription, vendor: VendorDescription): void;
+  remove(id: number): void;
+
+  // Called after add() has been called for all accounts known so far.
+  ready(): void;
 }
 
 // Top-level API exposed to the user after they have authenticated.
@@ -84,7 +93,31 @@ export interface AuthenticatedApi extends RpcTarget {
   // TODO: Pagination, sort options.
   listMinions(): Promise<MinionMetadata[]>;
 
-  // TODO: Configure adapters
+  // List all third-party services that this account can connect to.
+  listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]>;
+
+  // Connect this account to a specific account on a third-party service. Returns the URL which
+  // should be opened in a new tab in the user's browser to complete the authorization. When the
+  // authorization flow completes, the account will be added to the list, which can be observed
+  // through subscribeConnectedAccounts().
+  connectAccount(vendorId: string): Promise<{url: string}>;
+
+  // Subscribe to the list of third-party accounts connected to the user's account.
+  //
+  // Dispose the returned stub to cancel the subscription.
+  //
+  // This is subscription-based because the flow to connect a new account completes in a separate
+  // window. When it completes, we want the list of accounts in the Workshop UI to update
+  // immediately, to give the user feedback that the account is now connected.
+  subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+      : Promise<RpcStub<{}>>;
+
+  // Remove a connected account, revoking the token.
+  disconnectAccount(accountId: number): Promise<void>;
+
+  // TODO:
+  // - Recreate token on a connected account.
+  // - Edit permissions on a connected account.
 }
 
 // Supported AI providers.

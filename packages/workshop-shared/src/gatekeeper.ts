@@ -18,6 +18,40 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
+export type AvatarImage = {
+  url: string;
+}
+
+// Describes a connected GatekeeperVendor, for display purposes.
+export type VendorDescription = {
+  // Human-readable name of the service, e.g. "Google", "GitHub", etc.
+  displayName: string;
+
+  // URL of the service's home page.
+  url: string;
+
+  // Logo for the service.
+  logo?: AvatarImage;
+}
+
+// Describes a connected user account on an external service, for display purposes.
+export type AccountDescription = {
+  // User's display name, e.g. "John Doe". This is a non-unique name that is human-readable.
+  displayName?: string;
+
+  // Unique, canonical name for this user account. Typically this is what the user would type into
+  // the login form when logging in. This may an email address or a Unix-style username.
+  uniqueName?: string;
+
+  // User's avatar image.
+  avatar: AvatarImage;
+
+  // A list of strings describing what sort of access has been authorized through this connection.
+  // This is similar to OAuth scopes, but may or may not literally map to underlying OAuth scopes.
+  // Each string is a phrase like: "Read and send emails"
+  scope: string[];
+}
+
 // Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe().
 export type ResourceDescription = {
   // The resource's canonical URL. This can differ from the one passed to `newGatekeeper()`, if the
@@ -54,12 +88,23 @@ export type ResourceDescription = {
 //
 // An installation of the Minion Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
-export interface GatekeeperVendor {
-  // Creates an instance of the adapter for a specific user.
+export interface GatekeeperVendor extends WorkerEntrypoint {
+  // Get display info for the service, suitable for display to a user.
+  describe(): Promise<VendorDescription>;
+
+  // Start the auth flow to connect to the user's remote account. Returns the URL which the user
+  // should open in their browser in order to complete the flow. This URL will be opened in a new
+  // tab; when it completes, it should close itself using window.close().
   //
-  // Or, rather, returns a DurableObjectClass which can be instantiated as a facet on the Durable
-  // Object representing the user's account in the Minion Workshop.
-  newUser(): Promise<Fetcher<GatekeeperUser>>;
+  // When the flow completes, `callback.complete()` should be called to add the connection to the
+  // user's list of authorizations. (`callback` can be stored.)
+  //
+  // A typical implementation might create a short-lived Durable Object to manage the authorization
+  // flow, storing the callback in its storage, then directing the user to a URL that interacts
+  // with said object. Once the user completes the flow, the DO invokes the callback and deletes
+  // itself. The DO might also set an alarm to delete itself after some timeout if the user fails
+  // to complete the flow.
+  connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
 
   // Get a list of strings describing URL patterns for which this vendor may implement a
   // gatekeeper. The Minion Workshop uses this as a hint to quickly find an appropriate gatekeeper
@@ -86,6 +131,19 @@ export interface GatekeeperVendor {
   getTypeScriptTypes(): Promise<string>;
 }
 
+export interface GatekeeperConnectCallback extends WorkerEntrypoint {
+  // Indicates the connection completed successfully.
+  complete(user: Fetcher<GatekeeperUser>): Promise<void>;
+
+  // Note: If the authorization flow fails, the error can be displayed directly to the user, and
+  // the callback can be discarded.
+
+  // TODO:
+  // - Allow replacing the grant?
+  // - Notify of revocation?
+  // - Or maybe these should be system-level features?
+}
+
 // RPC interface to an Adapter. This is a privileged interface exposed to the Minion Workshop UI
 // itself, not to Minions nor AI agents.
 //
@@ -94,6 +152,9 @@ export interface GatekeeperVendor {
 // available through it, so needs to be guarded carefully. Hence, only the Workshop itself should
 // ever have direct access to an Adapter object.
 export interface GatekeeperUser extends WorkerEntrypoint {
+  // Get display info for an account, suitable for display to a user.
+  describe(): Promise<AccountDescription>;
+
   // Get a Durable Object class that can implement a gatekeeper for the given resource. This class
   // can be used to instantiate a Facet which implements the Gatekeeper interface.
   //
@@ -105,6 +166,18 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // The returned class is imbued (via `ctx.props`) with the user's credentials and the resource
   // ID.
   getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
+
+  // Revoke this account connection. The GatekeeperUser, and all Gatekeepers created through it,
+  // become broken.
+  revoke(): Promise<void>;
+
+  // TODO:
+  // - Description of user account (name, email, avatar, etc.) to display in an account
+  //   chooser / settings dialog.
+  // - Query whether account has scope to access a particular URL.
+
+  // TODO:
+  // - Some way to check if the grant is expired/revoked? (Or is that a system-level feature?)
 }
 
 // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a

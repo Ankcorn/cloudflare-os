@@ -2,6 +2,7 @@
 //
 // This file was lagely vibe-coded based on an interface spec.
 
+import { AccountDescription } from "@minions/workshop-shared/gatekeeper";
 import { GmailMessage, GmailThreadContent, GmailThreadSummary } from "./types";
 
 export type GoogleAccessToken = {
@@ -39,6 +40,65 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
     token: data.access_token,
     expires: new Date(Date.now() + data.expires_in * 1000),
   };
+}
+
+export async function getGoogleAccountDescription(accessToken: string)
+    : Promise<AccountDescription> {
+  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    response.body?.cancel();
+    throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
+  }
+
+  let data: any = await response.json();
+
+  // Mapping the response to our specific interface
+  return {
+    displayName: data.name,
+    uniqueName: data.email,
+    avatar: {url: data.picture},
+    scope: [ "Read and label emails" ],
+  };
+}
+
+export async function revokeGoogleToken(refreshToken: string): Promise<void> {
+  // Although we are revoking the token anyway, it's nice to avoid ever putting tokens in the
+  // URL, so we instead use the format where the URL is in the POST body.
+  const body = new URLSearchParams();
+  body.append('token', refreshToken);
+
+  const response = await fetch('https://oauth2.googleapis.com/revoke', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+
+  let contentType = response.headers.get("Content-Type");
+  let isJson = contentType && contentType.startsWith("application/json");
+
+  if (response.ok) {
+    // Read response body to be polite, but we don't really need it.
+    await response.text();
+  } else if (isJson) {
+    let body = await response.json<{error: string}>();
+    if (response.status === 400 && body.error === "invalid_token") {
+      // Token may have been revoked previously, or may have never been valid. We don't really
+      // know. But for the sake of idempotency, treat this as success.
+    } else {
+      throw new Error(`Failed to revoke token: ${body.error}`);
+    }
+  } else {
+    throw new Error(`Failed to revoke token: ${response.status} ${response.statusText}`);
+  }
 }
 
 // =======================================================================================

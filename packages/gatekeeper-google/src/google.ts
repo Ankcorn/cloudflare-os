@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue } from '@minions/workshop-shared/gatekeeper';
-import { getAccessToken, GmailApi, GoogleAccessToken } from "./google-api";
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription } from '@minions/workshop-shared/gatekeeper';
+import { getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import TYPES_CODE from "./types.txt";
 
@@ -25,6 +25,14 @@ function apiKeyForm(hasApiKey: boolean) {
   </body>
 </html>`;
 }
+
+const SELF_CLOSING_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <script type="text/javascript">window.close();</script>
+    <p>Authorization complete. You may close this tab and return to the Minions Workshop.
+  </body>
+</html>`;
 
 // Main HTTP UI entrypoint. We only use this to initiate OAuth requests to Google.
 export default {
@@ -55,7 +63,11 @@ export default {
             return new Response("Bad Request", {status: 400});
           }
           await stub.setApiKey(key);
-          return new Response("Key Saved");
+          return new Response(SELF_CLOSING_HTML, {
+            headers: {
+              "Content-Type": "text/html; charset=utf-8"
+            }
+          });
         }
 
         default:
@@ -73,6 +85,24 @@ export default {
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   status() {
     return "Google Gatekeeper";
+  }
+
+  async describe(): Promise<VendorDescription> {
+    return {
+      displayName: "Google",
+      url: "https://google.com",
+      // TODO: logo
+    };
+  }
+
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
+    let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
+
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
+
+    return {
+      url: `http://google.localhost:8787/${userObjectId.toString()}`
+    };
   }
 
   async newUser(): Promise<Fetcher<GatekeeperUser>> {
@@ -93,12 +123,35 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // TODO: More security on UserAccount. The object ID is unguessable, but it would be bad if it
 // leaked.
 export class UserAccount extends DurableObject<Env> {
-  async setApiKey(key: string) {
-    await this.ctx.storage.put("apiKey", key);
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
+    // If we have no API key in 1 hour, delete this object.
+    if (!this.ctx.storage.kv.get<string>("apiKey")) {
+      this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
+    }
+
+    this.ctx.storage.kv.put("callback", callback);
   }
 
-  async hasApiKey() {
-    return !!(await this.ctx.storage.get("apiKey"));
+  async setApiKey(key: string) {
+    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) {
+      // Must have timed out.
+      throw new Error("Took too long to complete the authorization. Please try again.");
+    }
+
+    this.ctx.storage.kv.put<string>("apiKey", key);
+
+    try {
+      let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
+      await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
+    } catch (err) {
+      this.ctx.storage.kv.delete("apiKey");
+      throw err;
+    }
+  }
+
+  hasApiKey() {
+    return this.ctx.storage.kv.get<string>("apiKey") !== undefined;
   }
 
   async getAccessToken(): Promise<GoogleAccessToken> {
@@ -108,6 +161,21 @@ export class UserAccount extends DurableObject<Env> {
     }
     return await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
   }
+
+  async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
+    if (!this.hasApiKey()) {
+      this.ctx.storage.deleteAll();
+    }
+  }
+
+  async revoke(): Promise<void> {
+    let refreshToken = this.ctx.storage.kv.get<string>("apiKey");
+    if (refreshToken) {
+      await revokeGoogleToken(refreshToken);
+    }
+    this.ctx.storage.deleteAlarm();
+    this.ctx.storage.deleteAll();
+  }
 }
 
 type GatekeeperUserImplProps = {
@@ -116,10 +184,23 @@ type GatekeeperUserImplProps = {
 
 export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
                                 implements GatekeeperUser {
+  async describe(): Promise<AccountDescription> {
+    let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    let obj = this.ctx.exports.UserAccount.get(id);
+    let token = await obj.getAccessToken();
+    return getGoogleAccountDescription(token.token);
+  }
+
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
     let props: GmailGatekeeperImplProps = this.ctx.props;
 
     return this.ctx.exports.GmailGatekeeperImpl({props});
+  }
+
+  async revoke(): Promise<void> {
+    let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    let obj = this.ctx.exports.UserAccount.get(id);
+    await obj.revoke();
   }
 }
 

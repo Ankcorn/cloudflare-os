@@ -1,10 +1,13 @@
-import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Tooltip, Spin } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LinkOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
-import { useState, useEffect } from 'react'
-import { AiChatAuthorInfo } from '@minions/workshop-shared/api'
+import { useState, useEffect, useRef } from 'react'
+import { AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@minions/workshop-shared/api'
+import { AccountDescription, VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { RpcTarget } from 'capnweb'
 import AddModelModal from './AddModelModal'
+import ConnectAccountModal from './ConnectAccountModal'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -21,6 +24,9 @@ export default function SettingsPage() {
   const [addModalVisible, setAddModalVisible] = useState(false)
   const [quickModel, setQuickModel] = useState<string | null>(null)
   const [quickModelLoading, setQuickModelLoading] = useState(true)
+  const [connectModalVisible, setConnectModalVisible] = useState(false)
+  const [connectedAccounts, setConnectedAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
+  const [accountsReady, setAccountsReady] = useState(false)
 
   // Fetch user info
   useEffect(() => {
@@ -73,6 +79,73 @@ export default function SettingsPage() {
 
     fetchQuickModel()
   }, [authenticatedApi])
+
+  // Create a stable subscriber class for connected accounts
+  class ConnectedAccountsSubscriberImpl extends RpcTarget implements ConnenctedAccountsSubscriber {
+    add(id: number, description: AccountDescription, vendor: VendorDescription) {
+      setConnectedAccounts(prev => {
+        const next = new Map(prev)
+        next.set(id, { description, vendor })
+        return next
+      })
+    }
+
+    remove(id: number) {
+      setConnectedAccounts(prev => {
+        const next = new Map(prev)
+        next.delete(id)
+        return next
+      })
+    }
+
+    ready() {
+      setAccountsReady(true)
+    }
+  }
+
+  // Keep stable subscriber instance across re-renders
+  const accountsSubscriberRef = useRef(new ConnectedAccountsSubscriberImpl())
+
+  // Subscribe to connected accounts
+  useEffect(() => {
+    let subscriptionHolder: { stub: { [Symbol.dispose](): void } } | null = null
+
+    const subscribe = async () => {
+      try {
+        const stub = await authenticatedApi.subscribeConnectedAccounts(accountsSubscriberRef.current)
+        subscriptionHolder = { stub }
+      } catch (error) {
+        console.error('Failed to subscribe to connected accounts:', error)
+        setAccountsReady(true) // Mark as ready even on error so UI isn't stuck loading
+      }
+    }
+
+    subscribe()
+
+    return () => {
+      if (subscriptionHolder) {
+        subscriptionHolder.stub[Symbol.dispose]()
+      }
+    }
+  }, [authenticatedApi])
+
+  const handleDisconnectAccount = (accountId: number, accountName: string) => {
+    Modal.confirm({
+      title: 'Disconnect Account',
+      content: `Are you sure you want to disconnect "${accountName}"? You can reconnect later.`,
+      okText: 'Disconnect',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          await authenticatedApi.disconnectAccount(accountId)
+        } catch (err) {
+          console.error('Failed to disconnect account:', err)
+          message.error('Failed to disconnect account')
+        }
+      }
+    })
+  }
 
   const handleQuickModelChange = async (value: string | null) => {
     const previousValue = quickModel
@@ -160,6 +233,12 @@ export default function SettingsPage() {
       ),
     },
   ]
+
+  // Convert connected accounts Map to array for display
+  const connectedAccountsArray = Array.from(connectedAccounts.entries()).map(([id, data]) => ({
+    id,
+    ...data
+  }))
 
   if (loading) {
     return (
@@ -256,6 +335,115 @@ export default function SettingsPage() {
           </Space>
         </Card>
 
+        <Card style={{ marginBottom: 24 }}>
+          <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Title level={4} style={{ margin: 0 }}>Connected Accounts</Title>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setConnectModalVisible(true)}
+            >
+              Connect Account
+            </Button>
+          </div>
+
+          {!accountsReady ? (
+            <div style={{ textAlign: 'center', padding: '32px 0' }}>
+              <Spin />
+            </div>
+          ) : connectedAccountsArray.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '32px 0' }}>
+              <Text type="secondary">
+                No accounts connected. Connect an account to use external services with your minions.
+              </Text>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {connectedAccountsArray.map(account => (
+                <Tooltip
+                  key={account.id}
+                  title={account.description.scope.length > 0 ? (
+                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                      {account.description.scope.map((scope, i) => (
+                        <li key={i}>{scope}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  placement="right"
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: '12px 16px',
+                      border: '1px solid #d9d9d9',
+                      borderRadius: 8,
+                    }}
+                  >
+                    {/* Overlapping avatars */}
+                    <div style={{ position: 'relative', width: 48, height: 40 }}>
+                      {account.vendor.logo ? (
+                        <Avatar
+                          src={account.vendor.logo.url}
+                          size={32}
+                          style={{ position: 'absolute', left: 0, top: 0 }}
+                        />
+                      ) : (
+                        <Avatar
+                          size={32}
+                          icon={<LinkOutlined />}
+                          style={{ position: 'absolute', left: 0, top: 0 }}
+                        />
+                      )}
+                      {account.description.avatar?.url ? (
+                        <Avatar
+                          src={account.description.avatar.url}
+                          size={32}
+                          style={{ position: 'absolute', left: 16, top: 8, border: '2px solid white' }}
+                        />
+                      ) : (
+                        <Avatar
+                          size={32}
+                          icon={<UserOutlined />}
+                          style={{ position: 'absolute', left: 16, top: 8, border: '2px solid white' }}
+                        />
+                      )}
+                    </div>
+
+                    {/* Account info */}
+                    <div style={{ flex: 1 }}>
+                      <Text strong>
+                        {account.vendor.displayName}
+                        {account.description.uniqueName && `: ${account.description.uniqueName}`}
+                      </Text>
+                      {account.description.displayName && account.description.uniqueName && (
+                        <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                          {account.description.displayName}
+                        </Text>
+                      )}
+                    </div>
+
+                    {/* Delete button */}
+                    <Button
+                      icon={<DeleteOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleDisconnectAccount(
+                          account.id,
+                          account.description.displayName || account.description.uniqueName || account.vendor.displayName
+                        )
+                      }}
+                      danger
+                      type="text"
+                    />
+                  </div>
+                </Tooltip>
+              ))}
+            </div>
+          )}
+        </Card>
+
         <Card>
           <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Title level={4} style={{ margin: 0 }}>AI Models</Title>
@@ -316,6 +504,13 @@ export default function SettingsPage() {
             setAddModalVisible(false)
             fetchModels()
           }}
+          authenticatedApi={authenticatedApi}
+        />
+
+        <ConnectAccountModal
+          visible={connectModalVisible}
+          onCancel={() => setConnectModalVisible(false)}
+          onInitiated={() => setConnectModalVisible(false)}
           authenticatedApi={authenticatedApi}
         />
       </Content>

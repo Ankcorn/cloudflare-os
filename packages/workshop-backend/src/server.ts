@@ -1,6 +1,6 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall, AiModelConfig } from '@minions/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall, AiModelConfig, ConnenctedAccountsSubscriber } from '@minions/workshop-shared/api';
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
 import * as Y from "yjs";
@@ -10,9 +10,11 @@ import { LanguageModelGatekeeper, LanguageModelGatekeeperProps, getModel } from 
 
 export { LanguageModelGatekeeper };
 
-type UserGatekeeperRecord = {
-  name: string;
-  vendor: Fetcher<GatekeeperUser>;
+type ConnectedAccountRecord = {
+  id: number;
+  account: Fetcher<GatekeeperUser>;
+  vendorDescription: VendorDescription;
+  description: AccountDescription;
 };
 
 type UserAiModelRecord = {
@@ -35,8 +37,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       minions: collection<MinionMetadata>()({
         primaryKey: "id"
       }),
-      gatekeepers: collection<UserGatekeeperRecord>()({
-        primaryKey: "name"
+      connectedAccounts: collection<ConnectedAccountRecord>()({
+        primaryKey: "id"
       }),
     },
     singletons: {
@@ -46,6 +48,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
         id: "user@example.com",
       },
       quickModel: <string | null>null,
+      nextAccountId: 0,
     }
   });
 }
@@ -55,10 +58,20 @@ type UserStorage = ReturnType<typeof makeUserStorage>;
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
+  private vendors: Map<string, Service<GatekeeperVendor>>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.storage = makeUserStorage(ctx.storage);
+
+    this.vendors = new Map;
+
+    for (let bindingName in env) {
+      if (bindingName.startsWith("GATEKEEPER_")) {
+        let vendorId = bindingName.slice("GATEKEEPER_".length).toLowerCase();
+        this.vendors.set(vendorId, (<any>this.env)[bindingName]);
+      }
+    }
   }
 
   async whoami(): Promise<AiChatAuthorInfo> {
@@ -145,24 +158,121 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.minions.delete(id);
   }
 
-  async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
-    // TODO: Actually choose based on url.
-    let name: string = "google";
+  async listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]> {
+    let promises: Promise<{id: string, description: VendorDescription}>[] = [];
 
-    let result = this.storage.gatekeepers.get(name)?.vendor;
-    if (!result) {
-      // TODO: Registry of gatekeepers that isn't just bindings.
-      let vendor: GatekeeperVendor | undefined =
-          (<any>this.env)["GATEKEEPER_" + name.toUpperCase()];
-      if (!vendor) {
-        throw new Error(`No such gatekeeper installed: ${name}`);
-      }
-      result = await vendor.newUser();
-
-      this.storage.gatekeepers.put({name, vendor: result});
+    for (let [id, vendor] of this.vendors) {
+      promises.push(vendor.describe().then(description => {
+        return {id, description};
+      }))
     }
 
-    return await result.getGatekeeperClassFor(url);
+    return await Promise.all(promises);
+  }
+
+  async connectAccount(vendorId: string): Promise<{url: string}> {
+    let vendor = this.vendors.get(vendorId);
+    if (!vendor) {
+      throw new Error("No such service: " + vendorId);
+    }
+
+    let vendorDescription = await vendor.describe();
+
+    let accountId = this.storage.nextAccountId.get();
+    this.storage.nextAccountId.put(accountId + 1);
+
+    let props = {
+      userId: this.ctx.id.toString(),
+      accountId,
+      vendorDescription,
+    };
+
+    let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
+
+    let {url} = await vendor.connectAccount(callback);
+    return {url};
+  }
+
+  async subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+      : Promise<RpcStub<{}>> {
+    let connectedAccounts = this.storage.connectedAccounts;
+
+    subscriber = subscriber.dup();  // keep stub after return
+
+    let dbSubscriber = {
+      add(record: ConnectedAccountRecord) {
+        subscriber.add(record.id, record.description, record.vendorDescription)
+            .catch(err => { connectedAccounts.unsubscribe(dbSubscriber) });
+      },
+      update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord): void {
+        // Never happens.
+      },
+      remove(record: ConnectedAccountRecord): void {
+        subscriber.remove(record.id);
+      }
+    }
+
+    let unsubscribe = () => {
+      connectedAccounts.unsubscribe(dbSubscriber);
+      subscriber[Symbol.dispose]();
+    };
+
+    for (let record of connectedAccounts.list()) {
+      subscriber.add(record.id, record.description, record.vendorDescription).catch(unsubscribe);
+    }
+
+    subscriber.ready().catch(unsubscribe);
+
+    connectedAccounts.subscribe(dbSubscriber);
+
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+        subscriber[Symbol.dispose]();
+      }
+    });
+  }
+
+  async disconnectAccount(accountId: number): Promise<void> {
+    let account = this.storage.connectedAccounts.get(accountId);
+    if (account) {
+      await account.account.revoke();
+      this.storage.connectedAccounts.delete(accountId);
+    }
+  }
+
+  async putConnectedAccount(record: ConnectedAccountRecord) {
+    this.storage.connectedAccounts.put(record);
+  }
+
+  async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
+    // TODO: Actually choose based on url. Or perhaps, return a list of accounts to choose from.
+    let account = this.storage.connectedAccounts.get(0);
+    if (!account) throw new Error("not connected");
+
+    return await account.account.getGatekeeperClassFor(url);
+  }
+}
+
+type GatekeeperConnectCallbackProps = {
+  userId: string;
+  accountId: number;
+  vendorDescription: VendorDescription;
+}
+
+export class GatekeeperConnectCallbackImpl
+    extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
+    implements GatekeeperConnectCallback {
+  async complete(account: Fetcher<GatekeeperUser>): Promise<void> {
+    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
+    let userStub = this.ctx.exports.UserDurableObject.get(userId);
+
+    await userStub.putConnectedAccount({
+      id: this.ctx.props.accountId,
+      account,
+      description: await account.describe(),
+      vendorDescription: this.ctx.props.vendorDescription
+    });
   }
 }
 
@@ -2138,6 +2248,23 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async listMinions(): Promise<MinionMetadata[]> {
     return this.user.listMinions();
+  }
+
+  listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]> {
+    return this.user.listGatekeeperVendors();
+  }
+
+  connectAccount(vendorId: string): Promise<{url: string}> {
+    return this.user.connectAccount(vendorId);
+  }
+
+  subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+      : Promise<RpcStub<{}>> {
+    return this.user.subscribeConnectedAccounts(subscriber);
+  }
+
+  disconnectAccount(accountId: number): Promise<void> {
+    return this.user.disconnectAccount(accountId);
   }
 }
 
