@@ -10,6 +10,52 @@ export type GoogleAccessToken = {
   expires: Date;
 };
 
+export type GoogleOAuthGrant = {
+  refreshToken: string;
+  accessToken: GoogleAccessToken;
+};
+
+export async function exchangeAuthCode(
+    code: string, clientId: string, clientSecret: string, redirectUri: string)
+    : Promise<GoogleOAuthGrant> {
+  let params = new URLSearchParams();
+  params.set("code", code);
+  params.set("client_id", clientId);
+  params.set("client_secret", clientSecret);
+  params.set("redirect_uri", redirectUri);
+  params.set("grant_type", "authorization_code");
+
+  let response = await fetch(
+      "https://oauth2.googleapis.com/token", {method: "POST", body: params});
+
+  let contentType = response.headers.get("Content-Type");
+  let isJson = contentType && contentType.startsWith("application/json");
+
+  if (!response.ok) {
+    if (isJson) {
+      let body = await response.json<any>();
+      throw new Error(`Failed to obtain refresh token: ${body.error} ${body.error_description}`);
+    } else {
+      throw new Error(
+          `Failed to obtain refresh token: ${response.status} ${response.statusText}`);
+    }
+  }
+
+  if (!isJson) {
+    throw new Error("Token endpoint didn't return JSON?");
+  }
+
+  let body = await response.json<any>();
+
+  return {
+    accessToken: {
+      token: body.access_token,
+      expires: new Date(Date.now() + body.expires_in * 1000),
+    },
+    refreshToken: body.refresh_token,
+  };
+}
+
 // Exchange a refresh token for an access token.
 export async function getAccessToken(refreshToken: string, clientId: string, clientSecret: string)
     : Promise<GoogleAccessToken> {

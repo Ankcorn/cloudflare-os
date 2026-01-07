@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription } from '@minions/workshop-shared/gatekeeper';
-import { getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
+import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import TYPES_CODE from "./types.txt";
 
@@ -34,45 +34,60 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
+const OAUTH_SCOPES = [
+  "openid",
+  "https://www.googleapis.com/auth/userinfo.profile",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/gmail.labels",
+  "https://www.googleapis.com/auth/gmail.modify"
+];
+
+const REDIRECT_URI = "http://localhost:8787/oauth/google";
+
 // Main HTTP UI entrypoint. We only use this to initiate OAuth requests to Google.
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
-
     let path = url.pathname.slice(1).split("/");
-    if (path.length === 1 && path[0]) {
-      let userObjectId = ctx.exports.UserAccount.idFromString(path[0]);
-      let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
 
-      switch (req.method) {
-        case "GET":
-        case "HEAD": {
-          let hasApiKey = await stub.hasApiKey();
+    if (path.length === 1 && path[0].length == 64) {
+      let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      newUrl.searchParams.set("client_id", env.CLIENT_ID);
+      newUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      newUrl.searchParams.set("response_type", "code");
+      newUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
+      newUrl.searchParams.set("access_type", "offline");
+      newUrl.searchParams.set("prompt", "consent");
 
-          return new Response(apiKeyForm(hasApiKey), {
-            headers: {
-              "Content-Type": "text/html; charset=utf-8"
-            }
-          });
-        }
+      // TODO: SECURITY: This is not secure enough! We need a new nonce every time. In fact
+      // we should include a nonce in the URL that initiated this request, too, so people can't
+      // just visit the same URL again later.
+      newUrl.searchParams.set("state", path[0]);
 
-        case "POST": {
-          let form = await req.formData();
-          let key = form.get("key");
-          if (!key || typeof key !== "string") {
-            return new Response("Bad Request", {status: 400});
-          }
-          await stub.setApiKey(key);
-          return new Response(SELF_CLOSING_HTML, {
-            headers: {
-              "Content-Type": "text/html; charset=utf-8"
-            }
-          });
-        }
+      return Response.redirect(newUrl.toString(), 302);
+    } else if (url.pathname === "/oauth/google") {
+      // Completion redirect.
 
-        default:
-          return new Response("Method Now Allowed", {status: 405});
+      let error = url.searchParams.get("error");
+      if (error) {
+        return new Response(`${error}: ${url.searchParams.get("error_description")}`);
       }
+
+      let state = url.searchParams.get("state");
+      if (!state) return new Response("Error: no 'state' provided");
+      let code = url.searchParams.get("code");
+      if (!code) return new Response("Error: no 'code' provided");
+
+      // TODO: check actual scopes granted, update our "scope" list accordingly
+
+      let userObjectId = ctx.exports.UserAccount.idFromString(state);
+      let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
+      await stub.acceptAuthCode(code);
+      return new Response(SELF_CLOSING_HTML, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8"
+        }
+      });
     } else {
       return new Response("Not Found", {status: 404});
     }
@@ -125,51 +140,64 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 export class UserAccount extends DurableObject<Env> {
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
     // If we have no API key in 1 hour, delete this object.
-    if (!this.ctx.storage.kv.get<string>("apiKey")) {
+    if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
 
     this.ctx.storage.kv.put("callback", callback);
   }
 
-  async setApiKey(key: string) {
+  async acceptAuthCode(code: string) {
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
       // Must have timed out.
       throw new Error("Took too long to complete the authorization. Please try again.");
     }
 
-    this.ctx.storage.kv.put<string>("apiKey", key);
+    let response = await exchangeAuthCode(
+        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, REDIRECT_URI);
+
+    if (!response.refreshToken) {
+      throw new Error("OAuth exchange didn't return refresh token?");
+    }
+
+    this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
+
+    // TODO: Cache the access token.
 
     try {
       let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
       await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
     } catch (err) {
-      this.ctx.storage.kv.delete("apiKey");
+      this.ctx.storage.kv.delete("refreshToken");
       throw err;
     }
   }
 
-  hasApiKey() {
-    return this.ctx.storage.kv.get<string>("apiKey") !== undefined;
+  hasRefreshToken() {
+    return this.ctx.storage.kv.get<string>("refreshToken") !== undefined;
   }
 
   async getAccessToken(): Promise<GoogleAccessToken> {
-    let refreshToken = await this.ctx.storage.get<string>("apiKey");
+    let refreshToken = await this.ctx.storage.get<string>("refreshToken");
     if (!refreshToken) {
       throw new Error("no refresh token set");
     }
+
+    // TODO: Cache the access token.
+    // TODO: If new refresh token returned, use it.
+
     return await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
-    if (!this.hasApiKey()) {
+    if (!this.hasRefreshToken()) {
       this.ctx.storage.deleteAll();
     }
   }
 
   async revoke(): Promise<void> {
-    let refreshToken = this.ctx.storage.kv.get<string>("apiKey");
+    let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     if (refreshToken) {
       await revokeGoogleToken(refreshToken);
     }

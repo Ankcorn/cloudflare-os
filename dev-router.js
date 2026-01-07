@@ -10,6 +10,12 @@ export default {
 
     switch (url.hostname) {
       case "localhost":
+        // Annoyingly, Google refuses to let me use "google.localhost" as a redirect URI, saying
+        // it's an invalid hostname.
+        if (url.pathname === "/oauth/google") {
+          return env.GATEKEEPER_GOOGLE.fetch(req);
+        }
+
         // Redirect to Vite dev server for frontend.
         //
         // Note that unfortunately when viewing this way, the frontend will refresh whenever
