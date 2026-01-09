@@ -1,9 +1,9 @@
-import { Modal, message, Typography, Avatar, Spin } from 'antd'
+import { Modal, message, Typography, Spin } from 'antd'
 import { useState, useEffect } from 'react'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi } from '@minions/workshop-shared/api'
+import { AuthenticatedApi, GatekeeperVendorFilter } from '@minions/workshop-shared/api'
 import { VendorDescription } from '@minions/workshop-shared/gatekeeper'
-import { LinkOutlined } from '@ant-design/icons'
+import VendorCard from './VendorCard'
 
 const { Text } = Typography
 
@@ -12,6 +12,8 @@ interface ConnectAccountModalProps {
   onCancel: () => void
   onInitiated: () => void
   authenticatedApi: RpcStub<AuthenticatedApi>
+  /** Optional filter to only show vendors supporting certain features */
+  filter?: GatekeeperVendorFilter
 }
 
 interface VendorOption {
@@ -19,7 +21,13 @@ interface VendorOption {
   description: VendorDescription
 }
 
-export default function ConnectAccountModal({ visible, onCancel, onInitiated, authenticatedApi }: ConnectAccountModalProps) {
+export default function ConnectAccountModal({
+  visible,
+  onCancel,
+  onInitiated,
+  authenticatedApi,
+  filter,
+}: ConnectAccountModalProps) {
   const [connecting, setConnecting] = useState<string | null>(null)
   const [vendors, setVendors] = useState<VendorOption[]>([])
   const [vendorsLoading, setVendorsLoading] = useState(true)
@@ -34,7 +42,7 @@ export default function ConnectAccountModal({ visible, onCancel, onInitiated, au
     const fetchVendors = async () => {
       setVendorsLoading(true)
       try {
-        const vendorList = await authenticatedApi.listGatekeeperVendors()
+        const vendorList = await authenticatedApi.listGatekeeperVendors(filter)
         setVendors(vendorList.map(v => ({ id: v.id, description: v.description })))
       } catch (error) {
         console.error('Failed to fetch vendors:', error)
@@ -45,7 +53,7 @@ export default function ConnectAccountModal({ visible, onCancel, onInitiated, au
     }
 
     fetchVendors()
-  }, [visible, authenticatedApi])
+  }, [visible, authenticatedApi, filter])
 
   const handleConnect = async (vendorId: string) => {
     setConnecting(vendorId)
@@ -79,48 +87,13 @@ export default function ConnectAccountModal({ visible, onCancel, onInitiated, au
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 8 }}>
           {vendors.map(vendor => (
-            <div
+            <VendorCard
               key={vendor.id}
-              onClick={() => !connecting && handleConnect(vendor.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 16,
-                padding: 16,
-                border: '1px solid #d9d9d9',
-                borderRadius: 8,
-                cursor: connecting ? 'not-allowed' : 'pointer',
-                opacity: connecting && connecting !== vendor.id ? 0.5 : 1,
-                transition: 'all 0.2s',
-              }}
-              onMouseEnter={(e) => {
-                if (!connecting) {
-                  e.currentTarget.style.borderColor = '#1890ff'
-                  e.currentTarget.style.backgroundColor = '#f0f5ff'
-                }
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = '#d9d9d9'
-                e.currentTarget.style.backgroundColor = 'transparent'
-              }}
-            >
-              {vendor.description.logo ? (
-                <Avatar src={vendor.description.logo.url} size={48} />
-              ) : (
-                <Avatar size={48} icon={<LinkOutlined />} />
-              )}
-              <div style={{ flex: 1 }}>
-                <Text strong style={{ display: 'block', fontSize: 16 }}>
-                  {vendor.description.displayName}
-                </Text>
-                {vendor.description.url && (
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {vendor.description.url}
-                  </Text>
-                )}
-              </div>
-              {connecting === vendor.id && <Spin size="small" />}
-            </div>
+              vendor={vendor.description}
+              onClick={() => handleConnect(vendor.id)}
+              loading={connecting === vendor.id}
+              disabled={connecting !== null && connecting !== vendor.id}
+            />
           ))}
         </div>
       )}

@@ -1,5 +1,5 @@
 import { RpcStub, RpcPromise, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall, AiModelConfig, ConnenctedAccountsSubscriber } from '@minions/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiToolCall, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@minions/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@minions/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
@@ -54,6 +54,40 @@ function makeUserStorage(storage: DurableObjectStorage) {
 }
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
+
+async function checkGatekeeperVendorFilter(
+    vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
+    filter: GatekeeperVendorFilter): Promise<boolean> {
+  try {
+    if (filter.resourceUrl) {
+      let patterns = await vendor.getSupportedUrls();
+      let matched = false;
+      for (let pattern of patterns) {
+        if (typeof pattern !== "string") {
+          // Guard against gatekeepers returning a non-string pattern for now.
+          //
+          // TODO: Consider whether this is the API we want for getSupportedUrls(). Is URLPattern
+          //   even the right thing?
+          throw new Error("Gatekeeper returned non-string pattern from getSupportedUrls()");
+        }
+
+        if (new URLPattern(pattern).test(filter.resourceUrl)) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return false;
+    }
+
+    return true;
+  } catch (err) {
+    // This function is called when iterating over several gatekeepers to filter them. If one of
+    // them throws we don't want to block the whole list, so instead log the error and assume this
+    // gatekeeper should be filtered.
+    console.error(err);
+    return false;
+  }
+}
 
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
@@ -158,16 +192,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.minions.delete(id);
   }
 
-  async listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]> {
-    let promises: Promise<{id: string, description: VendorDescription}>[] = [];
+  async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
+      : Promise<{id: string, description: VendorDescription}[]> {
+    let promises: Promise<{id: string, description: VendorDescription}|null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
-      promises.push(vendor.describe().then(description => {
-        return {id, description};
-      }))
+      promises.push((async () => {
+        if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
+          return null;
+        }
+
+        return {id, description: await vendor.describe()};
+      })());
     }
 
-    return await Promise.all(promises);
+    return (await Promise.all(promises)).filter(value => value !== null);
   }
 
   async connectAccount(vendorId: string): Promise<{url: string}> {
@@ -193,14 +232,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return {url};
   }
 
-  async subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+  async subscribeConnectedAccounts(
+      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>> {
     let connectedAccounts = this.storage.connectedAccounts;
 
     subscriber = subscriber.dup();  // keep stub after return
 
+    let seenIds = new Set<number>();
+
     let dbSubscriber = {
-      add(record: ConnectedAccountRecord) {
+      async add(record: ConnectedAccountRecord) {
+        if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
+          return;
+        }
+
+        seenIds.add(record.id);
         subscriber.add(record.id, record.description, record.vendorDescription)
             .catch(err => { connectedAccounts.unsubscribe(dbSubscriber) });
       },
@@ -208,7 +255,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         // Never happens.
       },
       remove(record: ConnectedAccountRecord): void {
-        subscriber.remove(record.id);
+        if (seenIds.has(record.id)) {
+          subscriber.remove(record.id);
+          seenIds.delete(record.id);
+        }
       }
     }
 
@@ -217,13 +267,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       subscriber[Symbol.dispose]();
     };
 
+    let promises: Promise<void>[] = [];
+
     for (let record of connectedAccounts.list()) {
-      subscriber.add(record.id, record.description, record.vendorDescription).catch(unsubscribe);
+      promises.push((async () => {
+        if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
+          return;
+        }
+
+        seenIds.add(record.id);
+        subscriber.add(record.id, record.description, record.vendorDescription).catch(unsubscribe);
+      })());
     }
 
-    subscriber.ready().catch(unsubscribe);
-
     connectedAccounts.subscribe(dbSubscriber);
+
+    await Promise.all(promises);
+
+    subscriber.ready().catch(unsubscribe);
 
     return new RpcStub<{}>({
       [Symbol.dispose]() {
@@ -245,11 +306,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.connectedAccounts.put(record);
   }
 
-  async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
-    // TODO: Actually choose based on url. Or perhaps, return a list of accounts to choose from.
-    let account = this.storage.connectedAccounts.get(0);
-    if (!account) throw new Error("not connected");
-
+  async getGatekeeperClassFor(accountId: number, url: string)
+      : Promise<DurableObjectClass<Gatekeeper<any>>> {
+    let account = this.storage.connectedAccounts.get(accountId);
+    if (!account) throw new Error("No such account.");
     return await account.account.getGatekeeperClassFor(url);
   }
 }
@@ -1794,8 +1854,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new GatekeeperClientImpl(this.impl, id, this.impl.getGatekeeperFacet(id));
   }
 
-  async newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
-    return await this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(resourceUrl));
+  async newGatekeeper(accountId: number, resourceUrl: string)
+      : Promise<GatekeeperClient<any> | null> {
+    return await this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(
+        accountId, resourceUrl));
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -2250,17 +2312,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listMinions();
   }
 
-  listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]> {
-    return this.user.listGatekeeperVendors();
+  listGatekeeperVendors(filter?: GatekeeperVendorFilter)
+      : Promise<{id: string, description: VendorDescription}[]> {
+    return this.user.listGatekeeperVendors(filter);
   }
 
   connectAccount(vendorId: string): Promise<{url: string}> {
     return this.user.connectAccount(vendorId);
   }
 
-  subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+  subscribeConnectedAccounts(
+      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>> {
-    return this.user.subscribeConnectedAccounts(subscriber);
+    return this.user.subscribeConnectedAccounts(subscriber, filter);
   }
 
   disconnectAccount(accountId: number): Promise<void> {

@@ -413,6 +413,7 @@ export default function MinionEditor() {
                 children: overseer ? (
                   <Connections
                     overseer={overseer.stub}
+                    authenticatedApi={authenticatedApi}
                     onConnectionsChange={handleCodeChange}
                     isVisible={activeTab === 'connections'}
                   />

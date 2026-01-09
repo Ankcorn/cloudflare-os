@@ -44,6 +44,8 @@ const OAUTH_SCOPES = [
 
 const REDIRECT_URI = "http://localhost:8787/oauth/google";
 
+const SUPPORTED_URLS = ["https://mail.google.com/*"];
+
 // Main HTTP UI entrypoint. We only use this to initiate OAuth requests to Google.
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
@@ -127,7 +129,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getSupportedUrls(): Promise<string[]> {
-    return ["https://mail.google.com/mail/*"];
+    return SUPPORTED_URLS;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -217,6 +219,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     let obj = this.ctx.exports.UserAccount.get(id);
     let token = await obj.getAccessToken();
     return getGoogleAccountDescription(token.token);
+  }
+
+  async getSupportedUrls(): Promise<string[]> {
+    return SUPPORTED_URLS;
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {

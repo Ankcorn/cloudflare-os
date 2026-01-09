@@ -1,5 +1,5 @@
-import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Tooltip, Spin } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LinkOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
@@ -8,6 +8,7 @@ import { AccountDescription, VendorDescription } from '@minions/workshop-shared/
 import { RpcTarget } from 'capnweb'
 import AddModelModal from './AddModelModal'
 import ConnectAccountModal from './ConnectAccountModal'
+import AccountCard from './AccountCard'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -80,9 +81,15 @@ export default function SettingsPage() {
     fetchQuickModel()
   }, [authenticatedApi])
 
+  // Track whether we've ever received ready() - only show spinner until first ready
+  const everReadyRef = useRef(false)
+  // Track account IDs seen in current subscription batch (for reconnection handling)
+  const seenAccountIdsRef = useRef(new Set<number>())
+
   // Create a stable subscriber class for connected accounts
   class ConnectedAccountsSubscriberImpl extends RpcTarget implements ConnenctedAccountsSubscriber {
     add(id: number, description: AccountDescription, vendor: VendorDescription) {
+      seenAccountIdsRef.current.add(id)
       setConnectedAccounts(prev => {
         const next = new Map(prev)
         next.set(id, { description, vendor })
@@ -91,6 +98,7 @@ export default function SettingsPage() {
     }
 
     remove(id: number) {
+      seenAccountIdsRef.current.delete(id)
       setConnectedAccounts(prev => {
         const next = new Map(prev)
         next.delete(id)
@@ -99,6 +107,26 @@ export default function SettingsPage() {
     }
 
     ready() {
+      // Capture seen set before clearing (must happen before setState callback runs)
+      const seen = seenAccountIdsRef.current
+      // Clear seen set for next subscription batch
+      seenAccountIdsRef.current = new Set()
+      // Mark as ready (only matters for first time)
+      everReadyRef.current = true
+
+      // On ready, remove any accounts that weren't seen in this subscription batch
+      // (handles reconnection where some accounts may no longer be valid)
+      setConnectedAccounts(prev => {
+        let changed = false
+        const next = new Map(prev)
+        for (const id of next.keys()) {
+          if (!seen.has(id)) {
+            next.delete(id)
+            changed = true
+          }
+        }
+        return changed ? next : prev
+      })
       setAccountsReady(true)
     }
   }
@@ -347,7 +375,7 @@ export default function SettingsPage() {
             </Button>
           </div>
 
-          {!accountsReady ? (
+          {!everReadyRef.current ? (
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <Spin />
             </div>
@@ -360,71 +388,12 @@ export default function SettingsPage() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {connectedAccountsArray.map(account => (
-                <Tooltip
+                <AccountCard
                   key={account.id}
-                  title={account.description.scope.length > 0 ? (
-                    <ul style={{ margin: 0, paddingLeft: 16 }}>
-                      {account.description.scope.map((scope, i) => (
-                        <li key={i}>{scope}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  placement="right"
-                >
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                      padding: '12px 16px',
-                      border: '1px solid #d9d9d9',
-                      borderRadius: 8,
-                    }}
-                  >
-                    {/* Overlapping avatars */}
-                    <div style={{ position: 'relative', width: 48, height: 40 }}>
-                      {account.vendor.logo ? (
-                        <Avatar
-                          src={account.vendor.logo.url}
-                          size={32}
-                          style={{ position: 'absolute', left: 0, top: 0 }}
-                        />
-                      ) : (
-                        <Avatar
-                          size={32}
-                          icon={<LinkOutlined />}
-                          style={{ position: 'absolute', left: 0, top: 0 }}
-                        />
-                      )}
-                      {account.description.avatar?.url ? (
-                        <Avatar
-                          src={account.description.avatar.url}
-                          size={32}
-                          style={{ position: 'absolute', left: 16, top: 8, border: '2px solid white' }}
-                        />
-                      ) : (
-                        <Avatar
-                          size={32}
-                          icon={<UserOutlined />}
-                          style={{ position: 'absolute', left: 16, top: 8, border: '2px solid white' }}
-                        />
-                      )}
-                    </div>
-
-                    {/* Account info */}
-                    <div style={{ flex: 1 }}>
-                      <Text strong>
-                        {account.vendor.displayName}
-                        {account.description.uniqueName && `: ${account.description.uniqueName}`}
-                      </Text>
-                      {account.description.displayName && account.description.uniqueName && (
-                        <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
-                          {account.description.displayName}
-                        </Text>
-                      )}
-                    </div>
-
-                    {/* Delete button */}
+                  account={account.description}
+                  vendor={account.vendor}
+                  showTooltip
+                  actions={
                     <Button
                       icon={<DeleteOutlined />}
                       onClick={(e) => {
@@ -437,8 +406,8 @@ export default function SettingsPage() {
                       danger
                       type="text"
                     />
-                  </div>
-                </Tooltip>
+                  }
+                />
               ))}
             </div>
           )}

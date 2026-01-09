@@ -155,6 +155,11 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // Get display info for an account, suitable for display to a user.
   describe(): Promise<AccountDescription>;
 
+  // Typically returns the same as GatekeeperVendor.getSupportedUrls(), though an implementation
+  // could choose to return a narrower set if the specific account does not support every resource
+  // that the vendor supports generally.
+  getSupportedUrls(): Promise<string[]>;
+
   // Get a Durable Object class that can implement a gatekeeper for the given resource. This class
   // can be used to instantiate a Facet which implements the Gatekeeper interface.
   //

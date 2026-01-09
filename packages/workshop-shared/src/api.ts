@@ -52,6 +52,13 @@ export interface ConnenctedAccountsSubscriber {
   ready(): void;
 }
 
+// When listing gatekeeper vendors or connected accounts, you can filter to only vendors/accounts
+// that support certain features. This type specifies the filter.
+export type GatekeeperVendorFilter = {
+  // Filter for vendors that can connect to the given resource.
+  resourceUrl?: string,
+};
+
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Get profile info for the user who is logged in.
@@ -94,7 +101,8 @@ export interface AuthenticatedApi extends RpcTarget {
   listMinions(): Promise<MinionMetadata[]>;
 
   // List all third-party services that this account can connect to.
-  listGatekeeperVendors(): Promise<{id: string, description: VendorDescription}[]>;
+  listGatekeeperVendors(filter?: GatekeeperVendorFilter)
+      : Promise<{id: string, description: VendorDescription}[]>;
 
   // Connect this account to a specific account on a third-party service. Returns the URL which
   // should be opened in a new tab in the user's browser to complete the authorization. When the
@@ -109,7 +117,8 @@ export interface AuthenticatedApi extends RpcTarget {
   // This is subscription-based because the flow to connect a new account completes in a separate
   // window. When it completes, we want the list of accounts in the Workshop UI to update
   // immediately, to give the user feedback that the account is now connected.
-  subscribeConnectedAccounts(subscriber: RpcStub<ConnenctedAccountsSubscriber>)
+  subscribeConnectedAccounts(
+      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>>;
 
   // Remove a connected account, revoking the token.
@@ -316,7 +325,11 @@ export interface Overseer extends RpcTarget {
   getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null>;
 
   // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
-  newGatekeeper(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+  //
+  // `accountId` is the user's connected account to use to access this resource. To determine an
+  // appropriate account, use `subscribeConnectedAccounts()` with a `filter` for this URL, then
+  // let the user choose one.
+  newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
 
   // Create a new gatekeeper for an AI model binding. The model can be any returned by
   // listModels().
