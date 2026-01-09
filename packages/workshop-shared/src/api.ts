@@ -450,7 +450,9 @@ export type AiChatMessage = {
   sequence: number;
   timestamp: Date;
   author: AiChatAuthorInfo;
-} & ({
+} & AiChatMessageBody;
+
+export type AiChatMessageBody = {
   // A regular chat message.
   type: "message";
   message: string;
@@ -481,7 +483,7 @@ export type AiChatMessage = {
   // before this point, and any later merge will not include the reverted changes.
   type: "revert";
   revertFrom: number;
-})
+};
 
 // Describes a tool call performed by an AI agent as part of a message.
 export type AiToolCall = {

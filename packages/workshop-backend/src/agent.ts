@@ -1,0 +1,579 @@
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody } from '@minions/workshop-shared/api';
+import * as Y from "yjs";
+import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
+import z from "zod";
+
+// Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
+// dependencies.
+export interface AgentHooks {
+  buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
+  listBindingNames(): string[];
+  describeBinding(bindingName: string): Promise<string>;
+  executeCodeMode(code: string): Promise<string>;
+  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[]): void;
+}
+
+let SYSTEM_PROMPT = `
+You are a helpful coding assistant tasked with helping users write small personal applications known as "Minions". A Minion is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
+
+Minions execute on a restricted and heavily-sandboxed variant of Cloudflare Workers.
+
+A Minion has two main files: client.js and server.js
+
+server.js defines the Minion's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Minion\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch hadler; the Minions platform automatically takes care of routing requests to the Minion. The Minion has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
+
+\`\`\`
+import { DurableObject } from "cloudflare:workers";
+
+export class Minion extends DurableObject {
+  greet(name) {
+    return \`Hello, \${name}!\`;
+  }
+}
+\`\`\`
+
+client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`minion\`, which is an RPC stub pointing at the minion's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudlfare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`minion\` stub will invoke the same-samed method on the Durable Object class. A simple client.js might look like:
+
+\`\`\`
+let greeting = await minion.greet("World");
+document.body.appendChild(document.createTextNode(greeting));
+\`\`\`
+
+Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Minion communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
+
+Note that Cap'n Web is a bidirectional object capability protocol, meaning, among other things, you can pass a function over RPC, in the params or results of another function. This actually passes the function "by reference": the receiving end actually receives an RPC stub, which can be used to call back over RPC to the original function. This, of course, causes the function to become async, even if the original was synchronous.
+
+Using functions this way is a great way to implement real-time updates. The client can "subscribe" to updates, passing a callback function to the server. The server can then call the function asynchronously whenever the state changes (perhaps due to activity of a different client). This technique should be used when implementing multiplayer collaboration.
+
+When implementing such a subscription, it is important to call \`.dup()\` on the callback stub, in order to obtain a long-lived stub. Otherwise, the stub received as a parameter is implicitly disposed at the end of the function. You should also use \`onRpcBroken\` to monitor for client disconnects, like:
+
+\`\`\`
+async subscribe(callback) {
+  let callbackDup = callback.dup();
+  this.subscribers.add(callbackDup);
+  callbackDup.onRpcBroken(error => {
+    this.subscribers.delete(callbackDup);
+  });
+}
+\`\`\`
+
+Some general app design tips:
+* ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
+* If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
+* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make each move. If it's concurrent but with distinct players, let each client choose which player they are controlling, inlcuding letting multiple clients choose the same player.
+* If the project contains a README.md file, use it to describe the Minion at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
+`.trim();
+
+export async function runAgent(
+    hooks: AgentHooks,
+    chosenModel: LanguageModel,
+    chatId: number,
+    author: AiChatAuthorInfo,
+    chatMessages: AiChatMessage[],
+    abortSignal: AbortSignal): Promise<void> {
+  // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
+  // this session.
+  let ydoc: Y.Doc | undefined;
+  let versionLock: number | undefined;
+  let capturedYdocChanges: Uint8Array[] = [];
+  let getSessionYDoc = () => {
+    if (!ydoc) {
+      let build = hooks.buildYDoc(versionLock === undefined ? "current" : versionLock);
+      versionLock = build.version;
+      ydoc = build.ydoc;
+
+      ydoc.on("updateV2", (update, origin) => {
+        capturedYdocChanges.push(update);
+      });
+    }
+    return ydoc;
+  };
+
+  // Track which files have been read in this session. Edits aren't allowed before reading.
+  let filesRead = new Set<string>();
+
+  let modelMessages: ModelMessage[] = [];
+
+  // Run through the chat log to process all "merge" and "revert" messages in order to mark
+  // which messages lie in merged or reverted ranges. This serves two purposes:
+  // 1. Let us know which changes should not be applied when building the Y.Doc of the current
+  //    content.
+  // 2. Let us know which *reads* are reading from reverted content, and therefore should be
+  //    elided from the chat history for being no longer relevant.
+  let chatMessageStatus: (undefined | "merged" | "reverted")[] = new Array(chatMessages.length);
+  for (let msg of chatMessages) {
+    if (msg.type === "merge") {
+      for (let i = 0; i < msg.mergeThrough; i++) {
+        if (chatMessageStatus[i] === undefined) {
+          chatMessageStatus[i] = "merged";
+        }
+      }
+    } else if (msg.type === "revert") {
+      for (let i = msg.revertFrom; i < msg.sequence; i++) {
+        if (chatMessageStatus[i] === undefined) {
+          chatMessageStatus[i] = "reverted";
+        }
+      }
+    }
+  }
+
+  // We compute sequential change ID numbers for the purpose of telling the LLM about reverts.
+  let nextChangeId = 0;
+
+  // Map sequence numbers to change IDs.
+  let changeIdMap = new Map<number, number>();
+
+  for (let msg of chatMessages) {
+    switch (msg.type) {
+      case "message": {
+        let modelMessage: ModelMessage;
+        switch (msg.author.type) {
+          case "user":
+            modelMessage = {
+              role: "user",
+              content: msg.message,
+            };
+            break;
+
+          case "agent":
+            modelMessage = {
+              role: "assistant",
+              content: msg.message,
+            };
+            break;
+
+          default:
+            msg.author.type satisfies never;
+            continue;
+        }
+
+        modelMessages.push(modelMessage);
+
+        if (msg.toolCalls) {
+          let modelToolCalls: ToolCallPart[] = [];
+
+          for (let toolCall of msg.toolCalls) {
+            if (toolCall.observedCodeVersion !== undefined &&
+                toolCall.observedCodeVersion !== versionLock) {
+              if (versionLock === undefined) {
+                versionLock = toolCall.observedCodeVersion;
+              } else {
+                throw new Error("observedCodeVersion version is inconsistent in chat history");
+              }
+            }
+
+            // Recreate the tool output.
+            // TODO: Refactor so that we're not duplicating tool implementations...
+            let toolOutput: ToolResultPart["output"];
+            try {
+              if (toolCall.error) {
+                toolOutput = {type: "error-text", value: `${toolCall.error}`};
+              } else switch (toolCall.toolName) {
+                case "readFile": {
+                  if (chatMessageStatus[msg.sequence] === "reverted") {
+                    // It would be a total waste of tokens to actually include this file
+                    // content in the chat history since it contains changes that were later
+                    // reverted -- not to mention a waste of resources to compute the content
+                    // of the file. The agent can always read the current file contents if it
+                    // needs to.
+                    toolOutput = {
+                      type: "error-text",
+                      value: "This call succeeded when the agent first invoked it, but " +
+                          "the reuslts have been elided from the chat history because " +
+                          "the user later reverted the file to an earlier version."
+                    };
+                  } else {
+                    let text = getSessionYDoc().getMap<Y.Text>().get(toolCall.input.filename);
+                    if (!text) {
+                      throw new Error("File does not exist.");
+                    }
+                    toolOutput = {
+                      type: "text",
+                      value: text.toString()
+                    };
+                    filesRead.add(toolCall.input.filename);
+                  }
+                  break;
+                }
+                case "editFile":
+                  toolOutput = {
+                    type: "json",
+                    value: {success: true, changeId: nextChangeId},
+                  };
+                  break;
+                case "describeBinding":
+                  toolOutput = {
+                    type: "text",
+                    value: await hooks.describeBinding(toolCall.input.bindingName),
+                  };
+                  break;
+                case "executeCode":
+                  toolOutput = {
+                    type: "text",
+                    value: toolCall.output!,
+                  };
+                  break;
+                case "observeUserChanges":
+                  toolOutput = {
+                    type: "json",
+                    value: {},
+                  };
+                  break;
+                default:
+                  toolCall satisfies never;
+                  throw new Error("Unknown tool.");
+              }
+            } catch (err) {
+              toolOutput = {type: "error-text", value: `${err}`};
+            }
+
+            modelMessages.push({
+              role: "tool",
+              content: [{
+                type: "tool-result",
+                toolName: toolCall.toolName,
+                toolCallId: toolCall.toolCallId,
+                output: toolOutput,
+              }]
+            });
+
+            modelToolCalls.push({
+              type: "tool-call",
+              toolCallId: toolCall.toolCallId,
+              toolName: toolCall.toolName,
+              input: toolCall.input,
+            });
+          }
+
+          if (modelMessage.role === "assistant") {
+            if (typeof modelMessage.content === "string") {
+              modelMessage.content = [{type: "text", text: modelMessage.content}];
+            }
+            modelMessage.content = modelMessage.content.concat(modelToolCalls);
+          }
+        }
+
+        break;
+      }
+
+      case "changes":
+        if (chatMessageStatus[msg.sequence] !== "reverted") {
+          Y.applyUpdateV2(getSessionYDoc(), msg.update);
+        }
+        changeIdMap.set(msg.sequence, nextChangeId);
+        ++nextChangeId;
+        break;
+
+      case "merge":
+        // No need to tell the agent about this.
+        break;
+
+      case "revert": {
+        // Synthetic message.
+        let toolCallId = `synthetic_${msg.sequence}`;
+        modelMessages.push({
+          role: "assistant",
+          content: [{
+            type: "tool-call",
+            toolCallId,
+            toolName: "observeUserChanges",
+            input: {},
+          }]
+        });
+        modelMessages.push({
+          role: "tool",
+          content: [{
+            type: "tool-result",
+            toolName: "observeUserChanges",
+            toolCallId,
+            output: {
+              type: "json",
+              value: {
+                revertedFromChangeId: changeIdMap.get(msg.revertFrom)!,
+              }
+            },
+          }]
+        });
+        break;
+      }
+
+      default:
+        msg satisfies never;
+        break;
+    }
+  }
+
+  // Additional information noted during execution of tool calls which we want to merge into
+  // the tool call logs later.
+  //
+  // As of this writing, if the tool call callback throws an error, the AI SDK renders the
+  // error back to the LLM, but does NOT indicate an error in the `toolCalls` array it returns
+  // to us. It only indicates an error there in cases where the AI failed to satisfy the
+  // parameter schema, seemingly. So we have to catch our own errors and log them to the
+  // side, ugh.
+  let toolCallNotes = new Map<string, Partial<AiToolCall>>();
+
+  capturedYdocChanges = [];
+
+  // Let's include the list of files in the system prompt so that the agent doesn't have to
+  // call a tool to list files at the start of every thread.
+  // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
+  //   will have been set, and this will list the files consistently with that version.
+  //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
+  //   agent doesn't acutally read any of the files, then the version won't end up being
+  //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
+  //   we don't actually lock in a version until the first time a file is actually read -- but
+  //   in the meantime, the system prompt can theoretically change on each request, if the
+  //   files are changing. That's fine.
+  let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
+  let systemPromptFiles: string;
+  if (currentFiles.length == 0) {
+    systemPromptFiles = "The project currently has no code files.";
+  } else {
+    systemPromptFiles =
+        `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
+        `\n* ${currentFiles.join("\n* ")}`;
+  }
+
+  let bindingNames = hooks.listBindingNames();
+  let systemPromptBindings: string;
+  if (bindingNames.length == 0) {
+    systemPromptBindings = "The project currently has no bindings.";
+  } else {
+    systemPromptBindings =
+        `The project is configured with the following Cloudflare Workers bindings:\n` +
+        `* ${bindingNames.join("\n* ")}`
+  }
+
+  let systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
+
+  await generateText({
+    model: chosenModel,
+    system: systemPrompt,
+    messages: modelMessages,
+    abortSignal,
+
+    // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
+    //   you want to support multiple steps at all? What if you don't want to set a limit?
+    // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
+    //   anything.
+    stopWhen: stepCountIs(30),
+
+    tools: {
+      readFile: tool({
+        description: "Read the content of a file in the project. Note that you will be " +
+            "informed any time a file changes, so it is not necessary to read a file again " +
+            "after you have already read it once.",
+        inputSchema: z.object({
+          filename: z.string().describe("Name of the file to read."),
+          // TODO: line range?
+          // TODO: Claude Code apparently presents the code to the agent with line number
+          //   prefixes on each line. Is this worth doing?
+        }),
+        execute: ({filename}, {toolCallId}) => {
+          try {
+            let text = getSessionYDoc().getMap<Y.Text>().get(filename);
+            if (!text) {
+              throw new Error("File does not exist.");
+            }
+            filesRead.add(filename);
+            toolCallNotes.set(toolCallId, {
+              observedCodeVersion: versionLock!
+            });
+            return text.toString();
+          } catch (error) {
+            toolCallNotes.set(toolCallId, {
+              observedCodeVersion: versionLock!,
+              error: `${error}`
+            });
+            throw error;
+          }
+        }
+      }),
+
+      editFile: tool({
+        description: "Edit content of a file. If you need to edit multiple places in a file " +
+            "or across multiple files, you should issue multiple tool calls simultanously, " +
+            "rather than in series.",
+        inputSchema: z.object({
+          filename: z.string().describe("Name of the file to edit."),
+          textToReplace: z.string()
+              .describe("Exact existing text which is to be replaced. This string must match " +
+                  "exactly one location in the file, or the edit will fail."),
+          replacement: z.string()
+              .describe("Text which should be inserted, replacing the matched text."),
+          // TODO: Line number hint, to disambiguate multiple matches?
+        }),
+        outputSchema: z.object({
+          success: z.boolean().describe(
+              "Always true to indicate the edit succeeded. Failed edits will throw an error."),
+          changeId: z.number().describe(
+              "Change number assigned to this change, in case we need to refer to it later. " +
+              "All edits made at the same time have the same changeId. This ID is not " +
+              "directly visible to the user."),
+        }),
+        execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
+          try {
+            if (!filesRead.has(filename)) {
+              throw new Error("You must read a file before you can edit it.");
+            }
+
+            let ydoc = getSessionYDoc();
+            let text = ydoc.getMap<Y.Text>().get(filename);
+            if (!text) {
+              throw new Error("File does not exist.");
+            }
+
+            let content = text.toString();
+            let pos = content.indexOf(textToReplace);
+            if (pos < 0) {
+              throw new Error("No matching text was found in the file.");
+            }
+            if (content.indexOf(textToReplace, pos + 1) >= 0) {
+              throw new Error("Multiple matches were found. The text to match must be unique.");
+            }
+
+            ydoc.transact(tr => {
+              text.delete(pos, textToReplace.length);
+              text.insert(pos, replacement);
+            });
+
+            return {success: true, changeId: nextChangeId};
+          } catch (error) {
+            toolCallNotes.set(toolCallId, {
+              error: `${error}`
+            });
+            throw error;
+          }
+        }
+      }),
+
+      observeUserChanges: tool({
+        description: "Returns information about changes which the user has made to the " +
+            "code.\n" +
+            "\n" +
+            "This tool is called automatically whenever the user makes changes, by " +
+            "inserting a synthetic messages into the chat history as if the assistant " +
+            "had called the tool. Hence, you never need to generate a call to this tool, " +
+            "but the chat history will automatically contain such calls when you need them.",
+        inputSchema: z.object({}),
+        outputSchema: z.object({
+          revertedFromChangeId: z.optional(z.boolean().describe(
+              "Indicates that all changes starting from the giver changeId to the " +
+              "current point in the chat history were reverted by the user. The file " +
+              "contents have returned to the state they were in immediately before the " +
+              "given changeId.")),
+          diff: z.optional(z.string().describe(
+              "Represents changes made by the user (other than broad reverts), in unified " +
+              "diff format.")),
+        }),
+        execute: ({}, {}) => {
+          // The agent shouldn't be calling this explicitly.
+          return {};
+        },
+      }),
+
+      describeBinding: tool({
+        description: "Describe one of the Minion's bindings (members of the Cloudflare " +
+            "Workers `env` object), including TypeScript types specifying the API it offers.",
+        inputSchema: z.object({
+          name: z.string().describe("Name of the binding (a property of `env`)."),
+        }),
+        execute: async ({name}, {toolCallId}) => {
+          try {
+            return await hooks.describeBinding(name);
+          } catch (error) {
+            toolCallNotes.set(toolCallId, {
+              error: `${error}`
+            });
+            throw error;
+          }
+        }
+      }),
+
+      executeCode: tool({
+        description: "Executes one-off JavaScript code, returning the output it logs to the " +
+            "console. The code will have access to the Minion's bindings ('env' object), " +
+            "so this can be used to directly perform tasks with them. The code runs in a " +
+            "sandbox where it cannot talk to the internet, except through the bindings; " +
+            "fetch() will not work. Otherwise, the code can call any built-in APIs " +
+            "available in Cloudflare Workers.\n" +
+            "\n" +
+            "When the user asks you to just do a task that can be done with these bindings, " +
+            "you should use executeCode to perform the task, instead of adding code to the " +
+            "minion to do it.",
+        inputSchema: z.object({
+          code: z.string().describe(
+              "Code to execute. This must be a complete self-contained JavaScript module " +
+              "which exports a single async function, like so:\n" +
+              "\n" +
+              "```\n" +
+              "export default async function(env) {\n" +
+              "  // ... code to execute ...\n" +
+              "}\n" +
+              "```\n" +
+              "\n" +
+              "`env` is the Cloudflare Workers env object containing the bindings."),
+        }),
+        execute: async ({code}, {toolCallId}) => {
+          try {
+            let output = await hooks.executeCodeMode(code);
+            toolCallNotes.set(toolCallId, {
+              output: `${output}`
+            });
+            return output;
+          } catch (error) {
+            toolCallNotes.set(toolCallId, {
+              error: `${error}`
+            });
+            throw error;
+          }
+        }
+      }),
+    },
+
+    onStepFinish: ({ text, reasoningText, toolCalls }) => {
+      let msgs: AiChatMessageBody[] = [];
+
+      {
+        let msg: AiChatMessageBody = {
+          type: "message",
+          message: text,
+        };
+        if (reasoningText) {
+          msg.reasoning = reasoningText;
+        }
+        if (toolCalls.length > 0) {
+          msg.toolCalls = toolCalls.map(tool => {
+            let result = <AiToolCall>{
+              toolCallId: tool.toolCallId,
+              toolName: tool.toolName,
+              input: tool.input
+            };
+            if (tool.error) {
+              result.error = `${tool.error}`;
+            }
+            let notes = toolCallNotes.get(tool.toolCallId);
+            if (notes) {
+              Object.assign(result, notes);
+            }
+            return result;
+          });
+        }
+        msgs.push(msg);
+      }
+
+      if (capturedYdocChanges.length > 0) {
+        let update = Y.mergeUpdatesV2(capturedYdocChanges);
+        capturedYdocChanges = [];
+
+        msgs.push({
+          type: "changes",
+          update
+        });
+      }
+
+      hooks.addChatMessages(chatId, author, msgs);
+    },
+  });
+}
