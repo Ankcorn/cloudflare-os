@@ -755,7 +755,6 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       <Modal
         title="Create New Connection"
         open={isNewConnectionModalVisible}
-        onOk={connectionTabKey === 'ai-model' ? handleNewAiModelConnection : undefined}
         onCancel={handleModalClose}
         okText={connectionTabKey === 'resource' && connectionStep === 'url' ? 'Next' : 'Create Connection'}
         cancelText="Cancel"
