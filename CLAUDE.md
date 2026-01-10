@@ -8,11 +8,11 @@ The following files are commonly important to reference:
 
 The project structure is:
 
-* packages/workshop-frontend: The Minions Workshop UI.
+* packages/workshop-frontend: The Gadgets Workshop UI.
     * This is a pure single-page app, running entirely client-side.
     * It speaks to the backend using an RPC API over a persistent WebSocket connection.
     * Uses React, Ant Design, and Vite.
-* packages/workshop-backend: The Minions Workshop server.
+* packages/workshop-backend: The Gadgets Workshop server.
     * Runs on Cloudflare Workers.
 * packages/workshop-shared: Shared API definitions between client and server.
     * This defines the application's RPC interface.

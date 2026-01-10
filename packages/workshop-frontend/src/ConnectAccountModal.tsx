@@ -1,8 +1,8 @@
 import { Modal, message, Typography, Spin } from 'antd'
 import { useState, useEffect } from 'react'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi, GatekeeperVendorFilter } from '@minions/workshop-shared/api'
-import { VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
+import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import VendorCard from './VendorCard'
 
 const { Text } = Typography

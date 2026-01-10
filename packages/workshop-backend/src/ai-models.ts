@@ -5,10 +5,10 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOllama } from 'ollama-ai-provider-v2';
-import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@minions/workshop-shared/gatekeeper';
+import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiModelConfig } from "@minions/workshop-shared/api";
+import { AiModelConfig } from "@gadgets/workshop-shared/api";
 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
   switch (config.provider) {

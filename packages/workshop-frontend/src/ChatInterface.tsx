@@ -11,7 +11,7 @@ import {
   AiChatMessage,
   AiChatSubscriber,
   AiChatAuthorInfo
-} from '@minions/workshop-shared/api'
+} from '@gadgets/workshop-shared/api'
 
 const { TextArea } = Input
 const { Text, Title } = Typography
@@ -678,7 +678,7 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
                 <TextArea
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="Type your message to start a conversation with your AI minion..."
+                  placeholder="Type your message to start a conversation with your AI gadget..."
                   autoSize={{ minRows: 3, maxRows: 8 }}
                   onPressEnter={(e) => {
                     if (e.shiftKey) return

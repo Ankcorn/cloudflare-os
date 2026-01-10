@@ -2,7 +2,7 @@
 //
 // This file was lagely vibe-coded based on an interface spec.
 
-import { AccountDescription } from "@minions/workshop-shared/gatekeeper";
+import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { GmailMessage, GmailThreadContent, GmailThreadSummary } from "./types";
 
 export type GoogleAccessToken = {

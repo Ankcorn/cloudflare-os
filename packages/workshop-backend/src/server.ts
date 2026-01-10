@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
-import { PublicApi, AuthenticatedApi, Overseer, MinionMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@minions/workshop-shared/api';
-import { VendorDescription } from "@minions/workshop-shared/gatekeeper";
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { GatekeeperConnectCallbackImpl, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback } from "./overseer";
@@ -47,7 +47,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.getQuickModel();
   }
 
-  async openMinion(id: string): Promise<Overseer> {
+  async openGadget(id: string): Promise<Overseer> {
     let userId = this.user.id.toString();
 
     let overseer = this.overseers.get(this.overseers.idFromString(id));
@@ -55,18 +55,18 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return overseer.open(userId);
   }
 
-  async newMinion(): Promise<Overseer> {
+  async newGadget(): Promise<Overseer> {
     let id = this.overseers.newUniqueId().toString();
-    await this.user.newMinion(id, "Untitled Minion");
-    let result = await this.openMinion(id);
+    await this.user.newGadget(id, "Untitled Gadget");
+    let result = await this.openGadget(id);
     if (!result) {
-      throw new Error("Open failed despite newly-created minion?");
+      throw new Error("Open failed despite newly-created gadget?");
     }
     return result;
   }
 
-  async listMinions(): Promise<MinionMetadata[]> {
-    return this.user.listMinions();
+  async listGadgets(): Promise<GadgetMetadata[]> {
+    return this.user.listGadgets();
   }
 
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)

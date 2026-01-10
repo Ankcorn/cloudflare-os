@@ -1,6 +1,6 @@
 import { Avatar, Typography, Spin } from 'antd'
 import { LinkOutlined } from '@ant-design/icons'
-import { VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 
 const { Text } = Typography
 

@@ -3,8 +3,8 @@ import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutl
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
-import { AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@minions/workshop-shared/api'
-import { AccountDescription, VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { RpcTarget } from 'capnweb'
 import AddModelModal from './AddModelModal'
 import ConnectAccountModal from './ConnectAccountModal'
@@ -382,7 +382,7 @@ export default function SettingsPage() {
           ) : connectedAccountsArray.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <Text type="secondary">
-                No accounts connected. Connect an account to use external services with your minions.
+                No accounts connected. Connect an account to use external services with your gadgets.
               </Text>
             </div>
           ) : (

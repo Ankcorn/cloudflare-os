@@ -1,8 +1,8 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { Overseer, MinionMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody } from '@minions/workshop-shared/api';
-import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@minions/workshop-shared/gatekeeper";
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { createTypedStorage, collection, keyString } from "@minions/typed-storage";
+import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
@@ -14,14 +14,14 @@ let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be repl
 
 let DEFAULT_SERVER_CODE = `import { DurableObject } from "cloudflare:workers";
 
-export class Minion extends DurableObject {
+export class Gadget extends DurableObject {
   greet(name) {
     return \`Hello, \${name}!\`;
   }
 }
 `;
 
-let DEFAULT_CLIENT_CODE = `let greeting = await minion.greet("World");
+let DEFAULT_CLIENT_CODE = `let greeting = await gadget.greet("World");
 document.body.appendChild(document.createTextNode(greeting));
 `;
 
@@ -74,7 +74,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // Initialized on first startup.
       ownerId: <string | undefined>undefined,
 
-      title: "Untitled Minion",
+      title: "Untitled Gadget",
 
       codeVersion: 0,
 
@@ -148,7 +148,7 @@ const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
 
-  // If not set, this minion doesn't exist yet.
+  // If not set, this gadget doesn't exist yet.
   ownerId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
@@ -286,17 +286,17 @@ class OverseerImpl implements AgentHooks {
     return env;
   }
 
-  // Which chat ID is the minion facet currently running from?
+  // Which chat ID is the gadget facet currently running from?
   #runningChatId: number | undefined;
 
   proposedChangesChanged(chatId: number) {
     if (this.#runningChatId === chatId) {
-      this.ctx.facets.abort("minion", new Error(
-          "Minion restarted because the proposed changes changed."));
+      this.ctx.facets.abort("gadget", new Error(
+          "Gadget restarted because the proposed changes changed."));
     }
   }
 
-  async getMinionFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
+  async getGadgetFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
     let codeVersion = `${this.storage.codeVersion.get()}`;
     let sequence: number | undefined;
     if (chatId !== undefined) {
@@ -308,14 +308,14 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (chatId !== this.#runningChatId) {
-      this.ctx.facets.abort("minion", new Error(
+      this.ctx.facets.abort("gadget", new Error(
           chatId === undefined
-            ? "Minion restarted to switch back to main version."
-            : "Minion restarted to test proposed changes."));
+            ? "Gadget restarted to switch back to main version."
+            : "Gadget restarted to test proposed changes."));
       this.#runningChatId = chatId;
     }
 
-    return this.ctx.facets.get<DurableObject>("minion", () => {
+    return this.ctx.facets.get<DurableObject>("gadget", () => {
       let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
         let {ydoc} = this.buildYDoc("current");
 
@@ -343,8 +343,8 @@ class OverseerImpl implements AgentHooks {
       });
 
       return {
-        class: stub.getDurableObjectClass<any>("Minion"),
-        id: "minion"
+        class: stub.getDurableObjectClass<any>("Gadget"),
+        id: "gadget"
       };
     });
   }
@@ -431,7 +431,7 @@ class OverseerImpl implements AgentHooks {
   bumpVersion(): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
-    this.ctx.facets.abort("minion", new Error("Minion restarted due to code update."));
+    this.ctx.facets.abort("gadget", new Error("Gadget restarted due to code update."));
     return codeVersion;
   }
 
@@ -740,9 +740,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // This Overseer hasn't been initialized yet.
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
-        // any new minions first before the minion is actually opened.
+        // any new gadgets first before the gadget is actually opened.
         let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
-        let meta = await owner.getMinion(this.ctx.id.toString());
+        let meta = await owner.getGadget(this.ctx.id.toString());
         if (!meta) {
           throw new Error("Not Found");
         }
@@ -867,7 +867,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.clientUser = owner;
   }
 
-  async getMetadata(): Promise<MinionMetadata> {
+  async getMetadata(): Promise<GadgetMetadata> {
     let title: string = this.impl.storage.title.get();
 
     return { id: this.impl.ctx.id.toString(), title };
@@ -880,7 +880,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async deleteSelf(): Promise<void> {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
-      await this.owner.deleteMinion(this.impl.ctx.id.toString());
+      await this.owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
       this.notifyDeleted();
     });
@@ -948,8 +948,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
   }
 
-  async connectToMinion(chatId?: number): Promise<RpcStub<any>> {
-    let facet = await this.impl.getMinionFacet(chatId);
+  async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
+    let facet = await this.impl.getGadgetFacet(chatId);
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     return new Proxy(facet, {

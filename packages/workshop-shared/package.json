@@ -1,5 +1,5 @@
 {
-  "name": "@minions/workshop-shared",
+  "name": "@gadgets/workshop-shared",
   "version": "1.0.0",
   "type": "module",
   "main": "./dist/api.js",

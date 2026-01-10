@@ -1,8 +1,8 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { RpcStub } from 'capnweb'
-import { PublicApi } from '@minions/workshop-shared/api'
+import { PublicApi } from '@gadgets/workshop-shared/api'
 import Home from './Home'
-import MinionEditor from './MinionEditor'
+import GadgetEditor from './GadgetEditor'
 import SettingsPage from './SettingsPage'
 import ProtectedRoute from './ProtectedRoute'
 
@@ -32,10 +32,10 @@ function App({ rpcStub }: AppProps) {
       />
 
       <Route
-        path="/minion/:id"
+        path="/gadget/:id"
         element={
           <ProtectedRoute rpcStub={rpcStub}>
-            <MinionEditor />
+            <GadgetEditor />
           </ProtectedRoute>
         }
       />

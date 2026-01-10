@@ -1,8 +1,8 @@
 import { RpcStub } from "capnweb";
-import { MinionMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@minions/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@minions/workshop-shared/gatekeeper";
+import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { createTypedStorage, collection } from "@minions/typed-storage";
+import { createTypedStorage, collection } from "@gadgets/typed-storage";
 
 type ConnectedAccountRecord = {
   id: number;
@@ -28,7 +28,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       aiModels: collection<UserAiModelRecord>()({
         primaryKey: record => record.profile.id,
       }),
-      minions: collection<MinionMetadata>()({
+      gadgets: collection<GadgetMetadata>()({
         primaryKey: "id"
       }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
@@ -161,29 +161,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  async listMinions(): Promise<MinionMetadata[]> {
-    return [...this.storage.minions.list()];
+  async listGadgets(): Promise<GadgetMetadata[]> {
+    return [...this.storage.gadgets.list()];
   }
 
-  async updateTitle(minionId: string, title: string) {
-    let record = this.storage.minions.get(minionId);
+  async updateTitle(gadgetId: string, title: string) {
+    let record = this.storage.gadgets.get(gadgetId);
     if (!record) {
-      throw new Error("No such minion belonging to user.");
+      throw new Error("No such gadget belonging to user.");
     }
     record.title = title;
-    this.storage.minions.put(record);
+    this.storage.gadgets.put(record);
   }
 
-  async getMinion(id: string): Promise<MinionMetadata | null> {
-    return this.storage.minions.get(id) || null;
+  async getGadget(id: string): Promise<GadgetMetadata | null> {
+    return this.storage.gadgets.get(id) || null;
   }
 
-  async newMinion(id: string, title: string): Promise<void> {
-    this.storage.minions.put({id, title});
+  async newGadget(id: string, title: string): Promise<void> {
+    this.storage.gadgets.put({id, title});
   }
 
-  async deleteMinion(id: string): Promise<void> {
-    this.storage.minions.delete(id);
+  async deleteGadget(id: string): Promise<void> {
+    this.storage.gadgets.delete(id);
   }
 
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})

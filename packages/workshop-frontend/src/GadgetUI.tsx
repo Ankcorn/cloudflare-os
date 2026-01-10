@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { Typography, Spin, Alert } from 'antd'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
-import { Overseer, UiBundle } from '@minions/workshop-shared/api'
+import { Overseer, UiBundle } from '@gadgets/workshop-shared/api'
 
 const { Text } = Typography
 
-// We want to inject Cap'n Web into the Minion. Luckily it has no dependencies, so we can just take
+// We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
 // content.
 import CAPNWEB_BUNDLE from 'capnweb?raw'
@@ -19,16 +19,16 @@ let CAPNWEB_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${CAPNWEB_BUNDLE}`
 // a data: URL, so we have a doubly-nested data: URL. We'll use base64 encoding for the inner
 // data: and URL encoding for the outer, as this lagely avoids double-escaping.
 //
-// In any case, we'll prefix the minion code with this prefix which imports the Cap'n Web library
+// In any case, we'll prefix the gadget code with this prefix which imports the Cap'n Web library
 // (from a massive data URL) and sets up the RPC connection to the parent.
 let INJECTED_CODE_PREFIX = encodeURIComponent(`//# sourceURL=client.js
 import { RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(CAPNWEB_BUNDLE_ANNOTATED)}";
 
-let minion;  // RPC stub to the minion's server-side Durable Object.
+let gadget;  // RPC stub to the gadget's server-side Durable Object.
 {
   let {port1, port2} = new MessageChannel();
   window.parent.postMessage("handshake", "*", [port2]);
-  minion = newMessagePortRpcSession(port1);
+  gadget = newMessagePortRpcSession(port1);
 }
 
 `);
@@ -45,7 +45,7 @@ const createSandboxedHtml = (jsCode: string): string => {
 </html>`.trim()
 }
 
-interface MinionUIProps {
+interface GadgetUIProps {
   overseer: RpcStub<Overseer>
   height: string
   reloadTrigger?: number
@@ -53,7 +53,7 @@ interface MinionUIProps {
   chatId?: number
 }
 
-export default function MinionUI({ overseer, height, reloadTrigger, isVisible = true, chatId }: MinionUIProps) {
+export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -61,7 +61,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
   const [isInvalidated, setIsInvalidated] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
-  const minionStubRef = useRef<RpcStub<any> | null>(null)
+  const gadgetStubRef = useRef<RpcStub<any> | null>(null)
   const rpcSessionRef = useRef<RpcStub<any> | null>(null)
 
   // Effect to handle reloadTrigger changes (code changes)
@@ -125,13 +125,13 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
 
       if (event.data === 'handshake' && event.ports && event.ports[0]) {
         try {
-          // Get the minion stub from overseer
-          const minionStub = await overseer.connectToMinion(chatId)
-          minionStubRef.current = minionStub
+          // Get the gadget stub from overseer
+          const gadgetStub = await overseer.connectToGadget(chatId)
+          gadgetStubRef.current = gadgetStub
 
-          // Create RPC session using the MessagePort and expose the minion stub
+          // Create RPC session using the MessagePort and expose the gadget stub
           const port = event.ports[0]
-          const rpcSession = newMessagePortRpcSession(port, minionStub)
+          const rpcSession = newMessagePortRpcSession(port, gadgetStub)
           rpcSessionRef.current = rpcSession
         } catch (error) {
           console.error('Failed to establish RPC connection:', error)
@@ -149,9 +149,9 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
   useEffect(() => {
     return () => {
       // Dispose of RPC resources
-      if (minionStubRef.current) {
-        minionStubRef.current[Symbol.dispose]?.()
-        minionStubRef.current = null
+      if (gadgetStubRef.current) {
+        gadgetStubRef.current[Symbol.dispose]?.()
+        gadgetStubRef.current = null
       }
       if (rpcSessionRef.current) {
         rpcSessionRef.current[Symbol.dispose]?.()
@@ -171,7 +171,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
         color: '#999'
       }}>
         <Text type="secondary">
-          Switch to this tab to load the Minion UI
+          Switch to this tab to load the Gadget UI
         </Text>
       </div>
     )
@@ -219,7 +219,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
         color: '#999'
       }}>
         <Text type="secondary">
-          This Minion doesn't have a custom UI yet. The UI will appear here when the Minion implements one.
+          This Gadget doesn't have a custom UI yet. The UI will appear here when the Gadget implements one.
         </Text>
       </div>
     )
@@ -237,7 +237,7 @@ export default function MinionUI({ overseer, height, reloadTrigger, isVisible = 
           border: 'none'
         }}
         sandbox="allow-scripts"
-        title="Minion UI"
+        title="Gadget UI"
       />
     </div>
   )

@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tag, Tabs, Select, Spin } from 'antd'
 import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
-import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber } from '@minions/workshop-shared/api'
-import { AccountDescription, VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import AccountCard from './AccountCard'
 import VendorCard from './VendorCard'
 
@@ -585,7 +585,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
           <div style={{ marginBottom: '16px' }}>
             <Text>
               Enter the URL of the resource you want to connect to. This will create a new connection
-              that your minion can use to interact with external services.
+              that your gadget can use to interact with external services.
             </Text>
           </div>
           <Input
@@ -746,7 +746,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
           emptyText: (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="No actions yet. Actions will appear here as the minion interacts with external resources."
+              description="No actions yet. Actions will appear here as the gadget interacts with external resources."
             />
           )
         }}
@@ -798,7 +798,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                 <>
                   <div style={{ marginBottom: '16px' }}>
                     <Text>
-                      Select an AI model to create a connection. This allows your minion to interact
+                      Select an AI model to create a connection. This allows your gadget to interact
                       with AI capabilities as a binding.
                     </Text>
                   </div>

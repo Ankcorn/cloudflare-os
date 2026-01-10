@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { message } from 'antd'
-import { Overseer, CodeSubscriber, CodeUpdate } from '@minions/workshop-shared/api'
+import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
 import { RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
@@ -50,7 +50,7 @@ class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
   }
 }
 
-interface MinionCodeInterfaceProps {
+interface GadgetCodeInterfaceProps {
   overseer: RpcStub<Overseer>
   height?: string | number
   onCodeChange?: () => void
@@ -58,7 +58,7 @@ interface MinionCodeInterfaceProps {
   fileToSelect?: string
 }
 
-export default function MinionCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect }: MinionCodeInterfaceProps) {
+export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect }: GadgetCodeInterfaceProps) {
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))

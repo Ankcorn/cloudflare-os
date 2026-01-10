@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody } from '@minions/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody } from '@gadgets/workshop-shared/api';
 import * as Y from "yjs";
 import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
 import z from "zod";
@@ -14,32 +14,32 @@ export interface AgentHooks {
 }
 
 let SYSTEM_PROMPT = `
-You are a helpful coding assistant tasked with helping users write small personal applications known as "Minions". A Minion is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
+You are a helpful coding assistant tasked with helping users write small personal applications known as "Gadgets". A Gadget is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
 
-Minions execute on a restricted and heavily-sandboxed variant of Cloudflare Workers.
+Gadgets execute on a restricted and heavily-sandboxed variant of Cloudflare Workers.
 
-A Minion has two main files: client.js and server.js
+A Gadget has two main files: client.js and server.js
 
-server.js defines the Minion's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Minion\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch hadler; the Minions platform automatically takes care of routing requests to the Minion. The Minion has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
+server.js defines the Gadget's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Gadget\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch hadler; the Gadgets platform automatically takes care of routing requests to the Gadget. The Gadget has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
 
 \`\`\`
 import { DurableObject } from "cloudflare:workers";
 
-export class Minion extends DurableObject {
+export class Gadget extends DurableObject {
   greet(name) {
     return \`Hello, \${name}!\`;
   }
 }
 \`\`\`
 
-client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`minion\`, which is an RPC stub pointing at the minion's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudlfare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`minion\` stub will invoke the same-samed method on the Durable Object class. A simple client.js might look like:
+client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`gadget\`, which is an RPC stub pointing at the gadget's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudlfare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`gadget\` stub will invoke the same-samed method on the Durable Object class. A simple client.js might look like:
 
 \`\`\`
-let greeting = await minion.greet("World");
+let greeting = await gadget.greet("World");
 document.body.appendChild(document.createTextNode(greeting));
 \`\`\`
 
-Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Minion communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
+Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Gadget communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
 
 Note that Cap'n Web is a bidirectional object capability protocol, meaning, among other things, you can pass a function over RPC, in the params or results of another function. This actually passes the function "by reference": the receiving end actually receives an RPC stub, which can be used to call back over RPC to the original function. This, of course, causes the function to become async, even if the original was synchronous.
 
@@ -61,7 +61,7 @@ Some general app design tips:
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
 * Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make each move. If it's concurrent but with distinct players, let each client choose which player they are controlling, inlcuding letting multiple clients choose the same player.
-* If the project contains a README.md file, use it to describe the Minion at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
+* If the project contains a README.md file, use it to describe the Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 `.trim();
 
 export async function runAgent(
@@ -474,7 +474,7 @@ export async function runAgent(
       }),
 
       describeBinding: tool({
-        description: "Describe one of the Minion's bindings (members of the Cloudflare " +
+        description: "Describe one of the Gadget's bindings (members of the Cloudflare " +
             "Workers `env` object), including TypeScript types specifying the API it offers.",
         inputSchema: z.object({
           name: z.string().describe("Name of the binding (a property of `env`)."),
@@ -493,7 +493,7 @@ export async function runAgent(
 
       executeCode: tool({
         description: "Executes one-off JavaScript code, returning the output it logs to the " +
-            "console. The code will have access to the Minion's bindings ('env' object), " +
+            "console. The code will have access to the Gadget's bindings ('env' object), " +
             "so this can be used to directly perform tasks with them. The code runs in a " +
             "sandbox where it cannot talk to the internet, except through the bindings; " +
             "fetch() will not work. Otherwise, the code can call any built-in APIs " +
@@ -501,7 +501,7 @@ export async function runAgent(
             "\n" +
             "When the user asks you to just do a task that can be done with these bindings, " +
             "you should use executeCode to perform the task, instead of adding code to the " +
-            "minion to do it.",
+            "gadget to do it.",
         inputSchema: z.object({
           code: z.string().describe(
               "Code to execute. This must be a complete self-contained JavaScript module " +

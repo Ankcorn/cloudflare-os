@@ -1,5 +1,5 @@
 {
-  "name": "@minions/typed-storage",
+  "name": "@gadgets/typed-storage",
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",

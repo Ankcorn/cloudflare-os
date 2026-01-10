@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { RpcStub } from 'capnweb'
-import { PublicApi, AuthenticatedApi } from '@minions/workshop-shared/api'
+import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
 interface AuthState {
   token: string | null

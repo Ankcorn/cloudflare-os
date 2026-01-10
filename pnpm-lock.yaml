@@ -20,7 +20,7 @@ importers:
 
   packages/gatekeeper-google:
     dependencies:
-      '@minions/workshop-shared':
+      '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
       capnweb:
@@ -54,10 +54,10 @@ importers:
       '@ai-sdk/openai':
         specifier: ^2.0.88
         version: 2.0.88(zod@4.2.1)
-      '@minions/typed-storage':
+      '@gadgets/typed-storage':
         specifier: workspace:*
         version: link:../typed-storage
-      '@minions/workshop-shared':
+      '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
       ai:
@@ -94,7 +94,7 @@ importers:
       '@ant-design/v5-patch-for-react-19':
         specifier: ^1.0.3
         version: 1.0.3(antd@5.29.3(react-dom@19.2.3(react@19.2.3))(react@19.2.3))(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-      '@minions/workshop-shared':
+      '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
       '@monaco-editor/react':

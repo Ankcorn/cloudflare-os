@@ -4,9 +4,9 @@ import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, D
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
-import { Overseer, MinionMetadata, AiChatAuthorInfo } from '@minions/workshop-shared/api'
-import MinionCodeInterface from './MinionCodeInterface'
-import MinionUI from './MinionUI'
+import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import GadgetCodeInterface from './GadgetCodeInterface'
+import GadgetUI from './GadgetUI'
 import Connections from './Connections'
 import ChatInterface from './ChatInterface'
 import type { MenuProps } from 'antd'
@@ -14,13 +14,13 @@ import type { MenuProps } from 'antd'
 const { Header, Content } = Layout
 const { Title, Text } = Typography
 
-export default function MinionEditor() {
+export default function GadgetEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { authenticatedApi, logout } = useAuthenticatedApi()
 
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
-  const [metadata, setMetadata] = useState<MinionMetadata | null>(null)
+  const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
@@ -69,9 +69,9 @@ export default function MinionEditor() {
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
 
-    const loadMinion = async () => {
+    const loadGadget = async () => {
       if (!id) {
-        setError('No minion ID provided')
+        setError('No gadget ID provided')
         setLoading(false)
         return
       }
@@ -84,13 +84,13 @@ export default function MinionEditor() {
 
       try {
         // Use promise pipelining - use the promise itself as the stub
-        overseerStub = authenticatedApi.openMinion(id)
+        overseerStub = authenticatedApi.openGadget(id)
         setOverseer({ stub: overseerStub })
 
         // Only await the metadata call
-        const minionMetadata = await overseerStub.getMetadata()
-        setMetadata(minionMetadata)
-        setTitleInput(minionMetadata.title)
+        const gadgetMetadata = await overseerStub.getMetadata()
+        setMetadata(gadgetMetadata)
+        setTitleInput(gadgetMetadata.title)
 
         // Clear any error on successful load
         setError(null)
@@ -101,10 +101,10 @@ export default function MinionEditor() {
           setConnectionLost(false)
         }
       } catch (err) {
-        console.error('Failed to load minion:', err)
+        console.error('Failed to load gadget:', err)
         // Only set error on initial load - for reconnection attempts, keep the UI visible
         if (isInitialLoad) {
-          setError('Failed to load minion')
+          setError('Failed to load gadget')
         } else if (!connectionLost) {
           // Track connection lost state but don't show toast
           setConnectionLost(true)
@@ -116,7 +116,7 @@ export default function MinionEditor() {
       }
     }
 
-    loadMinion()
+    loadGadget()
 
     // Cleanup function to dispose the correct stub
     return () => {
@@ -126,7 +126,7 @@ export default function MinionEditor() {
     }
   }, [id, authenticatedApi])
 
-  // Invalidate Minion UI when the selected chat changes or proposed changes update
+  // Invalidate Gadget UI when the selected chat changes or proposed changes update
   useEffect(() => {
     setUiReloadTrigger(prev => prev + 1)
   }, [selectedChatId, proposedChanges])
@@ -180,7 +180,7 @@ export default function MinionEditor() {
 
   const handleDelete = () => {
     Modal.confirm({
-      title: 'Delete Minion',
+      title: 'Delete Gadget',
       content: `Are you sure you want to delete "${metadata?.title}"? This action cannot be undone.`,
       okText: 'Delete',
       okType: 'danger',
@@ -190,11 +190,11 @@ export default function MinionEditor() {
 
         try {
           await overseer.stub.deleteSelf()
-          message.success('Minion deleted successfully')
+          message.success('Gadget deleted successfully')
           navigate('/')
         } catch (err) {
-          console.error('Failed to delete minion:', err)
-          message.error('Failed to delete minion')
+          console.error('Failed to delete gadget:', err)
+          message.error('Failed to delete gadget')
         }
       }
     })
@@ -226,7 +226,7 @@ export default function MinionEditor() {
     return (
       <Layout style={{ minHeight: '100vh' }}>
         <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <Text>Loading minion...</Text>
+          <Text>Loading gadget...</Text>
         </Content>
       </Layout>
     )
@@ -237,7 +237,7 @@ export default function MinionEditor() {
       <Layout style={{ minHeight: '100vh' }}>
         <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column' }}>
           <Text type="danger" style={{ fontSize: '18px', marginBottom: 16 }}>
-            {error || 'Failed to load minion'}
+            {error || 'Failed to load gadget'}
           </Text>
           <Button onClick={handleBack}>
             Back to Home
@@ -273,7 +273,7 @@ export default function MinionEditor() {
                 value={titleInput}
                 onChange={(e) => setTitleInput(e.target.value)}
                 onPressEnter={handleSaveTitle}
-                placeholder="Enter minion title"
+                placeholder="Enter gadget title"
                 style={{ width: 300 }}
                 autoFocus
               />
@@ -310,7 +310,7 @@ export default function MinionEditor() {
             danger
             type="text"
             size="large"
-            title="Delete Minion"
+            title="Delete Gadget"
           />
           <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
             <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
@@ -398,7 +398,7 @@ export default function MinionEditor() {
                 key: 'code',
                 label: 'Code Editor',
                 children: overseer ? (
-                  <MinionCodeInterface
+                  <GadgetCodeInterface
                     overseer={overseer.stub}
                     height="calc(100vh - 64px - 46px)"
                     onCodeChange={handleCodeChange}
@@ -421,9 +421,9 @@ export default function MinionEditor() {
               },
               {
                 key: 'ui',
-                label: 'Minion UI',
+                label: 'Gadget UI',
                 children: overseer ? (
-                  <MinionUI
+                  <GadgetUI
                     overseer={overseer.stub}
                     height="calc(100vh - 64px - 46px)"
                     reloadTrigger={uiReloadTrigger}

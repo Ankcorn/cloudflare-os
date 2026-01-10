@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { RpcStub } from 'capnweb'
-import { PublicApi } from '@minions/workshop-shared/api'
+import { PublicApi } from '@gadgets/workshop-shared/api'
 import { useAuth } from './useAuth'
 import { AuthProvider } from './AuthContext'
 import LoginPage from './LoginPage'

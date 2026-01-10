@@ -17,7 +17,7 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@minions/workshop-shared/*": ["../workshop-shared/src/*"]
+      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
     }
   },
   "include": ["src"],

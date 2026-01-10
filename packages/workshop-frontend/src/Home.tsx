@@ -3,7 +3,7 @@ import { LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@an
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect } from 'react'
-import { MinionMetadata, AiChatAuthorInfo } from '@minions/workshop-shared/api'
+import { GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
@@ -12,23 +12,23 @@ const { Title, Text } = Typography
 export default function Home() {
   const navigate = useNavigate()
   const { authenticatedApi, logout } = useAuthenticatedApi()
-  const [minions, setMinions] = useState<MinionMetadata[]>([])
+  const [gadgets, setGadgets] = useState<GadgetMetadata[]>([])
   const [loading, setLoading] = useState(true)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
   useEffect(() => {
-    const fetchMinions = async () => {
+    const fetchGadgets = async () => {
       try {
-        const minionList = await authenticatedApi.listMinions()
-        setMinions(minionList)
+        const gadgetList = await authenticatedApi.listGadgets()
+        setGadgets(gadgetList)
         setLoading(false) // Only set loading to false on successful fetch
       } catch (error) {
-        console.error('Failed to fetch minions:', error)
+        console.error('Failed to fetch gadgets:', error)
         // Keep loading = true when fetch fails, so we show spinner instead of empty state
       }
     }
 
-    fetchMinions()
+    fetchGadgets()
   }, [authenticatedApi])
 
   useEffect(() => {
@@ -49,14 +49,14 @@ export default function Home() {
     // No navigation needed - ProtectedRoute will show login overlay
   }
 
-  const handleCreateMinion = async () => {
+  const handleCreateGadget = async () => {
     try {
-      const newMinion = await authenticatedApi.newMinion()
-      const metadata = await newMinion.getMetadata()
-      setMinions(prev => [...prev, metadata])
-      navigate(`/minion/${metadata.id}`)
+      const newGadget = await authenticatedApi.newGadget()
+      const metadata = await newGadget.getMetadata()
+      setGadgets(prev => [...prev, metadata])
+      navigate(`/gadget/${metadata.id}`)
     } catch (error) {
-      console.error('Failed to create minion:', error)
+      console.error('Failed to create gadget:', error)
     }
   }
 
@@ -116,7 +116,7 @@ export default function Home() {
         }}
       >
         <Title level={4} style={{ margin: 0, color: 'inherit' }}>
-          Minions Workshop
+          Gadgets Workshop
         </Title>
         <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
           <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
@@ -137,35 +137,35 @@ export default function Home() {
             alignItems: 'center' 
           }}>
             <Title level={2} style={{ margin: 0 }}>
-              Your Minions
+              Your Gadgets
             </Title>
             <Button
               type="primary"
               icon={<PlusOutlined />}
-              onClick={handleCreateMinion}
+              onClick={handleCreateGadget}
               size="large"
             >
-              New Minion
+              New Gadget
             </Button>
           </div>
 
           <Table
             columns={columns}
-            dataSource={minions}
+            dataSource={gadgets}
             rowKey="id"
             loading={loading}
             pagination={{ pageSize: 50 }}
             onRow={(record) => ({
               onClick: () => {
-                navigate(`/minion/${record.id}`)
+                navigate(`/gadget/${record.id}`)
               },
               style: { cursor: 'pointer' }
             })}
             locale={{
-              emptyText: loading ? 'Loading minions...' : (
+              emptyText: loading ? 'Loading gadgets...' : (
                 <div style={{ padding: '32px 0' }}>
                   <Text type="secondary">
-                    No minions yet. Create your first minion to get started!
+                    No gadgets yet. Create your first gadget to get started!
                   </Text>
                 </div>
               )

@@ -1,12 +1,12 @@
-// This file defines the API spoken between the Minions Workshop service and the front-end UI.
+// This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
 // The UI is a good old "fat client" SPA. Why not use SSR? Because:
 // - Users of this UI are likely to have it open often, maybe even all the time. Startup time is
 //   less of a concern than with sites you visit only briefly, and assets are likely to be in cache
 //   in any case.
-// - The Minions themselves are sandboxed on the client side in addition to the server side. This
+// - The Gadgets themselves are sandboxed on the client side in addition to the server side. This
 //   sandboxing requires running code in the browser. It is not plausible to server-side render
-//   a Minion itself.
+//   a Gadget itself.
 // - By providing a really clean API boundary between client and server, we make it easier to build
 //   alternative clients.
 // - SPA is just easier to think about.
@@ -18,10 +18,10 @@
 // The RPC interface operates over a WebSocket, which the client starts immediately at startup and
 // keeps open for the entire lifetime of the session, reconnecting if needed.
 //
-// Minions run inside a sandboxed iframe which has no ability to talk to the outside world at all,
-// except postMessage() to the parent frame. Through postMessage() exchanges, the Minion can speak
+// Gadgets run inside a sandboxed iframe which has no ability to talk to the outside world at all,
+// except postMessage() to the parent frame. Through postMessage() exchanges, the Gadget can speak
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
-// Minion a stub pointing to the Minion's server-side Durable Object interface.
+// Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, VendorDescription } from "./gatekeeper.js";
@@ -69,8 +69,8 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // List the user's configured AI models.
   //
-  // Note that the list returned here could be different from a particular minion's Overseer,
-  // especially if the minion is owned by someone else.
+  // Note that the list returned here could be different from a particular gadget's Overseer,
+  // especially if the gadget is owned by someone else.
   listModels(): Promise<AiChatAuthorInfo[]>;
 
   // Adds a new model to the user's configured set. The ID must be unique among the user's
@@ -87,18 +87,18 @@ export interface AuthenticatedApi extends RpcTarget {
   // Get the quick model setting.
   getQuickModel(): Promise<null | string>;
 
-  // Open an existing minion.
+  // Open an existing gadget.
   //
-  // To allow for pipelining ,this throws an exception if the minion doesn't exist.
-  openMinion(id: string): Promise<Overseer>;
+  // To allow for pipelining ,this throws an exception if the gadget doesn't exist.
+  openGadget(id: string): Promise<Overseer>;
 
-  // Create a new minion. It will start out titled "Untitled Minion".
-  newMinion(): Promise<Overseer>;
+  // Create a new gadget. It will start out titled "Untitled Gadget".
+  newGadget(): Promise<Overseer>;
 
-  // List metadata about all the user's Minions. Used to display the front-page listing.
+  // List metadata about all the user's Gadgets. Used to display the front-page listing.
   //
   // TODO: Pagination, sort options.
-  listMinions(): Promise<MinionMetadata[]>;
+  listGadgets(): Promise<GadgetMetadata[]>;
 
   // List all third-party services that this account can connect to.
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
@@ -177,11 +177,11 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
   },
 };
 
-// Metadata about a Minion. Includes everything needed to render the Minion list on the front
+// Metadata about a Gadget. Includes everything needed to render the Gadget list on the front
 // page.
-export type MinionMetadata = {
-  // Unique ID for this Minion, used with `openMinion()`. This is a url-safe base64 value chosen
-  // randomly when the Minion is created.
+export type GadgetMetadata = {
+  // Unique ID for this Gadget, used with `openGadget()`. This is a url-safe base64 value chosen
+  // randomly when the Gadget is created.
   id: string;
 
   // Human-readable title. Can be modified.
@@ -193,20 +193,20 @@ export type MinionMetadata = {
   // - icon? thumbnail?
 }
 
-// Describes the client-side UI code for a Minion. Such code is intended to run inside an iframe
+// Describes the client-side UI code for a Gadget. Such code is intended to run inside an iframe
 // sandbox with no access to the outside world except through an RPC interface to the Workshop
-// and to the Minion's server.
+// and to the Gadget's server.
 export type UiBundle = {
   // URL from which the main bundle of UI code can be downloaded. This download contains all the
-  // Minion's client-side assets. The URL is content-addressed to make it highly cacheable, even
-  // across multiple Minions sharing the same implementation (blueprint).
+  // Gadget's client-side assets. The URL is content-addressed to make it highly cacheable, even
+  // across multiple Gadgets sharing the same implementation (blueprint).
   //
   // TODO: Specify the format of what this URL returns. A raw HTML page doesn't quite work because
   //   the client needs to initialize the sandbox with some platform libraries before loading the
-  //   Minion itself.
+  //   Gadget itself.
 //  url: string;
 
-  // Returns the raw JS code to execute in the Minion iframe.
+  // Returns the raw JS code to execute in the Gadget iframe.
   // TODO: For now we just return the code but we should switch to serving over HTTP as described
   //   above, for caching. Or... maybe we should actually serve over RPC, but also employ the
   //   Cache API in the browser? Or some other local storage?
@@ -254,7 +254,7 @@ export interface CodeSubscriber {
 export type ActionState = "pending" | "approved" | "rejected";
 
 export type ActionLogEntry = {
-  // Sequential ID number for the action. Counts up from when the minion was created.
+  // Sequential ID number for the action. Counts up from when the gadget was created.
   id: number;
 
   // Which binding produced this action?
@@ -272,16 +272,16 @@ export type ActionLogEntry = {
   description: ObservationDescription;
 });
 
-// Interface to a Minion's Overseer, used to display the Minion Workshop shell UI around that
-// Minion.
+// Interface to a Gadget's Overseer, used to display the Gadget Workshop shell UI around that
+// Gadget.
 export interface Overseer extends RpcTarget {
-  // Get metadata describing this minion.
-  getMetadata(): Promise<MinionMetadata>;
+  // Get metadata describing this gadget.
+  getMetadata(): Promise<GadgetMetadata>;
 
   // Change the title.
   setTitle(title: string): Promise<void>;
 
-  // Instruct Minion to delete itself, removing it from the User's minion list and deleting all
+  // Instruct Gadget to delete itself, removing it from the User's gadget list and deleting all
   // data. Further method calls will fail.
   //
   // TODO: Implement undelete, maybe using PITR...
@@ -302,23 +302,23 @@ export interface Overseer extends RpcTarget {
   // Send a Yjs update to the server.
   updateCode(update: Uint8Array): Promise<void>;
 
-  // Get the Minion's deployed UI code, to be run inside an iframe sandbox.
+  // Get the Gadget's deployed UI code, to be run inside an iframe sandbox.
   //
-  // Returns null if the minion has no deployed UI code (e.g. if it's new, or if it's just an AI
+  // Returns null if the gadget has no deployed UI code (e.g. if it's new, or if it's just an AI
   // agent with no code).
   getUiBundle(chatId?: number): Promise<UiBundle | null>;
 
-  // Open an RPC interface to the Minion's server-side Durable Object facet. The frontend may pass
-  // this stub into the Minion's iframe sandbox, so that the Minion UI can communicate with its
+  // Open an RPC interface to the Gadget's server-side Durable Object facet. The frontend may pass
+  // this stub into the Gadget's iframe sandbox, so that the Gadget UI can communicate with its
   // server side. It can also permit the coding agent to make direct calls.
   //
-  // If `chatId` is specified, then the minion will include changes currently proposed in the given
+  // If `chatId` is specified, then the gadget will include changes currently proposed in the given
   // chat.
   //
   // @ts-ignore - TODO: Fix type instantiation issue
-  connectToMinion(chatId?: number): Promise<RpcStub<any>>;
+  connectToGadget(chatId?: number): Promise<RpcStub<any>>;
 
-  // List all the Minion's current gatekeepers.
+  // List all the Gadget's current gatekeepers.
   listGatekeepers(): Promise<GatekeeperMetadata[]>;
 
   // Get an existing gatekeeper by binding name.
@@ -370,7 +370,7 @@ export interface Overseer extends RpcTarget {
   // will be sent upfront. This is intended to allow resubscribing after being disconnected. If
   // `startAt` is omitted, only new messages will be sent.
   //
-  // Generally, a client should subscribe to chats immediately on loading the minion editor. If
+  // Generally, a client should subscribe to chats immediately on loading the gadget editor. If
   // the client needs to call any methods like `listChats()` to backfill content, it should make
   // these calls after `subscribeToChat()`, so that there's no chance of missing a message. (It is
   // not necessary to wait for `subscribeToChat()` to return -- only to initate the call before
@@ -545,14 +545,14 @@ export interface AiChatSubscriber {
   message(msg: AiChatMessage): void;
 }
 
-// Information about one of a Minion's gatekeepers, for the purpose of displaying it in a list.
+// Information about one of a Gadget's gatekeepers, for the purpose of displaying it in a list.
 export type GatekeeperMetadata = {
   bindingName: string;
   resourceTitle: string;
 };
 
 export interface GatekeeperClient<Session> extends RpcTarget {
-  // Remove this gatekeeper from the Minion.
+  // Remove this gatekeeper from the Gadget.
   remove(): Promise<void>;
 
   // Get and set the binding name.

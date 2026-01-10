@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { RpcStub } from 'capnweb'
-import { PublicApi } from '@minions/workshop-shared/api'
+import { PublicApi } from '@gadgets/workshop-shared/api'
 import { Card, Form, Input, Button, Typography, Alert, Spin } from 'antd'
 
 const { Title, Text } = Typography
@@ -57,7 +57,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
       >
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <Title level={1} style={{ marginBottom: 8 }}>
-            Minions Workshop
+            Gadgets Workshop
           </Title>
           <Text type="secondary">
             Sign in to your account

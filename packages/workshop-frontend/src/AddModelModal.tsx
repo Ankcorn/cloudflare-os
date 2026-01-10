@@ -1,8 +1,8 @@
 import { Modal, Form, Select, Input, Collapse, message } from 'antd'
 import { useState, useEffect } from 'react'
-import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS } from '@minions/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi } from '@minions/workshop-shared/api'
+import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
 const { Option, OptGroup } = Select
 const { Panel } = Collapse

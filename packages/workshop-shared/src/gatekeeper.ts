@@ -1,6 +1,6 @@
-// This file defines the API that the AI Minions Workshop uses to talk to Adapters. Each Adapter
-// provides connectivity to some external service which AI Minions can then manipulate. Each
-// installation of the Minions Workshop may have access to different adapters, typically based on
+// This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
+// provides connectivity to some external service which AI Gadgets can then manipulate. Each
+// installation of the Gadgets Workshop may have access to different adapters, typically based on
 // the set of internal services used at the particular company.
 //
 // For instance, there might be adapters for Google Workspace, GitHub, Jira, etc.
@@ -8,10 +8,10 @@
 // Adapters provide access to resources. For instance, a Google Workspace adapter might provide
 // access to Google Docs, Spreadsheets, Gmail mailboxes, etc. Each Google Doc, for example, is a
 // separate "resource". Adapters are designed to provide object-oriented, capability-based access
-// to such resources, enabling the Minion Workshop to grant a particular Minion fine-grained
-// access to just the things the user wants that Minion to access.
+// to such resources, enabling the Gadget Workshop to grant a particular Gadget fine-grained
+// access to just the things the user wants that Gadget to access.
 //
-// Each adapter is deployed as a completely independent Workers application from the Minions
+// Each adapter is deployed as a completely independent Workers application from the Gadgets
 // Workshop itself, and is provided to the Workshop as a service binding. The Workshop communicates
 // with the adapter over JavaScript RPC. The types in this file define that RPC interface. The
 // `Adapter` type is the root interface implemented by the service binding.
@@ -71,7 +71,7 @@ export type ResourceDescription = {
   //
   // This name should usually be based on the binding's type, not the specific resource title,
   // since the coding agent will be able to see the name and the user may or may not intend to
-  // reveal the resource title to the agent, or may intend the same Minion to be connected to
+  // reveal the resource title to the agent, or may intend the same Gadget to be connected to
   // different resources (of the same type) at different times.
   suggestedBindingName: string;
 
@@ -84,9 +84,9 @@ export type ResourceDescription = {
   tsType: string;
 }
 
-// The root interface of an Adapter, as provided to the Minion Workshop.
+// The root interface of an Adapter, as provided to the Gadget Workshop.
 //
-// An installation of the Minion Workshop is provided with a set of Adapters to allow it to
+// An installation of the Gadget Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
 export interface GatekeeperVendor extends WorkerEntrypoint {
   // Get display info for the service, suitable for display to a user.
@@ -107,12 +107,12 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
 
   // Get a list of strings describing URL patterns for which this vendor may implement a
-  // gatekeeper. The Minion Workshop uses this as a hint to quickly find an appropriate gatekeeper
+  // gatekeeper. The Gadget Workshop uses this as a hint to quickly find an appropriate gatekeeper
   // implementation for an arbitrary URL entered by the user.
   //
   // The strings are in the format accepted by the `URLPattern` API.
   //
-  // TODO: How does the Minion Workshop know when the supported URLs have changed, without polling?
+  // TODO: How does the Gadget Workshop know when the supported URLs have changed, without polling?
   getSupportedUrls(): Promise<string[]>;
 
   // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
@@ -120,12 +120,12 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // `ResourceDescription` must be exported by this file. The types should ideally have complete
   // JSDoc comments describing them.
   //
-  // The Minions system will parse this file to construct a type database, which will be made
+  // The Gadgets system will parse this file to construct a type database, which will be made
   // available to the coding agent in a way that supports progressive discovery.
   //
   // TODO: Define exactly what global types and imports are available. I suppose capnweb should be
   // importable, but is anything else needed?
-  // TODO: How does the Minion Workshop know when the types have changed, without polling?
+  // TODO: How does the Gadget Workshop know when the types have changed, without polling?
   // TODO: Should we somehow distinguish stable vs. unstable types? Unstable are safe to use in
   //   one-off situations only.
   getTypeScriptTypes(): Promise<string>;
@@ -144,10 +144,10 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   // - Or maybe these should be system-level features?
 }
 
-// RPC interface to an Adapter. This is a privileged interface exposed to the Minion Workshop UI
-// itself, not to Minions nor AI agents.
+// RPC interface to an Adapter. This is a privileged interface exposed to the Gadget Workshop UI
+// itself, not to Gadgets nor AI agents.
 //
-// The Adapter is already specialized for a particular human user of the Minion Workshop. The
+// The Adapter is already specialized for a particular human user of the Gadget Workshop. The
 // Adapter capability itself represents permission to access all of the user's data that is
 // available through it, so needs to be guarded carefully. Hence, only the Workshop itself should
 // ever have direct access to an Adapter object.
@@ -163,8 +163,8 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // Get a Durable Object class that can implement a gatekeeper for the given resource. This class
   // can be used to instantiate a Facet which implements the Gatekeeper interface.
   //
-  // Note that the Overseer of a Minion will call this immediately when the user pastes in a URL,
-  // *before* the user has actually chosen to grant the Minion any permissions on the resource.
+  // Note that the Overseer of a Gadget will call this immediately when the user pastes in a URL,
+  // *before* the user has actually chosen to grant the Gadget any permissions on the resource.
   // Permissions are requested by instantiating the Gatekeeper and calling setPermissions() on it,
   // usually after first calling describe() to find out what the resource can do.
   //
@@ -186,10 +186,10 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 }
 
 // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
-// specific Minion.
+// specific Gadget.
 //
 // The Gatekeeper executes as a Durable Object Facet, where it is a child of the Overseer. This
-// interface is exposed to the Overseer, not directly to the Minion.
+// interface is exposed to the Overseer, not directly to the Gadget.
 export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends DurableObject {
   // Get more info on the specific resource without actually granting access. This information is
   // to be presented to the user in the UI, before the user actually confirms they want to grant
@@ -200,7 +200,7 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   getTypeScriptTypes(): Promise<string>;
 
   // Get the capability representing this resource's RPC interface which will be provided to the
-  // Minion.
+  // Gadget.
   //
   // Every operation performed through this session must be submitted to the approval queue.
   // Observations (read-only operations) must be authorized before data is returned to the caller.
@@ -208,7 +208,7 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   //
   // It is suggested that the gatekeeper "simulate" actions that have not been approved yet, that
   // is, the `Session` interface should reflect the state of the resource as if all actions had
-  // been applied. This allows the Minion to keep working, potentially queuing up additional
+  // been applied. This allows the Gadget to keep working, potentially queuing up additional
   // dependent actions. That said, there is no strict requirement that a gatekeeper does such
   // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
   // particular API.
@@ -244,9 +244,9 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // Indicates that an action was rejected by the user. The gatekeeper should clean up any
   // associated storage.
   //
-  // If the returned `restart` flag is true, rejecting this action requires restarting the Minion.
+  // If the returned `restart` flag is true, rejecting this action requires restarting the Gadget.
   // This is sometimes needed by gatekeepers that simulate actions as if they had been approved --
-  // the session may be in a state that is difficult to roll back without confusing the Minion.
+  // the session may be in a state that is difficult to roll back without confusing the Gadget.
   // The Overseer will take care of the restart, possibly after rejecting other actions.
   rejectAction(action: Action): Promise<void | {restart?: boolean}>;
 
@@ -277,20 +277,20 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
 export interface ApprovalQueue<Action> extends RpcTarget {
-  // TODO: Method to indicate that the minion tried to perform an action that the gatekeeper itself
+  // TODO: Method to indicate that the gadget tried to perform an action that the gatekeeper itself
   //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
   //   system should direct the user to the right UI to authorize the action.
 
-  // Check whether the minion should be permitted to make an observation (that is, to read some
+  // Check whether the gadget should be permitted to make an observation (that is, to read some
   // data from an external service). The gatekeeper calls this on every read operation, and must
-  // wait for the response before returning anything to the minion. The method will return normally
+  // wait for the response before returning anything to the gadget. The method will return normally
   // if the operation is permitted, or throw an exception if not; the exception should propagate
-  // through to the minion.
+  // through to the gadget.
   //
   // In many cases, the gatekeeper should actually call this *after* fetching the data from the
   // remote service, so that the description can include details about the actual data. As long
   // as the operation is strictly read-only, and the call is made before actually returning any
-  // data to the minion, this is OK.
+  // data to the gadget, this is OK.
   authorizeObservation(description: ObservationDescription): Promise<void>;
 
   // Submit an action for approval.
@@ -331,7 +331,7 @@ export type ObservationDescription = {
   // - Who are the users who may have contributed to such free-from content (to judge if they are
   //   prompt injection risks).
   // - If this content may contain secrets, who are the users that are allowed to view it? This
-  //   can help detect situations where the minion could leak information.
+  //   can help detect situations where the gadget could leak information.
 }
 
 // Describes an action submitted to the action approval queue. This contains all the information
@@ -365,7 +365,7 @@ export type ActionDescription = {
   // TODO: Define policy hints that might allow a policy engine to make better decisions. A policy
   // engine might want to know things like:
   // - Which human users are allowed to perform this action directly? Can be used to detect if
-  //   the minion might be influenced by humans to perform actions that said humans couldn't
+  //   the gadget might be influenced by humans to perform actions that said humans couldn't
   //   perform directly.
   // - Which human users might observe the effects of this action? Can be used to track possibility
   //   of leaking secrets.

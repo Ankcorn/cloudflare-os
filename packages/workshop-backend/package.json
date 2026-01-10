@@ -1,5 +1,5 @@
 {
-  "name": "@minions/workshop-backend",
+  "name": "@gadgets/workshop-backend",
   "version": "1.0.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -13,8 +13,8 @@
     "@ai-sdk/anthropic": "^2.0.56",
     "@ai-sdk/google": "^2.0.51",
     "@ai-sdk/openai": "^2.0.88",
-    "@minions/typed-storage": "workspace:*",
-    "@minions/workshop-shared": "workspace:*",
+    "@gadgets/typed-storage": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
     "ai": "^5.0.116",
     "capnweb": "^0.4.0",
     "ollama-ai-provider-v2": "^1.5.5",

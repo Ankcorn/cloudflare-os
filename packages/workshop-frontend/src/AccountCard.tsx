@@ -1,6 +1,6 @@
 import { Avatar, Tooltip, Typography } from 'antd'
 import { UserOutlined, LinkOutlined } from '@ant-design/icons'
-import { AccountDescription, VendorDescription } from '@minions/workshop-shared/gatekeeper'
+import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 
 const { Text } = Typography
 

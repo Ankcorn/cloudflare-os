@@ -1,5 +1,5 @@
 {
-  "name": "@minions/google-gatekeeper",
+  "name": "@gadgets/google-gatekeeper",
   "version": "1.0.0",
   "type": "module",
   "main": "./src/google.ts",
@@ -10,7 +10,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@minions/workshop-shared": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.4.0"
   },
   "devDependencies": {
