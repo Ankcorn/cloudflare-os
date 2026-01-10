@@ -90,6 +90,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
+
+    // Migrate data created prior to the minions -> gadgets rename.
+    // TODO(cleanup): Eventually remove this, very few people ever used it as "minions".
+    for (let [key, value] of [...ctx.storage.kv.list({prefix: "minions:"})]) {
+      let newKey = "gadgets:" + key.slice("minions:".length);
+      ctx.storage.kv.put(newKey, value);
+      ctx.storage.kv.delete(key);
+    }
+
     this.storage = makeUserStorage(ctx.storage);
 
     this.vendors = new Map;
