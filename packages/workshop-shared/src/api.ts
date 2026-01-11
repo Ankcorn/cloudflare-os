@@ -187,6 +187,10 @@ export type GadgetMetadata = {
   // Human-readable title. Can be modified.
   title: string;
 
+  created: Date;
+
+  lastActive: Date;
+
   // TODO:
   // - owner, shared-with
   // - created / modified / activity times

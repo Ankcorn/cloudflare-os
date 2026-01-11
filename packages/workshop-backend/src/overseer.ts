@@ -428,10 +428,31 @@ class OverseerImpl implements AgentHooks {
     this.storage.actions.put(record);
   }
 
+  #lastLastActiveBump?: Date;
+
+  bumpLastActive(now: Date = new Date()) {
+    // Only bump once a minute to reduce network traffic.
+    if (!this.#lastLastActiveBump ||
+        this.#lastLastActiveBump.getTime() + 60000 < now.getTime()) {
+      if (!this.ownerId) throw new Error("not created, can't bump?");
+      let owner = this.users.get(this.users.idFromString(this.ownerId));
+
+      // Don't make the caller wait for this as it is not all that important.
+      owner.setGadgetLastActive(this.ctx.id.toString(), now)
+          .catch(err => {
+        console.error(err);
+
+        // Force retry soon.
+        this.#lastLastActiveBump = undefined;
+      });
+    }
+  }
+
   bumpVersion(): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
     this.ctx.facets.abort("gadget", new Error("Gadget restarted due to code update."));
+    this.bumpLastActive();
     return codeVersion;
   }
 
@@ -442,6 +463,10 @@ class OverseerImpl implements AgentHooks {
   // with no duplicates.
   getChatTimestamp(): Date {
     let now = new Date();
+
+    // We must be getting the timestamp for some new chat activity, so go ahead and bump
+    // lastActive.
+    this.bumpLastActive(now);
 
     if (!this.#lastChatTimestamp) {
       // getChatTimestamp() hasn't been called yet during this DO session. It's extremely unlikely

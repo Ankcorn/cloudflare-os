@@ -171,7 +171,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listGadgets(): Promise<GadgetMetadata[]> {
-    return [...this.storage.gadgets.list()];
+    let result = [...this.storage.gadgets.list()];
+
+    // Handle old data that didn't have `created` or `lastModified`.
+    // TODO(cleanup): Remove this when I stop caring about old data.
+    for (let gadget of result) {
+      if (!gadget.created) {
+        gadget.created = new Date(0);
+      }
+      if (!gadget.lastActive) {
+        gadget.lastActive = gadget.created;
+      }
+    }
+
+    return result;
   }
 
   async updateTitle(gadgetId: string, title: string) {
@@ -188,7 +201,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async newGadget(id: string, title: string): Promise<void> {
-    this.storage.gadgets.put({id, title});
+    let created = new Date();
+    this.storage.gadgets.put({id, title, created, lastActive: created});
+  }
+
+  async setGadgetLastActive(id: string, time: Date): Promise<void> {
+    let gadget = this.storage.gadgets.get(id);
+    if (gadget) {
+      gadget.lastActive = time;
+      this.storage.gadgets.put(gadget);
+    }
   }
 
   async deleteGadget(id: string): Promise<void> {
