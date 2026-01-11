@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { RpcStub } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
 import { Card, Form, Input, Button, Typography, Alert } from 'antd'
@@ -7,35 +7,39 @@ import { hashPassword } from './passwordHash'
 
 const { Title, Text } = Typography
 
-interface LoginPageProps {
+interface SignupPageProps {
   rpcStub: RpcStub<PublicApi>
-  onLoginSuccess?: () => void
 }
 
-export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
+export default function SignupPage({ rpcStub }: SignupPageProps) {
+  const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const handleSubmit = async (values: { username: string; password: string }) => {
+  const handleSubmit = async (values: {
+    username: string
+    displayName: string
+    password: string
+  }) => {
     setLoading(true)
     setError(null)
 
     try {
       const passwordHash = await hashPassword(values.username, values.password)
-      const token = await rpcStub.login(values.username, passwordHash)
+      const token = await rpcStub.createAccount(
+        values.username,
+        values.displayName,
+        passwordHash
+      )
       if (token) {
         localStorage.setItem('authToken', token)
-        // Trigger re-authentication check in parent
-        if (onLoginSuccess) {
-          onLoginSuccess()
-        } else {
-          window.location.reload()
-        }
+        navigate('/')
+        window.location.reload()
       } else {
-        setError('Invalid username or password')
+        setError('Username already exists')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
+      setError(err instanceof Error ? err.message : 'Account creation failed')
     } finally {
       setLoading(false)
     }
@@ -63,7 +67,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
             Gadgets Workshop
           </Title>
           <Text type="secondary">
-            Sign in to your account
+            Create your account
           </Text>
         </div>
 
@@ -75,7 +79,10 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           <Form.Item
             label="Username"
             name="username"
-            rules={[{ required: true, message: 'Please input your username!' }]}
+            rules={[
+              { required: true, message: 'Please choose a username' },
+              { pattern: /^[a-z0-9_-]+$/i, message: 'Username can only contain letters, numbers, underscores, and hyphens' },
+            ]}
           >
             <Input
               disabled={loading}
@@ -85,13 +92,49 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           </Form.Item>
 
           <Form.Item
+            label="Display Name"
+            name="displayName"
+            rules={[{ required: true, message: 'Please enter your display name' }]}
+          >
+            <Input
+              disabled={loading}
+              autoComplete="name"
+            />
+          </Form.Item>
+
+          <Form.Item
             label="Password"
             name="password"
-            rules={[{ required: true, message: 'Please input your password!' }]}
+            rules={[
+              { required: true, message: 'Please choose a password' },
+              { min: 8, message: 'Password must be at least 8 characters' },
+            ]}
           >
             <Input.Password
               disabled={loading}
-              autoComplete="current-password"
+              autoComplete="new-password"
+            />
+          </Form.Item>
+
+          <Form.Item
+            label="Confirm Password"
+            name="confirmPassword"
+            dependencies={['password']}
+            rules={[
+              { required: true, message: 'Please confirm your password' },
+              ({ getFieldValue }) => ({
+                validator(_, value) {
+                  if (!value || getFieldValue('password') === value) {
+                    return Promise.resolve()
+                  }
+                  return Promise.reject(new Error('Passwords do not match'))
+                },
+              }),
+            ]}
+          >
+            <Input.Password
+              disabled={loading}
+              autoComplete="new-password"
             />
           </Form.Item>
 
@@ -112,15 +155,15 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
               size="large"
               block
             >
-              Sign in
+              Create Account
             </Button>
           </Form.Item>
         </Form>
 
         <div style={{ textAlign: 'center', marginTop: 16 }}>
           <Text type="secondary">
-            Don't have an account?{' '}
-            <Link to="/signup">Create one</Link>
+            Already have an account?{' '}
+            <Link to="/login">Sign in</Link>
           </Text>
         </div>
       </Card>

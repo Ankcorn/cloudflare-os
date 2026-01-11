@@ -1,5 +1,5 @@
-import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
@@ -9,6 +9,7 @@ import { RpcTarget } from 'capnweb'
 import AddModelModal from './AddModelModal'
 import ConnectAccountModal from './ConnectAccountModal'
 import AccountCard from './AccountCard'
+import { hashPassword } from './passwordHash'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -28,6 +29,9 @@ export default function SettingsPage() {
   const [connectModalVisible, setConnectModalVisible] = useState(false)
   const [connectedAccounts, setConnectedAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
   const [accountsReady, setAccountsReady] = useState(false)
+  const [passwordLoading, setPasswordLoading] = useState(false)
+  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [passwordForm] = Form.useForm()
 
   // Fetch user info
   useEffect(() => {
@@ -208,6 +212,29 @@ export default function SettingsPage() {
   const handleCancelEdit = () => {
     setNameInput(userInfo?.name || '')
     setIsEditingName(false)
+  }
+
+  const handleChangePassword = async (values: {
+    currentPassword: string
+    newPassword: string
+  }) => {
+    if (!userInfo) return
+
+    setPasswordLoading(true)
+    setPasswordError(null)
+
+    try {
+      const oldHash = await hashPassword(userInfo.id, values.currentPassword)
+      const newHash = await hashPassword(userInfo.id, values.newPassword)
+      await authenticatedApi.changePassword(oldHash, newHash)
+      message.success('Password changed successfully')
+      passwordForm.resetFields()
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to change password'
+      setPasswordError(errorMessage)
+    } finally {
+      setPasswordLoading(false)
+    }
   }
 
   const handleDeleteModel = (modelId: string, modelName: string) => {
@@ -464,6 +491,83 @@ export default function SettingsPage() {
               ]}
             />
           </div>
+        </Card>
+
+        <Card style={{ marginTop: 24 }}>
+          <Title level={4} style={{ marginTop: 0 }}>Change Password</Title>
+          <Form
+            form={passwordForm}
+            onFinish={handleChangePassword}
+            layout="vertical"
+            style={{ maxWidth: 400 }}
+          >
+            <Form.Item
+              label="Current Password"
+              name="currentPassword"
+              rules={[{ required: true, message: 'Please enter your current password' }]}
+            >
+              <Input.Password
+                disabled={passwordLoading}
+                autoComplete="current-password"
+              />
+            </Form.Item>
+
+            <Form.Item
+              label="New Password"
+              name="newPassword"
+              rules={[
+                { required: true, message: 'Please enter a new password' },
+                { min: 8, message: 'Password must be at least 8 characters' },
+              ]}
+            >
+              <Input.Password
+                disabled={passwordLoading}
+                autoComplete="new-password"
+              />
+            </Form.Item>
+
+            <Form.Item
+              label="Confirm New Password"
+              name="confirmPassword"
+              dependencies={['newPassword']}
+              rules={[
+                { required: true, message: 'Please confirm your new password' },
+                ({ getFieldValue }) => ({
+                  validator(_, value) {
+                    if (!value || getFieldValue('newPassword') === value) {
+                      return Promise.resolve()
+                    }
+                    return Promise.reject(new Error('Passwords do not match'))
+                  },
+                }),
+              ]}
+            >
+              <Input.Password
+                disabled={passwordLoading}
+                autoComplete="new-password"
+              />
+            </Form.Item>
+
+            {passwordError && (
+              <Alert
+                message={passwordError}
+                type="error"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
+            )}
+
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Button
+                type="primary"
+                htmlType="submit"
+                loading={passwordLoading}
+                icon={<LockOutlined />}
+              >
+                Change Password
+              </Button>
+            </Form.Item>
+          </Form>
         </Card>
 
         <AddModelModal

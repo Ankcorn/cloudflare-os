@@ -22,6 +22,24 @@ type UserChatContext = {
   quickModel?: AiModelConfig;
 }
 
+type LoginSessionRecord = {
+  tokenId: string,  // sha256 hash of token, hex-formatted
+  created: Date,
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length != b.length) {
+    return false;
+  }
+
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a[i] ^ b[i];
+  }
+
+  return result === 0;
+}
+
 function makeUserStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
@@ -34,8 +52,12 @@ function makeUserStorage(storage: DurableObjectStorage) {
       connectedAccounts: collection<ConnectedAccountRecord>()({
         primaryKey: "id"
       }),
+      sessions: collection<LoginSessionRecord>()({
+        primaryKey: "tokenId",
+      }),
     },
     singletons: {
+      created: false,
       profile: <AiChatAuthorInfo>{
         type: "user",
         name: "User",
@@ -43,6 +65,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
       },
       quickModel: <string | null>null,
       nextAccountId: 0,
+
+      // `passwordHash` value as passed to `login()`, but with an extra round of SHA-256 applied.
+      //
+      // null = password disabled (e.g. because some other auth mechanism is used)
+      passwordHashHash: <Uint8Array | null>null,
     }
   });
 }
@@ -109,6 +136,89 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         this.vendors.set(vendorId, (<any>this.env)[bindingName]);
       }
     }
+  }
+
+  async authenticate(token: string): Promise<void> {
+    let tokenBytes = Uint8Array.fromBase64(token);
+    let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
+    let tokenId = new Uint8Array(hash).toHex();
+    let session = this.storage.sessions.get(tokenId);
+    if (!session) {
+      throw new Error("invalid session token");
+    }
+  }
+
+  async #newSessionToken(): Promise<string> {
+    let sessionToken = new Uint8Array(32);
+    crypto.getRandomValues(sessionToken);
+
+    let tokenId = new Uint8Array(await crypto.subtle.digest('SHA-256', sessionToken)).toHex();
+    this.storage.sessions.put({ tokenId, created: new Date() });
+
+    return sessionToken.toBase64();
+  }
+
+  async login(passwordHash: Uint8Array): Promise<string | null> {
+    let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
+
+    let actualHashHash = this.storage.passwordHashHash.get();
+    if (!actualHashHash) {
+      return null;
+    }
+
+    if (!bytesEqual(passwordHashHash, actualHashHash)) {
+      return null;
+    }
+
+    return this.#newSessionToken();
+  }
+
+  async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
+      : Promise<string | null> {
+    if (this.storage.created.get()) {
+      return null;
+    }
+
+    // Do a little migration here for old data.
+    // TODO(soon): Delete this.
+    for (let gadget of [...this.storage.gadgets.list()]) {
+      if (!gadget.created || !gadget.lastActive) {
+        if (!gadget.created) {
+          gadget.created = new Date("2026-01-01");
+        }
+        if (!gadget.lastActive) {
+          gadget.lastActive = new Date("2026-01-01");;
+        }
+        this.storage.gadgets.put(gadget);
+      }
+    }
+
+    this.storage.created.put(true);
+    this.storage.profile.put({
+      type: "user",
+      name: displayName,
+      id: username,
+    });
+
+    let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
+    this.storage.passwordHashHash.put(passwordHashHash);
+
+    return this.#newSessionToken();
+  }
+
+  async changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
+    let actualHashHash = this.storage.passwordHashHash.get();
+    if (!actualHashHash) {
+      throw new Error("This account does not use password login.");
+    }
+
+    let oldHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', oldHash));
+    if (!bytesEqual(oldHashHash, actualHashHash)) {
+      throw new Error("Incorrect password.");
+    }
+
+    let newHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', newHash));
+    this.storage.passwordHashHash.put(newHashHash);
   }
 
   async whoami(): Promise<AiChatAuthorInfo> {
@@ -359,4 +469,14 @@ export class GatekeeperConnectCallbackImpl
       vendorDescription: this.ctx.props.vendorDescription
     });
   }
+}
+
+export function normalizeUsername(username: string) {
+  username = username.toLowerCase();
+
+  if (!username.match(/^[a-z][a-z0-9_]*$/)) {
+    throw new Error("Invalid username. Must be alphanumeric starting with a letter.")
+  }
+
+  return username;
 }

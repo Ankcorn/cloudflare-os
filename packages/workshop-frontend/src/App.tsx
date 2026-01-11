@@ -5,6 +5,7 @@ import Home from './Home'
 import GadgetEditor from './GadgetEditor'
 import SettingsPage from './SettingsPage'
 import ProtectedRoute from './ProtectedRoute'
+import SignupPage from './SignupPage'
 
 interface AppProps {
   rpcStub: RpcStub<PublicApi>
@@ -38,6 +39,11 @@ function App({ rpcStub }: AppProps) {
             <GadgetEditor />
           </ProtectedRoute>
         }
+      />
+
+      <Route
+        path="/signup"
+        element={<SignupPage rpcStub={rpcStub} />}
       />
 
       {/* Redirect any unmatched routes to home for now */}

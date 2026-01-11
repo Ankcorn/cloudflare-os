@@ -26,6 +26,10 @@
 import { RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, VendorDescription } from "./gatekeeper.js";
 
+export const SERVICE_SALT = new Uint8Array([
+  0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
+]);
+
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
   // Authenticates the user using an auth token (typically stored in localStorage).
@@ -39,8 +43,35 @@ export interface PublicApi extends RpcTarget {
   //
   // Returns null if login failed (no such user or wrong password).
   //
-  // TODO: This should be replaced with something based on an external identify provider.
-  login(username: string, password: string): Promise<string | null>;
+  // `passwordHash` is derived from the user's password as follows:
+  //
+  //     argon2id({
+  //       password,
+  //       salt: SERVICE_SALT + encode(username, 'utf8'),
+  //       parallelism: 1,
+  //       interations: 3,
+  //       memorySize: 64MiB,
+  //       hashLength: 32,
+  //     });
+  //
+  // Note that the `passwordHash` itself is NOT stored plaintext by the server -- additional
+  // hashing is performed server-side. The overall scheme achieves roughly the same security
+  // guarantees as traditional server-side password hashing, but with the added benefit that the
+  // server never sees the user's password at all, and also the benefit of performing the expensive
+  // hash on the client which tends to have more resources available than a busy server.
+  //
+  // TODO: Password-based login is only meant for local/priavte installations and will be
+  //   replaced with OpenID-based SSO / Cloudflare Access / etc. for web installations.
+  login(username: string, passwordHash: Uint8Array): Promise<string | null>;
+
+  // Create a new account. Returns a token to store in local storage and pass to `authenticate()`
+  // in the future.
+  //
+  // Returns null if the username already exists. (Other kinds of errors may throw exceptions.)
+  //
+  // See login() (above) for an explanation of the password hashing algorithm.
+  createAccount(username: string, displayName: string, passwordHash: Uint8Array)
+      : Promise<string | null>;
 }
 
 // Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
@@ -66,6 +97,11 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Set the user's own display name, seen in chats, etc.
   setOwnDisplayName(name: string): Promise<void>;
+
+  // Change the user's password, if using password-based authentication.
+  //
+  // See `PublicApi.login()` for an explanation of the hashing algorithm.
+  changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void>;
 
   // List the user's configured AI models.
   //
