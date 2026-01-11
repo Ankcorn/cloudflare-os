@@ -502,6 +502,12 @@ export type AiToolCall = {
   toolName: "readFile";
   input: {filename: string};
 } | {
+  toolName: "writeFile";
+  input: {
+    filename: string;
+    content: string;
+  };
+} | {
   toolName: "editFile";
   input: {
     filename: string;

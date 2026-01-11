@@ -411,6 +411,11 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     )
   }
 
+  // In diff mode, include files from both original and modified documents
+  const displayedFiles = isDiffMode && modifiedFilesMapRef.current
+    ? Array.from(new Set([...fileNames, ...Array.from(modifiedFilesMapRef.current.keys())])).sort()
+    : fileNames
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
       {hasUnsavedChanges && (
@@ -432,7 +437,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <FileSidebar
-          files={fileNames}
+          files={displayedFiles}
           activeFile={activeFile}
           dirtyFiles={new Set()}
           changedFiles={changedFiles}

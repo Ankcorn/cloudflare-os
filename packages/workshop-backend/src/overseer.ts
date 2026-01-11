@@ -753,15 +753,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         this.impl.storage.ownerId.put(ownerId);
 
         let ydoc = new Y.Doc();
-        let ymap = ydoc.getMap<Y.Text>();
-        let initFile = (name: string, content: string) => {
-          let txt = new Y.Text();
-          txt.insert(0, content);
-          ymap.set(name, txt);
-        }
-        initFile("README.md", DEFAULT_README);
-        initFile("server.js", DEFAULT_SERVER_CODE);
-        initFile("client.js", DEFAULT_CLIENT_CODE);
+        ydoc.getMap<Y.Text>();
 
         this.impl.storage.code.put({
           version: 1,

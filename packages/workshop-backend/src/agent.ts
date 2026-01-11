@@ -20,7 +20,7 @@ Gadgets execute on a restricted and heavily-sandboxed variant of Cloudflare Work
 
 A Gadget has two main files: client.js and server.js
 
-server.js defines the Gadget's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Gadget\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch hadler; the Gadgets platform automatically takes care of routing requests to the Gadget. The Gadget has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
+server.js defines the Gadget's server-side logic, in the form of a Cloudflare Durable Object class. The class must be exported under the name \`Gadget\`. Unlike with normal Durable Objects on Cloudflare, there is no need to export a separate fetch handler; the Gadgets platform automatically takes care of routing requests to the Gadget. The Gadget has access to private storage via the regular Durable Objects KV and SQLite storage APIs. A simple server.js might look like:
 
 \`\`\`
 import { DurableObject } from "cloudflare:workers";
@@ -32,7 +32,7 @@ export class Gadget extends DurableObject {
 }
 \`\`\`
 
-client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`gadget\`, which is an RPC stub pointing at the gadget's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudlfare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`gadget\` stub will invoke the same-samed method on the Durable Object class. A simple client.js might look like:
+client.js is JavaScript that runs inside the browser to render a client-side user interface. This script runs inside a sandboxed iframe. It can display UI by manipulating the DOM. The client context is initialized with a special global variable called \`gadget\`, which is an RPC stub pointing at the gadget's Durable Object server. This RPC stub is implemented using Cap'n Web, an RPC system from Cloudflare that works similarly to Cloudflare Workers' built-in RPC system, but is able to be used in a browser. In short, methods invoked on the \`gadget\` stub will invoke the same-named method on the Durable Object class. A simple client.js might look like:
 
 \`\`\`
 let greeting = await gadget.greet("World");
@@ -57,10 +57,31 @@ async subscribe(callback) {
 }
 \`\`\`
 
+And on the client:
+
+\`\`\`
+function updateCallback(state) {
+  // update the state
+}
+
+gadget.subscribe(updateCallback);
+\`\`\`
+
+NOTE: If you pass multiple callback functions to the server (e.g. wrapped in an object), each one must be \`dup()\`ed separately. Instead of doing that, consider writing a class that implements \`RpcTarget\`, which is a marker type from Cap'n Web that is automatically imported. Such a class can have multiple methods, but will be delivered to the server as a single stub with a single \`dup()\` method. Example:
+
+\`\`\`
+class Callbacks extends RpcTarget {
+  update(state) { ... }
+  reset() { ... }
+}
+
+gadget.subscribe(new Callbacks());
+\`\`\`
+
 Some general app design tips:
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
-* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make each move. If it's concurrent but with distinct players, let each client choose which player they are controlling, inlcuding letting multiple clients choose the same player.
+* Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
 * If the project contains a README.md file, use it to describe the Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
 `.trim();
 
@@ -195,6 +216,13 @@ export async function runAgent(
                   }
                   break;
                 }
+                case "writeFile":
+                  toolOutput = {
+                    type: "json",
+                    value: {success: true, changeId: nextChangeId},
+                  };
+                  filesRead.add(toolCall.input.filename);
+                  break;
                 case "editFile":
                   toolOutput = {
                     type: "json",
@@ -391,6 +419,45 @@ export async function runAgent(
         }
       }),
 
+      writeFile: tool({
+        description: "Write a complete file, creating it if it doesn't exist, or replacing it " +
+            "if it does.",
+        inputSchema: z.object({
+          filename: z.string().describe("Name of the file to write."),
+          content: z.string().describe("The entire content of the file to write."),
+        }),
+        outputSchema: z.object({
+          success: z.boolean().describe(
+              "Always true to indicate the write succeeded. Failed writes will throw an error."),
+          changeId: z.number().describe(
+              "Change number assigned to this change, in case we need to refer to it later. " +
+              "All writes and edits made at the same time have the same changeId. This ID is not " +
+              "directly visible to the user."),
+        }),
+        execute: ({filename, content}, {toolCallId}) => {
+          try {
+            let ydoc = getSessionYDoc();
+
+            ydoc.transact(tr => {
+              let txt = new Y.Text();
+              txt.insert(0, content);
+              ydoc.getMap<Y.Text>().set(filename, txt);
+            });
+
+            // The agent knows exactly what's in the file, so add it to the `filesRead` set so
+            // that it can make further edits without rewriting.
+            filesRead.add(filename);
+
+            return {success: true, changeId: nextChangeId};
+          } catch (error) {
+            toolCallNotes.set(toolCallId, {
+              error: `${error}`
+            });
+            throw error;
+          }
+        }
+      }),
+
       editFile: tool({
         description: "Edit content of a file. If you need to edit multiple places in a file " +
             "or across multiple files, you should issue multiple tool calls simultanously, " +
@@ -409,7 +476,7 @@ export async function runAgent(
               "Always true to indicate the edit succeeded. Failed edits will throw an error."),
           changeId: z.number().describe(
               "Change number assigned to this change, in case we need to refer to it later. " +
-              "All edits made at the same time have the same changeId. This ID is not " +
+              "All writes and edits made at the same time have the same changeId. This ID is not " +
               "directly visible to the user."),
         }),
         execute: ({filename, textToReplace, replacement}, {toolCallId}) => {

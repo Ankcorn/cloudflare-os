@@ -58,7 +58,8 @@ export default function CodeDiffEditor({
     const editor = editorRef.current
     const monaco = monacoRef.current
 
-    if (!editor || !monaco || !originalYText || !modifiedYText || !editorReady) {
+    // modifiedYText is required, but originalYText can be null (for new files)
+    if (!editor || !monaco || !modifiedYText || !editorReady) {
       return
     }
 
@@ -69,13 +70,18 @@ export default function CodeDiffEditor({
       return
     }
 
-    // Create bindings for both sides
-    const originalBinding = new MonacoBinding(
-      originalYText,
-      originalModel,
-      new Set([editor.getOriginalEditor()])
-    )
-    originalBindingRef.current = originalBinding
+    // For new files, originalYText is null - set original to empty string
+    if (originalYText) {
+      const originalBinding = new MonacoBinding(
+        originalYText,
+        originalModel,
+        new Set([editor.getOriginalEditor()])
+      )
+      originalBindingRef.current = originalBinding
+    } else {
+      // New file: original doesn't exist, show empty
+      originalModel.setValue('')
+    }
 
     const modifiedBinding = new MonacoBinding(
       modifiedYText,
@@ -85,9 +91,11 @@ export default function CodeDiffEditor({
     modifiedBindingRef.current = modifiedBinding
 
     return () => {
-      originalBinding.destroy()
+      if (originalBindingRef.current) {
+        originalBindingRef.current.destroy()
+        originalBindingRef.current = null
+      }
       modifiedBinding.destroy()
-      originalBindingRef.current = null
       modifiedBindingRef.current = null
     }
   }, [originalYText, modifiedYText, editorReady])
@@ -141,7 +149,8 @@ export default function CodeDiffEditor({
     }
   }
 
-  if (!filename || !originalYText || !modifiedYText) {
+  // modifiedYText is required; originalYText can be null for new files
+  if (!filename || !modifiedYText) {
     return (
       <div
         style={{
