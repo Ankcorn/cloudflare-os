@@ -16,7 +16,7 @@ Hint: Try "Make me a tic tac toe game."
 
 To enable support for external APIs, you must do further configuration to register credentials to access each API. This is described in the README.md files in various gatekeeper packages:
 
-* Google API: packages/gatekeeper-google/README.md
+* [Google API](packages/gatekeeper-google/README.md)
 
 # FAQ
 
