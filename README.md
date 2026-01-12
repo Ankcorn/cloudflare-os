@@ -12,6 +12,12 @@
 
 Hint: Try "Make me a tic tac toe game."
 
+# Enabling external APIs
+
+To enable support for external APIs, you must do further configuration to register credentials to access each API. This is described in the README.md files in various gatekeeper packages:
+
+* Google API: packages/gatekeeper-google/README.md
+
 # FAQ
 
 Q: Why are there no AI models available to select?
