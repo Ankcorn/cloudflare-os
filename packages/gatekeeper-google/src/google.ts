@@ -34,6 +34,21 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
+const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration Required</title>
+  </head>
+  <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
+    <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
+      <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Google Gatekeeper Not Configured</h1>
+      <p style="color: #555; line-height: 1.6; margin: 0;">Please see the README.md for instructions on configuring an OAuth client ID and secret so that this Gadgets instance can access Google APIs.</p>
+    </div>
+  </body>
+</html>`;
+
 const OAUTH_SCOPES = [
   "openid",
   "https://www.googleapis.com/auth/userinfo.profile",
@@ -53,6 +68,14 @@ export default {
     let path = url.pathname.slice(1).split("/");
 
     if (path.length === 1 && path[0].length == 64) {
+      if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
+        return new Response(NOT_CONFIGURED_HTML, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8"
+          }
+        });
+      }
+
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       newUrl.searchParams.set("client_id", env.CLIENT_ID);
       newUrl.searchParams.set("redirect_uri", REDIRECT_URI);
@@ -150,6 +173,10 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async acceptAuthCode(code: string) {
+    if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
+      throw new Error("The Google Gatekeeper is not configured.");
+    }
+
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
       // Must have timed out.
@@ -181,6 +208,10 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async getAccessToken(): Promise<GoogleAccessToken> {
+    if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
+      throw new Error("The Google Gatekeeper is not configured.");
+    }
+
     let refreshToken = await this.ctx.storage.get<string>("refreshToken");
     if (!refreshToken) {
       throw new Error("no refresh token set");
