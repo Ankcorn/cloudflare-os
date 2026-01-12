@@ -281,20 +281,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listGadgets(): Promise<GadgetMetadata[]> {
-    let result = [...this.storage.gadgets.list()];
-
-    // Handle old data that didn't have `created` or `lastModified`.
-    // TODO(cleanup): Remove this when I stop caring about old data.
-    for (let gadget of result) {
-      if (!gadget.created) {
-        gadget.created = new Date(0);
-      }
-      if (!gadget.lastActive) {
-        gadget.lastActive = gadget.created;
-      }
-    }
-
-    return result;
+    return [...this.storage.gadgets.list()];
   }
 
   async updateTitle(gadgetId: string, title: string) {
