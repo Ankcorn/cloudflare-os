@@ -198,7 +198,8 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
   },
   "cloudflare": {
     "@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8": "Qwen 3 Coder 480B (Workers AI)",
-    "@cf/moonshotai/kimi-k2-instruct": "Kimi K2 Instruct (Workers AI)",
+    "@cf/moonshotai/kimi-k2.5": "Kimi K2.5 (Workers AI)",
+    "@cf/zai-org/glm-4.7-flash": "GLM 4.7 Flash (Workers AI)",
   },
   "google": {
     "gemini-3-pro-preview": "Gemini 3 Pro",

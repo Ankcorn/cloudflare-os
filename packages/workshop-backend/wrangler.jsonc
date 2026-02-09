@@ -21,10 +21,10 @@
     {
       "binding": "LOADER"
     }
-  ]
-// Workers AI doesn't really work right now, and having this binding configured forces people to
-// log in when they run `wrangler dev`, so removing it for now.
-//  "ai": {
-//    "binding": "WORKERS_AI"
-//  }
+  ],
+  // Having this binding configured forces people to log in when they run `wrangler dev`, so it's
+  // disabled by default, but you should uncomment it if you want Workers AI.
+  // "ai": {
+  //   "binding": "WORKERS_AI"
+  // }
 }

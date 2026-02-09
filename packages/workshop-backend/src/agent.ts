@@ -375,11 +375,25 @@ export async function runAgent(
 
   let systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
 
+  let maxOutputTokens: number | undefined;
+  if (typeof chosenModel === "object" && chosenModel.provider &&
+      chosenModel.provider.startsWith("workersai")) {
+    // Workers AI uses a very low defalut max tokens if we don't set it higher. Qwen 3, Kimi K2.5,
+    // and GLM 4.7 all support 131k tokens. These are the only models on Workers AI so far that can
+    // even plausibly write code, so let's just assume we're using one of them.
+    // TODO: Qwen 3 requires that maxOutputTokens PLUS the input tokens do not exceed 131k or it
+    //   throws an exception. We don't know how to count input tokens so for now we use 100k,
+    //   leaving 31k headroom. This is obviously a terrible solution and we need to come up with
+    //   something better here.
+    maxOutputTokens = 100000;
+  }
+
   await generateText({
     model: chosenModel,
     system: systemPrompt,
     messages: modelMessages,
     abortSignal,
+    maxOutputTokens,
 
     // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
     //   you want to support multiple steps at all? What if you don't want to set a limit?

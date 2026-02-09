@@ -26,4 +26,6 @@ A: You skipped step 8.
 
 Q: Workers AI models don't work?
 
-A: Edit packages/workshop-backend/wrangler.jsonc and enable the WORKERS_AI binding. You will be forced to log in when you run `wrangler dev`. Unfortunately Workers AI still won't work, because there are currently bugs in Workers AI that prevent Kimi K2 and Qwen 3 Coder from using tool calls properly, and none of the other models are competent to write code.
+A: Edit packages/workshop-backend/wrangler.jsonc and enable the WORKERS_AI binding. You will be forced to log in when you run `wrangler dev`.
+
+As of this writing, no publicly-available model on Workers AI can really code. However, there are some experimental models that work if you can convince Michelle Chen to give you access. Kimi K2.5 in particular is pretty good.
