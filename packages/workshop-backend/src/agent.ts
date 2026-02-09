@@ -39,6 +39,8 @@ let greeting = await gadget.greet("World");
 document.body.appendChild(document.createTextNode(greeting));
 \`\`\`
 
+Note that there is no index.html. Instead, client.js must build the entire UI using JavaScript code.
+
 Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Gadget communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.
 
 Note that Cap'n Web is a bidirectional object capability protocol, meaning, among other things, you can pass a function over RPC, in the params or results of another function. This actually passes the function "by reference": the receiving end actually receives an RPC stub, which can be used to call back over RPC to the original function. This, of course, causes the function to become async, even if the original was synchronous.
