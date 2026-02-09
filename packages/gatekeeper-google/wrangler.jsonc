@@ -1,8 +1,8 @@
 {
   "name": "gatekeeper-google",
   "main": "src/google.ts",
-  "compatibility_date": "2025-12-01",
-  "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage", "rpc_params_dup_stubs"],
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
   "migrations": [
     {
       "tag": "v0",
