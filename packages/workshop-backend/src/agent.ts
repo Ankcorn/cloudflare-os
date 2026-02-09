@@ -464,9 +464,13 @@ export async function runAgent(
             // that it can make further edits without rewriting.
             filesRead.add(filename);
 
+            toolCallNotes.set(toolCallId, {
+              observedCodeVersion: versionLock!
+            });
             return {success: true, changeId: nextChangeId};
           } catch (error) {
             toolCallNotes.set(toolCallId, {
+              observedCodeVersion: versionLock!,
               error: `${error}`
             });
             throw error;
