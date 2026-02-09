@@ -152,6 +152,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const isSuggestedModel = selection?.type === 'suggested'
   const showCustomFields = selection?.type === 'custom'
   const isOllama = selection?.provider === 'ollama'
+  const isCloudflare = selection?.provider === 'cloudflare'
 
   return (
     <Modal
@@ -214,14 +215,14 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           </>
         )}
 
-        {selection && (
+        {selection && !isCloudflare && (
           <Form.Item
             label="API Token"
             name="apiToken"
             rules={[{ required: !isOllama, message: 'Please enter your API token' }]}
             extra={isOllama ?
               'Optional for local Ollama access' :
-              `Your ${selection.type === 'suggested' ? providerLabels[selection.provider] : providerLabels[selection.provider]} API token for billing`
+              `Your ${providerLabels[selection.provider]} API token for billing`
             }
           >
             <Input placeholder={isOllama ? '(optional)' : 'sk-...'} />
@@ -239,7 +240,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           </Form.Item>
         )}
 
-        {selection && !isOllama && (
+        {selection && !isOllama && !isCloudflare && (
           <Collapse ghost>
             <Panel header="Advanced Settings" key="advanced">
               <Form.Item
