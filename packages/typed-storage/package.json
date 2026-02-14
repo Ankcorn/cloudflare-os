@@ -17,7 +17,7 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260207.0",
+    "@cloudflare/workers-types": "^4.20260214.0",
     "vitest": "^3.2.4"
   }
 }
