@@ -194,7 +194,7 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
   "anthropic": {
     "claude-haiku-4-5": "Claude Haiku 4.5",
     "claude-sonnet-4-5": "Claude Sonnet 4.5",
-    "claude-opus-4-5": "Claude Opus 4.5",
+    "claude-opus-4-6": "Claude Opus 4.6",
   },
   "cloudflare": {
     "@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8": "Qwen 3 Coder 480B (Workers AI)",
