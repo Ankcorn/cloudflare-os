@@ -572,6 +572,7 @@ class OverseerImpl implements AgentHooks {
 
       await runAgent(this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal);
     } catch (err) {
+      console.error("error in runAgent():", err);
       this.postAgentChatMessage(chatId, aiModel.profile, `${err}`);
     } finally {
       this.#cancelSignals.delete(chatId);
