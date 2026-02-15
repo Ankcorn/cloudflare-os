@@ -68,8 +68,7 @@ type ActionRecord = {
 });
 
 function makeOverseerStorage(storage: DurableObjectStorage) {
-  // TODO(cleanup): Remove <any> once workers-types are updated with sync KV interface.
-  return createTypedStorage(<any>storage, {
+  return createTypedStorage(storage, {
     singletons: {
       // Initialized on first startup.
       ownerId: <string | undefined>undefined,
