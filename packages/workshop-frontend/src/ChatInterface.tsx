@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -141,9 +141,10 @@ function computeMessageStates(messages: AiChatMessage[]): MessageState {
 
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>
+  selectedChatId: number | null
+  onNavigateToChat: (chatId: number | null, options?: { replace?: boolean }) => void
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
   onFileEdited?: (filename: string) => void
-  onSelectedChatChange?: (chatId: number | null) => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -153,11 +154,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-export interface ChatInterfaceHandle {
-  clearChat(): void
-}
-
-const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(function ChatInterface({ overseer, onProposedChangesChange, onFileEdited, onSelectedChatChange }, ref) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -166,7 +163,6 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
   })
 
   // UI state
-  const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
   const [inputValue, setInputValue] = useState('')
   const [isSubscribed, setIsSubscribed] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -183,6 +179,8 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
 
   // Refs for accessing current values in subscriber callbacks
   const selectedChatIdRef = useRef<number | null>(null)
+  const onNavigateToChatRef = useRef(onNavigateToChat)
+  onNavigateToChatRef.current = onNavigateToChat
 
   // Subscription stub (wrapped in object for useState)
   const subscriptionRef = useRef<RpcStub<{}> | null>(null)
@@ -264,10 +262,7 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
     selectedChatIdRef.current = selectedChatId
   }, [selectedChatId])
 
-  // Notify parent when selected chat changes
-  useEffect(() => {
-    onSelectedChatChange?.(selectedChatId)
-  }, [selectedChatId, onSelectedChatChange])
+
 
   // Detect when files are edited via tool calls and notify parent
   useEffect(() => {
@@ -327,10 +322,9 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
       cacheRef.current.messages.delete(chatId)
 
       // If currently viewing this chat, go back to list
+      // Use replace to prevent browser-back returning to the deleted chat
       if (selectedChatIdRef.current === chatId) {
-        setSelectedChatId(null)
-        setInputValue('')
-        setIsEditingTitle(false)
+        onNavigateToChatRef.current(null, { replace: true })
       }
 
       forceUpdate()
@@ -431,50 +425,69 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
     }
   }, [overseer])
 
-  // Load chat history when selecting a chat
-  const selectChat = async (chatId: number) => {
-    setSelectedChatId(chatId)
+  // Reset per-chat UI state when selectedChatId changes
+  useEffect(() => {
     setExpandedToolCalls(new Set())
     setExpandedReasoning(new Set())
     processedToolCallsRef.current = new Set()
+    setInputValue('')
+    setIsEditingTitle(false)
+  }, [selectedChatId])
+
+  // Load chat history when selectedChatId changes to a non-null value
+  useEffect(() => {
+    if (selectedChatId === null) return
 
     // If we don't have messages for this chat yet, load them
-    if (!cacheRef.current.messages.has(chatId)) {
+    if (!cacheRef.current.messages.has(selectedChatId)) {
+      let cancelled = false
       setIsLoading(true)
-      try {
-        const history = await overseer.getChatHistory(chatId)
 
-        // Get or initialize messages array for this chat
-        let messages = cacheRef.current.messages.get(chatId)
-        if (!messages) {
-          messages = []
-          cacheRef.current.messages.set(chatId, messages)
-        }
+      ;(async () => {
+        try {
+          const history = await overseer.getChatHistory(selectedChatId)
+          if (cancelled) return
 
-        // Populate using sequence numbers as indices
-        // If subscription already added some messages, this will fill in the gaps
-        // (and harmlessly overwrite any that match, since content is identical)
-        history.forEach(msg => {
-          messages[msg.sequence] = msg
-        })
+          // Get or initialize messages array for this chat
+          let messages = cacheRef.current.messages.get(selectedChatId)
+          if (!messages) {
+            messages = []
+            cacheRef.current.messages.set(selectedChatId, messages)
+          }
 
-        // Update last message timestamp if needed
-        if (history.length > 0) {
-          const lastMsg = history[history.length - 1]
-          if (!cacheRef.current.lastMessageTimestamp ||
-              lastMsg.timestamp > cacheRef.current.lastMessageTimestamp) {
-            cacheRef.current.lastMessageTimestamp = lastMsg.timestamp
+          // Populate using sequence numbers as indices
+          // If subscription already added some messages, this will fill in the gaps
+          // (and harmlessly overwrite any that match, since content is identical)
+          history.forEach(msg => {
+            messages[msg.sequence] = msg
+          })
+
+          // Update last message timestamp if needed
+          if (history.length > 0) {
+            const lastMsg = history[history.length - 1]
+            if (!cacheRef.current.lastMessageTimestamp ||
+                lastMsg.timestamp > cacheRef.current.lastMessageTimestamp) {
+              cacheRef.current.lastMessageTimestamp = lastMsg.timestamp
+            }
+          }
+
+          forceUpdate()
+        } catch (err) {
+          console.error('Failed to load chat history:', err)
+          // If loading fails (e.g., invalid chat ID), navigate back to chat list
+          if (!cancelled) {
+            onNavigateToChatRef.current(null, { replace: true })
+          }
+        } finally {
+          if (!cancelled) {
+            setIsLoading(false)
           }
         }
+      })()
 
-        forceUpdate()
-      } catch (err) {
-        console.error('Failed to load chat history:', err)
-      } finally {
-        setIsLoading(false)
-      }
+      return () => { cancelled = true }
     }
-  }
+  }, [selectedChatId, overseer])
 
   // Handle sending a message
   const handleSend = async (messageText?: string, modelId?: string | null) => {
@@ -494,7 +507,7 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
       if (selectedChatId === null) {
         // Create a new chat
         const newChatId = await overseer.newChat(message, model)
-        setSelectedChatId(newChatId)
+        onNavigateToChatRef.current(newChatId)
       } else {
         // Send message to existing chat
         await overseer.sendChatMessage(selectedChatId, message, model)
@@ -526,20 +539,6 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
       console.error('Failed to stop agent:', err)
     }
   }
-
-  // Handle going back to chat list
-  const handleBack = () => {
-    setSelectedChatId(null)
-    setInputValue('')
-    setIsEditingTitle(false)
-    setExpandedToolCalls(new Set())
-    setExpandedReasoning(new Set())
-    processedToolCallsRef.current = new Set()
-  }
-
-  useImperativeHandle(ref, () => ({
-    clearChat: handleBack
-  }))
 
   // Handle saving chat title
   const handleSaveChatTitle = async () => {
@@ -718,7 +717,7 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
                 dataSource={chatList}
                 renderItem={(chat) => (
                   <List.Item
-                    onClick={() => selectChat(chat.id)}
+                    onClick={() => onNavigateToChat(chat.id)}
                     style={{ cursor: 'pointer', padding: '12px' }}
                   >
                     <List.Item.Meta
@@ -1240,6 +1239,6 @@ const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(functi
       )}
     </div>
   )
-})
+}
 
 export default ChatInterface

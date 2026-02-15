@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useState, useEffect, useCallback } from 'react'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
@@ -8,7 +8,7 @@ import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-sh
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
-import ChatInterface, { ChatInterfaceHandle } from './ChatInterface'
+import ChatInterface from './ChatInterface'
 import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
@@ -17,7 +17,12 @@ const { Title, Text } = Typography
 export default function GadgetEditor() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { authenticatedApi, logout } = useAuthenticatedApi()
+
+  // Derive selectedChatId from URL search params
+  const chatParam = searchParams.get('chat')
+  const selectedChatId = chatParam ? Number(chatParam) : null
 
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
@@ -33,9 +38,15 @@ export default function GadgetEditor() {
   const [activeTab, setActiveTab] = useState('code')
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
-  const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
-  const chatRef = useRef<ChatInterfaceHandle>(null)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+
+  const navigateToChat = useCallback((chatId: number | null, options?: { replace?: boolean }) => {
+    if (chatId !== null) {
+      navigate(`/gadget/${id}?chat=${chatId}`, { replace: options?.replace })
+    } else {
+      navigate(`/gadget/${id}`, { replace: options?.replace })
+    }
+  }, [navigate, id])
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -168,7 +179,8 @@ export default function GadgetEditor() {
 
   const handleBack = () => {
     if (selectedChatId !== null) {
-      chatRef.current?.clearChat()
+      // Push to history so browser back returns to this chat
+      navigate(`/gadget/${id}`)
     } else {
       navigate('/')
     }
@@ -340,11 +352,11 @@ export default function GadgetEditor() {
         >
           {overseer ? (
             <ChatInterface
-              ref={chatRef}
               overseer={overseer.stub}
+              selectedChatId={selectedChatId}
+              onNavigateToChat={navigateToChat}
               onProposedChangesChange={setProposedChanges}
               onFileEdited={handleFileEdited}
-              onSelectedChatChange={setSelectedChatId}
             />
           ) : null}
         </div>
