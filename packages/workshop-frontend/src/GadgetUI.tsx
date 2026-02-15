@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Typography, Spin, Alert } from 'antd'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
-import { Overseer, UiBundle } from '@gadgets/workshop-shared/api'
+import { Overseer } from '@gadgets/workshop-shared/api'
 
 const { Text } = Typography
 
@@ -61,13 +61,14 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
   const [isInvalidated, setIsInvalidated] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
-  const gadgetStubRef = useRef<RpcStub<any> | null>(null)
-  const rpcSessionRef = useRef<RpcStub<any> | null>(null)
+  // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
+  const gadgetStubRef = useRef<any>(null)
+  const rpcSessionRef = useRef<any>(null)
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
     // Only react if reloadTrigger has actually changed from the previous value
-    if (reloadTrigger !== prevReloadTriggerRef.current && reloadTrigger > 0) {
+    if (reloadTrigger !== undefined && reloadTrigger !== prevReloadTriggerRef.current && reloadTrigger > 0) {
       // Mark as invalidated but don't reload unless visible
       setIsInvalidated(true)
       if (!isVisible) {
@@ -113,6 +114,8 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
     }
 
     loadUiBundle()
+  // LSP reports an error here, but tsc does not.
+  // The LSP error is due to bugs that need to be fixed in Cap'n Web.
   }, [overseer, isVisible, hasLoaded, isInvalidated, chatId])
 
   // Effect to handle iframe RPC handshake

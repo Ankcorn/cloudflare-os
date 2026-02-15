@@ -1,4 +1,4 @@
-import { RpcStub, RpcTarget } from "capnweb";
+import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -7,7 +7,7 @@ import * as Y from "yjs";
 import { generateText } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
 import { AgentHooks, runAgent } from "./agent";
-import { UserDurableObject } from "./user";
+import { UserDurableObject, UserAiModelRecord } from "./user";
 
 let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
 `;
@@ -382,6 +382,8 @@ class OverseerImpl implements AgentHooks {
     }
     this.storage.gatekeepers.put(gatekeeperRecord);
 
+    // LSP reports an error here, but tsc does not.
+    // The LSP error is due to bugs that need to be fixed in Cap'n Web.
     return new GatekeeperClientImpl(this, id!, facet);
   }
 
@@ -829,6 +831,7 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let ns = ctx.exports.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
+    // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     let gatekeeper = stub.startGatekeeperSession(this.ctx.props.gatekeeperId);
 
     return new Proxy(gatekeeper, {
@@ -885,7 +888,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.clientUser = owner;
   }
 
-  async getMetadata(): Promise<GadgetMetadata> {
+  async getMetadata(): Promise<Omit<GadgetMetadata, 'created' | 'lastActive'>> {
     let title: string = this.impl.storage.title.get();
 
     return { id: this.impl.ctx.id.toString(), title };
@@ -912,7 +915,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let dbSubscriber = {
       add(record: CodeUpdate) {
-        subscriber.update(record).catch(err => { codeVersions.unsubscribe(dbSubscriber) });
+        subscriber.update(record).catch((_err: any) => { codeVersions.unsubscribe(dbSubscriber) });
       },
       update(oldRecord: CodeUpdate, newRecord: CodeUpdate): void {
         // Never happens.
@@ -1365,7 +1368,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 }
 
-class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClient<Session> {
+class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
+    extends RpcTarget implements GatekeeperClient<Session> {
   constructor(private impl: OverseerImpl, private id: number,
       private facet: Fetcher<Gatekeeper<Session>>) {
     super();
@@ -1389,7 +1393,8 @@ class GatekeeperClientImpl<Session> extends RpcTarget implements GatekeeperClien
     return this.facet.describe();
   }
 
-  async openSession(): Promise<Session> {
+  async openSession(): Promise<RpcStub<Session>> {
+    // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id));
   }
 }

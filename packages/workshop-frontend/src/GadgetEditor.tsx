@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
+import { Layout, Typography, Button, Input, Space, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
@@ -26,7 +26,7 @@ export default function GadgetEditor() {
   const selectedChatId = chatParam ? Number(chatParam) : null
 
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
-  const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
+  const [metadata, setMetadata] = useState<Omit<GadgetMetadata, 'created' | 'lastActive'> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)

@@ -1,3 +1,4 @@
+import React from 'react'
 import { Modal, Form, Select, Input, Collapse, message } from 'antd'
 import { useState, useEffect } from 'react'
 import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
@@ -73,8 +74,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       // For suggested models, get modelId/displayName from selection state (not form)
       // since those Form.Items don't exist for suggested models
       const isSuggested = selection!.type === 'suggested'
-      const modelId = isSuggested ? selection.modelId : values.modelId
-      const displayName = isSuggested ? selection.displayName : values.displayName
+      const modelId = isSuggested ? selection!.modelId : values.modelId
+      const displayName = isSuggested ? selection!.displayName : values.displayName
 
       const profile: AiChatAuthorInfo = {
         type: 'agent',
@@ -107,7 +108,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   }
 
   // Build dropdown options
-  const dropdownOptions: JSX.Element[] = []
+  const dropdownOptions: React.JSX.Element[] = []
 
   // Add suggested models grouped by provider
   const providerOrder: AiModelProvider[] = Object.keys(SUGGESTED_MODELS) as AiModelProvider[];
@@ -125,7 +126,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
 
     const models = SUGGESTED_MODELS[provider]
-    const suggestedOptions: JSX.Element[] = []
+    const suggestedOptions: React.JSX.Element[] = []
 
     for (const [modelId, displayName] of Object.entries(models)) {
       suggestedOptions.push(
@@ -149,7 +150,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     )
   }
 
-  const isSuggestedModel = selection?.type === 'suggested'
   const showCustomFields = selection?.type === 'custom'
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'

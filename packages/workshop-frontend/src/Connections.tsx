@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tag, Tabs, Select, Spin } from 'antd'
+import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tabs, Select, Spin } from 'antd'
 import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
@@ -40,8 +40,8 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [connectionStep, setConnectionStep] = useState<'url' | 'account'>('url')
   const [filteredAccounts, setFilteredAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
   const [filteredVendors, setFilteredVendors] = useState<VendorOption[]>([])
-  const [accountsReady, setAccountsReady] = useState(false)
-  const [vendorsLoading, setVendorsLoading] = useState(false)
+  const [_accountsReady, setAccountsReady] = useState(false)
+  const [_vendorsLoading, setVendorsLoading] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
 
   // Ref to track the current subscription
@@ -426,18 +426,6 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   }
 
-  const getStatusTag = (action: ActionLogEntry) => {
-    switch (action.state) {
-      case 'pending':
-        return <Tag color="orange">Pending</Tag>
-      case 'approved':
-        return <Tag color="green">Approved</Tag>
-      case 'rejected':
-        return <Tag color="red">Rejected</Tag>
-      default:
-        return <Tag>{action.state}</Tag>
-    }
-  }
 
   const formatDate = (date: Date) => {
     return new Date(date).toLocaleString()
@@ -535,7 +523,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       title: 'Actions',
       key: 'actions',
       width: '25%',
-      render: (_, record: ActionLogEntry) => {
+      render: (_: any, record: ActionLogEntry) => {
         const isProcessing = processingActions.has(record.id)
 
         if (record.state === 'pending') {

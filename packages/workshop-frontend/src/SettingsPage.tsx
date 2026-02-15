@@ -30,7 +30,7 @@ export default function SettingsPage() {
   const [quickModelLoading, setQuickModelLoading] = useState(true)
   const [connectModalVisible, setConnectModalVisible] = useState(false)
   const [connectedAccounts, setConnectedAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
-  const [accountsReady, setAccountsReady] = useState(false)
+  const [_accountsReady, setAccountsReady] = useState(false)
   const [passwordLoading, setPasswordLoading] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordForm] = Form.useForm()

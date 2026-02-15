@@ -164,7 +164,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
   // UI state
   const [inputValue, setInputValue] = useState('')
-  const [isSubscribed, setIsSubscribed] = useState(false)
+  const [_isSubscribed, setIsSubscribed] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [updateCounter, setUpdateCounter] = useState(0) // Force re-render when cache updates
   const [isEditingTitle, setIsEditingTitle] = useState(false)
@@ -487,6 +487,8 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
       return () => { cancelled = true }
     }
+  // LSP reports an error here, but tsc does not.
+  // The LSP error is due to bugs that need to be fixed in Cap'n Web.
   }, [selectedChatId, overseer])
 
   // Handle sending a message
@@ -819,7 +821,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
               </div>
             ) : (
               <>
-                {currentMessages.map((msg, idx) => (
+                {currentMessages.map((msg, _idx) => (
                   <div
                     key={`${msg.chatId}-${msg.sequence}`}
                     style={{

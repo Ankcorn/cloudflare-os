@@ -23,7 +23,7 @@
 // RPC to the Workshop. Among other things, through this interface, the Workshop provides the
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
-import { RpcStub, RpcTarget } from "capnweb";
+import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, VendorDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
@@ -317,7 +317,7 @@ export type ActionLogEntry = {
 // Gadget.
 export interface Overseer extends RpcTarget {
   // Get metadata describing this gadget.
-  getMetadata(): Promise<GadgetMetadata>;
+  getMetadata(): Promise<Omit<GadgetMetadata, 'created' | 'lastActive'>>;
 
   // Change the title.
   setTitle(title: string): Promise<void>;
@@ -598,7 +598,7 @@ export type GatekeeperMetadata = {
   resourceTitle: string;
 };
 
-export interface GatekeeperClient<Session> extends RpcTarget {
+export interface GatekeeperClient<Session extends RpcCompatible<Session>> extends RpcTarget {
   // Remove this gatekeeper from the Gadget.
   remove(): Promise<void>;
 
@@ -611,7 +611,7 @@ export interface GatekeeperClient<Session> extends RpcTarget {
 
   // Open a direct session to this gatekeeper. Particularly useful when using the AI agent to talk
   // to the resource directly.
-  openSession(): Promise<Session>;
+  openSession(): Promise<RpcStub<Session>>;
 
   // TODO: Get/set permissions.
 }

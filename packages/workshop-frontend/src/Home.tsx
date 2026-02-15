@@ -77,7 +77,6 @@ export default function Home() {
     try {
       const newGadget = await authenticatedApi.newGadget()
       const metadata = await newGadget.getMetadata()
-      setGadgets(prev => [metadata, ...prev])
       navigate(`/gadget/${metadata.id}`)
     } catch (error) {
       console.error('Failed to create gadget:', error)
@@ -158,11 +157,11 @@ export default function Home() {
 
       <Content style={{ padding: '24px' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <div style={{ 
-            marginBottom: 24, 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center' 
+          <div style={{
+            marginBottom: 24,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center'
           }}>
             <Title level={2} style={{ margin: 0 }}>
               Your Gadgets

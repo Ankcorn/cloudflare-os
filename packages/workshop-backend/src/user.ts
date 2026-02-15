@@ -11,7 +11,7 @@ type ConnectedAccountRecord = {
   description: AccountDescription;
 };
 
-type UserAiModelRecord = {
+export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
   config: AiModelConfig;
 }
