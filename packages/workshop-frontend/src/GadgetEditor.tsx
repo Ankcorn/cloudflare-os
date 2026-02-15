@@ -4,6 +4,7 @@ import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, D
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
+import AlphaWarning from './AlphaWarning'
 import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
@@ -283,7 +284,7 @@ export default function GadgetEditor() {
           size="large"
         />
 
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {isEditingTitle ? (
             <Space.Compact>
               <Input
@@ -318,6 +319,10 @@ export default function GadgetEditor() {
               />
             </>
           )}
+        </div>
+
+        <div style={{ flex: 1, textAlign: 'center' }}>
+          <AlphaWarning />
         </div>
 
         <Space>

@@ -2,6 +2,7 @@ import { Layout, Typography, Button, Table, Space, Dropdown, Avatar, Tooltip } f
 import { LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
+import AlphaWarning from './AlphaWarning'
 import { useState, useEffect } from 'react'
 import { GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import type { MenuProps } from 'antd'
@@ -144,6 +145,7 @@ export default function Home() {
         <Title level={4} style={{ margin: 0, color: 'inherit' }}>
           Gadgets Workshop
         </Title>
+        <AlphaWarning />
         <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
           <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
             <Space>

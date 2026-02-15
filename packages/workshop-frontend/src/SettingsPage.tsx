@@ -1,7 +1,9 @@
-import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert, Dropdown } from 'antd'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined, LogoutOutlined } from '@ant-design/icons'
+import type { MenuProps } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
+import AlphaWarning from './AlphaWarning'
 import { useState, useEffect, useRef } from 'react'
 import { AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
@@ -16,7 +18,7 @@ const { Title, Text } = Typography
 
 export default function SettingsPage() {
   const navigate = useNavigate()
-  const { authenticatedApi } = useAuthenticatedApi()
+  const { authenticatedApi, logout } = useAuthenticatedApi()
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
   const [loading, setLoading] = useState(true)
@@ -261,6 +263,19 @@ export default function SettingsPage() {
     navigate('/')
   }
 
+  const handleLogout = () => {
+    logout()
+  }
+
+  const accountMenuItems: MenuProps['items'] = [
+    {
+      key: 'logout',
+      label: 'Logout',
+      icon: <LogoutOutlined />,
+      onClick: handleLogout,
+    },
+  ]
+
   const modelColumns = [
     {
       title: 'Display Name',
@@ -326,6 +341,17 @@ export default function SettingsPage() {
         <Title level={4} style={{ margin: 0 }}>
           Settings
         </Title>
+        <div style={{ flex: 1, textAlign: 'center' }}>
+          <AlphaWarning />
+        </div>
+        <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
+          <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
+            <Space>
+              <Avatar size="small" icon={<UserOutlined />} />
+              <span>{userInfo?.name || 'Account'}</span>
+            </Space>
+          </Button>
+        </Dropdown>
       </Header>
 
       <Content style={{ padding: '24px', maxWidth: 800, margin: '0 auto' }}>
