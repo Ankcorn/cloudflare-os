@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
@@ -153,7 +153,11 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-export default function ChatInterface({ overseer, onProposedChangesChange, onFileEdited, onSelectedChatChange }: ChatInterfaceProps) {
+export interface ChatInterfaceHandle {
+  clearChat(): void
+}
+
+const ChatInterface = forwardRef<ChatInterfaceHandle, ChatInterfaceProps>(function ChatInterface({ overseer, onProposedChangesChange, onFileEdited, onSelectedChatChange }, ref) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -533,6 +537,10 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
     processedToolCallsRef.current = new Set()
   }
 
+  useImperativeHandle(ref, () => ({
+    clearChat: handleBack
+  }))
+
   // Handle saving chat title
   const handleSaveChatTitle = async () => {
     if (selectedChatId === null || !titleInput.trim()) {
@@ -753,9 +761,6 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
             justifyContent: 'space-between'
           }}>
             <Space>
-              <Button icon={<ArrowLeftOutlined />} onClick={handleBack}>
-                Back
-              </Button>
               {isEditingTitle ? (
                 <Space.Compact>
                   <Input
@@ -1235,4 +1240,6 @@ export default function ChatInterface({ overseer, onProposedChangesChange, onFil
       )}
     </div>
   )
-}
+})
+
+export default ChatInterface

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Layout, Typography, Button, Input, Space, Card, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
@@ -8,7 +8,7 @@ import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-sh
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
-import ChatInterface from './ChatInterface'
+import ChatInterface, { ChatInterfaceHandle } from './ChatInterface'
 import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
@@ -34,6 +34,7 @@ export default function GadgetEditor() {
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
+  const chatRef = useRef<ChatInterfaceHandle>(null)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
   useEffect(() => {
@@ -166,7 +167,11 @@ export default function GadgetEditor() {
   }
 
   const handleBack = () => {
-    navigate('/')
+    if (selectedChatId !== null) {
+      chatRef.current?.clearChat()
+    } else {
+      navigate('/')
+    }
   }
 
   const handleCodeChange = () => {
@@ -335,6 +340,7 @@ export default function GadgetEditor() {
         >
           {overseer ? (
             <ChatInterface
+              ref={chatRef}
               overseer={overseer.stub}
               onProposedChangesChange={setProposedChanges}
               onFileEdited={handleFileEdited}
