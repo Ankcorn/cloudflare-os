@@ -1,15 +1,29 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import * as Y from "yjs";
-import { generateText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart } from "ai";
+import { generateText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
+
+// Additional per-chat-thread info needed by the AI agent but not by the client.
+export type AiChatAgentContext = {
+  // Chat ID, corresponds to `chatMeta`.
+  chatId: number;
+
+  // If present, this chat was spawned using a spawner, and this was the spawner config at the
+  // time.
+  spawnerConfig?: AgentSpawnerConfig;
+
+  // If present, the `ctx.props` value for use with `executeCode`.
+  props?: unknown;
+};
 
 // Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
 // dependencies.
 export interface AgentHooks {
+  getChatAgentContext(chatId: number): AiChatAgentContext;
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
   listBindingNames(): string[];
   describeBinding(bindingName: string): Promise<string>;
-  executeCodeMode(code: string): Promise<string>;
+  executeCodeMode(code: string, context: AiChatAgentContext): Promise<string>;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[]): void;
 }
 
@@ -85,6 +99,18 @@ Some general app design tips:
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
 * Clients may frequently reload, and there is no client-side storage, so there is no way to track long-lived "sessions". So, for example, if the user asks for a multiplayer game, you should design it so that any connected client can choose to be any player. If it's turn-based, you can just let any client make any move. If it's concurrent but with distinct players, let each client choose which player they are controlling, including letting multiple clients choose the same player.
 * If the project contains a README.md file, use it to describe the Gadget at a high level and document anything that future agents (or humans) may need to know when editing the code. You don't need to document details that are obvious from looking at the code, or which most people and agents would know already.
+`.trim();
+
+let SPAWNER_SYSTEM_PROMPT = `
+You are an AI agent started to perform a specific task as part of a personal application called a "Gadget". A Gadget is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
+
+Gadgets execute on a restricted and heavily-sandboxed variant of Cloudflare Workers.
+
+You were started programmatically by the Gadget to perform a task. The specific task will be described in the first message in this chat. The message is not directly from the user but rather from an automated system. If you receive any further messages after the first, then these additional messages are directly from a human user making additional requests regarding the task.
+
+Typically (but not always), you will need to use the \`executeCode\` tool to complete the task, invoking the available bindings (members of the env object) and other APIs available to you.
+
+Upon completion of your task, invoke the \`reportOutcome\` tool to indicate success or failure. One you have invoked the \`reportOutcome\` tool, you can end the conversation normally.
 `.trim();
 
 export async function runAgent(
@@ -249,6 +275,12 @@ export async function runAgent(
                     value: {},
                   };
                   break;
+                case "reportOutcome":
+                  toolOutput = {
+                    type: "json",
+                    value: {acknowledged: true},
+                  }
+                  break;
                 default:
                   toolCall satisfies never;
                   throw new Error("Unknown tool.");
@@ -345,37 +377,78 @@ export async function runAgent(
 
   capturedYdocChanges = [];
 
-  // Let's include the list of files in the system prompt so that the agent doesn't have to
-  // call a tool to list files at the start of every thread.
-  // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
-  //   will have been set, and this will list the files consistently with that version.
-  //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
-  //   agent doesn't acutally read any of the files, then the version won't end up being
-  //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
-  //   we don't actually lock in a version until the first time a file is actually read -- but
-  //   in the meantime, the system prompt can theoretically change on each request, if the
-  //   files are changing. That's fine.
-  let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
-  let systemPromptFiles: string;
-  if (currentFiles.length == 0) {
-    systemPromptFiles = "The project currently has no code files.";
-  } else {
-    systemPromptFiles =
-        `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
-        `\n* ${currentFiles.join("\n* ")}`;
-  }
+  let agentContext = hooks.getChatAgentContext(chatId);
+  let systemPrompt: string;
 
-  let bindingNames = hooks.listBindingNames();
-  let systemPromptBindings: string;
-  if (bindingNames.length == 0) {
-    systemPromptBindings = "The project currently has no bindings.";
-  } else {
-    systemPromptBindings =
-        `The project is configured with the following Cloudflare Workers bindings:\n` +
-        `* ${bindingNames.join("\n* ")}`
-  }
+  if (agentContext.spawnerConfig) {
+    // This is a spawned agent. Build an appropriate system prompt.
 
-  let systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
+    let systemPromptProps: string = "";
+    let propsType = agentContext.spawnerConfig.propsTypeName;
+    if (propsType && propsType !== "{}") {
+      systemPromptProps =
+          "\n\n"
+          "You have been provided with a 'ctx.props' object which provides APIs that you likely " +
+          "need to complete your task. This object is specific to the task you have been " +
+          "assigned, as opposed to the env bindings which are given to every agent. The " +
+          `ctx.props object has the following TypeScript type: ${propsType}`;
+
+      let tsTypes = agentContext.spawnerConfig.propsTsTypes;
+      if (tsTypes) {
+        systemPromptProps += "\n\n" +
+            "The ctx.props type refers to other TypeScript types. The following type definitions " +
+            "have been provided to help you understand the type of ctx.props:\n\n" +
+            "```\n" + tsTypes.trim() + "\n```";
+      }
+    }
+
+    let bindingNames = agentContext.spawnerConfig.env || hooks.listBindingNames();
+    let systemPromptBindings: string;
+    if (bindingNames.length == 0) {
+      systemPromptBindings =
+          "You have not been given access to any bindings; the `env` object is empty.";
+    } else {
+      systemPromptBindings =
+          `You have access to the following Cloudflare Workers bindings via the \`env\` object:\n` +
+          `* ${bindingNames.join("\n* ")}`
+    }
+
+    systemPrompt = `${SPAWNER_SYSTEM_PROMPT}${systemPromptProps}\n\n${systemPromptBindings}`;
+  } else {
+    // This is a regular coding agent.
+
+    // Let's include the list of files in the system prompt so that the agent doesn't have to
+    // call a tool to list files at the start of every thread.
+    // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
+    //   will have been set, and this will list the files consistently with that version.
+    //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
+    //   agent doesn't acutally read any of the files, then the version won't end up being
+    //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
+    //   we don't actually lock in a version until the first time a file is actually read -- but
+    //   in the meantime, the system prompt can theoretically change on each request, if the
+    //   files are changing. That's fine.
+    let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
+    let systemPromptFiles: string;
+    if (currentFiles.length == 0) {
+      systemPromptFiles = "The project currently has no code files.";
+    } else {
+      systemPromptFiles =
+          `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
+          `\n* ${currentFiles.join("\n* ")}`;
+    }
+
+    let bindingNames = hooks.listBindingNames();
+    let systemPromptBindings: string;
+    if (bindingNames.length == 0) {
+      systemPromptBindings = "The project currently has no bindings.";
+    } else {
+      systemPromptBindings =
+          `The project is configured with the following Cloudflare Workers bindings:\n` +
+          `* ${bindingNames.join("\n* ")}`
+    }
+
+    systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
+  }
 
   let maxOutputTokens: number | undefined;
   if (typeof chosenModel === "object" && chosenModel.provider &&
@@ -390,6 +463,247 @@ export async function runAgent(
     maxOutputTokens = 100000;
   }
 
+  let tools: ToolSet = {
+    readFile: tool({
+      description: "Read the content of a file in the project. Note that you will be " +
+          "informed any time a file changes, so it is not necessary to read a file again " +
+          "after you have already read it once.",
+      inputSchema: z.object({
+        filename: z.string().describe("Name of the file to read."),
+        // TODO: line range?
+        // TODO: Claude Code apparently presents the code to the agent with line number
+        //   prefixes on each line. Is this worth doing?
+      }),
+      execute: ({filename}, {toolCallId}) => {
+        try {
+          let text = getSessionYDoc().getMap<Y.Text>().get(filename);
+          if (!text) {
+            throw new Error("File does not exist.");
+          }
+          filesRead.add(filename);
+          toolCallNotes.set(toolCallId, {
+            observedCodeVersion: versionLock!
+          });
+          return text.toString();
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            observedCodeVersion: versionLock!,
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
+    writeFile: tool({
+      description: "Write a complete file, creating it if it doesn't exist, or replacing it " +
+          "if it does.",
+      inputSchema: z.object({
+        filename: z.string().describe("Name of the file to write."),
+        content: z.string().describe("The entire content of the file to write."),
+      }),
+      outputSchema: z.object({
+        success: z.boolean().describe(
+            "Always true to indicate the write succeeded. Failed writes will throw an error."),
+        changeId: z.number().describe(
+            "Change number assigned to this change, in case we need to refer to it later. " +
+            "All writes and edits made at the same time have the same changeId. This ID is not " +
+            "directly visible to the user."),
+      }),
+      execute: ({filename, content}, {toolCallId}) => {
+        try {
+          let ydoc = getSessionYDoc();
+
+          ydoc.transact(tr => {
+            let txt = new Y.Text();
+            txt.insert(0, content);
+            ydoc.getMap<Y.Text>().set(filename, txt);
+          });
+
+          // The agent knows exactly what's in the file, so add it to the `filesRead` set so
+          // that it can make further edits without rewriting.
+          filesRead.add(filename);
+
+          toolCallNotes.set(toolCallId, {
+            observedCodeVersion: versionLock!
+          });
+          return {success: true, changeId: nextChangeId};
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            observedCodeVersion: versionLock!,
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
+    editFile: tool({
+      description: "Edit content of a file. If you need to edit multiple places in a file " +
+          "or across multiple files, you should issue multiple tool calls simultanously, " +
+          "rather than in series.",
+      inputSchema: z.object({
+        filename: z.string().describe("Name of the file to edit."),
+        textToReplace: z.string()
+            .describe("Exact existing text which is to be replaced. This string must match " +
+                "exactly one location in the file, or the edit will fail."),
+        replacement: z.string()
+            .describe("Text which should be inserted, replacing the matched text."),
+        // TODO: Line number hint, to disambiguate multiple matches?
+      }),
+      outputSchema: z.object({
+        success: z.boolean().describe(
+            "Always true to indicate the edit succeeded. Failed edits will throw an error."),
+        changeId: z.number().describe(
+            "Change number assigned to this change, in case we need to refer to it later. " +
+            "All writes and edits made at the same time have the same changeId. This ID is not " +
+            "directly visible to the user."),
+      }),
+      execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
+        try {
+          if (!filesRead.has(filename)) {
+            throw new Error("You must read a file before you can edit it.");
+          }
+
+          let ydoc = getSessionYDoc();
+          let text = ydoc.getMap<Y.Text>().get(filename);
+          if (!text) {
+            throw new Error("File does not exist.");
+          }
+
+          let content = text.toString();
+          let pos = content.indexOf(textToReplace);
+          if (pos < 0) {
+            throw new Error("No matching text was found in the file.");
+          }
+          if (content.indexOf(textToReplace, pos + 1) >= 0) {
+            throw new Error("Multiple matches were found. The text to match must be unique.");
+          }
+
+          ydoc.transact(tr => {
+            text.delete(pos, textToReplace.length);
+            text.insert(pos, replacement);
+          });
+
+          return {success: true, changeId: nextChangeId};
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
+    observeUserChanges: tool({
+      description: "Returns information about changes which the user has made to the " +
+          "code.\n" +
+          "\n" +
+          "This tool is called automatically whenever the user makes changes, by " +
+          "inserting a synthetic messages into the chat history as if the assistant " +
+          "had called the tool. Hence, you never need to generate a call to this tool, " +
+          "but the chat history will automatically contain such calls when you need them.",
+      inputSchema: z.object({}),
+      outputSchema: z.object({
+        revertedFromChangeId: z.optional(z.boolean().describe(
+            "Indicates that all changes starting from the giver changeId to the " +
+            "current point in the chat history were reverted by the user. The file " +
+            "contents have returned to the state they were in immediately before the " +
+            "given changeId.")),
+        diff: z.optional(z.string().describe(
+            "Represents changes made by the user (other than broad reverts), in unified " +
+            "diff format.")),
+      }),
+      execute: ({}, {}) => {
+        // The agent shouldn't be calling this explicitly.
+        return {};
+      },
+    }),
+
+    describeBinding: tool({
+      description: "Describe one of the Gadget's bindings (members of the Cloudflare " +
+          "Workers `env` object), including TypeScript types specifying the API it offers.",
+      inputSchema: z.object({
+        name: z.string().describe("Name of the binding (a property of `env`)."),
+      }),
+      execute: async ({name}, {toolCallId}) => {
+        try {
+          return await hooks.describeBinding(name);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
+    executeCode: tool({
+      description: "Executes one-off JavaScript code, returning the output it logs to the " +
+          "console. The code will have access to the Gadget's bindings ('env' object), " +
+          "so this can be used to directly perform tasks with them. The code runs in a " +
+          "sandbox where it cannot talk to the internet, except through the bindings; " +
+          "fetch() will not work. Otherwise, the code can call any built-in APIs " +
+          "available in Cloudflare Workers.\n" +
+          "\n" +
+          "When the user asks you to just do a task that can be done with these bindings, " +
+          "you should use executeCode to perform the task, instead of adding code to the " +
+          "gadget to do it.",
+      inputSchema: z.object({
+        code: z.string().describe(
+            "Code to execute. This must be a complete self-contained JavaScript module " +
+            "which exports a single async function, like so:\n" +
+            "\n" +
+            "```\n" +
+            "export default async function(env, ctx) {\n" +
+            "  // ... code to execute ...\n" +
+            "}\n" +
+            "```\n" +
+            "\n" +
+            "`env` and `ctx` are the usual objects passed to Cloudflare Workers event " +
+            "handlers. `env` contains the bindings, and `ctx` contains various functions " +
+            "and information related to the execution context."),
+      }),
+      execute: async ({code}, {toolCallId}) => {
+        try {
+          let output = await hooks.executeCodeMode(code, agentContext);
+          toolCallNotes.set(toolCallId, {
+            output: `${output}`
+          });
+          return output;
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+  };
+
+  if (agentContext.spawnerConfig) {
+    // Restrict to a narrower set of tools.
+    tools = {
+      describeBinding: tools.describeBinding,
+      executeCode: tools.executeCode,
+
+      reportOutcome: tool({
+        description:
+            "Declares that your task is complete and reports whether it succeeded or failed.",
+        inputSchema: z.object({
+          success: z.boolean().describe(
+              "Pass true to indicate that the task was completed successfully, or false to " +
+              "indicate that something went wrong and that the user should investigate."),
+        }),
+        execute: ({success}, {toolCallId}) => {
+          // TODO: Actually pay attention to success value and potentially notify user.
+          console.log("REPORTED OUTCOME", success);
+          return {acknowledged: true};
+        }
+      })
+    };
+  }
+
   await generateText({
     model: chosenModel,
     system: systemPrompt,
@@ -401,223 +715,12 @@ export async function runAgent(
     //   you want to support multiple steps at all? What if you don't want to set a limit?
     // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
     //   anything.
-    stopWhen: stepCountIs(30),
+    // Note: I added reportOutcome as ending the conversation because some dumb models will go
+    //   into a loop of repeatly reporting the outcome instead of just ending the conversation
+    //   themselves.
+    stopWhen: [stepCountIs(30), hasToolCall("reportOutcome")],
 
-    tools: {
-      readFile: tool({
-        description: "Read the content of a file in the project. Note that you will be " +
-            "informed any time a file changes, so it is not necessary to read a file again " +
-            "after you have already read it once.",
-        inputSchema: z.object({
-          filename: z.string().describe("Name of the file to read."),
-          // TODO: line range?
-          // TODO: Claude Code apparently presents the code to the agent with line number
-          //   prefixes on each line. Is this worth doing?
-        }),
-        execute: ({filename}, {toolCallId}) => {
-          try {
-            let text = getSessionYDoc().getMap<Y.Text>().get(filename);
-            if (!text) {
-              throw new Error("File does not exist.");
-            }
-            filesRead.add(filename);
-            toolCallNotes.set(toolCallId, {
-              observedCodeVersion: versionLock!
-            });
-            return text.toString();
-          } catch (error) {
-            toolCallNotes.set(toolCallId, {
-              observedCodeVersion: versionLock!,
-              error: `${error}`
-            });
-            throw error;
-          }
-        }
-      }),
-
-      writeFile: tool({
-        description: "Write a complete file, creating it if it doesn't exist, or replacing it " +
-            "if it does.",
-        inputSchema: z.object({
-          filename: z.string().describe("Name of the file to write."),
-          content: z.string().describe("The entire content of the file to write."),
-        }),
-        outputSchema: z.object({
-          success: z.boolean().describe(
-              "Always true to indicate the write succeeded. Failed writes will throw an error."),
-          changeId: z.number().describe(
-              "Change number assigned to this change, in case we need to refer to it later. " +
-              "All writes and edits made at the same time have the same changeId. This ID is not " +
-              "directly visible to the user."),
-        }),
-        execute: ({filename, content}, {toolCallId}) => {
-          try {
-            let ydoc = getSessionYDoc();
-
-            ydoc.transact(tr => {
-              let txt = new Y.Text();
-              txt.insert(0, content);
-              ydoc.getMap<Y.Text>().set(filename, txt);
-            });
-
-            // The agent knows exactly what's in the file, so add it to the `filesRead` set so
-            // that it can make further edits without rewriting.
-            filesRead.add(filename);
-
-            toolCallNotes.set(toolCallId, {
-              observedCodeVersion: versionLock!
-            });
-            return {success: true, changeId: nextChangeId};
-          } catch (error) {
-            toolCallNotes.set(toolCallId, {
-              observedCodeVersion: versionLock!,
-              error: `${error}`
-            });
-            throw error;
-          }
-        }
-      }),
-
-      editFile: tool({
-        description: "Edit content of a file. If you need to edit multiple places in a file " +
-            "or across multiple files, you should issue multiple tool calls simultanously, " +
-            "rather than in series.",
-        inputSchema: z.object({
-          filename: z.string().describe("Name of the file to edit."),
-          textToReplace: z.string()
-              .describe("Exact existing text which is to be replaced. This string must match " +
-                  "exactly one location in the file, or the edit will fail."),
-          replacement: z.string()
-              .describe("Text which should be inserted, replacing the matched text."),
-          // TODO: Line number hint, to disambiguate multiple matches?
-        }),
-        outputSchema: z.object({
-          success: z.boolean().describe(
-              "Always true to indicate the edit succeeded. Failed edits will throw an error."),
-          changeId: z.number().describe(
-              "Change number assigned to this change, in case we need to refer to it later. " +
-              "All writes and edits made at the same time have the same changeId. This ID is not " +
-              "directly visible to the user."),
-        }),
-        execute: ({filename, textToReplace, replacement}, {toolCallId}) => {
-          try {
-            if (!filesRead.has(filename)) {
-              throw new Error("You must read a file before you can edit it.");
-            }
-
-            let ydoc = getSessionYDoc();
-            let text = ydoc.getMap<Y.Text>().get(filename);
-            if (!text) {
-              throw new Error("File does not exist.");
-            }
-
-            let content = text.toString();
-            let pos = content.indexOf(textToReplace);
-            if (pos < 0) {
-              throw new Error("No matching text was found in the file.");
-            }
-            if (content.indexOf(textToReplace, pos + 1) >= 0) {
-              throw new Error("Multiple matches were found. The text to match must be unique.");
-            }
-
-            ydoc.transact(tr => {
-              text.delete(pos, textToReplace.length);
-              text.insert(pos, replacement);
-            });
-
-            return {success: true, changeId: nextChangeId};
-          } catch (error) {
-            toolCallNotes.set(toolCallId, {
-              error: `${error}`
-            });
-            throw error;
-          }
-        }
-      }),
-
-      observeUserChanges: tool({
-        description: "Returns information about changes which the user has made to the " +
-            "code.\n" +
-            "\n" +
-            "This tool is called automatically whenever the user makes changes, by " +
-            "inserting a synthetic messages into the chat history as if the assistant " +
-            "had called the tool. Hence, you never need to generate a call to this tool, " +
-            "but the chat history will automatically contain such calls when you need them.",
-        inputSchema: z.object({}),
-        outputSchema: z.object({
-          revertedFromChangeId: z.optional(z.boolean().describe(
-              "Indicates that all changes starting from the giver changeId to the " +
-              "current point in the chat history were reverted by the user. The file " +
-              "contents have returned to the state they were in immediately before the " +
-              "given changeId.")),
-          diff: z.optional(z.string().describe(
-              "Represents changes made by the user (other than broad reverts), in unified " +
-              "diff format.")),
-        }),
-        execute: ({}, {}) => {
-          // The agent shouldn't be calling this explicitly.
-          return {};
-        },
-      }),
-
-      describeBinding: tool({
-        description: "Describe one of the Gadget's bindings (members of the Cloudflare " +
-            "Workers `env` object), including TypeScript types specifying the API it offers.",
-        inputSchema: z.object({
-          name: z.string().describe("Name of the binding (a property of `env`)."),
-        }),
-        execute: async ({name}, {toolCallId}) => {
-          try {
-            return await hooks.describeBinding(name);
-          } catch (error) {
-            toolCallNotes.set(toolCallId, {
-              error: `${error}`
-            });
-            throw error;
-          }
-        }
-      }),
-
-      executeCode: tool({
-        description: "Executes one-off JavaScript code, returning the output it logs to the " +
-            "console. The code will have access to the Gadget's bindings ('env' object), " +
-            "so this can be used to directly perform tasks with them. The code runs in a " +
-            "sandbox where it cannot talk to the internet, except through the bindings; " +
-            "fetch() will not work. Otherwise, the code can call any built-in APIs " +
-            "available in Cloudflare Workers.\n" +
-            "\n" +
-            "When the user asks you to just do a task that can be done with these bindings, " +
-            "you should use executeCode to perform the task, instead of adding code to the " +
-            "gadget to do it.",
-        inputSchema: z.object({
-          code: z.string().describe(
-              "Code to execute. This must be a complete self-contained JavaScript module " +
-              "which exports a single async function, like so:\n" +
-              "\n" +
-              "```\n" +
-              "export default async function(env) {\n" +
-              "  // ... code to execute ...\n" +
-              "}\n" +
-              "```\n" +
-              "\n" +
-              "`env` is the Cloudflare Workers env object containing the bindings."),
-        }),
-        execute: async ({code}, {toolCallId}) => {
-          try {
-            let output = await hooks.executeCodeMode(code);
-            toolCallNotes.set(toolCallId, {
-              output: `${output}`
-            });
-            return output;
-          } catch (error) {
-            toolCallNotes.set(toolCallId, {
-              error: `${error}`
-            });
-            throw error;
-          }
-        }
-      }),
-    },
+    tools,
 
     onStepFinish: ({ text, reasoningText, toolCalls }) => {
       let msgs: AiChatMessageBody[] = [];

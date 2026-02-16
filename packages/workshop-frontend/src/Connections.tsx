@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tabs, Select, Spin } from 'antd'
+import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tabs, Select, Spin, Checkbox } from 'antd'
 import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
-import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber, AgentSpawnerConfig } from '@gadgets/workshop-shared/api'
 import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import AccountCard from './AccountCard'
 import VendorCard from './VendorCard'
@@ -32,9 +32,17 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [newConnectionUrl, setNewConnectionUrl] = useState('')
   const [creatingConnection, setCreatingConnection] = useState(false)
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
-  const [connectionTabKey, setConnectionTabKey] = useState<'resource' | 'ai-model'>('resource')
+  const [connectionTabKey, setConnectionTabKey] = useState<'resource' | 'ai-model' | 'agent-spawner'>('resource')
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>()
+
+  // Agent spawner tab state
+  const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
+  const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
+  const [spawnerPropsTypeName, setSpawnerPropsTypeName] = useState('')
+  const [spawnerPropsTsTypes, setSpawnerPropsTsTypes] = useState('')
+  const [spawnerLimitEnv, setSpawnerLimitEnv] = useState(false)
+  const [spawnerEnv, setSpawnerEnv] = useState<string[]>([])
 
   // Two-step flow state for resource connections
   const [connectionStep, setConnectionStep] = useState<'url' | 'account'>('url')
@@ -86,6 +94,15 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       // Set the first model as default if available
       if (models.length > 0 && !selectedModelId) {
         setSelectedModelId(models[0].id)
+      }
+      // Default spawner model: use last-selected model from chat (localStorage), else first model
+      if (models.length > 0) {
+        const lastSelectedModel = localStorage.getItem('lastSelectedModel')
+        if (lastSelectedModel && models.some(m => m.id === lastSelectedModel)) {
+          setSpawnerModelId(lastSelectedModel)
+        } else {
+          setSpawnerModelId(models[0].id)
+        }
       }
     } catch (err) {
       console.error('Failed to load models:', err)
@@ -364,6 +381,59 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   }
 
+  const handleNewAgentSpawnerConnection = async () => {
+    if (!spawnerDisplayName.trim()) {
+      message.error('Please enter a display name')
+      return
+    }
+
+    const config: AgentSpawnerConfig = {
+      displayName: spawnerDisplayName.trim(),
+      modelId: spawnerModelId,
+    }
+
+    const trimmedTypeName = spawnerPropsTypeName.trim()
+    if (trimmedTypeName) {
+      config.propsTypeName = trimmedTypeName
+    }
+
+    const trimmedTsTypes = spawnerPropsTsTypes.trim()
+    if (trimmedTsTypes) {
+      config.propsTsTypes = trimmedTsTypes
+    }
+
+    if (spawnerLimitEnv) {
+      config.env = spawnerEnv
+    }
+
+    setCreatingConnection(true)
+    try {
+      const gatekeeper = await overseer.newAgentSpawnerGatekeeper(config)
+      if (gatekeeper) {
+        message.success('Agent spawner connection created successfully')
+        handleModalClose()
+        await loadGatekeepers()
+        onConnectionsChange?.()
+      } else {
+        message.error('Failed to create agent spawner connection')
+      }
+    } catch (err) {
+      console.error('Failed to create agent spawner gatekeeper:', err)
+      message.error('Failed to create agent spawner connection')
+    } finally {
+      setCreatingConnection(false)
+    }
+  }
+
+  const resetSpawnerState = () => {
+    setSpawnerDisplayName('')
+    setSpawnerModelId(null)
+    setSpawnerPropsTypeName('')
+    setSpawnerPropsTsTypes('')
+    setSpawnerLimitEnv(false)
+    setSpawnerEnv([])
+  }
+
   const handleModalOpen = () => {
     setIsNewConnectionModalVisible(true)
     setConnectionTabKey('resource')
@@ -373,6 +443,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     setFilteredVendors([])
     setAccountsReady(false)
     setConnectingVendor(null)
+    resetSpawnerState()
     loadModels()
   }
 
@@ -390,6 +461,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     setFilteredVendors([])
     setAccountsReady(false)
     setConnectingVendor(null)
+    resetSpawnerState()
   }
 
   const handleApproveAction = async (actionId: number) => {
@@ -750,7 +822,9 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         okButtonProps={{
           disabled: connectionTabKey === 'resource'
             ? (connectionStep === 'url' ? !newConnectionUrl.trim() : false)
-            : !selectedModelId,
+            : connectionTabKey === 'ai-model'
+            ? !selectedModelId
+            : !spawnerDisplayName.trim(),
           // Hide the OK button in account selection step (users click on cards instead)
           style: connectionTabKey === 'resource' && connectionStep === 'account' ? { display: 'none' } : undefined
         }}
@@ -760,13 +834,15 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
             handleNextStep()
           } else if (connectionTabKey === 'ai-model') {
             handleNewAiModelConnection()
+          } else if (connectionTabKey === 'agent-spawner') {
+            handleNewAgentSpawnerConnection()
           }
         }}
       >
         <Tabs
           activeKey={connectionTabKey}
           onChange={(key) => {
-            setConnectionTabKey(key as 'resource' | 'ai-model')
+            setConnectionTabKey(key as 'resource' | 'ai-model' | 'agent-spawner')
             // Reset resource step when switching tabs
             if (key === 'resource') {
               setConnectionStep('url')
@@ -799,6 +875,109 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                       value: model.id
                     }))}
                   />
+                </>
+              )
+            },
+            {
+              key: 'agent-spawner',
+              label: 'Agent Spawner',
+              children: (
+                <>
+                  <div style={{ marginBottom: '16px' }}>
+                    <Text>
+                      Create an agent spawner binding. This allows your gadget to programmatically
+                      start new AI agent conversations to perform tasks on given resources.
+                    </Text>
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <Text strong style={{ display: 'block', marginBottom: 4 }}>Display Name</Text>
+                    <Input
+                      placeholder="e.g. Email Responder"
+                      value={spawnerDisplayName}
+                      onChange={(e) => setSpawnerDisplayName(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <Text strong style={{ display: 'block', marginBottom: 4 }}>Model</Text>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                      The AI model spawned agents will use. Choose "None" to create
+                      conversations without an agent (requires manual attention).
+                    </Text>
+                    <Select
+                      style={{ width: '100%' }}
+                      placeholder="Select a model"
+                      value={spawnerModelId}
+                      onChange={setSpawnerModelId}
+                      options={[
+                        { label: 'None (no agent)', value: null as any },
+                        ...availableModels.map(model => ({
+                          label: model.name,
+                          value: model.id
+                        }))
+                      ]}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <Text strong style={{ display: 'block', marginBottom: 4 }}>Props Type Name</Text>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                      TypeScript type name for the props passed to each spawned agent. Leave
+                      blank to default to <Text code>{'{}'}</Text>.
+                    </Text>
+                    <Input
+                      placeholder="{}"
+                      value={spawnerPropsTypeName}
+                      onChange={(e) => setSpawnerPropsTypeName(e.target.value)}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <Text strong style={{ display: 'block', marginBottom: 4 }}>Props Type Declarations</Text>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
+                      TypeScript type declarations that define the props type above. These will be
+                      available to the agent and to code that calls the spawner.
+                    </Text>
+                    <Input.TextArea
+                      placeholder={'type SpawnerProps = {\n  greeter: Service<Greeter>\n}'}
+                      value={spawnerPropsTsTypes}
+                      onChange={(e) => setSpawnerPropsTsTypes(e.target.value)}
+                      rows={4}
+                      style={{ fontFamily: 'monospace', fontSize: 12 }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <Checkbox
+                      checked={spawnerLimitEnv}
+                      onChange={(e) => {
+                        setSpawnerLimitEnv(e.target.checked)
+                        if (!e.target.checked) {
+                          setSpawnerEnv([])
+                        }
+                      }}
+                    >
+                      Limit inherited bindings
+                    </Checkbox>
+                    <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+                      By default, spawned agents inherit all of the gadget's bindings. Check this
+                      to restrict agents to only specific bindings.
+                    </Text>
+                    {spawnerLimitEnv && (
+                      <Select
+                        mode="multiple"
+                        style={{ width: '100%', marginTop: 8 }}
+                        placeholder="Select bindings to inherit"
+                        value={spawnerEnv}
+                        onChange={setSpawnerEnv}
+                        options={gatekeepers.map(g => ({
+                          label: g.bindingName,
+                          value: g.bindingName
+                        }))}
+                      />
+                    )}
+                  </div>
                 </>
               )
             }

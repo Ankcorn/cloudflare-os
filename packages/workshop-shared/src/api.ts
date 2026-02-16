@@ -313,6 +313,47 @@ export type ActionLogEntry = {
   description: ObservationDescription;
 });
 
+// Configuration for an AI spawner binding. This binding allows the gadget to programmatically
+// create new agents, that is, start new agent chat threads, which appear in the gadget's agent
+// chat UI as new conversations. Agents created this way don't typically edit the gadget code, but
+// rather use the `executeCode` tool to directly invoke the gadget's bindings to perform tasks.
+// Each agent can additionally be provide "props" which may include additional RPC stubs
+// representing specific resources or callbacks relevant to that agent session.
+//
+// For example, a gadget that responds to emails might invoke an agent for each email message that
+// arrives, with an RPC stub that allows it to reply to that email -- but prohibits the agent from
+// seeing or replying to any other email, to guard against prompt injection or information leakage
+// between email threads.
+export type AgentSpawnerConfig = {
+  // Display name for the binding, shown in the binding list.
+  displayName: string,
+
+  // Model ID to run, of the gadget owner's available models. Can be `null` to just create a chat
+  // that doesn't actually run an agent -- the chat will be notified that the chat needs attention,
+  // same as for an agent chat where the agent fails to mark the task complete.
+  modelId: string | null,
+
+  // Type name of the `Props` type parameter to `AgentSpawnerBinding`. Defaults to `{}`.
+  propsTypeName?: string,
+
+  // TypeScript type declarations backing `propsTypeName`, if needed. This will be appended to
+  // the types in `agent-spawner-binding.d.ts`, in order to fully define
+  // `AgentSpawnerBinding<PropsType>` describing this spawner.
+  //
+  // In the UI to configure a spawner, the user should be presented with a text box to paste in
+  // TypeScript type definitions.
+  //
+  // It also makes sense to include comments here that explain more about the purpose of the
+  // spawner, if needed, since these types will be presented both to the agent in its system
+  // prompt, and to coding agents writing code to call the spawner.
+  propsTsTypes?: string;
+
+  // Environment variables (bindings) to inherit from the gadget. If omitted, inherit all. This can
+  // be used to restrict agents spawned by this spawner to access only certain bindings /
+  // gatekeepers.
+  env?: string[],
+};
+
 // Interface to a Gadget's Overseer, used to display the Gadget Workshop shell UI around that
 // Gadget.
 export interface Overseer extends RpcTarget {
@@ -375,6 +416,10 @@ export interface Overseer extends RpcTarget {
   // Create a new gatekeeper for an AI model binding. The model can be any returned by
   // listModels().
   newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>>;
+
+  // Create a new gatekeeper for an agent spawner binding. This allows the gadget to
+  // programmatically spawn AI agents to complete tasks.
+  newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
 
   // List history of actions.
   // TODO: This should be paginated.
@@ -470,6 +515,9 @@ export type AiChatMetadata = {
 
   // If true, this chat thread has proposed changes which have not been accepted yet.
   hasProposedChanges?: boolean;
+
+  // If this was started from an agent spawner, the spawner's display name.
+  spawnerName?: string;
 };
 
 export type AiChatAuthorInfo = {
@@ -568,6 +616,11 @@ export type AiToolCall = {
 
   // Output, if the code actually ran. (Otherwise, `error` should be present.)
   output?: string;
+} | {
+  toolName: "reportOutcome";
+  input: {
+    success: boolean
+  };
 } | {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
   toolName: "observeUserChanges";

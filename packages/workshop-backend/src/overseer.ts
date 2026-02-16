@@ -1,13 +1,14 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
-import { AgentHooks, runAgent } from "./agent";
+import { AgentHooks, AiChatAgentContext, runAgent } from "./agent";
 import { UserDurableObject, UserAiModelRecord } from "./user";
+import { AgentSpawnerBinding } from "./agent-spawner-binding";
 
 let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
 `;
@@ -32,7 +33,7 @@ import agent from "agent.js";
 export default class extends WorkerEntrypoint {
   verify() {}
   async run() {
-    await agent(this.env);
+    await agent(this.env, this.ctx);
   }
 }
 `;
@@ -119,6 +120,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
         uniqueIndexes: {
           byLastActive(meta: AiChatMetadata) { return meta.lastActive.valueOf(); }
         }
+      }),
+
+      chatContext: collection<AiChatAgentContext>()({
+        primaryKey: "chatId"
       }),
 
       chats: collection<AiChatMessage>()({
@@ -273,7 +278,7 @@ class OverseerImpl implements AgentHooks {
     return version;
   }
 
-  getEnvForLoader(): object {
+  getEnvForLoader(filter?: string[]): object {
     let env: Record<string, Fetcher> = {}
     for (let {id, bindingName} of this.storage.gatekeepers.list()) {
       let props = {
@@ -281,6 +286,13 @@ class OverseerImpl implements AgentHooks {
         gatekeeperId: id,
       };
       env[bindingName] = this.ctx.exports.GatekeeperLoopback({props});
+    }
+    if (filter) {
+      let fullEnv = env;
+      env = {};
+      for (let name of filter) {
+        env[name] = fullEnv[name];
+      }
     }
     return env;
   }
@@ -586,6 +598,10 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  getChatAgentContext(chatId: number): AiChatAgentContext {
+    return this.storage.chatContext.get(chatId) || {chatId};
+  }
+
   listBindingNames(): string[] {
     let result: string[] = [];
     for (let gk of this.storage.gatekeepers.list()) {
@@ -674,7 +690,7 @@ class OverseerImpl implements AgentHooks {
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
 
-  async executeCodeMode(code: string): Promise<string> {
+  async executeCodeMode(code: string, context: AiChatAgentContext): Promise<string> {
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
@@ -685,7 +701,7 @@ class OverseerImpl implements AgentHooks {
 
     // TODO: Use null ID when supported.
     let worker = this.env.LOADER.get(Math.random().toString(), () => {
-      let props = {
+      let tailProps = {
         executionId,
         overseerId: this.ctx.id.toString(),
       };
@@ -700,13 +716,13 @@ class OverseerImpl implements AgentHooks {
           "harness.js": CODE_MODE_HARNESS,
           "agent.js": code,
         },
-        env: this.getEnvForLoader(),
-        tails: [this.ctx.exports.CodeModeTailLoopback({props})],
+        env: this.getEnvForLoader(context.spawnerConfig?.env),
+        tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
         globalOutbound: null,
       };
     });
 
-    let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>();
+    let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined, {props: context.props});
     // First check the code actually starts up. Treat startup errors as total failures.
     await entrypoint.verify();
 
@@ -810,6 +826,51 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   async deliverCodeModeTrace(executionId: string, trace: TraceItem) {
     return this.impl.deliverCodeModeTrace(executionId, trace);
+  }
+
+  async spawnAgent(
+      title: string, prompt: string, config: AgentSpawnerConfig, props: unknown): Promise<void> {
+    if (!this.impl.ownerId) throw new Error("Gadget has been deleted.");
+
+    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
+    let userMeta = await owner.getChatContext(config.modelId);
+
+    let chatId = this.impl.nextChatId();
+    let timestamp = this.impl.getChatTimestamp();
+    let meta: AiChatMetadata = {
+      id: chatId,
+      title,
+      started: timestamp,
+      lastActive: timestamp,
+      spawnerName: config.displayName,
+    };
+    if (userMeta.aiModel) {
+      meta.activeAgent = userMeta.aiModel.profile;
+    }
+    this.impl.storage.chatMeta.put(meta);
+
+    this.impl.storage.chatContext.put({
+      chatId,
+      spawnerConfig: config,
+      props
+    });
+
+    this.impl.storage.chats.put({
+      chatId,
+      sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
+      timestamp,
+      author: userMeta.profile,
+
+      type: "message",
+      message: prompt,
+    });
+
+    if (userMeta.aiModel) {
+      // Fire off the agent (asynchronously).
+      this.impl.startAgent(chatId, userMeta.aiModel);
+    } else {
+      // TODO: Flag as needing user attention.
+    }
   }
 }
 
@@ -1021,6 +1082,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     return await this.impl.addGatekeeper(this.impl.ctx.exports.LanguageModelGatekeeper({props}));
+  }
+
+  async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
+    let props: AgentSpawnerBindingProps = {
+      overseerId: this.impl.ctx.id.toString(),
+      config
+    };
+
+    return await this.impl.addGatekeeper(this.impl.ctx.exports.AgentSpawnerGatekeeper({props}));
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -1409,5 +1479,82 @@ class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Actio
 
   submitAction(action: Action, description: ActionDescription): Promise<void> {
     return this.impl.submitAction(this.gatekeeperId, action, description);
+  }
+}
+
+// =======================================================================================
+
+type AgentSpawnerBindingProps = {
+  // ID of the overseer under which this agent should run.
+  overseerId: string,
+
+  config: AgentSpawnerConfig,
+};
+
+type AgentSpawnerAction = {
+  // There are no actions yet.
+};
+type AgentSpawnerRevertInfo = {
+  // There are no actions yet.
+};
+
+import AGENT_SPAWNER_BINDING_TYPES from "./agent-spawner-binding.txt";
+
+export class AgentSpawnerGatekeeper
+    extends DurableObject<Cloudflare.Env, AgentSpawnerBindingProps>
+    implements Gatekeeper<AgentSpawnerBinding, AgentSpawnerAction, AgentSpawnerRevertInfo> {
+  async describe(): Promise<ResourceDescription> {
+    return {
+      // TODO: Decide if we need real URLs or if `url` should stop being part of the description.
+      url: `http://agent-spawner.local/`,
+
+      title: this.ctx.props.config.displayName,
+      snippet: "Allows the gadget to spawn AI agents to perform tasks on given resources.",
+
+      suggestedBindingName: "AGENT_SPAWNER",
+
+      tsType: `AgentSpawnerBinding<${this.ctx.props.config.propsTypeName || '{}'}>`,
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    if (this.ctx.props.config.propsTsTypes) {
+      return `${AGENT_SPAWNER_BINDING_TYPES}\n${this.ctx.props.config.propsTsTypes}`
+    } else {
+      return AGENT_SPAWNER_BINDING_TYPES;
+    }
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<AgentSpawnerAction>>)
+      : Promise<AgentSpawnerBinding> {
+    return new AgentSpawnerBindingImpl<unknown>(this.ctx);
+  }
+
+  applyAction(action: AgentSpawnerAction): Promise<void | {revertInfo?: AgentSpawnerRevertInfo}> {
+    throw new Error("This gatekeeper implements no actions.");
+  }
+  rejectAction(action: AgentSpawnerAction): Promise<void | {restart?: boolean}> {
+    throw new Error("This gatekeeper implements no actions.");
+  }
+  revertAction(action: AgentSpawnerAction, revertInfo: AgentSpawnerRevertInfo):
+      Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
+    throw new Error("This gatekeeper implements no actions.");
+  }
+}
+
+class AgentSpawnerBindingImpl<Props> extends RpcTarget implements AgentSpawnerBinding<Props> {
+  constructor(private ctx: DurableObjectState<AgentSpawnerBindingProps>) {
+    super();
+  }
+
+  async spawn(title: string, prompt: string, props: Props): Promise<void> {
+    // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
+    //   but you might want the audit logs? But also, the agents show up in the chat history so
+    //   maybe it's not really necessary to include them in the audit log too.
+
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let id = ns.idFromString(this.ctx.props.overseerId);
+    let overseer = ns.get(id);
+    return overseer.spawnAgent(title, prompt, this.ctx.props.config, props);
   }
 }

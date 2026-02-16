@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag } from 'antd'
+import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
@@ -720,13 +720,22 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                 renderItem={(chat) => (
                   <List.Item
                     onClick={() => onNavigateToChat(chat.id)}
-                    style={{ cursor: 'pointer', padding: '12px' }}
+                    style={{
+                      cursor: 'pointer',
+                      padding: '12px',
+                      ...(chat.spawnerName ? { backgroundColor: '#f0f5ff', borderLeft: '3px solid #597ef7' } : {})
+                    }}
                   >
                     <List.Item.Meta
-                      avatar={<MessageOutlined style={{ fontSize: '20px' }} />}
+                      avatar={chat.spawnerName
+                        ? <RobotOutlined style={{ fontSize: '20px', color: '#597ef7' }} />
+                        : <MessageOutlined style={{ fontSize: '20px' }} />}
                       title={
                         <Space>
                           <Text strong>{chat.title}</Text>
+                          {chat.spawnerName && (
+                            <Tag color="blue">{chat.spawnerName}</Tag>
+                          )}
                           {chat.activeAgent && (
                             <Spin size="small" />
                           )}
