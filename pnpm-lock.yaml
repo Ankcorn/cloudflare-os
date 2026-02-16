@@ -15,6 +15,25 @@ importers:
         specifier: ^4.65.0
         version: 4.65.0(@cloudflare/workers-types@4.20260214.0)
 
+  packages/gatekeeper-email:
+    dependencies:
+      '@gadgets/workshop-shared':
+        specifier: workspace:*
+        version: link:../workshop-shared
+      capnweb:
+        specifier: ^0.4.0
+        version: 0.4.0
+      postal-mime:
+        specifier: ^2.7.3
+        version: 2.7.3
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      wrangler:
+        specifier: ^4.65.0
+        version: 4.65.0(@cloudflare/workers-types@4.20260214.0)
+
   packages/gatekeeper-google:
     dependencies:
       '@gadgets/workshop-shared':
@@ -1409,6 +1428,9 @@ packages:
   picomatch@4.0.3:
     resolution: {integrity: sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q==}
     engines: {node: '>=12'}
+
+  postal-mime@2.7.3:
+    resolution: {integrity: sha512-MjhXadAJaWgYzevi46+3kLak8y6gbg0ku14O1gO/LNOuay8dO+1PtcSGvAdgDR0DoIsSaiIA8y/Ddw6MnrO0Tw==}
 
   postcss@8.5.6:
     resolution: {integrity: sha512-3Ybi1tAuwAP9s0r1UQ2J4n5Y0G05bJkpUIO0/bI9MhwmD70S5aTWbXGBwxHrelT+XM1k6dM0pk+SwNkpTRN7Pg==}
@@ -3293,6 +3315,8 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.3: {}
+
+  postal-mime@2.7.3: {}
 
   postcss@8.5.6:
     dependencies:

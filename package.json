@@ -5,7 +5,7 @@
   "scripts": {
     "build": "pnpm run --recursive build",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
-    "dev-server": "wrangler dev -c wrangler.jsonc -c packages/workshop-backend/wrangler.jsonc -c packages/gatekeeper-google/wrangler.jsonc",
+    "dev-server": "wrangler dev -c wrangler.jsonc -c packages/workshop-backend/wrangler.jsonc -c packages/gatekeeper-google/wrangler.jsonc -c packages/gatekeeper-email/wrangler.jsonc",
     "clean": "pnpm run --recursive clean"
   },
   "devDependencies": {

@@ -11,6 +11,10 @@
     {
       "binding": "GATEKEEPER_GOOGLE",
       "service": "gatekeeper-google"
+    },
+    {
+      "binding": "GATEKEEPER_EMAIL",
+      "service": "gatekeeper-email"
     }
   ]
 }

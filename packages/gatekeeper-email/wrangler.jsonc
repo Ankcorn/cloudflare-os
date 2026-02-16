@@ -1,0 +1,12 @@
+{
+  "name": "gatekeeper-email",
+  "main": "src/email.ts",
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
+  "migrations": [
+    {
+      "tag": "v0",
+      "new_sqlite_classes": [ "UserAccount", "EmailGatekeeperImpl", "EmailAddress" ]
+    }
+  ],
+}

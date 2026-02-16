@@ -9,6 +9,11 @@
       "binding": "GATEKEEPER_GOOGLE",
       "service": "gatekeeper-google",
       "entrypoint": "GatekeeperVendor"
+    },
+    {
+      "binding": "GATEKEEPER_EMAIL",
+      "service": "gatekeeper-email",
+      "entrypoint": "GatekeeperVendor"
     }
   ],
   "migrations": [

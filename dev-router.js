@@ -33,8 +33,14 @@ export default {
         return env.WORKSHOP_BACKEND.fetch(req);
       case "google.localhost":
         return env.GATEKEEPER_GOOGLE.fetch(req);
+      case "email.localhost":
+        return env.GATEKEEPER_EMAIL.fetch(req);
       default:
         return new Response(`Hostname not mapped: ${url.hostname}`, {status: 404});
     }
+  },
+
+  async email(message, env, ctx) {
+    await env.GATEKEEPER_EMAIL.email(message);
   }
 }
