@@ -1,4 +1,4 @@
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { generateText, LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -99,6 +99,10 @@ export class LanguageModelGatekeeper
   revertAction(action: LanguageModelAction, revertInfo: LanguageModelRevertInfo):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
+  }
+
+  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+    // Safe to ignore since we don't have a hook!
   }
 }
 

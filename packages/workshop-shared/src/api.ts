@@ -666,5 +666,12 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
   // to the resource directly.
   openSession(): Promise<RpcStub<Session>>;
 
+  // Get the export name to which the gatekeeper's "hook" is connected. Returns null if there is
+  // a hook available, but it's not connected, or undefined if this gatekeeper offers no hook.
+  getHook(): Promise<string | null | undefined>;
+
+  // Set the hook to target a particular exported class (or none).
+  setHook(exportName: string | null): Promise<void>;
+
   // TODO: Get/set permissions.
 }

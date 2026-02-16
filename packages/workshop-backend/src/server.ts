@@ -3,7 +3,7 @@ import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
-import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper } from "./overseer";
+import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback } from "./overseer";
 
 // Re-export entrypoint types from ai-models.ts.
 export { LanguageModelGatekeeper };
@@ -12,7 +12,8 @@ export { LanguageModelGatekeeper };
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
 
 // Re-export entrypoint types from overseer.ts.
-export { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper };
+export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback, CodeModeTailLoopback,
+    AgentSpawnerGatekeeper };
 
 // =======================================================================================
 

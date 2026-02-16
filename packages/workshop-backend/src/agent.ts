@@ -23,6 +23,7 @@ export interface AgentHooks {
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
   listBindingNames(): string[];
   describeBinding(bindingName: string): Promise<string>;
+  setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
   executeCodeMode(code: string, context: AiChatAgentContext): Promise<string>;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[]): void;
 }
@@ -622,13 +623,64 @@ export async function runAgent(
 
     describeBinding: tool({
       description: "Describe one of the Gadget's bindings (members of the Cloudflare " +
-          "Workers `env` object), including TypeScript types specifying the API it offers.",
+          "Workers `env` object), including TypeScript types specifying the API it offers.\n" +
+          "\n" +
+          "In addition to appearing in `env`, some bindings support push notifications using " +
+          "\"hooks\". If the binding defines a hook type, then the Gadget can implement this " +
+          "interface and arrange to receive notifications. Use the `setBindingHook` tool to " +
+          "attach the binding's hook to the Gadget.",
       inputSchema: z.object({
         name: z.string().describe("Name of the binding (a property of `env`)."),
       }),
       execute: async ({name}, {toolCallId}) => {
         try {
           return await hooks.describeBinding(name);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
+    setBindingHook: tool({
+      description: "Connects (or disconnects) a particular binding's \"hook\" to a particular " +
+          "entrypoint of the Gadget Worker.\n" +
+          "\n" +
+          "Some bindings support push notifications via \"hooks\". Use the `describeBinding` " +
+          "tool to discover if it has a hook, and how its hook interface is defined.\n" +
+          "\n" +
+          "For exmaple, imagine a binding which receives chat notifications, like:\n" +
+          "\n" +
+          "```\n" +
+          "interface Chat {\n" +
+          "  receivedMessage(fromUser: string, message: string): Promise<void>;\n" +
+          "}\n" +
+          "```\n" +
+          "\n" +
+          "The Gadget's server.js could implement this hook with code like:\n" +
+          "\n" +
+          "```\n" +
+          "import { WorkerEntrypoint } from \"cloudflare:workers\";\n" +
+          "class MyChatHook extends WorkerEntrypoint {\n" +
+          "  async receivedMessage(fromUser, message) {\n" +
+          "    // ... handle the message ...\n" +
+          "  }\n" +
+          "}\n" +
+          "```\n" +
+          "\n" +
+          "Within the hook, `this.env` contains the Gadget's bindings as usual.",
+      inputSchema: z.object({
+        bindingName: z.string().describe("Name of the binding whose hook should be set."),
+        entrypoint: z.nullable(z.string()).describe(
+            "Name of a WorkerEntrypoint class exported from server.js which should receive " +
+            "calls to the hook. Or, null to disconnect the hook."),
+      }),
+      execute: async ({bindingName, entrypoint}, {toolCallId}) => {
+        try {
+          await hooks.setBindingHook(bindingName, entrypoint);
+          return {success: true};
         } catch (error) {
           toolCallNotes.set(toolCallId, {
             error: `${error}`

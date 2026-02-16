@@ -391,4 +391,8 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
+
+  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+    // Safe to ignore since we don't have a hook!
+  }
 }

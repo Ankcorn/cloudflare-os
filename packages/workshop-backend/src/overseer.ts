@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText } from "ai";
@@ -51,6 +51,7 @@ type GatekeeperRecord = {
   id: number,
   bindingName: string,
   class: GatekeeperClass,
+  hook?: string,  // export name to which the gatekeeper's hook is connected
 };
 
 type ActionRecord = {
@@ -307,7 +308,12 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  async getGadgetFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
+  // Load the dynamic worker representing the gadget as of the current code version. Returns the
+  // dynamic WorkerStub (which can be used to get any entrypoint).
+  //
+  // If `chatId` is specified, load the worker including changes proposed in the given chat
+  // thread.
+  loadGadgetWorker(chatId?: number): WorkerStub {
     let codeVersion = `${this.storage.codeVersion.get()}`;
     let sequence: number | undefined;
     if (chatId !== undefined) {
@@ -318,6 +324,38 @@ class OverseerImpl implements AgentHooks {
       codeVersion += `.${sequence}`;
     }
 
+    return this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
+      let {ydoc} = this.buildYDoc("current");
+
+      if (chatId !== undefined) {
+        this.getProposedChanges(chatId, sequence).forEach(({update}) => {
+          Y.applyUpdateV2(ydoc, update);
+        });
+      }
+
+      let modules: Record<string, string> = {};
+      for (let [file, content] of ydoc.getMap<Y.Text>()) {
+        if (file.endsWith(".js")) {
+          modules[file] = content.toString();
+        }
+      }
+
+      return {
+        // TODO: compatibility date configuration
+        compatibilityDate: "2025-08-01",
+        mainModule: "server.js",
+        modules,
+        env: this.getEnvForLoader(),
+        globalOutbound: null,
+      };
+    });
+  }
+
+  // Load the gadget facet (if it's not running already) and return the stub to it.
+  //
+  // If `chatId` is specified, load the gadget including changes proposed in the given chat
+  // thread.
+  async getGadgetFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
     if (chatId !== this.#runningChatId) {
       this.ctx.facets.abort("gadget", new Error(
           chatId === undefined
@@ -327,37 +365,40 @@ class OverseerImpl implements AgentHooks {
     }
 
     return this.ctx.facets.get<DurableObject>("gadget", () => {
-      let stub = this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
-        let {ydoc} = this.buildYDoc("current");
-
-        if (chatId !== undefined) {
-          this.getProposedChanges(chatId, sequence).forEach(({update}) => {
-            Y.applyUpdateV2(ydoc, update);
-          });
-        }
-
-        let modules: Record<string, string> = {};
-        for (let [file, content] of ydoc.getMap<Y.Text>()) {
-          if (file.endsWith(".js")) {
-            modules[file] = content.toString();
-          }
-        }
-
-        return {
-          // TODO: compatibility date configuration
-          compatibilityDate: "2025-08-01",
-          mainModule: "server.js",
-          modules,
-          env: this.getEnvForLoader(),
-          globalOutbound: null,
-        };
-      });
+      let stub = this.loadGadgetWorker(chatId);
 
       return {
         class: stub.getDurableObjectClass<any>("Gadget"),
         id: "gadget"
       };
     });
+  }
+
+  // Load a WorkerEntrypoint exported by the gadget, used to implement a hook.
+  //
+  // TODO: There should be a way to simulate hooks within the context of a particular chat thread,
+  //   for testing. But when real-life hooks are delivered they obviously need to go to the
+  //   mainline code.
+  getGadgetHookEntrypoint(id: number): RpcTarget {
+    let gk = this.storage.gatekeepers.get(id);
+    if (gk && gk.hook) {
+      let stub = this.loadGadgetWorker();
+      let ep = stub.getEntrypoint(gk.hook);
+
+      // TODO: Make possible to return dynamic entrypoint stub over RPC. This Proxy is a hack.
+      return new Proxy<RpcTarget>(ep as any, {
+        get(target, prop, receiver) {
+          // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
+          //   we'll get an illegal invocation, as `receiver` points to our Proxy.
+          return Reflect.get(target, prop, target);
+        },
+        getPrototypeOf(target) {
+          return RpcTarget.prototype;
+        }
+      });
+    } else {
+      throw new Error("Hook is not connected.");
+    }
   }
 
   getGatekeeperFacet(id: number): Fetcher<Gatekeeper<any>> {
@@ -567,12 +608,61 @@ class OverseerImpl implements AgentHooks {
     return `Binding: env.${bindingName}\n` +
         `Title: ${desc.title}\n` +
         `TypeScript type: ${desc.tsType}\n` +
+        (desc.hookTsType
+            ? `Hook TypeScript type: ${desc.hookTsType}\n` +
+              `Hook entrypoint: ${gatekeeper.hook || "(not connected)"}\n`
+            : "") +
         `\n` +
         `The binding comes with the following bundle of TypeScript type definitions:\n` +
         `\n` +
         `\`\`\`\n` +
         `${types}\n` +
         `\`\`\`\n`;
+  }
+
+  async setBindingHook(bindingNameOrId: string | number, newHook: string | null): Promise<void> {
+    let id: number;
+    let gatekeeperRecord: GatekeeperRecord;
+    if (typeof bindingNameOrId === "string") {
+      let rec = this.storage.gatekeepers.byBindingName.get(bindingNameOrId);
+      if (!rec) {
+        throw new Error(`No such binding: ${bindingNameOrId}`);
+      }
+      id = rec.id;
+      gatekeeperRecord = rec;
+    } else {
+      id = bindingNameOrId;
+      let rec = this.storage.gatekeepers.get(id);
+      if (!rec) {
+        throw new Error(`No such binding: ${bindingNameOrId}`);
+      }
+      gatekeeperRecord = rec;
+    }
+
+    gatekeeperRecord.hook = newHook || undefined;
+    this.storage.gatekeepers.put(gatekeeperRecord);
+
+    // Make sure the gatekeeper is configured to call us back.
+    try {
+      let gatekeeper = this.getGatekeeperFacet(gatekeeperRecord.id);
+      let props: GatekeeperHookLoopbackProps = {
+        overseerId: this.ctx.id.toString(),
+        gatekeeperId: gatekeeperRecord.id,
+      }
+      if (newHook) {
+        await gatekeeper.setHook(this.ctx.exports.GatekeeperHookLoopback({props}));
+      } else {
+        await gatekeeper.setHook(null);
+      }
+    } catch (err) {
+      // Something went wrong, clear the hook mapping in storage to be safe.
+      let gatekeeperRecord = this.storage.gatekeepers.get(id);
+      if (gatekeeperRecord) {
+        delete gatekeeperRecord.hook;
+        this.storage.gatekeepers.put(gatekeeperRecord);
+      }
+      throw err;
+    }
   }
 
   async startAgent(chatId: number, aiModel: UserAiModelRecord): Promise<void> {
@@ -824,6 +914,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.startGatekeeperSession(id);
   }
 
+  startGatekeeperHook(id: number): NativeRpcStub<RpcTarget> {
+    // TODO: There's a bug in workerd, if we return the RpcTarget directly here, because it is a
+    //   Proxy, serializeJsValueWithPipeline() decides it is non-pipelineable, which is incorrect.
+    //   Manually wrapping in a stub works around the problem for now.
+    return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
+  }
+
   async deliverCodeModeTrace(executionId: string, trace: TraceItem) {
     return this.impl.deliverCodeModeTrace(executionId, trace);
   }
@@ -895,6 +992,38 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let gatekeeper = stub.startGatekeeperSession(this.ctx.props.gatekeeperId);
 
     return new Proxy(gatekeeper, {
+      get(target, prop, receiver) {
+        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
+        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
+        return Reflect.get(target, prop, target);
+      },
+      getPrototypeOf(target) {
+        return WorkerEntrypoint.prototype;
+      }
+    });
+  }
+}
+
+type GatekeeperHookLoopbackProps = {
+  overseerId: string;
+  gatekeeperId: number;
+};
+
+// Hack in the other direction: When we connect a gatekeeper's hook, we connect it to an instance
+// of this class which in turn forwards into the Gadget. This is needed since direct stubs to
+// entrypoints of a dynamic worker cannot be persisted (since the system doesn't know how to start
+// the dynamic worker back up again without the overseer's help).
+export class GatekeeperHookLoopback
+    extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps> {
+  constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Cloudflare.Env) {
+    super(ctx, env);
+
+    let ns = ctx.exports.OverseerDurableObject;
+    let stub: DurableObjectStub<OverseerDurableObject> =
+        ns.get(ns.idFromString(ctx.props.overseerId));
+    let hook = stub.startGatekeeperHook(this.ctx.props.gatekeeperId);
+
+    return new Proxy<GatekeeperHookLoopback>(<any>hook, {
       get(target, prop, receiver) {
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
         //   we'll get an illegal invocation, as `receiver` points to our Proxy.
@@ -1466,6 +1595,14 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id));
   }
+
+  async getHook(): Promise<string | null | undefined> {
+    return this.impl.storage.gatekeepers.get(this.id)!.hook;
+  }
+
+  async setHook(exportName: string | null): Promise<void> {
+    await this.impl.setBindingHook(this.id, exportName);
+  }
 }
 
 class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Action> {
@@ -1539,6 +1676,10 @@ export class AgentSpawnerGatekeeper
   revertAction(action: AgentSpawnerAction, revertInfo: AgentSpawnerRevertInfo):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
+  }
+
+  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+    // Safe to ignore since we don't have a hook!
   }
 }
 

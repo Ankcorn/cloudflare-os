@@ -82,6 +82,11 @@ export type ResourceDescription = {
   // TypeScript type name. Must be the name of one of the exports returned by this gatekeeper's
   // `getTypeScriptTypes()` method.
   tsType: string;
+
+  // Some resources implement the ability for the client to subscribe to events. The application
+  // implements a "hook", which is a WorkerEntrypoint that implements the TypeScript interface
+  // named by `hookTsType` (which must be one of the exports from `getTypescriptTypes()`).
+  hookTsType?: string;
 }
 
 // The root interface of an Adapter, as provided to the Gadget Workshop.
@@ -190,7 +195,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 //
 // The Gatekeeper executes as a Durable Object Facet, where it is a child of the Overseer. This
 // interface is exposed to the Overseer, not directly to the Gadget.
-export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends DurableObject {
+export interface Gatekeeper<
+    Session, Action = any, RevertInfo = any, Hook extends WorkerEntrypoint = WorkerEntrypoint>
+    extends DurableObject {
   // Get more info on the specific resource without actually granting access. This information is
   // to be presented to the user in the UI, before the user actually confirms they want to grant
   // access.
@@ -270,6 +277,11 @@ export interface Gatekeeper<Session, Action = any, RevertInfo = any> extends Dur
   // `restart` has the same meaning as for `rejectAction()`.
   revertAction(action: Action, revertInfo: RevertInfo):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}>;
+
+  // If the gatekeeper offers a hook, set the hook. Setting to `null` disables the hook.
+  //
+  // If the gatekeeper doesn't offer a hook, this does nothing.
+  setHook(hook: Fetcher<Hook> | null): Promise<void>;
 }
 
 // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
