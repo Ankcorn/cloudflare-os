@@ -23,7 +23,11 @@ let backoff: number = 1000;
 
 function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
-  return newWebSocketRpcSession<PublicApi>('ws://api.localhost:8787/api');
+  // When opening the Vite dev server directly (localhost:3000), the backend is at localhost:8787.
+  // Otherwise, the API is on the same host as the frontend.
+  const apiHost = window.location.host === 'localhost:3000' ? 'localhost:8787' : window.location.host;
+  const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
+  return newWebSocketRpcSession<PublicApi>(wsUrl);
 }
 async function handleBroken(error: any) {
   console.warn('RPC connection lost:', error);

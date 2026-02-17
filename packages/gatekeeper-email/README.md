@@ -6,7 +6,7 @@ Unlike most gatekeepers which connect to external services, this gatekeeper *is*
 
 ## How It Works
 
-The email gatekeeper uses the URL scheme `https://email.local/<name>` to represent the email address `<name>@<host>`, where `<host>` is the domain configured to route email to this worker.
+The email gatekeeper uses the URL scheme `http://email.localhost:8787/mailbox/<name>` to represent the email address `<name>@<host>`, where `<host>` is the domain configured to route email to this worker.
 
 When a Gadget is connected to an email address:
 
@@ -21,7 +21,7 @@ Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime)
 
 1. Start the dev server (see root README).
 2. Create or open a Gadget.
-3. In the chat, paste a URL like: `https://email.local/myinbox`
+3. In the chat, paste a URL like: `http://email.localhost:8787/mailbox/myinbox`
 4. This represents the email address `myinbox@<host>`.
 5. The binding will appear as `EMAIL` (the suggested name).
 
@@ -54,6 +54,8 @@ Then prompt your coding agent to use the `setBindingHook` tool to connect it:
 
 ## Local Development
 
+In local development, we pretend the gatekeeper serves `email.localhost`, but we don't actually support receiving real SMTP email.
+
 ### Sending a Test Email
 
 In local dev, wrangler exposes a `/cdn-cgi/handler/email` endpoint that simulates inbound email. You can POST raw email content to it using curl.
@@ -76,31 +78,29 @@ This is a test email body.'
 ```
 
 The `to` address's local part (`myinbox`) determines which `EmailAddress` Durable Object receives the email. Make sure:
-- You have a Gadget with a binding for `https://email.local/myinbox`
+- You have a Gadget with a binding for `http://email.localhost:8787/mailbox/myinbox`
 - The binding has a hook connected via `setBindingHook`
 
 If no hook is configured for that address, the email will be rejected.
-
-### Environment Configuration
-
-Create a `.env` file in this package's directory (`packages/gatekeeper-email/.env`):
-
-```bash
-EMAIL_HOST=example.com
-```
-
-This controls what `getAddress()` returns (e.g. `myinbox@example.com`). In local dev, the actual value doesn't matter much since emails are simulated, but it should match whatever you use in your test curl commands.
 
 ## Production Configuration
 
 In production, you need to set up [Cloudflare Email Routing](https://developers.cloudflare.com/email-routing/) to forward emails to this worker.
 
-### Step 1: Enable Email Routing
+### Step 1: Deploy the email gatekeeper to an HTTP host and set env.ORIGIN
+
+All occurrances of `http://email.localhost:8787` in the doc above will in production instead be the hostname on which you are serving the email gatekeeper worker. You need to set the `ORIGIN` environment variable to match this, like:
+
+```
+ORIGIN=https://gatekeeper-email.example.workers.dev
+```
+
+### Step 2: Enable Email Routing
 
 1. In the Cloudflare dashboard, go to your domain's **Email Routing** settings.
 2. Follow the setup wizard to enable Email Routing and configure the required DNS records (MX, SPF, etc.).
 
-### Step 2: Create an Email Worker Route
+### Step 3: Create an Email Worker Route
 
 1. Go to **Email Routing** > **Email Workers**.
 2. Create a route that matches the addresses you want to handle. For example:
@@ -108,25 +108,6 @@ In production, you need to set up [Cloudflare Email Routing](https://developers.
    - **Action**: Send to a Worker
    - **Worker**: Select the deployed `gatekeeper-email` worker
 3. Alternatively, you can configure this in your wrangler.jsonc for deployment.
-
-### Step 3: Set the EMAIL_HOST Variable
-
-Set the `EMAIL_HOST` environment variable on the deployed worker to match your email domain:
-
-```bash
-wrangler secret put EMAIL_HOST
-# Enter: yourdomain.com
-```
-
-Or add it to your wrangler.jsonc:
-
-```jsonc
-{
-  "vars": {
-    "EMAIL_HOST": "yourdomain.com"
-  }
-}
-```
 
 ### How It Fits Together
 

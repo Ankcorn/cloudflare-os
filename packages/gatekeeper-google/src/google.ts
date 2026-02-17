@@ -4,6 +4,26 @@ import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import TYPES_CODE from "./types.txt";
 
+// Declare optional environment variables here since they may be omitted from wrangler.jsonc.
+type Env = Cloudflare.Env & {
+  // Origin (protocol+host) on which the default fetch handler is served. Should NOT include a
+  // trailing slash. Omit for localhost dev server (which annoyingly has to use different hostnames
+  // for different functions).
+  ORIGIN?: string,
+}
+
+function getRedirectUri(env: Env) {
+  // Google doesn't permit `google.localhost` as a hostname for redirect_uri, only `localhost`. So
+  // we arrange in dev-router.js to redirect /oauth/google to the google gatekeeper as a hack.
+  // In production, the gatekeeper's actual hostname should be usable.
+  return (env.ORIGIN || "http://localhost:8787") + "/oauth/google";
+}
+
+function getUiOrigin(env: Env) {
+  // For displaying UI we can use google.localhost.
+  return env.ORIGIN || "http://google.localhost:8787";
+}
+
 // =======================================================================================
 
 function apiKeyForm(hasApiKey: boolean) {
@@ -57,8 +77,6 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify"
 ];
 
-const REDIRECT_URI = "http://localhost:8787/oauth/google";
-
 const SUPPORTED_URLS = ["https://mail.google.com/*"];
 
 // Main HTTP UI entrypoint. We only use this to initiate OAuth requests to Google.
@@ -78,7 +96,7 @@ export default {
 
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       newUrl.searchParams.set("client_id", env.CLIENT_ID);
-      newUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      newUrl.searchParams.set("redirect_uri", getRedirectUri(env));
       newUrl.searchParams.set("response_type", "code");
       newUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
       newUrl.searchParams.set("access_type", "offline");
@@ -141,7 +159,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
 
     return {
-      url: `http://google.localhost:8787/${userObjectId.toString()}`
+      url: `${getUiOrigin(this.env)}/${userObjectId.toString()}`
     };
   }
 
@@ -184,7 +202,7 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     let response = await exchangeAuthCode(
-        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, REDIRECT_URI);
+        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getRedirectUri(this.env));
 
     if (!response.refreshToken) {
       throw new Error("OAuth exchange didn't return refresh token?");

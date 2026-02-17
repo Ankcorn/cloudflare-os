@@ -16,6 +16,10 @@ export default {
           return env.GATEKEEPER_GOOGLE.fetch(req);
         }
 
+        if (url.pathname === "/api") {
+          return env.WORKSHOP_BACKEND.fetch(req);
+        }
+
         // Redirect to Vite dev server for frontend.
         //
         // Note that unfortunately when viewing this way, the frontend will refresh whenever
@@ -26,11 +30,9 @@ export default {
           return await fetch(url, req);
         } catch (err) {
           return new Response(
-              "Couldn't reach frontend dev server. Please run it with `pnpn run dev-client`.",
+              "Couldn't reach frontend dev server. Please run it with `pnpm run dev-client`.",
               {status: 500});
         }
-      case "api.localhost":
-        return env.WORKSHOP_BACKEND.fetch(req);
       case "google.localhost":
         return env.GATEKEEPER_GOOGLE.fetch(req);
       case "email.localhost":

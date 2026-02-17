@@ -7,7 +7,6 @@ declare namespace Cloudflare {
 		durableNamespaces: "UserAccount" | "EmailGatekeeperImpl" | "EmailAddress";
 	}
 	interface Env {
-		EMAIL_HOST: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

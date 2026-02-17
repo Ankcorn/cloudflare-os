@@ -19,6 +19,31 @@ import PostalMime from "postal-mime";
 import type { Email } from "postal-mime";
 import TYPES_CODE from "./types.txt";
 
+// Declare optional environment variables here since they may be omitted from wrangler.jsonc.
+type Env = Cloudflare.Env & {
+  // Origin (protocol+host) on which the default fetch handler is served. Should NOT include a
+  // trailing slash. Omit for localhost dev server (which annoyingly has to use different hostnames
+  // for different functions).
+  ORIGIN?: string,
+}
+
+function getOrigin(env: Env) {
+  return env.ORIGIN || "http://email.localhost:8787";
+}
+
+function getSupportedUrls(env: Env) {
+  return [`${getOrigin(env)}/mailbox/*`];
+}
+
+function getEmailHost(env: Env) {
+  // TODO: This is actually a lie, as email routing can be configured on an entirely different
+  //   domain and forwarded to this worker. We only really care about the name before the `@` for
+  //   routing purposes. At present the returned host isn't really used anywhere important so
+  //   maybe we can get rid of this entirely, or maybe we should bring back the env var that
+  //   specifies the default host.
+  return new URL(getOrigin(env)).hostname;
+}
+
 // =======================================================================================
 
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
@@ -28,8 +53,6 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
     <p>Authorization complete. You may close this tab and return to the Gadgets Workshop.
   </body>
 </html>`;
-
-const SUPPORTED_URLS = ["https://email.local/*"];
 
 // =======================================================================================
 // Default export: fetch handler (for connectAccount flow) and email handler (for inbound).
@@ -125,7 +148,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   async describe(): Promise<VendorDescription> {
     return {
       displayName: "Email",
-      url: "https://email.local",
+      url: getOrigin(this.env),
       // TODO: logo
     };
   }
@@ -136,12 +159,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
 
     return {
-      url: `http://email.localhost:8787/${userObjectId.toString()}`
+      url: `${getOrigin(this.env)}/${userObjectId.toString()}`
     };
   }
 
   async getSupportedUrls(): Promise<string[]> {
-    return SUPPORTED_URLS;
+    return getSupportedUrls(this.env);
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -198,16 +221,15 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getSupportedUrls(): Promise<string[]> {
-    return SUPPORTED_URLS;
+    return getSupportedUrls(this.env);
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
     // Parse the URL to extract the email name.
-    // URL format: https://email.local/<name>
+    // URL format: https://hostname/mailbox/<name>
     let parsed = new URL(url);
-    let emailName = parsed.pathname.slice(1);  // strip leading "/"
-
-    if (!emailName) {
+    let emailName = parsed.pathname.slice("/mailbox/".length);
+    if (!parsed.pathname.startsWith("/mailbox/") || !emailName) {
       throw new Error(`Invalid email URL: ${url}`);
     }
 
@@ -248,9 +270,9 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
 
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;
-    let host = this.env.EMAIL_HOST || "example.com";
+    let host = getEmailHost(this.env);
     return {
-      url: `https://email.local/${emailName}`,
+      url: `${getOrigin(this.env)}/mailbox/${emailName}`,
       title: `${emailName}@${host}`,
       snippet: `Receive emails sent to ${emailName}@${host}`,
       suggestedBindingName: "EMAIL",
@@ -265,7 +287,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue<never>>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
-    let host = this.env.EMAIL_HOST || "example.com";
+    let host = getEmailHost(this.env);
     return new EmailSessionImpl(emailName, host);
   }
 
