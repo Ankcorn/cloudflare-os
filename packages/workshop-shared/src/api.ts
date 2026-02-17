@@ -33,9 +33,13 @@ export const SERVICE_SALT = new Uint8Array([
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
   // Authenticates the user using an auth token (typically stored in localStorage).
-  //
-  // TODO: Is this right for Cloudflare Access?
   authenticate(token: string): Promise<AuthenticatedApi>;
+
+  // Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
+  // client is expected to have already authenticated with Access (before they could load the
+  // application in their browser at all). The credentials from the Cloudflare Access session will
+  // be used to authenticate the user.
+  authenticateFromCfAccess(): Promise<AuthenticatedApi>;
 
   // Login with username and password.
   //
@@ -60,8 +64,7 @@ export interface PublicApi extends RpcTarget {
   // server never sees the user's password at all, and also the benefit of performing the expensive
   // hash on the client which tends to have more resources available than a busy server.
   //
-  // TODO: Password-based login is only meant for local/priavte installations and will be
-  //   replaced with OpenID-based SSO / Cloudflare Access / etc. for web installations.
+  // This API may be disabled when the server uses SSO for authentication.
   login(username: string, passwordHash: Uint8Array): Promise<string | null>;
 
   // Create a new account. Returns a token to store in local storage and pass to `authenticate()`
@@ -70,6 +73,8 @@ export interface PublicApi extends RpcTarget {
   // Returns null if the username already exists. (Other kinds of errors may throw exceptions.)
   //
   // See login() (above) for an explanation of the password hashing algorithm.
+  //
+  // This API may be disabled when the server uses SSO for authentication.
   createAccount(username: string, displayName: string, passwordHash: Uint8Array)
       : Promise<string | null>;
 }

@@ -148,6 +148,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  async authenticateFromCfAccess(email: string): Promise<void> {
+    if (!this.storage.created.get()) {
+      // Create on first use.
+      this.storage.created.put(true);
+      this.storage.profile.put({
+        type: "user",
+        name: email.split("@")[0],
+        id: email,
+      });
+    }
+  }
+
   async #newSessionToken(): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);

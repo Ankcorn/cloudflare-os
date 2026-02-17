@@ -12,6 +12,7 @@ import AddModelModal from './AddModelModal'
 import ConnectAccountModal from './ConnectAccountModal'
 import AccountCard from './AccountCard'
 import { hashPassword } from './passwordHash'
+import { CF_ACCESS_MODE } from './useAuth'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
@@ -267,7 +268,8 @@ export default function SettingsPage() {
     logout()
   }
 
-  const accountMenuItems: MenuProps['items'] = [
+  // In CF Access mode, identity is managed by Cloudflare Access, so logout is not meaningful.
+  const accountMenuItems: MenuProps['items'] = CF_ACCESS_MODE ? [] : [
     {
       key: 'logout',
       label: 'Logout',
@@ -519,82 +521,85 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        <Card style={{ marginTop: 24 }}>
-          <Title level={4} style={{ marginTop: 0 }}>Change Password</Title>
-          <Form
-            form={passwordForm}
-            onFinish={handleChangePassword}
-            layout="vertical"
-            style={{ maxWidth: 400 }}
-          >
-            <Form.Item
-              label="Current Password"
-              name="currentPassword"
-              rules={[{ required: true, message: 'Please enter your current password' }]}
+        {/* Change Password is only available in password-auth mode, not when using CF Access. */}
+        {!CF_ACCESS_MODE && (
+          <Card style={{ marginTop: 24 }}>
+            <Title level={4} style={{ marginTop: 0 }}>Change Password</Title>
+            <Form
+              form={passwordForm}
+              onFinish={handleChangePassword}
+              layout="vertical"
+              style={{ maxWidth: 400 }}
             >
-              <Input.Password
-                disabled={passwordLoading}
-                autoComplete="current-password"
-              />
-            </Form.Item>
-
-            <Form.Item
-              label="New Password"
-              name="newPassword"
-              rules={[
-                { required: true, message: 'Please enter a new password' },
-                { min: 8, message: 'Password must be at least 8 characters' },
-              ]}
-            >
-              <Input.Password
-                disabled={passwordLoading}
-                autoComplete="new-password"
-              />
-            </Form.Item>
-
-            <Form.Item
-              label="Confirm New Password"
-              name="confirmPassword"
-              dependencies={['newPassword']}
-              rules={[
-                { required: true, message: 'Please confirm your new password' },
-                ({ getFieldValue }) => ({
-                  validator(_, value) {
-                    if (!value || getFieldValue('newPassword') === value) {
-                      return Promise.resolve()
-                    }
-                    return Promise.reject(new Error('Passwords do not match'))
-                  },
-                }),
-              ]}
-            >
-              <Input.Password
-                disabled={passwordLoading}
-                autoComplete="new-password"
-              />
-            </Form.Item>
-
-            {passwordError && (
-              <Alert
-                message={passwordError}
-                type="error"
-                showIcon
-                style={{ marginBottom: 16 }}
-              />
-            )}
-
-            <Form.Item style={{ marginBottom: 0 }}>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={passwordLoading}
-                icon={<LockOutlined />}
+              <Form.Item
+                label="Current Password"
+                name="currentPassword"
+                rules={[{ required: true, message: 'Please enter your current password' }]}
               >
-                Change Password
-              </Button>
-            </Form.Item>
-          </Form>
-        </Card>
+                <Input.Password
+                  disabled={passwordLoading}
+                  autoComplete="current-password"
+                />
+              </Form.Item>
+
+              <Form.Item
+                label="New Password"
+                name="newPassword"
+                rules={[
+                  { required: true, message: 'Please enter a new password' },
+                  { min: 8, message: 'Password must be at least 8 characters' },
+                ]}
+              >
+                <Input.Password
+                  disabled={passwordLoading}
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+
+              <Form.Item
+                label="Confirm New Password"
+                name="confirmPassword"
+                dependencies={['newPassword']}
+                rules={[
+                  { required: true, message: 'Please confirm your new password' },
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      if (!value || getFieldValue('newPassword') === value) {
+                        return Promise.resolve()
+                      }
+                      return Promise.reject(new Error('Passwords do not match'))
+                    },
+                  }),
+                ]}
+              >
+                <Input.Password
+                  disabled={passwordLoading}
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+
+              {passwordError && (
+                <Alert
+                  message={passwordError}
+                  type="error"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                />
+              )}
+
+              <Form.Item style={{ marginBottom: 0 }}>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  loading={passwordLoading}
+                  icon={<LockOutlined />}
+                >
+                  Change Password
+                </Button>
+              </Form.Item>
+            </Form>
+          </Card>
+        )}
 
         <AddModelModal
           visible={addModalVisible}

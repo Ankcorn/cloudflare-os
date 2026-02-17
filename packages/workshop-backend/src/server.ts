@@ -1,4 +1,5 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
+import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
@@ -14,6 +15,13 @@ export { UserDurableObject, GatekeeperConnectCallbackImpl };
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback, CodeModeTailLoopback,
     AgentSpawnerGatekeeper };
+
+// Declare optional environment variables here since they may be omitted from wrangler.jsonc.
+type Env = Cloudflare.Env & {
+  // Set these if using Cloudflare Access for authentication, otherwise username/password is used.
+  CF_ACCESS_AUD?: string,  // audience
+  CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
+}
 
 // =======================================================================================
 
@@ -96,7 +104,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
-  constructor(private ctx: ExecutionContext) {
+  constructor(private ctx: ExecutionContext, private env: Env,
+      private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
@@ -113,7 +122,23 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return new AuthenticatedApiImpl(this.ctx, stub);
   }
 
+  async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
+    if (!this.accessPayload) {
+      throw new Error("Not authenticated with Access.");
+    }
+
+    let email = this.accessPayload.email as string;
+    let userId = this.users.idFromName(email);
+    let stub = this.users.get(userId);
+    await stub.authenticateFromCfAccess(email);
+    return new AuthenticatedApiImpl(this.ctx, stub);
+  }
+
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
+    if (this.env.CF_ACCESS_AUD) {
+      throw new Error("This deployment requires Cloudflare Access authentication.");
+    }
+
     username = normalizeUsername(username);
 
     let id = this.users.idFromName(username);
@@ -127,6 +152,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
       : Promise<string | null> {
+    if (this.env.CF_ACCESS_AUD) {
+      throw new Error("This deployment requires Cloudflare Access authentication.");
+    }
+
     username = normalizeUsername(username);
 
     let id = this.users.idFromName(username);
@@ -140,11 +169,40 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 }
 
 export default {
-  async fetch(req: Request, env: Cloudflare.Env, ctx: ExecutionContext) {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
 
     if (url.pathname === "/api") {
-      return newWorkersRpcResponse(req, new PublicApiImpl(ctx));
+      let accessPayload: JWTPayload | undefined;
+
+      if (env.CF_ACCESS_AUD) {
+        if (req.headers.get("Origin") !== url.origin) {
+          return new Response("Cross-origin API access not allowed.", { status: 403 });
+        }
+
+        const token = req.headers.get("cf-access-jwt-assertion");
+        if (!token) {
+          return new Response("Missing CF access JWT.", { status: 403 });
+        }
+
+        const JWKS = createRemoteJWKSet(
+          new URL(`${env.CF_ACCESS_ISS}/cdn-cgi/access/certs`)
+        );
+
+        // Verify the JWT
+        const { payload } = await jwtVerify(token, JWKS, {
+          issuer: env.CF_ACCESS_ISS,
+          audience: env.CF_ACCESS_AUD,
+        });
+
+        if (!payload.email) {
+          return new Response("Access JWT didn't specify email address.", { status: 403 });
+        }
+
+        accessPayload = payload;
+      }
+
+      return newWorkersRpcResponse(req, new PublicApiImpl(ctx, env, accessPayload));
     } else if (url.pathname === "/status") {
       // A little debug endpoint to check if we can reach our gatekeepers.
       let responses = [];
@@ -161,4 +219,4 @@ export default {
       return new Response("Not Found", {status: 404});
     }
   }
-} satisfies ExportedHandler<Cloudflare.Env>;
+} satisfies ExportedHandler<Env>;

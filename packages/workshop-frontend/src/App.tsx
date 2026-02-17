@@ -6,6 +6,7 @@ import GadgetEditor from './GadgetEditor'
 import SettingsPage from './SettingsPage'
 import ProtectedRoute from './ProtectedRoute'
 import SignupPage from './SignupPage'
+import { CF_ACCESS_MODE } from './useAuth'
 
 interface AppProps {
   rpcStub: RpcStub<PublicApi>
@@ -41,9 +42,10 @@ function App({ rpcStub }: AppProps) {
         }
       />
 
+      {/* Signup is not available in CF Access mode — identity is managed by Access. */}
       <Route
         path="/signup"
-        element={<SignupPage rpcStub={rpcStub} />}
+        element={CF_ACCESS_MODE ? <Navigate to="/" replace /> : <SignupPage rpcStub={rpcStub} />}
       />
 
       {/* Redirect any unmatched routes to home for now */}

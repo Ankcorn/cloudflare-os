@@ -2,6 +2,7 @@ import { Layout, Typography, Button, Table, Space, Dropdown, Avatar, Tooltip } f
 import { LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
+import { CF_ACCESS_MODE } from './useAuth'
 import AlphaWarning from './AlphaWarning'
 import { useState, useEffect } from 'react'
 import { GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
@@ -118,15 +119,15 @@ export default function Home() {
       icon: <SettingOutlined />,
       onClick: () => navigate('/settings'),
     },
-    {
-      type: 'divider',
-    },
-    {
-      key: 'logout',
-      label: 'Logout',
-      icon: <LogoutOutlined />,
-      onClick: handleLogout,
-    },
+    ...(!CF_ACCESS_MODE ? [
+      { type: 'divider' as const },
+      {
+        key: 'logout',
+        label: 'Logout',
+        icon: <LogoutOutlined />,
+        onClick: handleLogout,
+      },
+    ] : []),
   ]
 
   return (

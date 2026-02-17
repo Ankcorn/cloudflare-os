@@ -1,5 +1,16 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  // Set to "true" to enable Cloudflare Access authentication mode.
+  // In this mode, password-based login/signup is disabled and the app authenticates
+  // via the CF Access JWT that Access injects into requests before they reach the server.
+  readonly VITE_CF_ACCESS_MODE?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 // Stub declarations for Cloudflare Workers types used by the shared package.
 // The frontend compiles @gadgets/workshop-shared source via path aliases, so it needs
 // minimal type stubs for server-side types that appear in the shared interfaces.

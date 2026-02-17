@@ -4,6 +4,7 @@ import { Layout, Typography, Button, Input, Space, message, Tabs, Modal, Dropdow
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
+import { CF_ACCESS_MODE } from './useAuth'
 import AlphaWarning from './AlphaWarning'
 import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import GadgetCodeInterface from './GadgetCodeInterface'
@@ -229,15 +230,15 @@ export default function GadgetEditor() {
       icon: <SettingOutlined />,
       onClick: () => navigate('/settings'),
     },
-    {
-      type: 'divider',
-    },
-    {
-      key: 'logout',
-      label: 'Logout',
-      icon: <LogoutOutlined />,
-      onClick: handleLogout,
-    },
+    ...(!CF_ACCESS_MODE ? [
+      { type: 'divider' as const },
+      {
+        key: 'logout',
+        label: 'Logout',
+        icon: <LogoutOutlined />,
+        onClick: handleLogout,
+      },
+    ] : []),
   ]
 
   if (loading) {
