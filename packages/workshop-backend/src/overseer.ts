@@ -1002,6 +1002,10 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
       }
     });
   }
+
+  // We need to declare a method otherwise the validator won't even report this class as existing
+  // and so the loopback binding won't be created.
+  dummyMethodToWorkAroundValidatorBug() {}
 }
 
 type GatekeeperHookLoopbackProps = {
@@ -1034,6 +1038,10 @@ export class GatekeeperHookLoopback
       }
     });
   }
+
+  // We need to declare a method otherwise the validator won't even report this class as existing
+  // and so the loopback binding won't be created.
+  dummyMethodToWorkAroundValidatorBug() {}
 }
 
 type CodeModeLoopbackProps = {
