@@ -10,3 +10,6 @@ dist/
 # Cloudflare Workers
 .wrangler/
 .env
+
+# Site-specific production deployment configs.
+wrangler.prod.jsonc
