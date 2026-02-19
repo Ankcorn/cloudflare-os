@@ -55,7 +55,7 @@ This is important! While your app is in "Testing" mode (which it will be by defa
 3. Select **OAuth client ID**
 4. For **Application type**, select **Web application**
 5. **Name**: Enter anything (e.g., "Gadgets Local")
-6. Under **Authorized redirect URIs**, click **Add URI** and enter: `http://localhost:8787/oauth/google`
+6. Under **Authorized redirect URIs**, click **Add URI** and enter: `http://localhost:8787/gatekeeper/google/oauth`
 7. Click **Create**
 
 A popup will appear with your **Client ID** and **Client Secret**. Keep this window open or copy these values somewhere safe.
@@ -94,7 +94,7 @@ You can also see your connected accounts and add and remove them in the settings
 
 ### "redirect_uri_mismatch" error
 
-This means the redirect URI in your OAuth credentials doesn't match what the app is sending. Double-check that you added exactly `http://localhost:8787/oauth/google` (no trailing slash, http not https) to your OAuth client's Authorized redirect URIs.
+This means the redirect URI in your OAuth credentials doesn't match what the app is sending. Double-check that you added exactly `http://localhost:8787/gatekeeper/google/oauth` (no trailing slash, http not https) to your OAuth client's Authorized redirect URIs.
 
 ### "access_denied" error
 

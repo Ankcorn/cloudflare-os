@@ -6,22 +6,17 @@ import TYPES_CODE from "./types.txt";
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
-  // Origin (protocol+host) on which the default fetch handler is served. Should NOT include a
-  // trailing slash. Omit for localhost dev server (which annoyingly has to use different hostnames
-  // for different functions).
-  ORIGIN?: string,
+  // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
+  // NOT include a trailing slash. Omit for localhost dev server.
+  BASE_URL?: string,
 }
 
-function getRedirectUri(env: Env) {
-  // Google doesn't permit `google.localhost` as a hostname for redirect_uri, only `localhost`. So
-  // we arrange in dev-router.js to redirect /oauth/google to the google gatekeeper as a hack.
-  // In production, the gatekeeper's actual hostname should be usable.
-  return (env.ORIGIN || "http://localhost:8787") + "/oauth/google";
+function getBaseUrl(env: Env) {
+  return env.BASE_URL || "http://localhost:8787/gatekeeper/google";
 }
 
-function getUiOrigin(env: Env) {
-  // For displaying UI we can use google.localhost.
-  return env.ORIGIN || "http://google.localhost:8787";
+function getBasePath(env: Env) {
+  return new URL(getBaseUrl(env)).pathname;
 }
 
 // =======================================================================================
@@ -79,11 +74,16 @@ const OAUTH_SCOPES = [
 
 const SUPPORTED_URLS = ["https://mail.google.com/*"];
 
-// Main HTTP UI entrypoint. We only use this to initiate OAuth requests to Google.
+// Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
-    let path = url.pathname.slice(1).split("/");
+    let basePath = getBasePath(env);
+    if (!url.pathname.startsWith(basePath + "/") && url.pathname !== basePath) {
+      throw new Error(`Request path ${url.pathname} does not match BASE_URL path ${basePath}`);
+    }
+    let relPath = url.pathname.slice(basePath.length);
+    let path = relPath.slice(1).split("/");
 
     if (path.length === 1 && path[0].length == 64) {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
@@ -96,7 +96,7 @@ export default {
 
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       newUrl.searchParams.set("client_id", env.CLIENT_ID);
-      newUrl.searchParams.set("redirect_uri", getRedirectUri(env));
+      newUrl.searchParams.set("redirect_uri", getBaseUrl(env) + "/oauth");
       newUrl.searchParams.set("response_type", "code");
       newUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
       newUrl.searchParams.set("access_type", "offline");
@@ -108,7 +108,7 @@ export default {
       newUrl.searchParams.set("state", path[0]);
 
       return Response.redirect(newUrl.toString(), 302);
-    } else if (url.pathname === "/oauth/google") {
+    } else if (relPath === "/oauth") {
       // Completion redirect.
 
       let error = url.searchParams.get("error");
@@ -159,7 +159,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
 
     return {
-      url: `${getUiOrigin(this.env)}/${userObjectId.toString()}`
+      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}`
     };
   }
 
@@ -202,7 +202,7 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     let response = await exchangeAuthCode(
-        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getRedirectUri(this.env));
+        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getBaseUrl(this.env) + "/oauth");
 
     if (!response.refreshToken) {
       throw new Error("OAuth exchange didn't return refresh token?");

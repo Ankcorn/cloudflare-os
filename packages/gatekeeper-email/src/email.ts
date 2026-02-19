@@ -21,18 +21,21 @@ import TYPES_CODE from "./types.txt";
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
-  // Origin (protocol+host) on which the default fetch handler is served. Should NOT include a
-  // trailing slash. Omit for localhost dev server (which annoyingly has to use different hostnames
-  // for different functions).
-  ORIGIN?: string,
+  // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
+  // NOT include a trailing slash. Omit for localhost dev server.
+  BASE_URL?: string,
 }
 
-function getOrigin(env: Env) {
-  return env.ORIGIN || "http://email.localhost:8787";
+function getBaseUrl(env: Env) {
+  return env.BASE_URL || "http://localhost:8787/gatekeeper/email";
+}
+
+function getBasePath(env: Env) {
+  return new URL(getBaseUrl(env)).pathname;
 }
 
 function getSupportedUrls(env: Env) {
-  return [`${getOrigin(env)}/mailbox/*`];
+  return [`${getBaseUrl(env)}/mailbox/*`];
 }
 
 function getEmailHost(env: Env) {
@@ -41,7 +44,7 @@ function getEmailHost(env: Env) {
   //   routing purposes. At present the returned host isn't really used anywhere important so
   //   maybe we can get rid of this entirely, or maybe we should bring back the env var that
   //   specifies the default host.
-  return new URL(getOrigin(env)).hostname;
+  return new URL(getBaseUrl(env)).hostname;
 }
 
 // =======================================================================================
@@ -60,7 +63,12 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
-    let path = url.pathname.slice(1).split("/");
+    let basePath = getBasePath(env);
+    if (!url.pathname.startsWith(basePath + "/") && url.pathname !== basePath) {
+      throw new Error(`Request path ${url.pathname} does not match BASE_URL path ${basePath}`);
+    }
+    let relPath = url.pathname.slice(basePath.length);
+    let path = relPath.slice(1).split("/");
 
     if (path.length === 1 && path[0].length === 64) {
       // This is a connectAccount completion URL. Route to the UserAccount DO.
@@ -148,7 +156,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   async describe(): Promise<VendorDescription> {
     return {
       displayName: "Email",
-      url: getOrigin(this.env),
+      url: getBaseUrl(this.env),
       // TODO: logo
     };
   }
@@ -159,7 +167,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
 
     return {
-      url: `${getOrigin(this.env)}/${userObjectId.toString()}`
+      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}`
     };
   }
 
@@ -226,10 +234,16 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
     // Parse the URL to extract the email name.
-    // URL format: https://hostname/mailbox/<name>
+    // URL format: <BASE_URL>/mailbox/<name>
+    // Strip the base path prefix before checking for /mailbox/.
     let parsed = new URL(url);
-    let emailName = parsed.pathname.slice("/mailbox/".length);
-    if (!parsed.pathname.startsWith("/mailbox/") || !emailName) {
+    let basePath = getBasePath(this.env);
+    if (!parsed.pathname.startsWith(basePath + "/") && parsed.pathname !== basePath) {
+      throw new Error(`URL path ${parsed.pathname} does not match BASE_URL path ${basePath}`);
+    }
+    let relPath = parsed.pathname.slice(basePath.length);
+    let emailName = relPath.slice("/mailbox/".length);
+    if (!relPath.startsWith("/mailbox/") || !emailName) {
       throw new Error(`Invalid email URL: ${url}`);
     }
 
@@ -272,7 +286,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
     return {
-      url: `${getOrigin(this.env)}/mailbox/${emailName}`,
+      url: `${getBaseUrl(this.env)}/mailbox/${emailName}`,
       title: `${emailName}@${host}`,
       snippet: `Receive emails sent to ${emailName}@${host}`,
       suggestedBindingName: "EMAIL",

@@ -2,43 +2,36 @@
 // HTTP interface.
 //
 // But we actually need the Workshop and each gatekeeper to host web interfaces. So, we have the
-// "main" Worker be this little router that routes to the others based on hostname.
+// "main" Worker be this little router that routes to the others based on path prefix.
 
 export default {
   async fetch(req, env, ctx) {
     let url = new URL(req.url);
 
-    switch (url.hostname) {
-      case "localhost":
-        // Annoyingly, Google refuses to let me use "google.localhost" as a redirect URI, saying
-        // it's an invalid hostname.
-        if (url.pathname === "/oauth/google") {
-          return env.GATEKEEPER_GOOGLE.fetch(req);
-        }
+    if (url.pathname.startsWith("/gatekeeper/google/") || url.pathname === "/gatekeeper/google") {
+      return env.GATEKEEPER_GOOGLE.fetch(req);
+    }
 
-        if (url.pathname === "/api") {
-          return env.WORKSHOP_BACKEND.fetch(req);
-        }
+    if (url.pathname.startsWith("/gatekeeper/email/") || url.pathname === "/gatekeeper/email") {
+      return env.GATEKEEPER_EMAIL.fetch(req);
+    }
 
-        // Redirect to Vite dev server for frontend.
-        //
-        // Note that unfortunately when viewing this way, the frontend will refresh whenever
-        // wrangler restarts workerd. You may wish to open localhost:3000 directly in your
-        // browser to avoid that.
-        url.host = "localhost:3000";
-        try {
-          return await fetch(url, req);
-        } catch (err) {
-          return new Response(
-              "Couldn't reach frontend dev server. Please run it with `pnpm run dev-client`.",
-              {status: 500});
-        }
-      case "google.localhost":
-        return env.GATEKEEPER_GOOGLE.fetch(req);
-      case "email.localhost":
-        return env.GATEKEEPER_EMAIL.fetch(req);
-      default:
-        return new Response(`Hostname not mapped: ${url.hostname}`, {status: 404});
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      return env.WORKSHOP_BACKEND.fetch(req);
+    }
+
+    // Redirect to Vite dev server for frontend.
+    //
+    // Note that unfortunately when viewing this way, the frontend will refresh whenever
+    // wrangler restarts workerd. You may wish to open localhost:3000 directly in your
+    // browser to avoid that.
+    url.host = "localhost:3000";
+    try {
+      return await fetch(url, req);
+    } catch (err) {
+      return new Response(
+          "Couldn't reach frontend dev server. Please run it with `pnpm run dev-client`.",
+          {status: 500});
     }
   },
 
