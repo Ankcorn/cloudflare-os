@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -82,18 +82,18 @@ async function checkGatekeeperVendorFilter(
     filter: GatekeeperVendorFilter): Promise<boolean> {
   try {
     if (filter.resourceUrl) {
-      let patterns = await vendor.getSupportedUrls();
+      let resources = await vendor.getSupportedResources();
       let matched = false;
-      for (let pattern of patterns) {
-        if (typeof pattern !== "string") {
-          // Guard against gatekeepers returning a non-string pattern for now.
+      for (let resource of resources) {
+        if (typeof resource.urlPattern !== "string") {
+          // Guard against gatekeepers returning a non-string urlPattern for now.
           //
-          // TODO: Consider whether this is the API we want for getSupportedUrls(). Is URLPattern
+          // TODO: Consider whether this is the API we want for getSupportedResources(). Is URLPattern
           //   even the right thing?
-          throw new Error("Gatekeeper returned non-string pattern from getSupportedUrls()");
+          throw new Error("Gatekeeper returned non-string urlPattern from getSupportedResources()");
         }
 
-        if (new URLPattern(pattern).test(filter.resourceUrl)) {
+        if (new URLPattern(resource.urlPattern).test(filter.resourceUrl)) {
           matched = true;
           break;
         }
@@ -372,8 +372,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
-      : Promise<{id: string, description: VendorDescription}[]> {
-    let promises: Promise<{id: string, description: VendorDescription}|null>[] = [];
+      : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
+    let promises: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}|null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
       promises.push((async () => {
@@ -381,7 +381,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           return null;
         }
 
-        return {id, description: await vendor.describe()};
+        let [description, supportedResources] = await Promise.all([
+          vendor.describe(),
+          vendor.getSupportedResources(),
+        ]);
+        return {id, description, supportedResources};
       })());
     }
 
@@ -426,8 +430,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           return;
         }
 
+        let supportedResources: SupportedResource[] = [];
+        try {
+          supportedResources = await record.account.getSupportedResources();
+        } catch (err) {
+          console.error("getSupportedResources() failed for account", record.id, err);
+        }
+
         seenIds.add(record.id);
-        subscriber.add(record.id, record.description, record.vendorDescription)
+        subscriber.add(record.id, record.description, record.vendorDescription, supportedResources)
             .catch(err => { connectedAccounts.unsubscribe(dbSubscriber) });
       },
       update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord): void {
@@ -454,8 +465,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           return;
         }
 
+        let supportedResources: SupportedResource[] = [];
+        try {
+          supportedResources = await record.account.getSupportedResources();
+        } catch (err) {
+          console.error("getSupportedResources() failed for account", record.id, err);
+        }
+
         seenIds.add(record.id);
-        subscriber.add(record.id, record.description, record.vendorDescription).catch(unsubscribe);
+        subscriber.add(record.id, record.description, record.vendorDescription, supportedResources).catch(unsubscribe);
       })());
     }
 

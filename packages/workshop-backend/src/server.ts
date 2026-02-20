@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
-import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
@@ -97,7 +97,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
-      : Promise<{id: string, description: VendorDescription}[]> {
+      : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
     return this.user.listGatekeeperVendors(filter);
   }
 

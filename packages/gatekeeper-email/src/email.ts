@@ -8,6 +8,7 @@ import {
   VendorDescription,
   GatekeeperConnectCallback,
   AccountDescription,
+  SupportedResource,
 } from '@gadgets/workshop-shared/gatekeeper';
 import {
   EmailSession,
@@ -34,8 +35,12 @@ function getBasePath(env: Env) {
   return new URL(getBaseUrl(env)).pathname;
 }
 
-function getSupportedUrls(env: Env) {
-  return [`${getBaseUrl(env)}/mailbox/*`];
+function getSupportedResourcesList(env: Env): SupportedResource[] {
+  return [{
+    urlPattern: `${getBaseUrl(env)}/mailbox/*`,
+    title: "Email Mailbox",
+    description: "Send and receive emails.",
+  }];
 }
 
 function getEmailHost(env: Env) {
@@ -171,8 +176,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getSupportedUrls(): Promise<string[]> {
-    return getSupportedUrls(this.env);
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return getSupportedResourcesList(this.env);
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -228,8 +233,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     };
   }
 
-  async getSupportedUrls(): Promise<string[]> {
-    return getSupportedUrls(this.env);
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return getSupportedResourcesList(this.env);
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {

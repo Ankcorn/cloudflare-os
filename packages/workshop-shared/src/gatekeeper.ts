@@ -89,6 +89,19 @@ export type ResourceDescription = {
   hookTsType?: string;
 }
 
+// Describes a type of resource that a vendor can provide access to. Each entry represents a
+// category of resource (e.g. "Jira Issue", "Gmail Mailbox") rather than a specific instance.
+export type SupportedResource = {
+  // URLPattern string for matching URLs, e.g. "https://jira.cfdata.org/*"
+  urlPattern: string;
+
+  // Human-readable title for this resource type, e.g. "Jira Issue"
+  title: string;
+
+  // Short description of what this resource provides.
+  description: string;
+}
+
 // The root interface of an Adapter, as provided to the Gadget Workshop.
 //
 // An installation of the Gadget Workshop is provided with a set of Adapters to allow it to
@@ -111,14 +124,11 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // to complete the flow.
   connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
 
-  // Get a list of strings describing URL patterns for which this vendor may implement a
-  // gatekeeper. The Gadget Workshop uses this as a hint to quickly find an appropriate gatekeeper
-  // implementation for an arbitrary URL entered by the user.
-  //
-  // The strings are in the format accepted by the `URLPattern` API.
+  // Get the list of resource types this vendor supports. Each entry describes a category of
+  // resource the vendor can provide access to, along with a URL pattern for matching.
   //
   // TODO: How does the Gadget Workshop know when the supported URLs have changed, without polling?
-  getSupportedUrls(): Promise<string[]>;
+  getSupportedResources(): Promise<SupportedResource[]>;
 
   // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
   // The returned string is the content of a `.d.ts` file. All types refereced by
@@ -160,10 +170,10 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // Get display info for an account, suitable for display to a user.
   describe(): Promise<AccountDescription>;
 
-  // Typically returns the same as GatekeeperVendor.getSupportedUrls(), though an implementation
-  // could choose to return a narrower set if the specific account does not support every resource
-  // that the vendor supports generally.
-  getSupportedUrls(): Promise<string[]>;
+  // Typically returns the same as GatekeeperVendor.getSupportedResources(), though an
+  // implementation could choose to return a narrower set if the specific account does not support
+  // every resource that the vendor supports generally.
+  getSupportedResources(): Promise<SupportedResource[]>;
 
   // Get a Durable Object class that can implement a gatekeeper for the given resource. This class
   // can be used to instantiate a Facet which implements the Gatekeeper interface.

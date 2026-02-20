@@ -1,5 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import TYPES_CODE from "./types.txt";
@@ -72,7 +72,11 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/gmail.modify"
 ];
 
-const SUPPORTED_URLS = ["https://mail.google.com/*"];
+const SUPPORTED_RESOURCES: SupportedResource[] = [{
+  urlPattern: "https://mail.google.com/*",
+  title: "Gmail Mailbox",
+  description: "Read and send emails.",
+}];
 
 // Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
 export default {
@@ -169,8 +173,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return this.ctx.exports.GatekeeperUserImpl({props});
   }
 
-  async getSupportedUrls(): Promise<string[]> {
-    return SUPPORTED_URLS;
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return SUPPORTED_RESOURCES;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -270,8 +274,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return getGoogleAccountDescription(token.token);
   }
 
-  async getSupportedUrls(): Promise<string[]> {
-    return SUPPORTED_URLS;
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return SUPPORTED_RESOURCES;
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
