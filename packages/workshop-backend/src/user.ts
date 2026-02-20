@@ -3,6 +3,7 @@ import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubs
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
+import { getAiGatewayConfig } from "./ai-gateway.js";
 
 type ConnectedAccountRecord = {
   id: number;
@@ -245,8 +246,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
     let result: AiChatAuthorInfo[] = [];
+
+    // When AI Gateway mode is active, include all suggested models for enabled providers.
+    let gwConfig = getAiGatewayConfig(this.env);
+    let gwModelIds = new Set<string>();
+    if (gwConfig) {
+      for (let entry of gwConfig.getModelList()) {
+        result.push(entry);
+        gwModelIds.add(entry.id);
+      }
+    }
+
+    // Also include user-configured models, skipping any that duplicate a gateway model.
     for (let model of this.storage.aiModels.list()) {
-      result.push(model.profile);
+      if (!gwModelIds.has(model.profile.id)) {
+        result.push(model.profile);
+      }
     }
     return result;
   }
@@ -275,18 +290,33 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // DO NOT MAKE PUBLIC -- returns API keys.
   async getChatContext(modelId: string | null): Promise<UserChatContext> {
+    let gwConfig = getAiGatewayConfig(this.env);
+
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
     if (modelId) {
-      result.aiModel = this.storage.aiModels.get(modelId);
+      // In AI Gateway mode, resolve gateway models first.
+      if (gwConfig) {
+        result.aiModel = gwConfig.resolveModel(modelId);
+      }
+      if (!result.aiModel) {
+        result.aiModel = this.storage.aiModels.get(modelId);
+      }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
     }
-    let quickModelId = this.storage.quickModel.get();
-    if (quickModelId) {
-      let quickModel = this.storage.aiModels.get(quickModelId);
-      if (quickModel) {
-        result.quickModel = quickModel.config;
+
+    // Resolve the quick model (used for lightweight tasks like title generation).
+    if (gwConfig) {
+      // In AI Gateway mode, always use the hardcoded quick model.
+      result.quickModel = gwConfig.getQuickModelConfig();
+    } else {
+      let quickModelId = this.storage.quickModel.get();
+      if (quickModelId) {
+        let quickModel = this.storage.aiModels.get(quickModelId);
+        if (quickModel) {
+          result.quickModel = quickModel.config;
+        }
       }
     }
     return result;

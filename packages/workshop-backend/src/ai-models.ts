@@ -9,8 +9,56 @@ import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@gadgets/worksho
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiModelConfig } from "@gadgets/workshop-shared/api";
+import { AiGatewayConfig, getAiGatewayConfig } from "./ai-gateway.js";
 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
+  // When AI Gateway mode is active, all models are routed through the gateway.
+  // The config's apiToken and apiUrl are ignored; we use the gateway URL and CF API token instead.
+  let gwConfig = getAiGatewayConfig(env);
+  if (gwConfig) {
+    return getModelViaGateway(env, gwConfig, config);
+  }
+
+  return getModelDirect(env, config);
+}
+
+function getModelViaGateway(
+  env: Cloudflare.Env,
+  gwConfig: AiGatewayConfig,
+  config: AiModelConfig,
+): LanguageModel {
+  let baseURL = gwConfig.getBaseUrl(config.provider);
+
+  switch (config.provider) {
+    case "anthropic":
+      return createAnthropic({
+        apiKey: gwConfig.apiToken,
+        baseURL,
+      })(config.model);
+    case "cloudflare":
+      return createWorkersAI({
+        binding: env.WORKERS_AI,
+        gateway: { id: gwConfig.workersAiGateway },
+      })(config.model as any);
+    case "google":
+      return createGoogleGenerativeAI({
+        apiKey: gwConfig.apiToken,
+        baseURL,
+      })(config.model);
+    case "openai":
+      return createOpenAI({
+        apiKey: gwConfig.apiToken,
+        baseURL,
+      })(config.model);
+    default:
+      throw new Error(
+        `Provider "${config.provider}" is not supported through AI Gateway. ` +
+        `Configured providers: ${[...gwConfig.providers].join(", ")}`
+      );
+  }
+}
+
+function getModelDirect(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
   switch (config.provider) {
     case "anthropic":
       return createAnthropic({
@@ -19,8 +67,6 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig): LanguageMo
       })(config.model);
     case "cloudflare":
       return createWorkersAI({
-        // TODO: This bills to the workshop's own account rather than the user, do we need to
-        //   change this?
         binding: env.WORKERS_AI,
       })(config.model as any);
     case "google":
