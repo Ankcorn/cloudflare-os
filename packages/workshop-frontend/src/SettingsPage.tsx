@@ -1,11 +1,11 @@
-import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert, Dropdown } from 'antd'
+import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert, Dropdown, Tag } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined, LogoutOutlined } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import AlphaWarning from './AlphaWarning'
 import { useState, useEffect, useRef } from 'react'
-import { AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiGatewayInfo, SUGGESTED_MODELS, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { RpcTarget } from 'capnweb'
 import AddModelModal from './AddModelModal'
@@ -35,6 +35,7 @@ export default function SettingsPage() {
   const [passwordLoading, setPasswordLoading] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordForm] = Form.useForm()
+  const [aiConfig, setAiConfig] = useState<AiGatewayInfo | null>(null)
 
   // Fetch user info
   useEffect(() => {
@@ -70,6 +71,13 @@ export default function SettingsPage() {
 
   useEffect(() => {
     fetchModels()
+  }, [authenticatedApi])
+
+  // Fetch AI config (gateway mode info)
+  useEffect(() => {
+    authenticatedApi.getAiConfig().then(setAiConfig).catch(error => {
+      console.error('Failed to fetch AI config:', error)
+    })
   }, [authenticatedApi])
 
   // Fetch quick model setting
@@ -278,12 +286,29 @@ export default function SettingsPage() {
     },
   ]
 
+  const gatewayMode = aiConfig?.enabled === true
+
+  // Determine if a model is a built-in gateway model (not user-deletable).
+  const isBuiltInModel = (modelId: string): boolean => {
+    if (!aiConfig?.enabled) return false
+    const enabledSet: Set<string> = new Set(aiConfig.enabledProviders)
+    for (const [provider, models] of Object.entries(SUGGESTED_MODELS)) {
+      if (enabledSet.has(provider) && modelId in models) return true
+    }
+    return false
+  }
+
   const modelColumns = [
     {
       title: 'Display Name',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Text strong>{name}</Text>,
+      render: (name: string, record: AiChatAuthorInfo) => (
+        <Space>
+          <Text strong>{name}</Text>
+          {isBuiltInModel(record.id) && <Tag color="blue">Built-in</Tag>}
+        </Space>
+      ),
     },
     {
       title: 'Model ID',
@@ -296,12 +321,14 @@ export default function SettingsPage() {
       key: 'actions',
       width: 100,
       render: (_: any, record: AiChatAuthorInfo) => (
-        <Button
-          icon={<DeleteOutlined />}
-          onClick={() => handleDeleteModel(record.id, record.name)}
-          danger
-          type="text"
-        />
+        isBuiltInModel(record.id) ? null : (
+          <Button
+            icon={<DeleteOutlined />}
+            onClick={() => handleDeleteModel(record.id, record.name)}
+            danger
+            type="text"
+          />
+        )
       ),
     },
   ]
@@ -497,28 +524,30 @@ export default function SettingsPage() {
             }}
           />
 
-          <div style={{ marginTop: 24 }}>
-            <Text strong style={{ display: 'block', marginBottom: 8 }}>
-              Quick Model
-            </Text>
-            <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-              Used for simple tasks like generating chat titles. Choose a fast, inexpensive model.
-            </Text>
-            <Select
-              style={{ width: 300 }}
-              value={quickModel}
-              onChange={handleQuickModelChange}
-              loading={quickModelLoading}
-              placeholder="Select a model"
-              options={[
-                { value: null, label: 'None' },
-                ...models.map(model => ({
-                  value: model.id,
-                  label: model.name,
-                }))
-              ]}
-            />
-          </div>
+          {!gatewayMode && (
+            <div style={{ marginTop: 24 }}>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>
+                Quick Model
+              </Text>
+              <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+                Used for simple tasks like generating chat titles. Choose a fast, inexpensive model.
+              </Text>
+              <Select
+                style={{ width: 300 }}
+                value={quickModel}
+                onChange={handleQuickModelChange}
+                loading={quickModelLoading}
+                placeholder="Select a model"
+                options={[
+                  { value: null, label: 'None' },
+                  ...models.map(model => ({
+                    value: model.id,
+                    label: model.name,
+                  }))
+                ]}
+              />
+            </div>
+          )}
         </Card>
 
         {/* Change Password is only available in password-auth mode, not when using CF Access. */}
@@ -609,6 +638,7 @@ export default function SettingsPage() {
             fetchModels()
           }}
           authenticatedApi={authenticatedApi}
+          aiConfig={aiConfig}
         />
 
         <ConnectAccountModal

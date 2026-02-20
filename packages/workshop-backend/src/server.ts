@@ -1,8 +1,9 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadata, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
+import { getAiGatewayConfig } from "./ai-gateway.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback } from "./overseer";
 
@@ -26,7 +27,8 @@ type Env = Cloudflare.Env & {
 // =======================================================================================
 
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
-  constructor(private ctx: ExecutionContext, private user: DurableObjectStub<UserDurableObject>) {
+  constructor(private ctx: ExecutionContext, private env: Env,
+      private user: DurableObjectStub<UserDurableObject>) {
     super();
 
     this.overseers = this.ctx.exports.OverseerDurableObject;
@@ -59,11 +61,24 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.getQuickModel();
   }
 
+  getAiConfig(): Promise<AiGatewayInfo> {
+    let gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig) {
+      return Promise.resolve({
+        enabled: true,
+        enabledProviders: [...gwConfig.providers] as AiModelProvider[],
+      });
+    } else {
+      return Promise.resolve({ enabled: false });
+    }
+  }
+
   async openGadget(id: string): Promise<Overseer> {
     let userId = this.user.id.toString();
 
     let overseer = this.overseers.get(this.overseers.idFromString(id));
 
+    // @ts-ignore -- Cap'n Web RPC types can trigger "excessively deep" errors.
     return overseer.open(userId);
   }
 
@@ -119,7 +134,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let userId = this.users.idFromName(split[0]);
     let stub = this.users.get(userId);
     await stub.authenticate(split[1]);
-    return new AuthenticatedApiImpl(this.ctx, stub);
+    return new AuthenticatedApiImpl(this.ctx, this.env, stub);
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -131,7 +146,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let userId = this.users.idFromName(email);
     let stub = this.users.get(userId);
     await stub.authenticateFromCfAccess(email);
-    return new AuthenticatedApiImpl(this.ctx, stub);
+    return new AuthenticatedApiImpl(this.ctx, this.env, stub);
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {

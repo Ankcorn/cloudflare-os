@@ -31,9 +31,9 @@
   // Having this binding configured forces people to log in when they run `wrangler dev`, so it's
   // disabled by default, but you should uncomment it if you want Workers AI.
   //
-  // "ai": {
-  //   "binding": "WORKERS_AI"
-  // },
+  "ai": {
+    "binding": "WORKERS_AI"
+  },
 
   // When deploying to prod, you may want to bundle the frontend as assets on the backend, like so.
   // But it's not the only way to do it.

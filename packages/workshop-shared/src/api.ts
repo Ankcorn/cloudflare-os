@@ -128,6 +128,10 @@ export interface AuthenticatedApi extends RpcTarget {
   // Get the quick model setting.
   getQuickModel(): Promise<null | string>;
 
+  // Get AI configuration info, including whether AI Gateway mode is active and which providers
+  // are available. The frontend uses this to adjust the model management UI.
+  getAiConfig(): Promise<AiGatewayInfo>;
+
   // Open an existing gadget.
   //
   // To allow for pipelining ,this throws an exception if the gadget doesn't exist.
@@ -171,7 +175,15 @@ export interface AuthenticatedApi extends RpcTarget {
 }
 
 // Supported AI providers.
-type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+
+// Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`.
+export type AiGatewayInfo = {
+  enabled: true;
+  enabledProviders: AiModelProvider[];
+} | {
+  enabled: false;
+};
 
 // Configuration specifying how to connect to an AI model provider.
 export type AiModelConfig = {
@@ -207,15 +219,14 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
     "@cf/zai-org/glm-4.7-flash": "GLM 4.7 Flash (Workers AI)",
   },
   "google": {
-    "gemini-3-pro-preview": "Gemini 3 Pro",
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
     "gemini-3-flash-preview": "Gemini 3 Flash",
   },
   "ollama": {
     "qwen3-coder:30b": "Qwen 3 Coder 30B (ollama)",
   },
   "openai": {
-    "gpt-5.1-codex": "ChatGPT 5.1 Codex",
-    "gpt-5.1-codex-max": "ChatGPT 5.1 Codex Max",
+    "gpt-5.2-codex": "ChatGPT 5.2 Codex",
   },
 };
 

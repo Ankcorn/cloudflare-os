@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -267,11 +267,26 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    let gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig && !gwConfig.providers.has(config.provider)) {
+      throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
+    }
+
     profile.type = "agent";
     this.storage.aiModels.put({profile, config});
   }
 
   async deleteModel(id: string): Promise<void> {
+    // In AI Gateway mode, don't allow deleting built-in suggested models.
+    let gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig) {
+      for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
+        if (gwConfig.providers.has(provider) && id in models) {
+          throw new Error(`Cannot delete built-in model "${models[id]}".`);
+        }
+      }
+    }
+
     this.storage.aiModels.delete(id);
   }
 
