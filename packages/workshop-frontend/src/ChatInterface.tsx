@@ -145,6 +145,7 @@ interface ChatInterfaceProps {
   onNavigateToChat: (chatId: number | null, options?: { replace?: boolean }) => void
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
   onFileEdited?: (filename: string) => void
+  onGadgetTitleMaybeChanged?: () => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -154,7 +155,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited }: ChatInterfaceProps) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, onGadgetTitleMaybeChanged }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -312,7 +313,13 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   // not separate stubs for each method
   class ChatSubscriberImpl extends RpcTarget implements AiChatSubscriber{
     metadata(chat: AiChatMetadata) {
+      let prev = cacheRef.current.chats.get(chat.id)
       cacheRef.current.chats.set(chat.id, chat)
+      // When the first chat gets its AI-generated title, the gadget may have
+      // been auto-renamed too — tell the parent to re-fetch metadata.
+      if (chat.id === 0 && prev?.title === "New Chat" && chat.title !== "New Chat") {
+        onGadgetTitleMaybeChanged?.()
+      }
       forceUpdate()
     }
 
