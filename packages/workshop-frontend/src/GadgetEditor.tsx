@@ -363,6 +363,13 @@ export default function GadgetEditor() {
               onNavigateToChat={navigateToChat}
               onProposedChangesChange={setProposedChanges}
               onFileEdited={handleFileEdited}
+              onGadgetTitleMaybeChanged={async () => {
+                try {
+                  let m = await overseer.stub.getMetadata()
+                  setMetadata(m)
+                  setTitleInput(m.title)
+                } catch {}
+              }}
             />
           ) : null}
         </div>
