@@ -1,5 +1,5 @@
-import { Layout, Typography, Button, Table, Space, Dropdown, Avatar, Tooltip } from 'antd'
-import { LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Table, Space, Dropdown, Avatar, Tooltip, Modal, message } from 'antd'
+import { DeleteOutlined, LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { CF_ACCESS_MODE } from './useAuth'
@@ -74,6 +74,32 @@ export default function Home() {
     // No navigation needed - ProtectedRoute will show login overlay
   }
 
+  const handleDeleteGadget = (gadget: GadgetMetadata, e: React.MouseEvent) => {
+    e.stopPropagation()
+    Modal.confirm({
+      title: 'Delete Gadget',
+      content: `Are you sure you want to delete "${gadget.title}"? This action cannot be undone.`,
+      okText: 'Delete',
+      okType: 'danger',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          const overseer = await authenticatedApi.openGadget(gadget.id)
+          try {
+            await overseer.deleteSelf()
+          } finally {
+            overseer[Symbol.dispose]()
+          }
+          message.success('Gadget deleted')
+          setGadgets(prev => prev.filter(g => g.id !== gadget.id))
+        } catch (err) {
+          console.error('Failed to delete gadget:', err)
+          message.error('Failed to delete gadget')
+        }
+      }
+    })
+  }
+
   const handleCreateGadget = async () => {
     try {
       const newGadget = await authenticatedApi.newGadget()
@@ -108,6 +134,20 @@ export default function Home() {
         <Tooltip title={lastActive.toLocaleString()}>
           <Text type="secondary">{formatRelativeTime(lastActive)}</Text>
         </Tooltip>
+      ),
+    },
+    {
+      title: '',
+      key: 'actions',
+      width: 48,
+      render: (_: any, record: GadgetMetadata) => (
+        <Button
+          type="text"
+          size="small"
+          danger
+          icon={<DeleteOutlined />}
+          onClick={(e) => handleDeleteGadget(record, e)}
+        />
       ),
     },
   ]
