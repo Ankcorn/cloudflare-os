@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { Button, Table, Input, Space, Typography, Modal, message, Empty, Tabs, Select, Spin, Checkbox } from 'antd'
-import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ArrowLeftOutlined } from '@ant-design/icons'
+import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ArrowLeftOutlined, SearchOutlined, RightOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { Overseer, GatekeeperMetadata, ActionLogEntry, AiChatAuthorInfo, AuthenticatedApi, ConnenctedAccountsSubscriber, AgentSpawnerConfig } from '@gadgets/workshop-shared/api'
-import { AccountDescription, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
-import AccountCard from './AccountCard'
-import VendorCard from './VendorCard'
+import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+
 
 const { Title, Text } = Typography
 
@@ -19,6 +18,53 @@ interface ConnectionsProps {
 interface VendorOption {
   id: string
   description: VendorDescription
+  supportedResources: SupportedResource[]
+}
+
+// Extract a base URL from a resource pattern, e.g. "https://jira.cfdata.org/*" → "https://jira.cfdata.org/"
+// Returns null for wildcard hostnames (e.g. "https://*.example.com/*") since we can't pre-fill.
+function extractBaseUrl(pattern: string): string | null {
+  const match = pattern.match(/^(https?:\/\/[^/*:]+(?:\/[^*]*)?)/)
+  if (!match) return null
+  return match[1].endsWith('/') ? match[1] : match[1] + '/'
+}
+
+// Extract the hostname from a pattern, including wildcard subdomains.
+// e.g. "https://jira.cfdata.org/*" → "jira.cfdata.org"
+// e.g. "https://*.prometheus-access.cfdata.org/*" → "*.prometheus-access.cfdata.org"
+function extractHostname(pattern: string): string | null {
+  const match = pattern.match(/^https?:\/\/([^/:]+)/)
+  if (!match) return null
+  const hostname = match[1].replace(/\*+$/, '') // strip trailing wildcard (e.g. https://*)
+  return hostname || null
+}
+
+// URL prefix match: strip scheme and trailing wildcards, then check if one is a prefix
+// of the other. Handles partial typing ("jira.cfdata.or") and full URLs with paths.
+// Also handles wildcard subdomain patterns like "*.prometheus-access.cfdata.org".
+function matchesResourceUrl(search: string, pattern: string): boolean {
+  const stripScheme = (s: string) => s.replace(/^https?:\/\//, '').toLowerCase()
+  const s = stripScheme(search).replace(/\*+$/, '')
+  const p = stripScheme(pattern).replace(/\*+$/, '')
+  if (!s) return false
+
+  // Wildcard subdomain: *.foo.com matches anything.foo.com
+  if (p.startsWith('*.')) {
+    const suffixHost = p.slice(1).split('/')[0] // ".foo.com"
+    const searchHost = s.split('/')[0]
+    if (searchHost.endsWith(suffixHost) || suffixHost.startsWith('.' + searchHost)) return true
+  }
+
+  return p.startsWith(s) || s.startsWith(p)
+}
+
+// Check if search text matches a resource. Tries URL prefix matching (scheme-optional),
+// then falls back to multi-word token matching against title/description/pattern.
+function matchesResource(search: string, resource: SupportedResource): boolean {
+  if (matchesResourceUrl(search.trim(), resource.urlPattern)) return true
+  const corpus = `${resource.title} ${resource.description} ${resource.urlPattern}`.toLowerCase()
+  const tokens = search.toLowerCase().split(/\s+/).filter(Boolean)
+  return tokens.every(t => corpus.includes(t))
 }
 
 export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible }: ConnectionsProps) {
@@ -29,7 +75,6 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
-  const [newConnectionUrl, setNewConnectionUrl] = useState('')
   const [creatingConnection, setCreatingConnection] = useState(false)
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
   const [connectionTabKey, setConnectionTabKey] = useState<'resource' | 'ai-model' | 'agent-spawner'>('resource')
@@ -44,22 +89,19 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [spawnerLimitEnv, setSpawnerLimitEnv] = useState(false)
   const [spawnerEnv, setSpawnerEnv] = useState<string[]>([])
 
-  // Two-step flow state for resource connections
-  const [connectionStep, setConnectionStep] = useState<'url' | 'account'>('url')
-  const [filteredAccounts, setFilteredAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
-  const [filteredVendors, setFilteredVendors] = useState<VendorOption[]>([])
+  // Unified resource connection state
+  const [searchText, setSearchText] = useState('')
+  const [allAccounts, setAllAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] }>>(new Map())
+  const [allVendors, setAllVendors] = useState<VendorOption[]>([])
   const [_accountsReady, setAccountsReady] = useState(false)
-  const [_vendorsLoading, setVendorsLoading] = useState(false)
+  const [vendorsLoading, setVendorsLoading] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
+  const [selectedAccountForUrl, setSelectedAccountForUrl] = useState<number | null>(null)
+  const [selectedVendorForUrl, setSelectedVendorForUrl] = useState<string | null>(null)
+  const [resourceUrlInput, setResourceUrlInput] = useState('')
 
   // Ref to track the current subscription
   const subscriptionRef = useRef<{ stub: { [Symbol.dispose](): void } } | null>(null)
-  // Track whether we've ever received ready() for the current URL context - only show spinner until first ready
-  const everReadyForUrlRef = useRef(false)
-  // Track whether we've ever loaded vendors for the current URL context
-  const everLoadedVendorsForUrlRef = useRef(false)
-  // Track the URL for which the "ever ready/loaded" refs apply
-  const readyUrlRef = useRef<string | null>(null)
   // Track account IDs seen in current subscription batch (for reconnection handling)
   const seenAccountIdsRef = useRef(new Set<number>())
 
@@ -121,37 +163,26 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   }, [isVisible])
 
-  // Subscribe to filtered accounts when in account selection step
+  // Subscribe to ALL connected accounts when modal opens (no filter).
+  // New accounts from OAuth completion appear live via this subscription.
   useEffect(() => {
-    if (connectionStep !== 'account' || !newConnectionUrl.trim()) {
-      return
-    }
+    if (!isNewConnectionModalVisible) return
 
-    const currentUrl = newConnectionUrl.trim()
+    seenAccountIdsRef.current = new Set()
 
-    // Check if this is a new URL context (vs reconnection for same URL)
-    if (readyUrlRef.current !== currentUrl) {
-      // New URL context - reset tracking state
-      everReadyForUrlRef.current = false
-      everLoadedVendorsForUrlRef.current = false
-      readyUrlRef.current = currentUrl
-      seenAccountIdsRef.current = new Set()
-    }
-
-    // Create subscriber for filtered accounts
-    class FilteredAccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
-      add(id: number, description: AccountDescription, vendor: VendorDescription) {
+    class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+      add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = []) {
         seenAccountIdsRef.current.add(id)
-        setFilteredAccounts(prev => {
+        setAllAccounts(prev => {
           const next = new Map(prev)
-          next.set(id, { description, vendor })
+          next.set(id, { description, vendor, supportedResources })
           return next
         })
       }
 
       remove(id: number) {
         seenAccountIdsRef.current.delete(id)
-        setFilteredAccounts(prev => {
+        setAllAccounts(prev => {
           const next = new Map(prev)
           next.delete(id)
           return next
@@ -159,16 +190,9 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       }
 
       ready() {
-        // Capture seen set before clearing (must happen before setState callback runs)
         const seen = seenAccountIdsRef.current
-        // Clear seen set for next subscription batch
         seenAccountIdsRef.current = new Set()
-        // Mark as ready (only matters for first time for this URL)
-        everReadyForUrlRef.current = true
-
-        // On ready, remove any accounts that weren't seen in this subscription batch
-        // (handles reconnection where some accounts may no longer be valid)
-        setFilteredAccounts(prev => {
+        setAllAccounts(prev => {
           let changed = false
           const next = new Map(prev)
           for (const id of next.keys()) {
@@ -183,21 +207,16 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       }
     }
 
-    const subscriber = new FilteredAccountsSubscriber()
-    const filter = { resourceUrl: currentUrl }
-
+    const subscriber = new AccountsSubscriber()
     const subscribe = async () => {
       try {
-        const stub = await authenticatedApi.subscribeConnectedAccounts(subscriber, filter)
+        const stub = await authenticatedApi.subscribeConnectedAccounts(subscriber)
         subscriptionRef.current = { stub }
       } catch (error) {
         console.error('Failed to subscribe to connected accounts:', error)
-        // Mark as ready even on error so UI isn't stuck loading
-        everReadyForUrlRef.current = true
         setAccountsReady(true)
       }
     }
-
     subscribe()
 
     return () => {
@@ -206,24 +225,17 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         subscriptionRef.current = null
       }
     }
-  }, [connectionStep, newConnectionUrl, authenticatedApi])
+  }, [isNewConnectionModalVisible, authenticatedApi])
 
-  // Load filtered vendors when in account selection step
+  // Load ALL vendors (with supportedResources) when modal opens.
   useEffect(() => {
-    if (connectionStep !== 'account' || !newConnectionUrl.trim()) {
-      return
-    }
+    if (!isNewConnectionModalVisible) return
 
-    const loadFilteredVendors = async () => {
-      // Only show loading spinner on first load for this URL, not on reconnection
-      if (!everLoadedVendorsForUrlRef.current) {
-        setVendorsLoading(true)
-      }
+    const loadVendors = async () => {
+      setVendorsLoading(true)
       try {
-        const filter = { resourceUrl: newConnectionUrl.trim() }
-        const vendorList = await authenticatedApi.listGatekeeperVendors(filter)
-        setFilteredVendors(vendorList.map(v => ({ id: v.id, description: v.description })))
-        everLoadedVendorsForUrlRef.current = true
+        const vendorList = await authenticatedApi.listGatekeeperVendors()
+        setAllVendors(vendorList.map(v => ({ id: v.id, description: v.description, supportedResources: v.supportedResources })))
       } catch (error) {
         console.error('Failed to load vendors:', error)
         message.error('Failed to load available services')
@@ -231,9 +243,8 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         setVendorsLoading(false)
       }
     }
-
-    loadFilteredVendors()
-  }, [connectionStep, newConnectionUrl, authenticatedApi])
+    loadVendors()
+  }, [isNewConnectionModalVisible, authenticatedApi])
 
   const handleEditStart = (bindingName: string) => {
     setEditingGatekeeper(bindingName)
@@ -289,43 +300,16 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     })
   }
 
-  const handleNextStep = () => {
-    if (!newConnectionUrl.trim()) {
-      message.error('Please enter a URL')
-      return
-    }
-    const currentUrl = newConnectionUrl.trim()
-    // Reset account selection state
-    setFilteredAccounts(new Map())
-    setFilteredVendors([])
-    setAccountsReady(false)
-    // Reset refs for new URL context (must be done synchronously before render)
-    if (readyUrlRef.current !== currentUrl) {
-      everReadyForUrlRef.current = false
-      everLoadedVendorsForUrlRef.current = false
-      readyUrlRef.current = currentUrl
-      seenAccountIdsRef.current = new Set()
-    }
-    setConnectionStep('account')
+  const handleBackFromUrlEntry = () => {
+    setSelectedAccountForUrl(null)
+    setSelectedVendorForUrl(null)
+    setResourceUrlInput('')
   }
 
-  const handleBackToUrl = () => {
-    // Clean up subscription
-    if (subscriptionRef.current) {
-      subscriptionRef.current.stub[Symbol.dispose]()
-      subscriptionRef.current = null
-    }
-    setConnectionStep('url')
-    setFilteredAccounts(new Map())
-    setFilteredVendors([])
-    setAccountsReady(false)
-    setConnectingVendor(null)
-  }
-
-  const handleSelectAccount = async (accountId: number) => {
+  const handleCreateConnection = async (accountId: number, url: string) => {
     setCreatingConnection(true)
     try {
-      const gatekeeper = await overseer.newGatekeeper(accountId, newConnectionUrl.trim())
+      const gatekeeper = await overseer.newGatekeeper(accountId, url)
       if (gatekeeper) {
         message.success('Connection created successfully')
         handleModalClose()
@@ -342,12 +326,11 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   }
 
-  const handleConnectNewAccount = async (vendorId: string) => {
+  const handleConnectNew = async (vendorId: string) => {
     setConnectingVendor(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId)
       window.open(result.url, '_blank')
-      // Don't close the modal - the new account will appear via subscription
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       message.error('Failed to start connection flow')
@@ -437,29 +420,32 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const handleModalOpen = () => {
     setIsNewConnectionModalVisible(true)
     setConnectionTabKey('resource')
-    setConnectionStep('url')
-    setNewConnectionUrl('')
-    setFilteredAccounts(new Map())
-    setFilteredVendors([])
+    setSearchText('')
+    setAllAccounts(new Map())
+    setAllVendors([])
     setAccountsReady(false)
+    setSelectedAccountForUrl(null)
+    setSelectedVendorForUrl(null)
+    setResourceUrlInput('')
     setConnectingVendor(null)
     resetSpawnerState()
     loadModels()
   }
 
   const handleModalClose = () => {
-    // Clean up subscription
     if (subscriptionRef.current) {
       subscriptionRef.current.stub[Symbol.dispose]()
       subscriptionRef.current = null
     }
     setIsNewConnectionModalVisible(false)
-    setNewConnectionUrl('')
+    setSearchText('')
     setConnectionTabKey('resource')
-    setConnectionStep('url')
-    setFilteredAccounts(new Map())
-    setFilteredVendors([])
+    setAllAccounts(new Map())
+    setAllVendors([])
     setAccountsReady(false)
+    setSelectedAccountForUrl(null)
+    setSelectedVendorForUrl(null)
+    setResourceUrlInput('')
     setConnectingVendor(null)
     resetSpawnerState()
   }
@@ -631,107 +617,203 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   ]
 
-  // Convert filtered accounts to array for rendering
-  const filteredAccountsArray = Array.from(filteredAccounts.entries()).map(([id, data]) => ({
-    id,
-    ...data
-  }))
-
-  // Render the resource tab content based on the current step
+  // Render the resource tab content
   const renderResourceTabContent = () => {
-    if (connectionStep === 'url') {
+    // Sub-step: user picked a (resource, account) pair and is entering the resource URL.
+    if (selectedVendorForUrl !== null && selectedAccountForUrl !== null) {
+      const vendor = allVendors.find(v => v.id === selectedVendorForUrl)
+      const vendorName = vendor?.description.displayName || ''
+      const account = allAccounts.get(selectedAccountForUrl)
+
       return (
-        <>
-          <div style={{ marginBottom: '16px' }}>
-            <Text>
-              Enter the URL of the resource you want to connect to. This will create a new connection
-              that your gadget can use to interact with external services.
+        <div style={{ minHeight: 200 }}>
+          <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Button type="text" icon={<ArrowLeftOutlined />} onClick={handleBackFromUrlEntry} size="small" />
+            <Text type="secondary">
+              {vendorName} · <Text strong>{account?.description.displayName || account?.description.uniqueName}</Text>
             </Text>
           </div>
           <Input
             placeholder="https://example.com/resource"
-            value={newConnectionUrl}
-            onChange={(e) => setNewConnectionUrl(e.target.value)}
-            onPressEnter={handleNextStep}
+            value={resourceUrlInput}
+            onChange={(e) => setResourceUrlInput(e.target.value)}
             autoFocus
+            style={{ marginBottom: 16 }}
           />
-        </>
+          <Button
+            type="primary"
+            block
+            disabled={!resourceUrlInput.trim()}
+            loading={creatingConnection}
+            onClick={() => handleCreateConnection(selectedAccountForUrl!, resourceUrlInput.trim())}
+          >
+            Create Connection
+          </Button>
+        </div>
       )
     }
 
-    // Account selection step
-    // Only show spinner until first load completes - on reconnection, keep showing existing list
-    const isLoading = !everReadyForUrlRef.current || !everLoadedVendorsForUrlRef.current
-    const hasAccounts = filteredAccountsArray.length > 0
-    const hasVendors = filteredVendors.length > 0
+    const lowerSearch = searchText.toLowerCase().trim()
+
+    const allResourceItems = allVendors.flatMap(v =>
+      v.supportedResources.map(r => ({ resource: r, vendor: v }))
+    )
+
+    // Empty search matches everything; otherwise filter by resource.
+    let matchedResources: { resource: SupportedResource, vendor: VendorOption, accountsOnly?: boolean }[] =
+      lowerSearch
+        ? allResourceItems.filter(({ resource }) => matchesResource(searchText, resource))
+        : [...allResourceItems]
+
+    // HTTP wildcard (`https://*`) shouldn't match when specific resources also match.
+    // But connected HTTP accounts whose details match the search should still show.
+    const httpItem = matchedResources.find(({ resource }) => resource.urlPattern === 'https://*')
+    const hasSpecificMatches = matchedResources.some(({ resource }) => resource.urlPattern !== 'https://*')
+
+    if (lowerSearch && httpItem && hasSpecificMatches) {
+      matchedResources = matchedResources.filter(({ resource }) => resource.urlPattern !== 'https://*')
+
+      // Check if any connected HTTP accounts match the search.
+      const httpVendorName = httpItem.vendor.description.displayName
+      const httpAccounts = [...allAccounts.entries()]
+        .filter(([_, { vendor: v }]) => v.displayName === httpVendorName)
+
+      const hasMatchingAccounts = lowerSearch
+        ? httpAccounts.some(([_, { description }]) => {
+            const corpus = [description.displayName, description.uniqueName, ...description.scope]
+              .filter(Boolean).join(' ').toLowerCase()
+            return lowerSearch.split(/\s+/).every(t => corpus.includes(t))
+          })
+        : httpAccounts.length > 0
+
+      if (hasMatchingAccounts) {
+        matchedResources.push({ ...httpItem, accountsOnly: true })
+      }
+    }
 
     return (
-      <div style={{ minHeight: 200 }}>
-        <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Button
-            type="text"
-            icon={<ArrowLeftOutlined />}
-            onClick={handleBackToUrl}
-            size="small"
-          />
-          <Text type="secondary">
-            Select an account to access: <Text code>{newConnectionUrl}</Text>
-          </Text>
-        </div>
+      <div>
+        <Input
+          placeholder="Search resources or paste a URL..."
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          autoFocus
+          allowClear
+          prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
+          style={{ borderRadius: 8 }}
+        />
 
-        {isLoading ? (
-          <div style={{ textAlign: 'center', padding: '32px 0' }}>
-            <Spin />
-          </div>
-        ) : !hasAccounts && !hasVendors ? (
-          <div style={{ textAlign: 'center', padding: '32px 0' }}>
-            <Text type="secondary">
-              No accounts or services are available that can access this URL.
-            </Text>
-          </div>
-        ) : (
-          <>
-            {/* Existing connected accounts section */}
-            {hasAccounts && (
-              <div style={{ marginBottom: 24 }}>
-                <Text strong style={{ display: 'block', marginBottom: 12 }}>
-                  Your Accounts
-                </Text>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {filteredAccountsArray.map(account => (
-                    <AccountCard
+        <div style={{
+          marginTop: 8,
+          border: '1px solid #e8e8e8',
+          borderRadius: 8,
+          overflow: 'hidden',
+          maxHeight: 400,
+          overflowY: 'auto',
+        }}>
+          {vendorsLoading ? (
+            <div style={{ textAlign: 'center', padding: '16px 0' }}>
+              <Spin size="small" />
+            </div>
+          ) : matchedResources.length === 0 ? (
+            <div style={{ padding: '12px 16px' }}>
+              <Text type="secondary">No matching resources.</Text>
+            </div>
+          ) : (
+            matchedResources.map(({ resource, vendor, accountsOnly }, i) => {
+              let vendorAccounts = [...allAccounts.entries()]
+                .filter(([_, { vendor: v }]) => v.displayName === vendor.description.displayName)
+                .map(([id, data]) => ({ id, ...data }))
+
+              // In accounts-only mode (HTTP alongside specific matches), only show
+              // accounts whose details match the search.
+              if (accountsOnly && lowerSearch) {
+                vendorAccounts = vendorAccounts.filter(account => {
+                  const corpus = [account.description.displayName, account.description.uniqueName, ...account.description.scope]
+                    .filter(Boolean).join(' ').toLowerCase()
+                  return lowerSearch.split(/\s+/).every(t => corpus.includes(t))
+                })
+              }
+
+              if (accountsOnly && vendorAccounts.length === 0) return null
+
+              const hostname = extractHostname(resource.urlPattern)
+
+              return (
+                <div key={`${vendor.id}-${resource.urlPattern}`} style={{ borderTop: i > 0 ? '1px solid #e8e8e8' : undefined }}>
+                  {/* Resource header */}
+                  <div style={{
+                    padding: '8px 16px',
+                    backgroundColor: '#fafafa',
+                  }}>
+                    <span style={{ fontWeight: 500, fontSize: 13 }}>{resource.title}</span>
+                    <span style={{ color: '#8c8c8c', fontSize: 12, marginLeft: 6 }}>{resource.description}</span>
+                  </div>
+
+                  {/* Existing account rows — click to go to URL entry */}
+                  {vendorAccounts.map(account => (
+                    <div
                       key={account.id}
-                      account={account.description}
-                      vendor={account.vendor}
-                      onClick={() => handleSelectAccount(account.id)}
-                      disabled={creatingConnection}
-                    />
+                      onClick={() => {
+                        setSelectedVendorForUrl(vendor.id)
+                        setSelectedAccountForUrl(account.id)
+                        const accountBaseUrl = account.supportedResources
+                          .map(r => extractBaseUrl(r.urlPattern)).find(Boolean)
+                        setResourceUrlInput(accountBaseUrl || extractBaseUrl(resource.urlPattern) || 'https://')
+                      }}
+                      style={{
+                        padding: '6px 16px 6px 32px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        borderTop: '1px solid #f5f5f5',
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#f0f0f0')}
+                      onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={{ fontSize: 13 }}>
+                          {account.description.uniqueName || account.description.displayName}
+                        </Text>
+                        {hostname && hostname !== '*' && (
+                          <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
+                            {hostname}
+                          </Text>
+                        )}
+                      </div>
+                      <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
+                    </div>
                   ))}
-                </div>
-              </div>
-            )}
 
-            {/* Connect new account section */}
-            {hasVendors && (
-              <div>
-                <Text strong style={{ display: 'block', marginBottom: 12 }}>
-                  Connect New Account
-                </Text>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {filteredVendors.map(vendor => (
-                    <VendorCard
-                      key={vendor.id}
-                      vendor={vendor.description}
-                      onClick={() => handleConnectNewAccount(vendor.id)}
-                      loading={connectingVendor === vendor.id}
-                      disabled={connectingVendor !== null && connectingVendor !== vendor.id}
-                    />
-                  ))}
+                  {/* Connect new account */}
+                  {!accountsOnly && (
+                    <div
+                      onClick={() => !connectingVendor && handleConnectNew(vendor.id)}
+                      style={{
+                        padding: '6px 16px 6px 32px',
+                        cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        borderTop: '1px solid #f5f5f5',
+                      }}
+                      onMouseEnter={e => (e.currentTarget.style.backgroundColor = '#fafafa')}
+                      onMouseLeave={e => (e.currentTarget.style.backgroundColor = '')}
+                    >
+                      {connectingVendor === vendor.id ? (
+                        <Spin size="small" style={{ marginRight: 8 }} />
+                      ) : (
+                        <PlusOutlined style={{ marginRight: 8, color: '#8c8c8c', fontSize: 11 }} />
+                      )}
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {connectingVendor === vendor.id ? 'Opening...' : 'Connect new account'}
+                      </Text>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
-          </>
-        )}
+              )
+            })
+          )}
+        </div>
       </div>
     )
   }
@@ -816,23 +898,17 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         title="Create New Connection"
         open={isNewConnectionModalVisible}
         onCancel={handleModalClose}
-        okText={connectionTabKey === 'resource' && connectionStep === 'url' ? 'Next' : 'Create Connection'}
+        okText="Create Connection"
         cancelText="Cancel"
         confirmLoading={creatingConnection}
         okButtonProps={{
-          disabled: connectionTabKey === 'resource'
-            ? (connectionStep === 'url' ? !newConnectionUrl.trim() : false)
-            : connectionTabKey === 'ai-model'
+          disabled: connectionTabKey === 'ai-model'
             ? !selectedModelId
             : !spawnerDisplayName.trim(),
-          // Hide the OK button in account selection step (users click on cards instead)
-          style: connectionTabKey === 'resource' && connectionStep === 'account' ? { display: 'none' } : undefined
         }}
-        footer={connectionTabKey === 'resource' && connectionStep === 'account' ? null : undefined}
+        footer={connectionTabKey === 'resource' ? null : undefined}
         onOk={() => {
-          if (connectionTabKey === 'resource' && connectionStep === 'url') {
-            handleNextStep()
-          } else if (connectionTabKey === 'ai-model') {
+          if (connectionTabKey === 'ai-model') {
             handleNewAiModelConnection()
           } else if (connectionTabKey === 'agent-spawner') {
             handleNewAgentSpawnerConnection()
@@ -843,9 +919,10 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
           activeKey={connectionTabKey}
           onChange={(key) => {
             setConnectionTabKey(key as 'resource' | 'ai-model' | 'agent-spawner')
-            // Reset resource step when switching tabs
             if (key === 'resource') {
-              setConnectionStep('url')
+              setSelectedAccountForUrl(null)
+              setSelectedVendorForUrl(null)
+              setResourceUrlInput('')
             }
           }}
           items={[
