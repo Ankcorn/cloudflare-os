@@ -210,7 +210,7 @@ export type AiModelConfig = {
 export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
   "anthropic": {
     "claude-haiku-4-5": "Claude Haiku 4.5",
-    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
     "claude-opus-4-6": "Claude Opus 4.6",
   },
   "cloudflare": {
@@ -515,6 +515,15 @@ export interface Overseer extends RpcTarget {
   // If no LLM is running, `stop()` does nothing and returns immediately.
   stopAgent(chatId: number): Promise<void>;
 
+  // Subscribe to the gadget worker's console logs. This allows the user to observe console logs
+  // being produced by the gadget.
+  //
+  // At present, logs are not stored, so the only way to see them is to be subscribed when they
+  // happen.
+  //
+  // To unsubscribe, dispose the returned stub.
+  subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>>;
+
   // TODO:
   // - Sharing / access control functions
 }
@@ -659,6 +668,28 @@ export interface AiChatSubscriber {
   // Adds a message to the chat.
   // TODO: Support streaming tokens into individual messages.
   message(msg: AiChatMessage): void;
+}
+
+// Interface implemented by the client to receive callback notifications about console logs written
+// by the gadget.
+export interface ConsoleLogSubscriber {
+  // Deliver a batch of logs. Often just one log is delivered at a time, but for efficiency they
+  // may be batched.
+  //
+  // If `chatId` is non-null, then the logs were generated while running the version of the gadget
+  // code including the changes in the given chat. This can be used to associate the logs with
+  // an ongoing agent session and report them to that session.
+  event(chatId: number | null, logs: ConsoleLogEvent[]): Promise<void>;
+}
+
+export type ConsoleLogEvent = {
+  timestamp: Date;
+
+  level: "debug" | "info" | "log" | "warn" | "error";
+
+  // The parameters that were passed to the log function, represented as an array of serializable
+  // values.
+  message: any[];
 }
 
 // Information about one of a Gadget's gatekeepers, for the purpose of displaying it in a list.

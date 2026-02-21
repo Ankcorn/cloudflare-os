@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -321,7 +321,7 @@ class OverseerImpl implements AgentHooks {
         throw new Error("No such chat");
       }
       sequence = this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
-      codeVersion += `.${sequence}`;
+      codeVersion += `.${chatId}.${sequence}`;
     }
 
     return this.env.LOADER.get(`${this.ctx.id}.${codeVersion}`, async () => {
@@ -340,13 +340,21 @@ class OverseerImpl implements AgentHooks {
         }
       }
 
+      let tailProps = {
+        chatId,
+        overseerId: this.ctx.id.toString(),
+      };
+
       return {
         // TODO: compatibility date configuration
-        compatibilityDate: "2025-08-01",
+        compatibilityDate: "2026-02-01",
         mainModule: "server.js",
         modules,
         env: this.getEnvForLoader(),
         globalOutbound: null,
+
+        // TODO: Switch to streaming tails when the workerd log spam issue is fixed.
+        tails: [this.ctx.exports.GadgetTailLoopback({props: tailProps})],
       };
     });
   }
@@ -824,7 +832,7 @@ class OverseerImpl implements AgentHooks {
       };
 
       return {
-        compatibilityDate: "2025-11-01",
+        compatibilityDate: "2026-02-01",
         // disallow_importable_env also disallows importable ctx.exports, to prevent the code
         // from calling itself in a loop.
         compatibilityFlags: ["disallow_importable_env"],
@@ -874,6 +882,34 @@ class OverseerImpl implements AgentHooks {
     }
 
     return log;
+  }
+
+  #tailSubscribers: Set<RpcStub<ConsoleLogSubscriber>> = new Set();
+
+  async deliverGadgetLogs(chatId: number | null, logs: ConsoleLogEvent[]) {
+    for (let sub of this.#tailSubscribers) {
+      sub.event(chatId, logs).catch(() => {
+        sub[Symbol.dispose]();
+        this.#tailSubscribers.delete(sub);
+      });
+    }
+  }
+
+  async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
+    let sub = subscriber.dup();
+    sub.onRpcBroken(_ => {
+      this.#tailSubscribers.delete(sub);
+      sub[Symbol.dispose]();
+    });
+    this.#tailSubscribers.add(sub);
+
+    let self = this;
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        self.#tailSubscribers.delete(sub);
+        sub[Symbol.dispose]();
+      }
+    });
   }
 
   async deliverCodeModeTrace(executionId: string, trace: TraceItem) {
@@ -946,6 +982,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     //   Proxy, serializeJsValueWithPipeline() decides it is non-pipelineable, which is incorrect.
     //   Manually wrapping in a stub works around the problem for now.
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
+  }
+
+  async deliverGadgetLogs(chatId: number | null, logs: ConsoleLogEvent[]) {
+    return this.impl.deliverGadgetLogs(chatId, logs);
   }
 
   async deliverCodeModeTrace(executionId: string, trace: TraceItem) {
@@ -1069,6 +1109,82 @@ export class GatekeeperHookLoopback
   // We need to declare a method otherwise the validator won't even report this class as existing
   // and so the loopback binding won't be created.
   dummyMethodToWorkAroundValidatorBug() {}
+}
+
+type GadgetTailLoopbackProps = {
+  chatId?: number;
+  overseerId: string;
+};
+
+export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetTailLoopbackProps> {
+  async #deliver(logs: ConsoleLogEvent[]) {
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let stub: DurableObjectStub<OverseerDurableObject> =
+        ns.get(ns.idFromString(this.ctx.props.overseerId));
+    await stub.deliverGadgetLogs(this.ctx.props.chatId ?? null, logs);
+  }
+
+  // New-style streaming tail worker. This produces console logs in real time (rather than waiting
+  // for the end of the event), but currently produces log spam on the `wrangler dev` console.
+  tailStream(event: TailStream.TailEvent<TailStream.Onset>)
+      : TailStream.TailEventHandlerType | Promise<TailStream.TailEventHandlerType> {
+    return {
+      log: (event: TailStream.TailEvent<TailStream.Log>) => {
+        console.log("log", event);
+        let log: ConsoleLogEvent = {
+          timestamp: new Date(event.timestamp),
+          level: event.event.level,
+          message: event.event.message as any[]
+        }
+        return this.#deliver([log]);
+      },
+
+      exception: (event: TailStream.TailEvent<TailStream.Exception>) => {
+        console.log("exception", event);
+        let log: ConsoleLogEvent = {
+          timestamp: new Date(event.timestamp),
+          level: "error",
+          message: [event.event.message, event.event.stack]
+        }
+        return this.#deliver([log]);
+      },
+    };
+  }
+
+  // Old-style tail worker. Logs are delayed until the end of the RPC event, which can be annoying
+  // for calls that do things like register subscriptions.
+  async tail(events: TraceItem[]) {
+    if (events.length != 1) {
+      console.error("Unexpected gadget trace size: ${events.length}");
+      return;
+    }
+
+    let event: TraceItem = events[0];
+
+    // HACK: Convert trace to serializable value by round-tripping to JSON.
+    // TODO: Make traces serializable in workerd.
+    event = JSON.parse(JSON.stringify(event));
+
+    let logs: ConsoleLogEvent[] = event.logs.map(log => {
+      let result: ConsoleLogEvent = {
+        timestamp: new Date(log.timestamp),
+        level: log.level as ConsoleLogEvent["level"],
+        message: log.message,
+      };
+      return result;
+    });
+
+    for (let err of event.exceptions) {
+      // Pretend errors were logged using console.error().
+      logs.push({
+        timestamp: new Date(err.timestamp),
+        level: "error",
+        message: [err.message],
+      });
+    }
+
+    await this.#deliver(logs);
+  }
 }
 
 type CodeModeLoopbackProps = {
@@ -1195,13 +1311,46 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
     let facet = await this.impl.getGadgetFacet(chatId);
+    let overseerImpl = this.impl;
 
     // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
     return new Proxy(facet, {
       get(target, prop, receiver) {
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
         //   we'll get an illegal invocation, as `receiver` points to our Proxy.
-        return Reflect.get(target, prop, target);
+        let method = Reflect.get(target, prop, target);
+
+        // Note that all wildcart properties of a stub appear as functions. So this check only
+        // really catches when `get()` returns `undefined`, as it does e.g. for the property
+        // named "then". Also if the prop is a symbol then it's definitely not an RPC so we handle
+        // that here.
+        if (typeof method !== "function" || typeof prop === "symbol") return method;
+
+        // HACK: We're going to assume all top-level properties are methods, and we are going to
+        //   intercept exceptions thrown by these methods and deliver them to the console log
+        //   subscriber. In theory we shouldn't have to do this, because these exceptions should
+        //   be reported to the tail worker. However, for some reason, that isn't working --
+        //   possibly a runtime bug which needs investigation.
+        // TODO: Fix exception reporting it tail workers so we can remove this hack.
+        return (...args: any[]) => {
+          let result: Promise<any> = Reflect.apply(method, target, args);
+          return result.catch((err: any) => {
+            let msg = err;
+            if (err instanceof Error) {
+              // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
+              // we at least specify the method that was called it's somewhat useful to the agent.
+              msg = `${err}\n    at ${prop}()`;
+            }
+
+            let event: ConsoleLogEvent = {
+              timestamp: new Date(),
+              level: "error",
+              message: [msg],
+            };
+            overseerImpl.deliverGadgetLogs(chatId ?? null, [event]);
+            throw err;
+          });
+        }
       },
       getPrototypeOf(target) {
         return RpcTarget.prototype;
@@ -1598,6 +1747,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async stopAgent(chatId: number): Promise<void> {
     this.impl.cancelAgent(chatId);
+  }
+
+  subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
+    return this.impl.subscribeToConsoleLogs(subscriber);
   }
 }
 

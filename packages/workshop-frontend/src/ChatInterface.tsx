@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag } from 'antd'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
@@ -17,12 +17,24 @@ const { TextArea } = Input
 const { Text, Title } = Typography
 
 // Chat input component with internal state to prevent parent re-renders while typing
-const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange }: {
+const CONSOLE_LOG_SEVERITY_STYLES: Record<string, React.CSSProperties> = {
+  error: { backgroundColor: '#fff1f0', borderColor: '#ffa39e', color: '#cf1322' },
+  warn:  { backgroundColor: '#fffbe6', borderColor: '#ffe58f', color: '#ad6800' },
+  info:  { backgroundColor: '#f5f5f5', borderColor: '#d9d9d9', color: '#595959' },
+}
+
+const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange,
+    pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: {
   onSend: (message: string, modelId: string | null) => void
   isAgentActive: boolean
   models: AiChatAuthorInfo[]
   selectedModel: string | null
   onModelChange: (modelId: string | null) => void
+  pendingConsoleLogCount: number
+  consoleLogPreview: string
+  consoleLogSeverity: 'error' | 'warn' | 'info'
+  onConsumeConsoleLogs: () => string
+  onDiscardConsoleLogs: () => void
 }) => {
   const [inputValue, setInputValue] = useState('')
 
@@ -30,6 +42,11 @@ const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange
     if (!inputValue.trim()) return
     onSend(inputValue.trim(), selectedModel)
     setInputValue('')
+  }
+
+  const handleAttachLogs = () => {
+    const formatted = onConsumeConsoleLogs()
+    setInputValue(prev => prev + '\n\n' + formatted)
   }
 
   return (
@@ -47,6 +64,31 @@ const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange
               ...models.map(model => ({ label: model.name, value: model.id }))
             ]}
           />
+          {pendingConsoleLogCount > 0 && (
+            <Space size={4} style={{ marginLeft: 'auto' }}>
+              <Tooltip
+                title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '11px', maxHeight: '300px', overflow: 'auto' }}>{consoleLogPreview}</pre>}
+                placement="topRight"
+                overlayStyle={{ maxWidth: '500px' }}
+              >
+                <Button
+                  size="small"
+                  onClick={handleAttachLogs}
+                  style={{ ...CONSOLE_LOG_SEVERITY_STYLES[consoleLogSeverity], borderWidth: '1px', borderStyle: 'solid' }}
+                >
+                  Attach {pendingConsoleLogCount} captured log{pendingConsoleLogCount !== 1 ? 's' : ''}
+                </Button>
+              </Tooltip>
+              <Button
+                size="small"
+                type="text"
+                onClick={onDiscardConsoleLogs}
+                style={{ padding: '0 4px', minWidth: 0 }}
+              >
+                <CloseOutlined style={{ fontSize: '10px' }} />
+              </Button>
+            </Space>
+          )}
         </div>
         <Space.Compact style={{ width: '100%' }}>
           <TextArea
@@ -146,6 +188,11 @@ interface ChatInterfaceProps {
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
   onFileEdited?: (filename: string) => void
   onGadgetTitleMaybeChanged?: () => void
+  pendingConsoleLogCount: number
+  consoleLogPreview: string
+  consoleLogSeverity: 'error' | 'warn' | 'info'
+  onConsumeConsoleLogs: () => string
+  onDiscardConsoleLogs: () => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -155,7 +202,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, onGadgetTitleMaybeChanged }: ChatInterfaceProps) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, onGadgetTitleMaybeChanged, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -1252,6 +1299,11 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
             models={availableModels}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            pendingConsoleLogCount={pendingConsoleLogCount}
+            consoleLogPreview={consoleLogPreview}
+            consoleLogSeverity={consoleLogSeverity}
+            onConsumeConsoleLogs={onConsumeConsoleLogs}
+            onDiscardConsoleLogs={onDiscardConsoleLogs}
           />
         </>
       )}
