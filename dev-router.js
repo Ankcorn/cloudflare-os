@@ -8,12 +8,13 @@ export default {
   async fetch(req, env, ctx) {
     let url = new URL(req.url);
 
-    if (url.pathname.startsWith("/gatekeeper/google/") || url.pathname === "/gatekeeper/google") {
-      return env.GATEKEEPER_GOOGLE.fetch(req);
-    }
-
-    if (url.pathname.startsWith("/gatekeeper/email/") || url.pathname === "/gatekeeper/email") {
-      return env.GATEKEEPER_EMAIL.fetch(req);
+    for (let key of Object.keys(env)) {
+      if (!key.startsWith("GATEKEEPER_")) continue;
+      let suffix = key.slice("GATEKEEPER_".length).toLowerCase().replaceAll("_", "-");
+      let prefix = `/gatekeeper/${suffix}`;
+      if (url.pathname === prefix || url.pathname.startsWith(prefix + "/")) {
+        return env[key].fetch(req);
+      }
     }
 
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
