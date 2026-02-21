@@ -673,9 +673,10 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  async startAgent(chatId: number, aiModel: UserAiModelRecord): Promise<void> {
+  async startAgent(chatId: number, aiModel: UserAiModelRecord,
+                   initiator: AiChatAuthorInfo): Promise<void> {
     try {
-      let chosenModel = getModel(this.env, aiModel.config);
+      let chosenModel = getModel(this.env, aiModel.config, initiator);
       let chatMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
 
       let controller = new AbortController();
@@ -727,9 +728,10 @@ class OverseerImpl implements AgentHooks {
   }
 
   async generateTitle(chatId: number, initialMessage: string,
-                      modelConfig: AiModelConfig): Promise<void> {
+                      modelConfig: AiModelConfig,
+                      initiator: AiChatAuthorInfo): Promise<void> {
     try {
-      let model = getModel(this.env, modelConfig);
+      let model = getModel(this.env, modelConfig, initiator);
 
       let result = await generateText({
         model,
@@ -1019,11 +1021,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       props
     });
 
+    let author: AiChatAuthorInfo = {
+      type: "gadget",
+      id: userMeta.profile.id,
+      name: this.impl.storage.title.get(),
+    };
+
     this.impl.storage.chats.put({
       chatId,
       sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
       timestamp,
-      author: userMeta.profile,
+      author,
 
       type: "message",
       message: prompt,
@@ -1031,7 +1039,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel);
+      this.impl.startAgent(chatId, userMeta.aiModel, author);
     } else {
       // TODO: Flag as needing user attention.
     }
@@ -1584,12 +1592,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel);
+      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
     }
 
     // Also fire off a second LLM call to generate a title based on the first message.
     if (userMeta.quickModel) {
-      this.impl.generateTitle(chatId, initialMessage, userMeta.quickModel);
+      this.impl.generateTitle(chatId, initialMessage, userMeta.quickModel, userMeta.profile);
     }
 
     return chatId;
@@ -1624,7 +1632,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
 
     if (userMeta.aiModel) {
-      this.impl.startAgent(chatId, userMeta.aiModel);
+      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
     }
   }
 

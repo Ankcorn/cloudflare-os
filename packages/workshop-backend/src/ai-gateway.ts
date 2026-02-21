@@ -14,28 +14,18 @@ const PROVIDER_PATHS: Record<string, string> = {
 export class AiGatewayConfig {
   readonly gateway: string;
   readonly workersAiGateway: string;
-  readonly accountId: string;
-  readonly apiToken: string;
+  readonly accountId?: string;
+  readonly apiToken?: string;
   readonly providers: Set<string>;
 
   constructor(env: Cloudflare.Env) {
     this.gateway = env.CF_AI_GATEWAY!;
     this.workersAiGateway = env.CF_AI_GATEWAY_WAI || this.gateway;
-    this.accountId = env.CF_AI_GATEWAY_ACCOUNT_ID!;
-    this.apiToken = env.CF_AI_GATEWAY_API_TOKEN!;
+    this.accountId = env.CF_AI_GATEWAY_ACCOUNT_ID;
+    this.apiToken = env.CF_AI_GATEWAY_API_TOKEN;
     this.providers = new Set(
       (env.CF_AI_GATEWAY_PROVIDERS || "").split(",").map(s => s.trim()).filter(s => s !== "")
     );
-  }
-
-  /**
-   * Compute the AI Gateway base URL for a given provider.
-   * Returns undefined for providers that don't use a URL (e.g. cloudflare/Workers AI).
-   */
-  getBaseUrl(provider: string): string | undefined {
-    let path = PROVIDER_PATHS[provider];
-    if (!path) return undefined;
-    return `https://gateway.ai.cloudflare.com/v1/${this.accountId}/${this.gateway}/${path}`;
   }
 
   /**

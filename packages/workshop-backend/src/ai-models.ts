@@ -3,20 +3,25 @@ import { generateText, LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createAnthropic as aigCreateAnthropic } from "ai-gateway-provider/providers/anthropic";
+import { createOpenAI as aigCreateOpenAI } from "ai-gateway-provider/providers/openai";
+import { createGoogleGenerativeAI as aigCreateGoogleGenerativeAI } from "ai-gateway-provider/providers/google";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOllama } from 'ollama-ai-provider-v2';
 import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
-import { AiModelConfig } from "@gadgets/workshop-shared/api";
+import { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig } from "./ai-gateway.js";
+import { AiGateway, createAiGateway } from 'ai-gateway-provider';
 
-export function getModel(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
+export function getModel(env: Cloudflare.Env, config: AiModelConfig,
+                         initiator: AiChatAuthorInfo): LanguageModel {
   // When AI Gateway mode is active, all models are routed through the gateway.
   // The config's apiToken and apiUrl are ignored; we use the gateway URL and CF API token instead.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
-    return getModelViaGateway(env, gwConfig, config);
+    return getModelViaGateway(env, gwConfig, config, initiator);
   }
 
   return getModelDirect(env, config);
@@ -26,30 +31,47 @@ function getModelViaGateway(
   env: Cloudflare.Env,
   gwConfig: AiGatewayConfig,
   config: AiModelConfig,
+  initiator: AiChatAuthorInfo,
 ): LanguageModel {
-  let baseURL = gwConfig.getBaseUrl(config.provider);
+  let metadata: any = {
+    user: initiator.id,
+  };
+  if (initiator.type === "gadget") {
+    metadata.automated = true;
+  }
+
+  if (config.provider === "cloudflare") {
+    return createWorkersAI({
+      binding: env.WORKERS_AI,
+      gateway: { id: gwConfig.workersAiGateway, metadata },
+    })(config.model as any);
+  }
+
+  let gatewayWrapper: AiGateway;
+
+  if (gwConfig.accountId) {
+    // Cross-account AI Gateway request, use token from env vars.
+    gatewayWrapper = createAiGateway({
+      accountId: gwConfig.accountId,
+      gateway: gwConfig.gateway,
+      apiKey: gwConfig.apiToken,
+      options: { metadata },
+    });
+  } else {
+    // We can just use our binding.
+    gatewayWrapper = createAiGateway({
+      binding: env.WORKERS_AI.gateway(gwConfig.gateway),
+      options: { metadata },
+    });
+  }
 
   switch (config.provider) {
     case "anthropic":
-      return createAnthropic({
-        apiKey: gwConfig.apiToken,
-        baseURL,
-      })(config.model);
-    case "cloudflare":
-      return createWorkersAI({
-        binding: env.WORKERS_AI,
-        gateway: { id: gwConfig.workersAiGateway },
-      })(config.model as any);
+      return gatewayWrapper(aigCreateAnthropic()(config.model));
     case "google":
-      return createGoogleGenerativeAI({
-        apiKey: gwConfig.apiToken,
-        baseURL,
-      })(config.model);
+      return gatewayWrapper(aigCreateGoogleGenerativeAI()(config.model));
     case "openai":
-      return createOpenAI({
-        apiKey: gwConfig.apiToken,
-        baseURL,
-      })(config.model);
+      return gatewayWrapper(aigCreateOpenAI()(config.model));
     default:
       throw new Error(
         `Provider "${config.provider}" is not supported through AI Gateway. ` +
