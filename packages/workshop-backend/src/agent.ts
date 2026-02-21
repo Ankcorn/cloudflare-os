@@ -189,6 +189,7 @@ export async function runAgent(
         let modelMessage: ModelMessage;
         switch (msg.author.type) {
           case "user":
+          case "gadget":
             modelMessage = {
               role: "user",
               content: msg.message,

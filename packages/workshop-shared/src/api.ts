@@ -546,8 +546,12 @@ export type AiChatMetadata = {
 };
 
 export type AiChatAuthorInfo = {
-  // Is the author a human or AI?
-  type: "user" | "agent";
+  // Is the author a human, AI, or Gadget?
+  //
+  // "gadget" means this is a prompt sent to an agent spawner -- i.e. a gadget spawned an
+  // agent programmatically. In this case `id` is the gadget's owner's ID (for accounting purposes)
+  // and `name` is the gadget title.
+  type: "user" | "agent" | "gadget";
 
   // Unique user identifier, e.g. "kenton@cloudflare.com" or "chatgpt-5.1-pro".
   id: string;
