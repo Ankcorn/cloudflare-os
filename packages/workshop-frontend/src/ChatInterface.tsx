@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag } from 'antd'
+import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
@@ -1088,22 +1088,26 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
                               {status === 'pending' && (
                                 <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                                  <Button
-                                    size="small"
-                                    type="primary"
-                                    disabled={isAgentActive}
-                                    onClick={() => handleMergeChanges(msg.sequence)}
-                                  >
-                                    Accept through here
-                                  </Button>
-                                  <Button
-                                    size="small"
-                                    danger
-                                    disabled={isAgentActive}
-                                    onClick={() => handleRevertChanges(msg.sequence)}
-                                  >
-                                    Revert from here
-                                  </Button>
+                                  <Tooltip title="Merge this change and all previous changes in this chat thread into the Gadget's mainline code.">
+                                    <Button
+                                      size="small"
+                                      type="primary"
+                                      disabled={isAgentActive}
+                                      onClick={() => handleMergeChanges(msg.sequence)}
+                                    >
+                                      Merge changes
+                                    </Button>
+                                  </Tooltip>
+                                  <Tooltip title="Undo this change, and all later changes currently proposed in the thread.">
+                                    <Button
+                                      size="small"
+                                      danger
+                                      disabled={isAgentActive}
+                                      onClick={() => handleRevertChanges(msg.sequence)}
+                                    >
+                                      Revert from here
+                                    </Button>
+                                  </Tooltip>
                                 </div>
                               )}
                             </div>
@@ -1234,13 +1238,15 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                 <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
                   The agent has proposed changes to the code
                 </span>
-                <Button
-                  type="primary"
-                  icon={<CheckCircleOutlined />}
-                  onClick={() => handleMergeChanges(lastActiveChange.sequence)}
-                >
-                  Accept All Changes
-                </Button>
+                <Tooltip title="Merge all changes proposed in this thread into the Gadget's mainline code.">
+                  <Button
+                    type="primary"
+                    icon={<CheckCircleOutlined />}
+                    onClick={() => handleMergeChanges(lastActiveChange.sequence)}
+                  >
+                    Merge All Changes
+                  </Button>
+                </Tooltip>
               </div>
             )
           })()}
