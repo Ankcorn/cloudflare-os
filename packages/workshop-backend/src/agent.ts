@@ -126,11 +126,13 @@ export async function runAgent(
   let ydoc: Y.Doc | undefined;
   let versionLock: number | undefined;
   let capturedYdocChanges: Uint8Array[] = [];
+  let startingFiles: string[] = [];  // files that existed at session start, for system prompt
   let getSessionYDoc = () => {
     if (!ydoc) {
       let build = hooks.buildYDoc(versionLock === undefined ? "current" : versionLock);
       versionLock = build.version;
       ydoc = build.ydoc;
+      startingFiles = [...ydoc.getMap<Y.Text>().keys()];
 
       ydoc.on("updateV2", (update, origin) => {
         capturedYdocChanges.push(update);
@@ -142,7 +144,15 @@ export async function runAgent(
   // Track which files have been read in this session. Edits aren't allowed before reading.
   let filesRead = new Set<string>();
 
-  let modelMessages: ModelMessage[] = [];
+  // Reserve two slots for the system message: The non-project-specific parts, followed by the
+  // project-specific parts. We'll fill these in later.
+  let modelMessages: ModelMessage[] = [{
+    role: "system",
+    content: ""
+  }, {
+    role: "system",
+    content: ""
+  }];
 
   // Run through the chat log to process all "merge" and "revert" messages in order to mark
   // which messages lie in merged or reverted ranges. This serves two purposes:
@@ -379,7 +389,6 @@ export async function runAgent(
   capturedYdocChanges = [];
 
   let agentContext = hooks.getChatAgentContext(chatId);
-  let systemPrompt: string;
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt.
@@ -388,7 +397,6 @@ export async function runAgent(
     let propsType = agentContext.spawnerConfig.propsTypeName;
     if (propsType && propsType !== "{}") {
       systemPromptProps =
-          "\n\n"
           "You have been provided with a 'ctx.props' object which provides APIs that you likely " +
           "need to complete your task. This object is specific to the task you have been " +
           "assigned, as opposed to the env bindings which are given to every agent. The " +
@@ -414,12 +422,16 @@ export async function runAgent(
           `* ${bindingNames.join("\n* ")}`
     }
 
-    systemPrompt = `${SPAWNER_SYSTEM_PROMPT}${systemPromptProps}\n\n${systemPromptBindings}`;
+    // Split the system prompt into static and dynamic parts for better caching.
+    modelMessages[0].content = SPAWNER_SYSTEM_PROMPT;
+    modelMessages[1].content = `${systemPromptProps}\n\n${systemPromptBindings}`;
   } else {
     // This is a regular coding agent.
 
     // Let's include the list of files in the system prompt so that the agent doesn't have to
-    // call a tool to list files at the start of every thread.
+    // call a tool to list files at the start of every thread. In order to avoid cache misses,
+    // we specifically list the files that existed at the start of the thread even if the agent
+    // adds or removes files during the thread.
     // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
     //   will have been set, and this will list the files consistently with that version.
     //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
@@ -427,15 +439,19 @@ export async function runAgent(
     //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
     //   we don't actually lock in a version until the first time a file is actually read -- but
     //   in the meantime, the system prompt can theoretically change on each request, if the
-    //   files are changing. That's fine.
-    let currentFiles = [...getSessionYDoc().getMap<Y.Text>().keys()];
+    //   files are changing. That would cause a cache miss, but it probably isn't that common
+    //   that files are being created or deleted concurrently to a chat withit the cache TTL,
+    //   so no big deal. We could "fix" this by choosing the version at the start of the thread
+    //   rather than first read.
+    getSessionYDoc();
     let systemPromptFiles: string;
-    if (currentFiles.length == 0) {
-      systemPromptFiles = "The project currently has no code files.";
+    if (startingFiles.length == 0) {
+      systemPromptFiles = "As of the start of this session, the project had no code files.";
     } else {
       systemPromptFiles =
-          `${SYSTEM_PROMPT}\n\nThe project currently contains the following files:` +
-          `\n* ${currentFiles.join("\n* ")}`;
+          `${SYSTEM_PROMPT}` +
+          `\n\nAs of the start of this session, the project contained the following files:` +
+          `\n* ${startingFiles.join("\n* ")}`;
     }
 
     let bindingNames = hooks.listBindingNames();
@@ -448,7 +464,9 @@ export async function runAgent(
           `* ${bindingNames.join("\n* ")}`
     }
 
-    systemPrompt = `${SYSTEM_PROMPT}\n\n${systemPromptFiles}\n\n${systemPromptBindings}`;
+    // Split the system prompt into static and dynamic parts for better caching.
+    modelMessages[0].content = SYSTEM_PROMPT;
+    modelMessages[1].content = `${systemPromptFiles}\n\n${systemPromptBindings}`;
   }
 
   let maxOutputTokens: number | undefined;
@@ -749,16 +767,76 @@ export async function runAgent(
         }),
         execute: ({success}, {toolCallId}) => {
           // TODO: Actually pay attention to success value and potentially notify user.
-          console.log("REPORTED OUTCOME", success);
           return {acknowledged: true};
         }
       })
     };
   }
 
+  let prepareStep: Parameters<typeof generateText>[0]["prepareStep"];
+
+  if (typeof chosenModel === "object" && chosenModel.provider &&
+      chosenModel.provider.startsWith("anthropic")) {
+    // Anthropic doesn't cache automatically, you have to tell it.
+    //
+    // Any message that is marked with cacheControl becomes a cache point. Note that we are allowed
+    // to mark only four cache points at a time. We mark:
+    // 1. The system prompt, sans any project-specific parts, so the system prompt can be shared
+    //    across users.
+    // 2. The last message, so the whole conversation is written to cache.
+    // 3. The second-to-last mesasge, in hopes that it is read from cache.
+    // 4. The last user message that is not one of the last two messages. This is specifically to
+    //    avoid a possible subtle problem: within a single call to generateText(), the AI SDK
+    //    is adding new messages to the messages list and sending them back to the LLM for each
+    //    step. But the next time we call generateText(), we recerate these messages just from
+    //    the information we stored. It could easily be the case that we don't recreate them
+    //    exactly as AI SDK would have internally; we might drop some information by accident.
+    //    So we might have a cache miss on the second-to-last message because of this, but we
+    //    should still have a cache hit on the last user message, since everything up to the
+    //    last user message was generated by us previously, and so should have regenerated
+    //    identically!
+
+    prepareStep = ({messages}) => {
+      // When we mutate the messages, unfortunately, those mutations stick around for the next
+      // step. So first we have to delete them. Dumb.
+      for (let msg of messages) {
+        if (msg.providerOptions) {
+          delete msg.providerOptions;
+        }
+      }
+
+      messages[0].providerOptions = {
+        // 1h caching on the system prompt since it may be shared between users
+        anthropic: { cacheControl: { type: "ephemeral", ttl: '1h' } },
+      };
+
+      messages[messages.length - 1].providerOptions = {
+        anthropic: { cacheControl: { type: "ephemeral", ttl: '5m' } },
+      };
+
+      // If messages.length is 3, we're actually just starting a new thread (we have two system
+      // messages and the user message). No use marking the second-to-last message in that case.
+      if (messages.length > 3) {
+        messages[messages.length - 2].providerOptions = {
+          anthropic: { cacheControl: { type: "ephemeral", ttl: '5m' } },
+        };
+      }
+
+      for (let i = messages.length - 3; i >= 2; i--) {
+        if (messages[i].role === "user") {
+          messages[i].providerOptions = {
+            anthropic: { cacheControl: { type: "ephemeral", ttl: '5m' } },
+          };
+          break;
+        }
+      }
+
+      return {};
+    };
+  }
+
   await generateText({
     model: chosenModel,
-    system: systemPrompt,
     messages: modelMessages,
     abortSignal,
     maxOutputTokens,
@@ -774,7 +852,9 @@ export async function runAgent(
 
     tools,
 
-    onStepFinish: ({ text, reasoningText, toolCalls }) => {
+    prepareStep,
+
+    onStepFinish: ({ text, reasoningText, toolCalls, usage }) => {
       let msgs: AiChatMessageBody[] = [];
 
       {
