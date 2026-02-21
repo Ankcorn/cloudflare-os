@@ -13,3 +13,6 @@ dist/
 
 # Site-specific production deployment configs.
 wrangler.prod.jsonc
+
+# Site-specific dev server configs.
+wrangler.dev.jsonc
