@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Typography, Spin, Alert } from 'antd'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
-import { Overseer } from '@gadgets/workshop-shared/api'
+import { Overseer, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
 const { Text } = Typography
 
@@ -31,6 +31,39 @@ let gadget;  // RPC stub to the gadget's server-side Durable Object.
   gadget = newMessagePortRpcSession(port1);
 }
 
+// Monkey-patch console to forward logs to the parent frame.
+for (let level of ['debug', 'info', 'log', 'warn', 'error']) {
+  let original = console[level];
+  console[level] = (...args) => {
+    original.apply(console, args);
+    try {
+      let message = args.map(arg => {
+        if (typeof arg === 'string') return arg;
+        try { return JSON.stringify(arg); }
+        catch { return String(arg); }
+      });
+      window.parent.postMessage({ type: 'console', level, message }, '*');
+    } catch {};
+  };
+}
+
+// Capture unhandled exceptions and promise rejections.
+window.addEventListener('error', (event) => {
+  window.parent.postMessage({
+    type: 'console',
+    level: 'error',
+    message: ['Uncaught', event.error?.stack || event.message],
+  }, '*');
+});
+window.addEventListener('unhandledrejection', (event) => {
+  let reason = event.reason;
+  window.parent.postMessage({
+    type: 'console',
+    level: 'error',
+    message: ['Unhandled promise rejection:', reason?.stack || String(reason)],
+  }, '*');
+});
+
 `);
 
 const createSandboxedHtml = (jsCode: string): string => {
@@ -51,9 +84,10 @@ interface GadgetUIProps {
   reloadTrigger?: number
   isVisible?: boolean
   chatId?: number
+  onConsoleLog?: (log: ConsoleLogEvent) => void
 }
 
-export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId }: GadgetUIProps) {
+export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId, onConsoleLog }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -139,6 +173,12 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         } catch (error) {
           console.error('Failed to establish RPC connection:', error)
         }
+      } else if (event.data?.type === 'console' && onConsoleLog) {
+        onConsoleLog({
+          timestamp: new Date(),
+          level: event.data.level,
+          message: event.data.message,
+        })
       }
     }
 

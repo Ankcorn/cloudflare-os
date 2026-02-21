@@ -1,12 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { Layout, Typography, Button, Input, Space, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
 import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
-import { RpcStub } from 'capnweb'
+import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import { CF_ACCESS_MODE } from './useAuth'
 import AlphaWarning from './AlphaWarning'
-import { Overseer, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { Overseer, GadgetMetadata, AiChatAuthorInfo, ConsoleLogSubscriber, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
@@ -15,6 +15,38 @@ import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
 const { Title, Text } = Typography
+
+type BufferedLogEntry = ConsoleLogEvent & { source: 'server' | 'client' }
+
+class ConsoleLogSubscriberImpl extends RpcTarget implements ConsoleLogSubscriber {
+  selectedChatIdRef: { current: number | null } = { current: null }
+  logBufferRef: { current: BufferedLogEntry[] } = { current: [] }
+  onBufferUpdated: () => void = () => {}
+
+  async event(chatId: number | null, logs: ConsoleLogEvent[]) {
+    // Always write to the browser console.
+    for (const log of logs) {
+      const method = console[log.level] ?? console.log
+      method("server:", ...log.message)
+    }
+
+    // Buffer logs that match the currently-displayed chat.
+    if (chatId !== null && chatId === this.selectedChatIdRef.current) {
+      this.logBufferRef.current.push(...logs.map(l => ({ ...l, source: 'server' as const })))
+      this.onBufferUpdated()
+    }
+  }
+}
+
+function formatConsoleLogs(logs: BufferedLogEntry[]): string {
+  const lines = logs.map(log => {
+    const parts = log.message.map(part =>
+      typeof part === 'string' ? part : JSON.stringify(part)
+    )
+    return `[${log.source} ${log.level}] ${parts.join(' ')}`
+  })
+  return 'Console logs:\n' + lines.join('\n')
+}
 
 export default function GadgetEditor() {
   const { id } = useParams<{ id: string }>()
@@ -139,6 +171,74 @@ export default function GadgetEditor() {
       }
     }
   }, [id, authenticatedApi])
+
+  // Console log subscription and buffering.
+  const consoleLogSubscriberRef = useRef(new ConsoleLogSubscriberImpl())
+  const consoleLogBufferRef = useRef<BufferedLogEntry[]>([])
+  const [consoleLogCount, setConsoleLogCount] = useState(0)
+
+  // Keep the subscriber wired to the current selectedChatId and buffer.
+  const selectedChatIdRef = useRef(selectedChatId)
+  selectedChatIdRef.current = selectedChatId
+  consoleLogSubscriberRef.current.selectedChatIdRef = selectedChatIdRef
+  consoleLogSubscriberRef.current.logBufferRef = consoleLogBufferRef
+  consoleLogSubscriberRef.current.onBufferUpdated = () => {
+    setConsoleLogCount(consoleLogBufferRef.current.length)
+  }
+
+  // Clear the buffer when the selected chat changes.
+  useEffect(() => {
+    consoleLogBufferRef.current = []
+    setConsoleLogCount(0)
+  }, [selectedChatId])
+
+  const consumeConsoleLogs = useCallback((): string => {
+    const logs = consoleLogBufferRef.current
+    consoleLogBufferRef.current = []
+    setConsoleLogCount(0)
+    return formatConsoleLogs(logs)
+  }, [])
+
+  const discardConsoleLogs = useCallback(() => {
+    consoleLogBufferRef.current = []
+    setConsoleLogCount(0)
+  }, [])
+
+  const handleClientConsoleLog = useCallback((log: ConsoleLogEvent) => {
+    // Echo to browser console.
+    const method = console[log.level] ?? console.log
+    method("client:", ...log.message)
+
+    // Buffer if a chat is selected (client logs always belong to the current chat).
+    if (selectedChatIdRef.current !== null) {
+      consoleLogBufferRef.current.push({ ...log, source: 'client' as const })
+      setConsoleLogCount(consoleLogBufferRef.current.length)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!overseer) return
+
+    let subscription: RpcStub<{}> | null = null
+
+    const subscribe = async () => {
+      try {
+        subscription = await overseer.stub.subscribeToConsoleLogs(
+          consoleLogSubscriberRef.current
+        )
+      } catch (err) {
+        console.error('Failed to subscribe to console logs:', err)
+      }
+    }
+
+    subscribe()
+
+    return () => {
+      if (subscription) {
+        subscription[Symbol.dispose]()
+      }
+    }
+  }, [overseer])
 
   // Invalidate Gadget UI when the selected chat changes or proposed changes update
   useEffect(() => {
@@ -370,6 +470,15 @@ export default function GadgetEditor() {
                   setTitleInput(m.title)
                 } catch {}
               }}
+              pendingConsoleLogCount={consoleLogCount}
+              consoleLogPreview={consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''}
+              consoleLogSeverity={
+                consoleLogBufferRef.current.some(l => l.level === 'error') ? 'error'
+                : consoleLogBufferRef.current.some(l => l.level === 'warn') ? 'warn'
+                : 'info'
+              }
+              onConsumeConsoleLogs={consumeConsoleLogs}
+              onDiscardConsoleLogs={discardConsoleLogs}
             />
           ) : null}
         </div>
@@ -460,6 +569,7 @@ export default function GadgetEditor() {
                     reloadTrigger={uiReloadTrigger}
                     isVisible={activeTab === 'ui'}
                     chatId={selectedChatId ?? undefined}
+                    onConsoleLog={handleClientConsoleLog}
                   />
                 ) : null
               }
