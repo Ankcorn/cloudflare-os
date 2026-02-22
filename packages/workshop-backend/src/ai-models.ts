@@ -119,6 +119,7 @@ function getModelDirect(env: Cloudflare.Env, config: AiModelConfig): LanguageMod
 export type LanguageModelGatekeeperProps = {
   displayName: string,
   config: AiModelConfig,
+  initiator: AiChatAuthorInfo,
 };
 
 type LanguageModelAction = {
@@ -154,7 +155,7 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue<LanguageModelAction>>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config);
+    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator);
     return new LanguageModelBindingImpl(model);
   }
 
@@ -187,6 +188,9 @@ class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding
       prompt: options.prompt,
       system: options.systemPrompt
     });
+
+    // TODO: Account LLM costs back to the calling gadget.
+
     return text;
   }
 }
