@@ -359,10 +359,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put({id, title, created, lastActive: created});
   }
 
-  async setGadgetLastActive(id: string, time: Date): Promise<void> {
+  async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
     let gadget = this.storage.gadgets.get(id);
     if (gadget) {
       gadget.lastActive = time;
+      if (totalCost) {
+        gadget.totalCost = totalCost;
+      }
       this.storage.gadgets.put(gadget);
     }
   }

@@ -137,6 +137,16 @@ export default function Home() {
       ),
     },
     {
+      title: 'Cost',
+      dataIndex: 'totalCost',
+      key: 'totalCost',
+      render: (totalCost: number | undefined) => (
+        <Text style={{ color: '#595959' }}>
+          {totalCost != null ? `$${totalCost.toFixed(4)}` : '—'}
+        </Text>
+      ),
+    },
+    {
       title: '',
       key: 'actions',
       width: 48,

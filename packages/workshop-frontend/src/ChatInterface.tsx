@@ -187,7 +187,6 @@ interface ChatInterfaceProps {
   onNavigateToChat: (chatId: number | null, options?: { replace?: boolean }) => void
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
   onFileEdited?: (filename: string) => void
-  onGadgetTitleMaybeChanged?: () => void
   pendingConsoleLogCount: number
   consoleLogPreview: string
   consoleLogSeverity: 'error' | 'warn' | 'info'
@@ -202,7 +201,7 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
-function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, onGadgetTitleMaybeChanged, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: ChatInterfaceProps) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -360,13 +359,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   // not separate stubs for each method
   class ChatSubscriberImpl extends RpcTarget implements AiChatSubscriber{
     metadata(chat: AiChatMetadata) {
-      let prev = cacheRef.current.chats.get(chat.id)
       cacheRef.current.chats.set(chat.id, chat)
-      // When the first chat gets its AI-generated title, the gadget may have
-      // been auto-renamed too — tell the parent to re-fetch metadata.
-      if (chat.id === 0 && prev?.title === "New Chat" && chat.title !== "New Chat") {
-        onGadgetTitleMaybeChanged?.()
-      }
       forceUpdate()
     }
 
@@ -1311,6 +1304,25 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
             onConsumeConsoleLogs={onConsumeConsoleLogs}
             onDiscardConsoleLogs={onDiscardConsoleLogs}
           />
+
+          {/* Token / cost summary */}
+          {(currentChatMetadata?.totalTokens != null || currentChatMetadata?.totalCost != null) && (
+            <div style={{
+              padding: '0 16px 16px',
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: '16px',
+              fontSize: '12px',
+              color: '#595959',
+            }}>
+              {currentChatMetadata.totalTokens != null && (
+                <span>{currentChatMetadata.totalTokens.toLocaleString()} tokens</span>
+              )}
+              {currentChatMetadata.totalCost != null && (
+                <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>
