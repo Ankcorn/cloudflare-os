@@ -789,9 +789,23 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                         </Space>
                       }
                       description={
-                        <Text type="secondary">
-                          Last active: {chat.lastActive.toLocaleString()}
-                        </Text>
+                        <Space direction="vertical" size={0}>
+                          <Text type="secondary">
+                            Last active: {chat.lastActive.toLocaleString()}
+                          </Text>
+                          {(chat.totalTokens != null || chat.totalCost != null) && (
+                            <Text type="secondary" style={{ fontSize: '12px' }}>
+                              {[
+                                chat.totalTokens != null
+                                  ? `${chat.totalTokens.toLocaleString()} tokens`
+                                  : null,
+                                chat.totalCost != null
+                                  ? `$${chat.totalCost.toFixed(4)}`
+                                  : null,
+                              ].filter(Boolean).join(' · ')}
+                            </Text>
+                          )}
+                        </Space>
                       }
                     />
                   </List.Item>

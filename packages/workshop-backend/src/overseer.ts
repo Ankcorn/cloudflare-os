@@ -1549,6 +1549,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
       config: chatMeta.aiModel!.config,
+      initiator: {
+        type: "gadget",
+        id: chatMeta.profile.id,
+        name: this.impl.storage.title.get(),
+      },
     }
 
     return await this.impl.addGatekeeper(this.impl.ctx.exports.LanguageModelGatekeeper({props}));
