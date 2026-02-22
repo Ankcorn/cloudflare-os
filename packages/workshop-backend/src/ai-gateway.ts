@@ -2,7 +2,10 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS } from "@gadgets/work
 import { UserAiModelRecord } from "./user.js";
 
 // The model used for quick tasks like title generation when AI Gateway mode is active.
-const QUICK_MODEL_ID = "@cf/zai-org/glm-4.7-flash";
+//
+// This 70B model is quite fast and cheap and produces pretty good titles. The cost is insigificant
+// compared to the actual coding model so there's not much reason to use a smaller model.
+const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 const PROVIDER_PATHS: Record<string, string> = {
   "anthropic": "anthropic",
@@ -70,7 +73,12 @@ export class AiGatewayConfig {
    * Get the AiModelConfig for the quick model (used for title generation).
    */
   getQuickModelConfig(): AiModelConfig | undefined {
-    return this.resolveModel(QUICK_MODEL_ID)?.config;
+    // Always use Workers AI here.
+    return {
+      provider: "cloudflare",
+      model: QUICK_MODEL_ID,
+      apiToken: "",
+    };
   }
 }
 
