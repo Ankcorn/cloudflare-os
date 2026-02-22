@@ -65,6 +65,8 @@ export default function GadgetEditor() {
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)
   const [isEditingTitle, setIsEditingTitle] = useState(false)
+  const isEditingTitleRef = useRef(false)
+  isEditingTitleRef.current = isEditingTitle
   const [titleInput, setTitleInput] = useState('')
   const [siderWidth, setSiderWidth] = useState(() => Math.floor(window.innerWidth / 3))
   const [isResizing, setIsResizing] = useState(false)
@@ -114,6 +116,7 @@ export default function GadgetEditor() {
 
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
+    let metadataSubscription: RpcStub<{}> | null = null
 
     const loadGadget = async () => {
       if (!id) {
@@ -133,10 +136,14 @@ export default function GadgetEditor() {
         overseerStub = authenticatedApi.openGadget(id)
         setOverseer({ stub: overseerStub })
 
-        // Only await the metadata call
-        const gadgetMetadata = await overseerStub.getMetadata()
-        setMetadata(gadgetMetadata)
-        setTitleInput(gadgetMetadata.title)
+        // Subscribe to metadata updates. The callback fires immediately with
+        // the current metadata, then again whenever it changes.
+        metadataSubscription = await overseerStub.subscribeToMetadata((metadata: Omit<GadgetMetadata, 'created' | 'lastActive'>) => {
+          setMetadata(metadata)
+          if (!isEditingTitleRef.current) {
+            setTitleInput(metadata.title)
+          }
+        })
 
         // Clear any error on successful load
         setError(null)
@@ -164,8 +171,11 @@ export default function GadgetEditor() {
 
     loadGadget()
 
-    // Cleanup function to dispose the correct stub
+    // Cleanup function to dispose the subscription and overseer stub
     return () => {
+      if (metadataSubscription) {
+        metadataSubscription[Symbol.dispose]()
+      }
       if (overseerStub) {
         overseerStub[Symbol.dispose]()
       }
@@ -427,6 +437,11 @@ export default function GadgetEditor() {
         </div>
 
         <Space>
+          {metadata.totalCost != null && (
+            <Text style={{ fontSize: '13px', color: '#595959' }}>
+              ${metadata.totalCost.toFixed(4)}
+            </Text>
+          )}
           <Button
             icon={<DeleteOutlined />}
             onClick={handleDelete}
@@ -463,13 +478,6 @@ export default function GadgetEditor() {
               onNavigateToChat={navigateToChat}
               onProposedChangesChange={setProposedChanges}
               onFileEdited={handleFileEdited}
-              onGadgetTitleMaybeChanged={async () => {
-                try {
-                  let m = await overseer.stub.getMetadata()
-                  setMetadata(m)
-                  setTitleInput(m.title)
-                } catch {}
-              }}
               pendingConsoleLogCount={consoleLogCount}
               consoleLogPreview={consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''}
               consoleLogSeverity={

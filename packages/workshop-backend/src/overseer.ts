@@ -78,6 +78,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       title: "Untitled Gadget",
 
       codeVersion: 0,
+      totalCost: 0,
 
       nextGatekeeperId: 0,
       nextActionId: 0,
@@ -490,23 +491,62 @@ class OverseerImpl implements AgentHooks {
     this.storage.actions.put(record);
   }
 
-  #lastLastActiveBump?: Date;
+  // What is the last active time that we know the user DO has been made aware of?
+  #lastActiveTimeKnownToUserDo?: Date;
+  // What is the lact active time we've seen locally?
+  #lastActiveTimeKnownToUs?: Date;
+  // Do we currently have a timeout scheduled after which we plan to send a last active update?
+  #lastActiveBumpScheduled: boolean = false;
 
+  // Update the last-active time and cost conuter as recorded for this gadget in the user-level DO.
   bumpLastActive(now: Date = new Date()) {
+    if (this.#lastActiveTimeKnownToUs && this.#lastActiveTimeKnownToUs >= now) {
+      // Redundant bump.
+      return;
+    }
+
+    this.#lastActiveTimeKnownToUs = now;
+
+    if (this.#lastActiveBumpScheduled) {
+      // Wait for the scheduled bump, which will see our update to #lastActiveTimeKnownToUs.
+      return;
+    }
+
     // Only bump once a minute to reduce network traffic.
-    if (!this.#lastLastActiveBump ||
-        this.#lastLastActiveBump.getTime() + 60000 < now.getTime()) {
+    let timeToNextBump: number = this.#lastActiveTimeKnownToUserDo
+        ? this.#lastActiveTimeKnownToUserDo.getTime() + 60000 - now.getTime()
+        : 0;
+
+    if (timeToNextBump <= 0) {
+      // Bump now!
+      // Let this run async -- no need to make the caller wait for it.
+      this.#bumpLastActiveImpl();
+    } else {
+      // Schedule bump in the future, coalescing with any other bumps that happen before then.
+      this.#lastActiveBumpScheduled = true;
+      scheduler.wait(timeToNextBump).then(() => {
+        this.#lastActiveBumpScheduled = false;
+        if (!this.#lastActiveTimeKnownToUserDo ||
+            this.#lastActiveTimeKnownToUserDo < this.#lastActiveTimeKnownToUs!) {
+          this.#bumpLastActiveImpl();
+        }
+      });
+    }
+  }
+
+  async #bumpLastActiveImpl() {
+    try {
       if (!this.ownerId) throw new Error("not created, can't bump?");
       let owner = this.users.get(this.users.idFromString(this.ownerId));
 
-      // Don't make the caller wait for this as it is not all that important.
-      owner.setGadgetLastActive(this.ctx.id.toString(), now)
-          .catch(err => {
-        console.error(err);
+      this.#lastActiveTimeKnownToUserDo = this.#lastActiveTimeKnownToUs!;
+      await owner.setGadgetLastActive(this.ctx.id.toString(), this.#lastActiveTimeKnownToUs!,
+                                      this.storage.totalCost.get());
+    } catch (err) {
+      console.error(err);
 
-        // Force retry soon.
-        this.#lastLastActiveBump = undefined;
-      });
+      // Force retry on next bump.
+      this.#lastActiveTimeKnownToUserDo = undefined;
     }
   }
 
@@ -783,13 +823,16 @@ class OverseerImpl implements AgentHooks {
       meta.lastActive = this.getChatTimestamp();
       meta.title = result.text;
       this.storage.chatMeta.put(meta);
+
+      // TODO: Should we track costs for title generation? It's pretty negligible.
     } catch (err) {
       // Oh well, just leave the title as "New Chat".
       console.error("Error generating chat title:", err);
     }
   }
 
-  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[]): void {
+  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
+        totalTokens?: number, aiGatewayLogId?: string): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -811,8 +854,71 @@ class OverseerImpl implements AgentHooks {
       });
     }
 
+    if (totalTokens !== undefined) {
+      meta.totalTokens = totalTokens;
+    }
+
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
+
+    if (aiGatewayLogId) {
+      // Fetch the AI gateway log to account for costs.
+      this.#getCostFromAiGateway(chatId, aiGatewayLogId);
+    }
+  }
+
+  // Fetches an AI Gateway log entry and adds the cost to the given chat ID's cost indicator.
+  //
+  // TODO: Get AI gateway to add cost data to response headers -- it's dumb that we need a
+  //   separate request!
+  async #getCostFromAiGateway(chatId: number, aiGatewayLogId: string) {
+    try {
+      if (this.env.CF_AI_GATEWAY_ACCOUNT_ID) {
+        // TODO: Support fetching AI gateway log from cross-account AI gateway, or maybe just stop
+        //   supporting cross-account gateways.
+        return;
+      }
+
+      if (!this.env.WORKERS_AI || !this.env.CF_AI_GATEWAY) {
+        // We lack the binding or we aren't configured with a gateway... can't fetch.
+        return;
+      }
+
+      let log: AiGatewayLog | undefined;
+      try {
+        log = await this.env.WORKERS_AI.gateway(this.env.CF_AI_GATEWAY!).getLog(aiGatewayLogId);
+      } catch (err) {
+        // AI gateway sometimes cannot find the log right away, wait and try again.
+        await scheduler.wait(1000);
+        log = await this.env.WORKERS_AI.gateway(this.env.CF_AI_GATEWAY!).getLog(aiGatewayLogId);
+      }
+
+      if (!log.cost) {
+        // Either cost is not available or it was zero; nothing to update in this case.
+        return;
+      }
+
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta) {
+        // Chat thread deleted?
+        return;
+      }
+
+      meta.totalCost = (meta.totalCost ?? 0) + log.cost;
+
+      // Even though this is not really activity, we need to update lastActive for the subscription
+      // machinery to work correctly.
+      meta.lastActive = this.getChatTimestamp();
+
+      this.storage.chatMeta.put(meta);
+      this.storage.totalCost.put(this.storage.totalCost.get() + log.cost);
+    } catch (err) {
+      // This is an async operation without any caller waiting so there's not much we can do with
+      // this error.
+      // TODO: If we ever use this for billing we'll want to make it more reliable, perhaps by
+      //   storing unfetched log IDs in storage and retrying fetches.
+      console.error(err);
+    }
   }
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
@@ -1238,8 +1344,51 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async getMetadata(): Promise<Omit<GadgetMetadata, 'created' | 'lastActive'>> {
     let title: string = this.impl.storage.title.get();
+    let totalCost = this.impl.storage.totalCost.get();
 
-    return { id: this.impl.ctx.id.toString(), title };
+    return { id: this.impl.ctx.id.toString(), title, totalCost };
+  }
+
+  async subscribeToMetadata(
+      callback: RpcStub<(metadata: Omit<GadgetMetadata, 'created' | 'lastActive'>) => void>)
+      : Promise<RpcStub<{}>> {
+    callback = callback.dup();  // keep stub after return
+
+    let metadata: Omit<GadgetMetadata, 'created' | 'lastActive'> = {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      totalCost: this.impl.storage.totalCost.get()
+    };
+
+    let titleSubscriber = {
+      update(value: string) {
+        metadata.title = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+    let costSubscriber = {
+      update(value: number | undefined) {
+        metadata.totalCost = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+
+    let unsubscribe = () => {
+      this.impl.storage.title.unsubscribe(titleSubscriber);
+      this.impl.storage.totalCost.unsubscribe(costSubscriber);
+      callback[Symbol.dispose]();
+    };
+
+    this.impl.storage.title.subscribe(titleSubscriber);
+    this.impl.storage.totalCost.subscribe(costSubscriber);
+
+    callback(metadata).catch(unsubscribe);
+
+    return new RpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+      }
+    });
   }
 
   async setTitle(title: string): Promise<void> {

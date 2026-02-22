@@ -25,7 +25,8 @@ export interface AgentHooks {
   describeBinding(bindingName: string): Promise<string>;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
   executeCodeMode(code: string, context: AiChatAgentContext): Promise<string>;
-  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[]): void;
+  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
+      totalTokens?: number, aiGatewayLogId?: string): void;
 }
 
 let SYSTEM_PROMPT = `
@@ -855,7 +856,7 @@ export async function runAgent(
 
     prepareStep,
 
-    onStepFinish: ({ text, reasoningText, toolCalls, usage }) => {
+    onStepFinish: ({ text, reasoningText, toolCalls, usage, response }) => {
       let msgs: AiChatMessageBody[] = [];
 
       {
@@ -896,7 +897,9 @@ export async function runAgent(
         });
       }
 
-      hooks.addChatMessages(chatId, author, msgs);
+      // TODO: Figure out where to get cf-aig-log-id when using the Workers AI binding.
+      hooks.addChatMessages(chatId, author, msgs,
+          usage.totalTokens, response.headers?.["cf-aig-log-id"]);
     },
   });
 }

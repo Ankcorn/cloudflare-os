@@ -244,6 +244,9 @@ export type GadgetMetadata = {
 
   lastActive: Date;
 
+  // Total cost of AI inference in dollars, if known.
+  totalCost?: number;
+
   // TODO:
   // - owner, shared-with
   // - created / modified / activity times
@@ -375,6 +378,16 @@ export type AgentSpawnerConfig = {
 export interface Overseer extends RpcTarget {
   // Get metadata describing this gadget.
   getMetadata(): Promise<Omit<GadgetMetadata, 'created' | 'lastActive'>>;
+
+  // Get metadata describing this gadget and subscribe to changes.
+  //
+  // `callback` will be called once immeditaely with the current metadata, then again any time it
+  // changes.
+  //
+  // Disposing the returned `RpcStub` will cancel the subscription.
+  subscribeToMetadata(
+      callback: RpcStub<(metadata: Omit<GadgetMetadata, 'created' | 'lastActive'>) => void>)
+      : Promise<RpcStub<{}>>;
 
   // Change the title.
   setTitle(title: string): Promise<void>;
@@ -543,6 +556,12 @@ export type AiChatMetadata = {
 
   // If this was started from an agent spawner, the spawner's display name.
   spawnerName?: string;
+
+  // Total tokens in this conversation so far, if known.
+  totalTokens?: number;
+
+  // Total cost of this conversation so far, in dollars, if known.
+  totalCost?: number;
 };
 
 export type AiChatAuthorInfo = {
