@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -10,8 +10,12 @@ import {
   AiChatMetadata,
   AiChatMessage,
   AiChatSubscriber,
-  AiChatAuthorInfo
+  AiChatAuthorInfo,
+  CapsuleSpecifier,
 } from '@gadgets/workshop-shared/api'
+import { ResourceDescription } from '@gadgets/workshop-shared/gatekeeper'
+import CapsuleOverlay from './CapsuleOverlay'
+import type { SelectableItem } from './ResourcePicker'
 
 const { TextArea } = Input
 const { Text, Title } = Typography
@@ -23,25 +27,124 @@ const CONSOLE_LOG_SEVERITY_STYLES: Record<string, React.CSSProperties> = {
   info:  { backgroundColor: '#f5f5f5', borderColor: '#d9d9d9', color: '#595959' },
 }
 
-const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange,
-    pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: {
-  onSend: (message: string, modelId: string | null) => void
+// Internal capsule state tracked within ChatInput (not yet sent).
+interface InputCapsule {
+  start: number
+  length: number
+  gatekeeperId: number
+  description: ResourceDescription
+}
+
+// Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
+const URL_REGEX = /https?:\/\/[^\s)>\]]+/g
+
+const ChatInput = ({ overseer, onSend, isAgentActive, models,
+    selectedModel, onModelChange,
+    pendingConsoleLogCount = 0, consoleLogPreview = '', consoleLogSeverity = 'info',
+    onConsumeConsoleLogs = () => '', onDiscardConsoleLogs = () => {},
+    newChat = false }: {
+  overseer: RpcStub<Overseer>
+  onSend: (message: string, modelId: string | null, capsules?: CapsuleSpecifier[]) => void
   isAgentActive: boolean
   models: AiChatAuthorInfo[]
   selectedModel: string | null
   onModelChange: (modelId: string | null) => void
-  pendingConsoleLogCount: number
-  consoleLogPreview: string
-  consoleLogSeverity: 'error' | 'warn' | 'info'
-  onConsumeConsoleLogs: () => string
-  onDiscardConsoleLogs: () => void
+  pendingConsoleLogCount?: number
+  consoleLogPreview?: string
+  consoleLogSeverity?: 'error' | 'warn' | 'info'
+  onConsumeConsoleLogs?: () => string
+  onDiscardConsoleLogs?: () => void
+  newChat?: boolean
 }) => {
   const [inputValue, setInputValue] = useState('')
+  const [capsules, setCapsules] = useState<InputCapsule[]>([])
+  const [activeUrl, setActiveUrl] = useState<{ text: string, start: number, end: number } | null>(null)
+  const [overlayIndex, setOverlayIndex] = useState(0)
+  const overlayItemsRef = useRef<SelectableItem[]>([])
+  const overlayActivateRef = useRef<((index: number) => void) | null>(null)
+
+  // Refs for the mirror div and the textarea wrapper.
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const mirrorRef = useRef<HTMLDivElement>(null)
+
+  // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
+  const inputValueRef = useRef(inputValue)
+  inputValueRef.current = inputValue
+  const capsulesRef = useRef(capsules)
+  capsulesRef.current = capsules
+
+  // Sync mirror div size with the textarea via ResizeObserver.
+  useEffect(() => {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+
+    const textarea = wrapper.querySelector('textarea')
+    if (!textarea) return
+
+    const syncMirror = () => {
+      const mirror = mirrorRef.current
+      if (!mirror) return
+
+      // Copy computed styles from the textarea to the mirror so text layout matches exactly.
+      const cs = getComputedStyle(textarea)
+      mirror.style.fontFamily = cs.fontFamily
+      mirror.style.fontSize = cs.fontSize
+      mirror.style.fontWeight = cs.fontWeight
+      mirror.style.lineHeight = cs.lineHeight
+      mirror.style.letterSpacing = cs.letterSpacing
+      mirror.style.padding = cs.padding
+      mirror.style.border = `${cs.borderWidth} solid transparent`
+      mirror.style.height = `${textarea.offsetHeight}px`
+      mirror.style.width = `${textarea.offsetWidth}px`
+    }
+
+    // Initial sync.
+    syncMirror()
+
+    const observer = new ResizeObserver(syncMirror)
+    observer.observe(textarea)
+
+    return () => observer.disconnect()
+  })
+
+  // Reset overlay selection when the overlay appears or changes URL.
+  useEffect(() => {
+    setOverlayIndex(0)
+  }, [activeUrl])
 
   const handleSend = () => {
     if (!inputValue.trim()) return
-    onSend(inputValue.trim(), selectedModel)
+
+    if (capsules.length === 0) {
+      // No capsules — simple send.
+      onSend(inputValue.trim(), selectedModel)
+    } else {
+      // Build processed message: replace each capsule title with [i] placeholder.
+      const sortedCapsules = [...capsules].sort((a, b) => a.start - b.start)
+      let processedMsg = inputValue
+      let cumulativeShift = 0
+      const specifiers: CapsuleSpecifier[] = []
+
+      for (let i = 0; i < sortedCapsules.length; i++) {
+        const c = sortedCapsules[i]
+        const placeholder = `[${i}]`
+        const adjustedStart = c.start + cumulativeShift
+        processedMsg = processedMsg.slice(0, adjustedStart) + placeholder
+                     + processedMsg.slice(adjustedStart + c.length)
+        specifiers.push({
+          position: adjustedStart,
+          length: placeholder.length,
+          gatekeeperId: c.gatekeeperId,
+          description: c.description,
+        })
+        cumulativeShift += placeholder.length - c.length
+      }
+
+      onSend(processedMsg.trim(), selectedModel, specifiers)
+    }
+
     setInputValue('')
+    setCapsules([])
   }
 
   const handleAttachLogs = () => {
@@ -49,8 +152,287 @@ const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange
     setInputValue(prev => prev + '\n\n' + formatted)
   }
 
+  // Called when the user selects an account in the CapsuleOverlay.
+  // Creates a capsule gatekeeper, fetches its description, and replaces the URL
+  // in the input text with the resource title highlighted as a capsule.
+  const handleCapsuleCreate = async (accountId: number) => {
+    if (!activeUrl) return
+
+    try {
+      // Create the capsule gatekeeper.
+      const gk = await overseer.newCapsuleGatekeeper(accountId, activeUrl.text)
+      if (!gk) {
+        console.error('Failed to create capsule gatekeeper')
+        return
+      }
+
+      // Fetch ID and description in parallel (promise pipelining).
+      const [id, description] = await Promise.all([gk.getId(), gk.describe()])
+      gk[Symbol.dispose]()
+
+      // Snapshot the activeUrl position before any state updates.
+      const urlStart = activeUrl.start
+      const urlEnd = activeUrl.end
+      // Pad the title with spaces so the mirror highlight has visible interior padding.
+      const paddedTitle = ` ${description.title} `
+      const lengthDiff = paddedTitle.length - (urlEnd - urlStart)
+
+      // Replace the URL text with the padded title in inputValue.
+      setInputValue(prev => prev.slice(0, urlStart) + paddedTitle + prev.slice(urlEnd))
+
+      // Adjust positions of existing capsules and add the new one.
+      setCapsules(prev => {
+        const adjusted = prev.map(c => {
+          if (c.start >= urlEnd) {
+            return { ...c, start: c.start + lengthDiff }
+          }
+          return c
+        })
+        return [...adjusted, {
+          start: urlStart,
+          length: paddedTitle.length,
+          gatekeeperId: id,
+          description,
+        }]
+      })
+
+      // Clear activeUrl so the overlay dismisses.
+      setActiveUrl(null)
+
+      // Move cursor to end of inserted title on next tick.
+      requestAnimationFrame(() => {
+        const wrapper = wrapperRef.current
+        if (!wrapper) return
+        const textarea = wrapper.querySelector('textarea')
+        if (textarea) {
+          const cursorPos = urlStart + paddedTitle.length
+          textarea.setSelectionRange(cursorPos, cursorPos)
+          textarea.focus()
+        }
+      })
+    } catch (err) {
+      console.error('Failed to create capsule:', err)
+    }
+  }
+
+  // Handle text changes: detect if edits overlap any capsule and remove broken ones.
+  const handleInputChange = (newValue: string) => {
+    const oldValue = inputValueRef.current
+
+    if (capsulesRef.current.length === 0) {
+      setInputValue(newValue)
+      return
+    }
+
+    // Find the region that changed by comparing old and new values.
+    let diffStart = 0
+    while (diffStart < oldValue.length && diffStart < newValue.length
+           && oldValue[diffStart] === newValue[diffStart]) {
+      diffStart++
+    }
+
+    let oldEnd = oldValue.length
+    let newEnd = newValue.length
+    while (oldEnd > diffStart && newEnd > diffStart
+           && oldValue[oldEnd - 1] === newValue[newEnd - 1]) {
+      oldEnd--
+      newEnd--
+    }
+
+    // The edit replaced oldValue[diffStart..oldEnd) with newValue[diffStart..newEnd).
+    const isPureInsertion = oldEnd === diffStart
+
+    // If the insertion (no deletion) landed inside a capsule, reject the edit.
+    if (isPureInsertion) {
+      for (const capsule of capsulesRef.current) {
+        const capsuleEnd = capsule.start + capsule.length
+        if (diffStart > capsule.start && diffStart < capsuleEnd) {
+          // Reject the edit: reset the textarea DOM directly and restore cursor.
+          const wrapper = wrapperRef.current
+          const textarea = wrapper?.querySelector('textarea')
+          if (textarea) {
+            textarea.value = oldValue
+            textarea.setSelectionRange(diffStart, diffStart)
+          }
+          return
+        }
+      }
+    }
+
+    // First pass: identify broken capsules and remove their remaining text from
+    // newValue. Process from end to start so removals don't shift earlier positions.
+    const broken: InputCapsule[] = []
+    for (const capsule of capsulesRef.current) {
+      const capsuleEnd = capsule.start + capsule.length
+      if (diffStart < capsuleEnd && oldEnd > capsule.start) {
+        broken.push(capsule)
+      }
+    }
+
+    // Apply the user's edit shift to map old capsule positions into newValue.
+    // Then remove any remaining capsule text that the user didn't already delete.
+    let adjusted = newValue
+    const editShift = (newEnd - diffStart) - (oldEnd - diffStart)
+    // Sort broken capsules by start position descending so we can splice from the end.
+    broken.sort((a, b) => b.start - a.start)
+    let extraShift = 0
+    for (const capsule of broken) {
+      // Map capsule range into newValue coordinates.
+      let remStart = capsule.start
+      let remEnd = capsule.start + capsule.length
+      // The edit replaced old[diffStart..oldEnd) with new[diffStart..newEnd).
+      // Portions of the capsule before diffStart are unchanged.
+      // Portions within the edit region were already modified by the user's edit.
+      // Portions after oldEnd shifted by editShift.
+      // We want to remove the parts of the capsule that survived the user's edit.
+      if (remEnd <= diffStart) {
+        // Capsule is entirely before the edit — shouldn't be broken, skip.
+        continue
+      }
+      if (remStart >= oldEnd) {
+        // Capsule is entirely after the edit — shifted in newValue.
+        remStart += editShift
+        remEnd += editShift
+      } else {
+        // Capsule overlaps the edit region. Clamp to the parts outside the edit
+        // that still exist in newValue, plus the edited region itself.
+        // In newValue, the edit region is [diffStart..newEnd).
+        // Before the edit: capsule text in [remStart..diffStart) is unchanged.
+        // After the edit: capsule text in [oldEnd..capsuleEnd) shifted to [newEnd..newEnd+(capsuleEnd-oldEnd)).
+        remStart = Math.min(remStart, diffStart)
+        const afterOldEnd = capsule.start + capsule.length - oldEnd
+        if (afterOldEnd > 0) {
+          remEnd = newEnd + afterOldEnd
+        } else {
+          remEnd = newEnd
+        }
+        // Also include any part before diffStart.
+        remStart = Math.min(remStart, diffStart)
+      }
+      const removeLen = remEnd - remStart
+      if (removeLen > 0 && remStart < adjusted.length) {
+        adjusted = adjusted.slice(0, remStart) + adjusted.slice(Math.min(remEnd, adjusted.length))
+        extraShift -= removeLen
+      }
+    }
+
+    // Second pass: keep non-broken capsules, adjusting positions.
+    const totalShift = editShift + extraShift
+    const surviving: InputCapsule[] = []
+    for (const capsule of capsulesRef.current) {
+      const capsuleEnd = capsule.start + capsule.length
+      if (diffStart < capsuleEnd && oldEnd > capsule.start) {
+        continue // broken
+      }
+      if (capsule.start >= oldEnd) {
+        surviving.push({ ...capsule, start: capsule.start + totalShift })
+      } else {
+        surviving.push(capsule)
+      }
+    }
+
+    // Position cursor where the earliest broken capsule was.
+    const cursorPos = broken.length > 0
+      ? broken[broken.length - 1].start  // broken is sorted descending, last = earliest
+      : undefined
+
+    setCapsules(surviving)
+    setInputValue(adjusted)
+
+    if (cursorPos !== undefined) {
+      requestAnimationFrame(() => {
+        const wrapper = wrapperRef.current
+        if (!wrapper) return
+        const textarea = wrapper.querySelector('textarea')
+        if (textarea) {
+          textarea.setSelectionRange(cursorPos, cursorPos)
+        }
+      })
+    }
+  }
+
+  // Detect whether the cursor is currently inside a URL in the input text.
+  // Called on every cursor movement (select, click, keyup).
+  const handleCursorChange = () => {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+
+    const textarea = wrapper.querySelector('textarea')
+    if (!textarea) return
+
+    const cursorPos = textarea.selectionStart
+    const text = inputValueRef.current
+
+    // Find all URL matches in the current text.
+    URL_REGEX.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = URL_REGEX.exec(text)) !== null) {
+      const start = match.index
+      const end = start + match[0].length
+
+      // Cursor is within this URL (inclusive of both endpoints).
+      if (cursorPos >= start && cursorPos <= end) {
+        // Skip if this region is already a capsule.
+        const isInsideCapsule = capsulesRef.current.some(
+          c => start >= c.start && end <= c.start + c.length
+        )
+        if (isInsideCapsule) break
+
+        setActiveUrl(prev =>
+          prev && prev.text === match![0] && prev.start === start && prev.end === end
+            ? prev
+            : { text: match![0], start, end }
+        )
+        return
+      }
+    }
+
+    // Cursor is not inside any URL.
+    setActiveUrl(null)
+  }
+
+  // Build the mirror div content: transparent text with highlighted capsule regions.
+  const renderMirrorContent = () => {
+    if (capsules.length === 0) {
+      // No capsules — mirror is just invisible text (no highlights needed,
+      // but we still render it so the ResizeObserver can size it).
+      return <span>{inputValue || ' '}</span>
+    }
+
+    const sorted = [...capsules].sort((a, b) => a.start - b.start)
+    const segments: React.ReactNode[] = []
+    let pos = 0
+
+    for (let i = 0; i < sorted.length; i++) {
+      const c = sorted[i]
+      // Text before this capsule.
+      if (c.start > pos) {
+        segments.push(<span key={`t${i}`}>{inputValue.slice(pos, c.start)}</span>)
+      }
+      // Capsule highlight.
+      segments.push(
+        <span key={`c${i}`} className={styles.capsuleHighlight}>
+          {inputValue.slice(c.start, c.start + c.length)}
+        </span>
+      )
+      pos = c.start + c.length
+    }
+
+    // Remaining text after last capsule.
+    if (pos < inputValue.length) {
+      segments.push(<span key="tail">{inputValue.slice(pos)}</span>)
+    }
+
+    // Ensure at least a space so the div has nonzero height when empty.
+    if (segments.length === 0) {
+      segments.push(<span key="empty">{' '}</span>)
+    }
+
+    return <>{segments}</>
+  }
+
   return (
-    <div style={{ padding: '16px', borderTop: '1px solid #f0f0f0' }}>
+    <div style={{ padding: '16px', ...(!newChat ? { borderTop: '1px solid #f0f0f0' } : {}) }}>
       <Space direction="vertical" style={{ width: '100%' }} size="small">
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Text type="secondary" style={{ fontSize: '12px' }}>Model:</Text>
@@ -90,32 +472,97 @@ const ChatInput = ({ onSend, isAgentActive, models, selectedModel, onModelChange
             </Space>
           )}
         </div>
-        <Space.Compact style={{ width: '100%' }}>
-          <TextArea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder={
-              isAgentActive
-                ? 'Waiting for agent to finish...'
-                : 'Type your message...'
-            }
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            onPressEnter={(e) => {
-              if (e.shiftKey) return
-              e.preventDefault()
-              if (!isAgentActive) handleSend()
-            }}
-            style={{ flex: 1 }}
-          />
+        <div style={{ display: 'flex', width: '100%' }}>
+          <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
+            {/* Capsule overlay — floats above (or below in newChat mode) the textarea when cursor is in a URL */}
+            {activeUrl && (
+              <CapsuleOverlay
+                url={activeUrl.text}
+                onSelectAccount={(accountId) => {
+                  handleCapsuleCreate(accountId)
+                }}
+                onDismiss={() => setActiveUrl(null)}
+                activeIndex={overlayIndex}
+                onItems={(items) => { overlayItemsRef.current = items }}
+                activateRef={overlayActivateRef}
+                below={newChat}
+              />
+            )}
+            {/* Mirror div — sits behind the textarea, renders capsule highlights */}
+            <div ref={mirrorRef} className={styles.capsuleMirror} aria-hidden="true">
+              {renderMirrorContent()}
+            </div>
+            <TextArea
+              value={inputValue}
+              onChange={(e) => {
+                handleInputChange(e.target.value)
+                // Re-check URL detection after text changes (cursor position updates on next tick).
+                requestAnimationFrame(handleCursorChange)
+              }}
+              onSelect={handleCursorChange}
+              onClick={handleCursorChange}
+              onKeyUp={handleCursorChange}
+              placeholder={
+                isAgentActive
+                  ? 'Waiting for agent to finish...'
+                  : 'Type your message...'
+              }
+              autoSize={newChat ? { minRows: 4, maxRows: 12 } : { minRows: 1, maxRows: 4 }}
+              onKeyDown={(e) => {
+                if (activeUrl && overlayItemsRef.current.length > 0) {
+                  const count = overlayItemsRef.current.length
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setOverlayIndex(i => (i + 1) % count)
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setOverlayIndex(i => (i - 1 + count) % count)
+                  } else if (e.key === 'Tab') {
+                    e.preventDefault()
+                    overlayActivateRef.current?.(overlayIndex)
+                  }
+                }
+              }}
+              onPressEnter={(e) => {
+                if (e.shiftKey) return
+                e.preventDefault()
+                if (!isAgentActive) handleSend()
+              }}
+              style={{
+                background: 'transparent', position: 'relative', zIndex: 1,
+                ...(newChat ? {} : { borderTopRightRadius: 0, borderBottomRightRadius: 0 }),
+              }}
+            />
+          </div>
+          {!newChat && (
+            <Button
+              type="primary"
+              icon={<SendOutlined />}
+              onClick={handleSend}
+              disabled={!inputValue.trim() || isAgentActive}
+              style={{
+                borderTopLeftRadius: 0,
+                borderBottomLeftRadius: 0,
+                height: 'auto',
+                alignSelf: 'stretch',
+              }}
+            >
+              Send
+            </Button>
+          )}
+        </div>
+        {newChat && (
           <Button
             type="primary"
             icon={<SendOutlined />}
             onClick={handleSend}
-            disabled={!inputValue.trim() || isAgentActive}
+            disabled={!inputValue.trim()}
+            block
+            size="large"
           >
-            Send
+            Start Chat
           </Button>
-        </Space.Compact>
+        )}
       </Space>
     </div>
   )
@@ -201,6 +648,65 @@ interface ChatCache {
   lastMessageTimestamp: Date | null
 }
 
+// Render a text segment as inline markdown, preserving leading/trailing whitespace
+// that CommonMark paragraph parsing would otherwise strip.
+function renderInlineMarkdown(text: string, key: string): ReactNode {
+  const leading = text.length - text.trimStart().length
+  const trailing = text.length - text.trimEnd().length
+  if (leading >= text.length) {
+    // All whitespace — render directly.
+    return <Fragment key={key}>{text}</Fragment>
+  }
+  return <Fragment key={key}>
+    {leading > 0 && text.slice(0, leading)}
+    <ReactMarkdown skipHtml={true}
+      components={{ p: ({children}) => <>{children}</> }}>
+      {text.slice(leading, trailing > 0 ? text.length - trailing : undefined)}
+    </ReactMarkdown>
+    {trailing > 0 && text.slice(text.length - trailing)}
+  </Fragment>
+}
+
+// Render a message that may contain capsule placeholders. Splits the message at
+// capsule positions and interleaves ReactMarkdown text segments with capsule pills.
+function renderMessageWithCapsules(message: string, capsules: CapsuleSpecifier[]) {
+  const sorted = [...capsules].sort((a, b) => a.position - b.position)
+  const segments: React.ReactNode[] = []
+  let pos = 0
+
+  for (let i = 0; i < sorted.length; i++) {
+    const capsule = sorted[i]
+
+    // Text before this capsule.
+    if (capsule.position > pos) {
+      segments.push(renderInlineMarkdown(message.slice(pos, capsule.position), `t${i}`))
+    }
+
+    // Capsule pill.
+    segments.push(
+      <Tooltip key={`c${i}`} title={
+        <a href={capsule.description.url} target="_blank" rel="noopener noreferrer"
+          style={{ color: 'inherit' }}>
+          {capsule.description.url}
+        </a>
+      }>
+        <span className={styles.capsulePill}>
+          {capsule.description.title}
+        </span>
+      </Tooltip>
+    )
+
+    pos = capsule.position + capsule.length
+  }
+
+  // Remaining text after last capsule.
+  if (pos < message.length) {
+    segments.push(renderInlineMarkdown(message.slice(pos), 'tail'))
+  }
+
+  return <>{segments}</>
+}
+
 function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
@@ -210,7 +716,6 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   })
 
   // UI state
-  const [inputValue, setInputValue] = useState('')
   const [_isSubscribed, setIsSubscribed] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [updateCounter, setUpdateCounter] = useState(0) // Force re-render when cache updates
@@ -477,7 +982,6 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     setExpandedToolCalls(new Set())
     setExpandedReasoning(new Set())
     processedToolCallsRef.current = new Set()
-    setInputValue('')
     setIsEditingTitle(false)
   }, [selectedChatId])
 
@@ -538,35 +1042,26 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   // The LSP error is due to bugs that need to be fixed in Cap'n Web.
   }, [selectedChatId, overseer])
 
-  // Handle sending a message
-  const handleSend = async (messageText?: string, modelId?: string | null) => {
-    // If messageText is provided (from ChatInput), use it; otherwise use inputValue (from new chat form)
-    const message = messageText?.trim() || inputValue.trim()
+  // Handle sending a message (always called from ChatInput with explicit messageText)
+  const handleSend = async (messageText?: string, modelId?: string | null,
+      capsules?: CapsuleSpecifier[]) => {
+    const message = messageText?.trim()
     if (!message) return
 
     // Use provided modelId or fall back to selectedModel
     const model = modelId !== undefined ? modelId : selectedModel
 
-    // Only clear inputValue if we're using it (new chat form)
-    if (!messageText) {
-      setInputValue('')
-    }
-
     try {
       if (selectedChatId === null) {
-        // Create a new chat
-        const newChatId = await overseer.newChat(message, model)
+        // Create a new chat (with optional capsules).
+        const newChatId = await overseer.newChat(message, model, capsules)
         onNavigateToChatRef.current(newChatId)
       } else {
-        // Send message to existing chat
-        await overseer.sendChatMessage(selectedChatId, message, model)
+        // Send message to existing chat.
+        await overseer.sendChatMessage(selectedChatId, message, model, capsules || undefined)
       }
     } catch (err) {
       console.error('Failed to send message:', err)
-      // Restore the input on error (only for new chat form)
-      if (!messageText) {
-        setInputValue(message)
-      }
     }
   }
 
@@ -715,44 +1210,18 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
           {/* New chat input at top/center */}
           <div style={{ width: '100%', maxWidth: '600px', marginBottom: '32px' }}>
             <Card>
-              <Space direction="vertical" size="large" style={{ width: '100%' }}>
-                <Title level={4} style={{ margin: 0, textAlign: 'center' }}>
-                  Start a New Chat
-                </Title>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Text type="secondary" style={{ fontSize: '12px' }}>Model:</Text>
-                  <Select
-                    value={selectedModel}
-                    onChange={handleModelChange}
-                    style={{ flex: 1 }}
-                    options={[
-                      { label: '(none)', value: null },
-                      ...availableModels.map(model => ({ label: model.name, value: model.id }))
-                    ]}
-                  />
-                </div>
-                <TextArea
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  placeholder="Type your message to start a conversation with your AI gadget..."
-                  autoSize={{ minRows: 3, maxRows: 8 }}
-                  onPressEnter={(e) => {
-                    if (e.shiftKey) return
-                    e.preventDefault()
-                    handleSend()
-                  }}
-                />
-                <Button
-                  type="primary"
-                  icon={<SendOutlined />}
-                  onClick={() => handleSend()}
-                  disabled={!inputValue.trim()}
-                  block
-                  size="large"
-                >
-                  Start Chat
-                </Button>
-              </Space>
+              <Title level={4} style={{ margin: '0 0 16px', textAlign: 'center' }}>
+                Start a New Chat
+              </Title>
+              <ChatInput
+                overseer={overseer}
+                onSend={handleSend}
+                isAgentActive={false}
+                models={availableModels}
+                selectedModel={selectedModel}
+                onModelChange={handleModelChange}
+                newChat
+              />
             </Card>
           </div>
 
@@ -947,9 +1416,14 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                             </div>
                           )}
                           <div style={{ fontSize: '14px' }} className={styles.markdownContent}>
-                            <ReactMarkdown skipHtml={true}>
-                              {msg.message}
-                            </ReactMarkdown>
+                            {msg.capsules && msg.capsules.length > 0
+                              ? renderMessageWithCapsules(msg.message, msg.capsules)
+                              : (
+                                <ReactMarkdown skipHtml={true}>
+                                  {msg.message}
+                                </ReactMarkdown>
+                              )
+                            }
                           </div>
                           {/* Render tool calls if present */}
                           {msg.toolCalls && msg.toolCalls.length > 0 && (
@@ -1307,6 +1781,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
           {/* Input area */}
           <ChatInput
+            overseer={overseer}
             onSend={handleSend}
             isAgentActive={isAgentActive}
             models={availableModels}

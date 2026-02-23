@@ -23,8 +23,10 @@ export interface AgentHooks {
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
   listBindingNames(): string[];
   describeBinding(bindingName: string): Promise<string>;
+  describeCapsule(name: string, gatekeeperId: number): Promise<string>;
+  saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
-  executeCodeMode(code: string, context: AiChatAgentContext): Promise<string>;
+  executeCodeMode(code: string, context: AiChatAgentContext, capsules?: number[]): Promise<string>;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
 }
@@ -184,23 +186,59 @@ export async function runAgent(
   // Map sequence numbers to change IDs.
   let changeIdMap = new Map<number, number>();
 
+  // Map capsule indices to gatekeeper IDs.
+  let capsules: number[] | undefined;
+
+  // Map gatekeeper IDs that are already in `capsules` back to their index.
+  let seenCapsuleGatekeeperIds = new Map<number, number>();
+
   for (let msg of chatMessages) {
     switch (msg.type) {
       case "message": {
+        let content = msg.message;
+
+        if (msg.capsules) {
+          // This message contains capsules.
+
+          // Make sure capsules are sorted by position.
+          let srcCaps = [...msg.capsules];
+          srcCaps.sort((a, b) => a.position - b.position);
+
+          // Rewrite the content to replace each capsule with `[<title>](env[<n>])`, where
+          // <n> is the index into the capsules array, which will map back to gatekeeper IDs.
+          let parts: string[] = [];
+          let pos = 0;
+          for (let capsule of msg.capsules) {
+            let idx = seenCapsuleGatekeeperIds.get(capsule.gatekeeperId);
+            if (idx === undefined) {
+              capsules = capsules ?? [];
+              idx = capsules.length;
+              capsules.push(capsule.gatekeeperId);
+              seenCapsuleGatekeeperIds.set(capsule.gatekeeperId, idx);
+            }
+
+            parts.push(content.slice(pos, capsule.position));
+            parts.push(`[${capsule.description.title}](env[${idx}])`);
+            pos = capsule.position + capsule.length;
+          }
+          parts.push(content.slice(pos));
+          content = parts.join("");
+        }
+
         let modelMessage: ModelMessage;
         switch (msg.author.type) {
           case "user":
           case "gadget":
             modelMessage = {
               role: "user",
-              content: msg.message,
+              content,
             };
             break;
 
           case "agent":
             modelMessage = {
               role: "assistant",
-              content: msg.message,
+              content,
             };
             break;
 
@@ -648,13 +686,27 @@ export async function runAgent(
           "In addition to appearing in `env`, some bindings support push notifications using " +
           "\"hooks\". If the binding defines a hook type, then the Gadget can implement this " +
           "interface and arrange to receive notifications. Use the `setBindingHook` tool to " +
-          "attach the binding's hook to the Gadget.",
+          "attach the binding's hook to the Gadget.\n" +
+          "\n" +
+          "Sometimes user messages may contain text like `[Resource Title](env[5])`. " +
+          "This is called a \"capsule\". When you see this, it means that the user has " +
+          "granted you access to an external resource for use within this chat session. " +
+          "These resources can also be described using the `describeBinding` tool, by passing " +
+          "the index number in place of the name.",
       inputSchema: z.object({
-        name: z.string().describe("Name of the binding (a property of `env`)."),
+        name: z.string().or(z.number()).describe("Name of the binding (a property of `env`)."),
       }),
       execute: async ({name}, {toolCallId}) => {
         try {
-          return await hooks.describeBinding(name);
+          if (typeof name === "number") {
+            if (!capsules || capsules[name] === undefined) {
+              throw new Error(`No such capsule binding env[${name}].`);
+            } else {
+              return await hooks.describeCapsule(`env[${name}]`, capsules[name]);
+            }
+          } else {
+            return await hooks.describeBinding(name);
+          }
         } catch (error) {
           toolCallNotes.set(toolCallId, {
             error: `${error}`
@@ -710,6 +762,40 @@ export async function runAgent(
       }
     }),
 
+    saveCapsuleAsBinding: tool({
+      description:
+          "Sometimes user messages may contain text like `[Resource Title](env[2])`. " +
+          "This is called a \"capsule\". When you see this, it means that the user has " +
+          "granted you access to an external resource for use within this chat session. " +
+          "However, since capsules are specific to a chat session, they are NOT immediately " +
+          "available for use by the Gadget code. To make them available, you must first " +
+          "use the `saveCapsuleAsBinding` tool to assign a real binding name to the resource.",
+      inputSchema: z.object({
+        capsuleId: z.number().describe(
+            "The capsule index number, e.g. if the capsule was introduced as `env[4]`, then " +
+            "the ID is 4."),
+        bindingName: z.string().describe("Name to assign to the new binding."),
+      }),
+      execute: ({capsuleId, bindingName}, {toolCallId}) => {
+        try {
+          if (!capsules || capsules[capsuleId] === undefined) {
+            throw new Error(`No such capsule binding env[${capsuleId}].`);
+          }
+          if (!/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$/.test(bindingName)) {
+            throw new Error(
+                "Inappropriate binding name. Binding names should be ALL_CAPS_WITH_UNDERSCORES.");
+          }
+          hooks.saveCapsuleAsBinding(capsuleId, bindingName);
+          return {success: true};
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {
+            error: `${error}`
+          });
+          throw error;
+        }
+      }
+    }),
+
     executeCode: tool({
       description: "Executes one-off JavaScript code, returning the output it logs to the " +
           "console. The code will have access to the Gadget's bindings ('env' object), " +
@@ -720,7 +806,12 @@ export async function runAgent(
           "\n" +
           "When the user asks you to just do a task that can be done with these bindings, " +
           "you should use executeCode to perform the task, instead of adding code to the " +
-          "gadget to do it.",
+          "gadget to do it.\n" +
+          "\n" +
+          "Sometimes user messages may contain text like `[Resource Title](env[3])`. " +
+          "This is called a \"capsule\". When you see this, it means that the user has " +
+          "granted you access to an external resource for use within this chat session. " +
+          "You may access these bindings within your function executed with this tool.",
       inputSchema: z.object({
         code: z.string().describe(
             "Code to execute. This must be a complete self-contained JavaScript module " +
@@ -738,7 +829,7 @@ export async function runAgent(
       }),
       execute: async ({code}, {toolCallId}) => {
         try {
-          let output = await hooks.executeCodeMode(code, agentContext);
+          let output = await hooks.executeCodeMode(code, agentContext, capsules);
           toolCallNotes.set(toolCallId, {
             output: `${output}`
           });

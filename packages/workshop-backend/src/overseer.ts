@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -49,7 +49,7 @@ type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
 type GatekeeperRecord = {
   id: number,
-  bindingName: string,
+  bindingName?: string,
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
 };
@@ -107,7 +107,9 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       gatekeepers: collection<GatekeeperRecord>()({
         primaryKey: "id",
         uniqueIndexes: {
-          byBindingName(gatekeeper: GatekeeperRecord) { return gatekeeper.bindingName; }
+          byBindingName(gatekeeper: GatekeeperRecord) {
+            return gatekeeper.bindingName ?? null;
+          }
         }
       }),
 
@@ -280,14 +282,25 @@ class OverseerImpl implements AgentHooks {
     return version;
   }
 
-  getEnvForLoader(filter?: string[]): object {
+  makeGatekeeperLoopback(id: number) {
+    let props = {
+      overseerId: this.ctx.id.toString(),
+      gatekeeperId: id,
+    };
+    return this.ctx.exports.GatekeeperLoopback({props});
+  }
+
+  getEnvForLoader(filter?: string[], capsules?: number[]): object {
     let env: Record<string, Fetcher> = {}
     for (let {id, bindingName} of this.storage.gatekeepers.list()) {
-      let props = {
-        overseerId: this.ctx.id.toString(),
-        gatekeeperId: id,
-      };
-      env[bindingName] = this.ctx.exports.GatekeeperLoopback({props});
+      if (bindingName) {
+        env[bindingName] = this.makeGatekeeperLoopback(id);
+      }
+    }
+    if (capsules) {
+      for (let i = 0; i < capsules.length; i++) {
+        env[i] = this.makeGatekeeperLoopback(capsules[i]);
+      }
     }
     if (filter) {
       let fullEnv = env;
@@ -442,6 +455,24 @@ class OverseerImpl implements AgentHooks {
       gatekeeperRecord.bindingName = `${suggestedName}_${++i}`;
     }
     this.storage.gatekeepers.put(gatekeeperRecord);
+
+    // LSP reports an error here, but tsc does not.
+    // The LSP error is due to bugs that need to be fixed in Cap'n Web.
+    return new GatekeeperClientImpl(this, id!, facet);
+  }
+
+  async addCapsuleGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
+    let id = this.storage.nextGatekeeperId.get();
+    this.storage.nextGatekeeperId.put(id + 1);
+    let gatekeeperRecord = {
+      id,
+      class: cls
+    };
+    this.storage.gatekeepers.put(gatekeeperRecord);
+
+    this.bumpVersion();
+
+    let facet = this.getGatekeeperFacet(id!);
 
     // LSP reports an error here, but tsc does not.
     // The LSP error is due to bugs that need to be fixed in Cap'n Web.
@@ -647,13 +678,24 @@ class OverseerImpl implements AgentHooks {
     if (!gatekeeper) {
       throw new Error(`No such binding: ${bindingName}`);
     }
+    return this.describeGatekeeper(`env.${bindingName}`, gatekeeper);
+  }
 
+  async describeCapsule(name: string, gatekeeperId: number): Promise<string> {
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+    if (!gatekeeper) {
+      throw new Error("This capsule is no longer available.");
+    }
+    return this.describeGatekeeper(name, gatekeeper);
+  }
+
+  async describeGatekeeper(name: string, gatekeeper: GatekeeperRecord): Promise<string> {
     let facet = this.getGatekeeperFacet(gatekeeper.id);
 
     let desc = await facet.describe();
     let types = await facet.getTypeScriptTypes();
 
-    return `Binding: env.${bindingName}\n` +
+    return `Binding: ${name}\n` +
         `Title: ${desc.title}\n` +
         `TypeScript type: ${desc.tsType}\n` +
         (desc.hookTsType
@@ -666,6 +708,18 @@ class OverseerImpl implements AgentHooks {
         `\`\`\`\n` +
         `${types}\n` +
         `\`\`\`\n`;
+  }
+
+  async saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): Promise<void> {
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+    if (!gatekeeper) {
+      throw new Error("This capsule is no longer available.");
+    }
+    if (gatekeeper.bindingName) {
+      throw new Error(`This capsule has already been bound as: env.${gatekeeper.bindingName}`);
+    }
+    gatekeeper.bindingName = bindingName;
+    this.storage.gatekeepers.put(gatekeeper);
   }
 
   async setBindingHook(bindingNameOrId: string | number, newHook: string | null): Promise<void> {
@@ -744,7 +798,9 @@ class OverseerImpl implements AgentHooks {
   listBindingNames(): string[] {
     let result: string[] = [];
     for (let gk of this.storage.gatekeepers.list()) {
-      result.push(gk.bindingName);
+      if (gk.bindingName) {
+        result.push(gk.bindingName);
+      }
     }
     return result;
   }
@@ -923,7 +979,8 @@ class OverseerImpl implements AgentHooks {
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
 
-  async executeCodeMode(code: string, context: AiChatAgentContext): Promise<string> {
+  async executeCodeMode(code: string, context: AiChatAgentContext,
+                        capsules?: number[]): Promise<string> {
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
@@ -932,8 +989,7 @@ class OverseerImpl implements AgentHooks {
       this.#codeModeResolvers.set(executionId, resolve);
     });
 
-    // TODO: Use null ID when supported.
-    let worker = this.env.LOADER.get(Math.random().toString(), () => {
+    let worker = this.env.LOADER.get(null, () => {
       let tailProps = {
         executionId,
         overseerId: this.ctx.id.toString(),
@@ -949,7 +1005,7 @@ class OverseerImpl implements AgentHooks {
           "harness.js": CODE_MODE_HARNESS,
           "agent.js": code,
         },
-        env: this.getEnvForLoader(context.spawnerConfig?.env),
+        env: this.getEnvForLoader(context.spawnerConfig?.env, capsules),
         tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
         globalOutbound: null,
       };
@@ -1516,11 +1572,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listGatekeepers(): Promise<GatekeeperMetadata[]> {
-    let promises = [...this.impl.storage.gatekeepers.list()].map(async ({id, bindingName}) => {
+    let promises = [...this.impl.storage.gatekeepers.list()]
+        .filter(gk => gk.bindingName !== undefined)
+        .map(async ({id, bindingName}) => {
       let description = await this.impl.getGatekeeperFacet(id).describe();
 
       let result: GatekeeperMetadata = {
-        bindingName,
+        bindingName: bindingName!,
         resourceTitle: description.title,
       };
 
@@ -1542,6 +1600,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<GatekeeperClient<any> | null> {
     return await this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(
         accountId, resourceUrl));
+  }
+
+  async newCapsuleGatekeeper(accountId: number, resourceUrl: string)
+        : Promise<GatekeeperClient<any> | null> {
+    return await this.impl.addCapsuleGatekeeper(
+        await this.owner.getGatekeeperClassFor(accountId, resourceUrl));
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -1718,7 +1782,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async newChat(initialMessage: string, chosenModelId: string | null): Promise<number> {
+  async newChat(initialMessage: string, chosenModelId: string | null,
+                capsules?: CapsuleSpecifier[]): Promise<number> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
 
     let chatId = this.impl.nextChatId();
@@ -1742,6 +1807,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       type: "message",
       message: initialMessage,
+      capsules,
     });
 
     if (userMeta.aiModel) {
@@ -1758,7 +1824,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async sendChatMessage(
-      chatId: number, message: string, chosenModelId: string | null): Promise<void> {
+      chatId: number, message: string, chosenModelId: string | null,
+      capsules?: CapsuleSpecifier[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
 
     let meta = this.impl.storage.chatMeta.get(chatId);
@@ -1783,6 +1850,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       type: "message",
       message,
+      capsules,
     });
 
     if (userMeta.aiModel) {
@@ -1925,6 +1993,10 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async remove(): Promise<void> {
     this.impl.removeGatekeeper(this.id);
+  }
+
+  async getId(): Promise<number> {
+    return this.id;
   }
 
   async getBindingName(): Promise<string> {
