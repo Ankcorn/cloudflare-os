@@ -429,11 +429,14 @@ export interface Overseer extends RpcTarget {
   // @ts-ignore - TODO: Fix type instantiation issue
   connectToGadget(chatId?: number): Promise<RpcStub<any>>;
 
-  // List all the Gadget's current gatekeepers.
+  // List all the Gadget's current gatekeepers (that have been assigned binding names).
   listGatekeepers(): Promise<GatekeeperMetadata[]>;
 
   // Get an existing gatekeeper by binding name.
   getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null>;
+
+  // Get an existing gatekeeper by ID number. Throws if the ID doesn't exist.
+  getGatekkeperById(id: number): Promise<GatekeeperClient<any>>;
 
   // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
   //
@@ -441,6 +444,11 @@ export interface Overseer extends RpcTarget {
   // appropriate account, use `subscribeConnectedAccounts()` with a `filter` for this URL, then
   // let the user choose one.
   newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+
+  // Like newGatekeeper() but creates a gatekeeper for use in a capsule embedded in a chat session.
+  // See `CapsuleSpecifier` for more on capsules.
+  newCapsuleGatekeeper(accountId: number, resourceUrl: string)
+      : Promise<GatekeeperClient<any> | null>;
 
   // Create a new gatekeeper for an AI model binding. The model can be any returned by
   // listModels().
@@ -496,14 +504,16 @@ export interface Overseer extends RpcTarget {
   //
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
-  newChat(initialMessage: string, modelId: string | null): Promise<number>;
+  newChat(initialMessage: string, modelId: string | null,
+          capsules?: CapsuleSpecifier[]): Promise<number>;
 
   // Send a message to the chat from this client. Sending a message causes the LLM to start
   // running if it isn't already.
   //
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
-  sendChatMessage(chatId: number, message: string, modelId: string | null): Promise<void>;
+  sendChatMessage(chatId: number, message: string, modelId: string | null,
+                  capsules?: CapsuleSpecifier[]): Promise<void>;
 
   // Update the title of a chat. Usually not needed as a title is generated automatically from
   // the first message.
@@ -594,6 +604,10 @@ export type AiChatMessageBody = {
   type: "message";
   message: string;
 
+  // The message may contain "capsules", which are embedded capabilities that reference external
+  // resources. See `CapsuleSpecifier` for more.
+  capsules?: CapsuleSpecifier[];
+
   // If the AI produces any thinking/reasoning text, this is it. This should be hidden by default
   // but the user should have the option to expand it.
   reasoning?: string;
@@ -679,6 +693,33 @@ export type AiToolCall = {
 // - Includes inline audit logs from the action.
 // - Actions can be approved or rejected inline.
 
+// Capsules are resource references that are embedded inline in a chat message. The name comes
+// from the fact that they are represented as a pill-shaped inline element, and that they represent
+// a capability (in the capability-based security sense).
+//
+// When the user is typing a chat message and inserts a link into the message, they will be
+// prompted to turn the link into a capsule. Doing so implicitly creates a gatekeeper and grants
+// the agent permission to use it.
+export type CapsuleSpecifier = {
+  // Position and length of the text within the chat message which should be replaced by the
+  // capsule. The chat message contains some placeholder text which the capsule replaces. This
+  // placeholder text exists mostly for ease of debugging -- it is never actually displayed to
+  // the user nor the agent. Typically, the placeholder text should be an integer in square
+  // brackets, where the integer is the position of the capsule within the message's capsule
+  // list, e.g. `[0]`, `[1]`, etc. However, nothing should actually depend on the placeholder
+  // text's content; the CapsuleSpecifier itself is all that matters.
+  position: number;
+  length: number;
+
+  // ID of the gatekeeper, which should have been created using newCapsuleGatekeeper().
+  gatekeeperId: number;
+
+  // Denormalized resource description from calling GatekeeperClient.describe() at the time of
+  // insertion. We store this in the chat message to avoid the need to start up the gatekeeper
+  // to ask for it again every time the message is displayed.
+  description: ResourceDescription;
+};
+
 // Interface implemented by the client to receive callback notifications whenever there is new
 // chat activity. Use Overseer.subscribeToChat() to register a subscriber.
 export interface AiChatSubscriber {
@@ -725,8 +766,15 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
   // Remove this gatekeeper from the Gadget.
   remove(): Promise<void>;
 
-  // Get and set the binding name.
-  getBindingName(): Promise<string>;
+  // Get the gatekeeper's numeric ID. These are assigned sequentially for all gatekeepers created
+  // in a particular gadget, including those used in capsules in chat threads (which may not have
+  // a binding name assigned).
+  getId(): Promise<number>;
+
+  // Get and set the binding name. A gatekeeper may not have a binding name if it is referenced
+  // only via a capsule in a particular chat thread, but a binding name can be assigned to such
+  // a gatekeeper later to promote it to a permanent member of `env`.
+  getBindingName(): Promise<string | null>;
   setBindingName(name: string): Promise<void>;
 
   // Get the resource description, including the schema of its RPC interface.
