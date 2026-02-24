@@ -724,6 +724,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   const [chatListReady, setChatListReady] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [updateCounter, setUpdateCounter] = useState(0) // Force re-render when cache updates
+  const [proposedChangesVersion, setProposedChangesVersion] = useState(0) // Incremented only for change-affecting messages
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
@@ -866,15 +867,21 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     })
   }, [currentMessages, selectedChatId, onFileEdited])
 
-  // Notify parent when proposed changes change for the selected chat
-  // Compute active (unmerged/unreverted) changes and send to parent
+  // Notify parent when proposed changes change for the selected chat.
+  // Only recomputes when proposedChangesVersion changes (i.e. a "changes", "merge",
+  // or "revert" message arrives), NOT on every message.
   useEffect(() => {
     if (!currentChatMetadata?.hasProposedChanges) {
       onProposedChangesChange?.(undefined)
       return
     }
 
-    const { activeChanges } = computeMessageStates(currentMessages)
+    // Read messages directly from the cache (always current) rather than using the
+    // memoized currentMessages, so we don't need it as a dependency.
+    const messages = selectedChatId !== null
+      ? (cacheRef.current.messages.get(selectedChatId) || []).filter(msg => msg !== undefined)
+      : []
+    const { activeChanges } = computeMessageStates(messages)
 
     if (activeChanges.length === 0) {
       onProposedChangesChange?.(undefined)
@@ -886,7 +893,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
       : Y.mergeUpdatesV2(activeChanges)
 
     onProposedChangesChange?.(mergedUpdate)
-  }, [currentChatMetadata?.hasProposedChanges, currentMessages, onProposedChangesChange])
+  }, [currentChatMetadata?.hasProposedChanges, proposedChangesVersion, selectedChatId, onProposedChangesChange])
 
   // Proper class implementation of AiChatSubscriber
   // This is necessary so the server receives a single stub for the object,
@@ -929,6 +936,14 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
       if (!cacheRef.current.lastMessageTimestamp ||
           msg.timestamp > cacheRef.current.lastMessageTimestamp) {
         cacheRef.current.lastMessageTimestamp = msg.timestamp
+      }
+
+      // Only trigger proposed-changes recomputation for message types that affect the code.
+      // "merge" is excluded: it reclassifies changes from proposed to committed but doesn't
+      // change the total code (committed + proposed). The hasProposedChanges metadata
+      // dependency handles the transition when all changes are merged.
+      if (msg.type === "changes" || msg.type === "revert") {
+        setProposedChangesVersion(prev => prev + 1)
       }
 
       forceUpdate()
@@ -1053,6 +1068,10 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
             }
           }
 
+          // History may contain change-affecting messages that the subscriber
+          // didn't deliver (they predated the subscription). Bump the version so
+          // the proposed-changes effect re-evaluates with the loaded messages.
+          setProposedChangesVersion(prev => prev + 1)
           forceUpdate()
         } catch (err) {
           console.error('Failed to load chat history:', err)
