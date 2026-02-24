@@ -21,14 +21,14 @@ export type AiChatAgentContext = {
 export interface AgentHooks {
   getChatAgentContext(chatId: number): AiChatAgentContext;
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
-  listBindingNames(): string[];
+  listBindingInfo(filter?: string[]): {name: string, title: string}[];
   describeBinding(bindingName: string): Promise<string>;
   describeCapsule(name: string, gatekeeperId: number): Promise<string>;
   saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
   executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
                   capsules?: number[]): Promise<string>;
-  getCapturedActions(chatId: number): number[] | undefined;
+  consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
 }
@@ -413,6 +413,7 @@ export async function runAgent(
       }
 
       case "action":
+      case "useGadget":
         // No need to tell the agent about this.
         break;
 
@@ -457,15 +458,15 @@ export async function runAgent(
       }
     }
 
-    let bindingNames = agentContext.spawnerConfig.env || hooks.listBindingNames();
+    let bindingInfo = hooks.listBindingInfo(agentContext.spawnerConfig.env);
     let systemPromptBindings: string;
-    if (bindingNames.length == 0) {
+    if (bindingInfo.length == 0) {
       systemPromptBindings =
           "You have not been given access to any bindings; the `env` object is empty.";
     } else {
       systemPromptBindings =
           `You have access to the following Cloudflare Workers bindings via the \`env\` object:\n` +
-          `* ${bindingNames.join("\n* ")}`
+          `${bindingInfo.map(info => `* ${info.name}: ${info.title}`).join("\n")}`
     }
 
     // Split the system prompt into static and dynamic parts for better caching.
@@ -500,14 +501,14 @@ export async function runAgent(
           `\n* ${startingFiles.join("\n* ")}`;
     }
 
-    let bindingNames = hooks.listBindingNames();
+    let bindingInfo = hooks.listBindingInfo();
     let systemPromptBindings: string;
-    if (bindingNames.length == 0) {
+    if (bindingInfo.length == 0) {
       systemPromptBindings = "The project currently has no bindings.";
     } else {
       systemPromptBindings =
           `The project is configured with the following Cloudflare Workers bindings:\n` +
-          `* ${bindingNames.join("\n* ")}`
+          `${bindingInfo.map(info => `* ${info.name}: ${info.title}`).join("\n")}`
     }
 
     // Split the system prompt into static and dynamic parts for better caching.
@@ -775,7 +776,11 @@ export async function runAgent(
           "granted you access to an external resource for use within this chat session. " +
           "However, since capsules are specific to a chat session, they are NOT immediately " +
           "available for use by the Gadget code. To make them available, you must first " +
-          "use the `saveCapsuleAsBinding` tool to assign a real binding name to the resource.",
+          "use the `saveCapsuleAsBinding` tool to assign a real binding name to the resource.\n" +
+          "\n" +
+          "NOTE: You do NOT have to use `saveCapsuleAsBinding` in order to use a capsule with " +
+          "the `executeCode` tool. You ONLY need to assign a binding name in order to be able " +
+          "to use it in Gadget code.",
       inputSchema: z.object({
         capsuleId: z.number().describe(
             "The capsule index number, e.g. if the capsule was introduced as `env[4]`, then " +
@@ -994,10 +999,13 @@ export async function runAgent(
         });
       }
 
-      let capturedActions = hooks.getCapturedActions(chatId);
+      let capturedActions = hooks.consumeCapturedActions(chatId);
       if (capturedActions) {
-        for (let actionId of capturedActions) {
+        for (let actionId of capturedActions.actions) {
           msgs.push({type: "action", actionId});
+        }
+        if (capturedActions.accessedGadget) {
+          msgs.push({type: "useGadget"});
         }
       }
 
