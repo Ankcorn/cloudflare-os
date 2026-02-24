@@ -658,6 +658,10 @@ export type AiChatMessageBody = {
   // current in messages delivered to the client. It is marked optional only because it is not
   // present in messages stored in the chat table on the server side.
   actionLog?: ActionLogEntry;
+} | {
+  // Indicates that the AI agent accessed the gadget one or more times. This is logged in order
+  // to track whether information known to the gadget may have tainted the agent session.
+  type: "useGadget";
 };
 
 // Describes a tool call performed by an AI agent as part of a message.

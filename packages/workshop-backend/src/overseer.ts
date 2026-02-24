@@ -50,21 +50,17 @@ type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 type GatekeeperRecord = {
   id: number,
   bindingName?: string,
+  resourceTitle?: string,   // denormalized to avoid gatekeeper query
+  resourceUrl?: string;     // denormalized to avoid gatekeeper query
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
-};
-
-type CachedGatekeeperMetadata = {
-  bindingName?: string,
-  resourceTitle: string;
-  resourceUrl?: string;
 };
 
 type ActionRecord = {
   id: number,
   gatekeeperId: number;
   caller: GatekeeperCaller;
-  resourceTitle: string;    // denormalized to avoid gatekeeper query
+  resourceTitle?: string;   // denormalized to avoid gatekeeper query
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
   bindingName?: string;     // denormalized to avoid gatekeeper lookup, omitted for capsules
   createdAt: Date;
@@ -89,7 +85,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
     return {
       id: record.id,
       bindingName: record.bindingName,
-      resourceTitle: record.resourceTitle,
+      resourceTitle: record.resourceTitle || "(title unavailable)",
       resourceUrl: record.resourceUrl,
       createdAt: record.createdAt,
       state: record.state,
@@ -100,7 +96,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
     return {
       id: record.id,
       bindingName: record.bindingName,
-      resourceTitle: record.resourceTitle,
+      resourceTitle: record.resourceTitle || "(title unavailable)",
       resourceUrl: record.resourceUrl,
       createdAt: record.createdAt,
       appliedAt: record.appliedAt,
@@ -335,6 +331,10 @@ class OverseerImpl implements AgentHooks {
 
   getEnvForLoader(caller: GatekeeperCaller, filter?: string[], capsules?: number[]): object {
     let env: Record<string, Fetcher> = {}
+
+    env.GADGET = this.ctx.exports.GatekeeperLoopback(
+        {props: {overseerId: this.ctx.id.toString(), caller}});
+
     for (let {id, bindingName} of this.storage.gatekeepers.list()) {
       if (bindingName) {
         env[bindingName] = this.makeGatekeeperLoopback(id, caller);
@@ -420,7 +420,10 @@ class OverseerImpl implements AgentHooks {
   //
   // If `chatId` is specified, load the gadget including changes proposed in the given chat
   // thread.
-  async getGadgetFacet(chatId?: number): Promise<Fetcher<DurableObject>> {
+  //
+  // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
+  // look like an RpcTarget instead.
+  async getGadgetFacet(chatId?: number): Promise<RpcStub<any>> {
     if (chatId !== this.#runningChatId) {
       this.ctx.facets.abort("gadget", new Error(
           chatId === undefined
@@ -429,7 +432,7 @@ class OverseerImpl implements AgentHooks {
       this.#runningChatId = chatId;
     }
 
-    return this.ctx.facets.get<DurableObject>("gadget", () => {
+    let facet = this.ctx.facets.get<DurableObject>("gadget", () => {
       let stub = this.loadGadgetWorker(chatId);
 
       return {
@@ -437,6 +440,57 @@ class OverseerImpl implements AgentHooks {
         id: "gadget"
       };
     });
+
+    let self = this;
+
+    // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
+    let proxy = new Proxy(facet, {
+      get(target, prop, receiver) {
+        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
+        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
+        let method = Reflect.get(target, prop, target);
+
+        // Note that all wildcart properties of a stub appear as functions. So this check only
+        // really catches when `get()` returns `undefined`, as it does e.g. for the property
+        // named "then". Also if the prop is a symbol then it's definitely not an RPC so we handle
+        // that here.
+        if (typeof method !== "function" || typeof prop === "symbol") return method;
+
+        // HACK: We're going to assume all top-level properties are methods, and we are going to
+        //   intercept exceptions thrown by these methods and deliver them to the console log
+        //   subscriber. In theory we shouldn't have to do this, because these exceptions should
+        //   be reported to the tail worker. However, for some reason, that isn't working --
+        //   possibly a runtime bug which needs investigation.
+        // TODO: Fix exception reporting it tail workers so we can remove this hack.
+        return (...args: any[]) => {
+          let result: Promise<any> = Reflect.apply(method, target, args);
+          return result.catch((err: any) => {
+            let msg = err;
+            if (err instanceof Error) {
+              // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
+              // we at least specify the method that was called it's somewhat useful to the agent.
+              msg = `${err}\n    at ${prop}()`;
+            }
+
+            let event: ConsoleLogEvent = {
+              timestamp: new Date(),
+              level: "error",
+              message: [msg],
+            };
+            self.deliverGadgetLogs(chatId ?? null, [event]);
+            throw err;
+          });
+        }
+      },
+      getPrototypeOf(target) {
+        return RpcTarget.prototype;
+      }
+    });
+
+    // Explicitly construct at RpcStub around the proxy to work around a workerd bug where
+    // returning an RpcTarget proxy as the top-level return value from an RPC isn't detected
+    // correctly.
+    return new RpcStub(proxy);
   }
 
   // Load a WorkerEntrypoint exported by the gadget, used to implement a hook.
@@ -476,46 +530,36 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  async addGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
+  async addGatekeeper(cls: GatekeeperClass, isCapsule: boolean): Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
     this.storage.nextGatekeeperId.put(id + 1);
-    let gatekeeperRecord = {
+    let gatekeeperRecord: GatekeeperRecord = {
       id,
-      bindingName: `NEW_BINDING_${id}`,
       class: cls
     };
     this.storage.gatekeepers.put(gatekeeperRecord);
 
-    this.bumpVersion();
-
     let facet = this.getGatekeeperFacet(id!);
+    let description = await facet.describe();
 
-    // Update binding name to the suggested name, avoiding conflicts.
-    let suggestedName = await facet.describe().suggestedBindingName;
-    gatekeeperRecord.bindingName = suggestedName;
-    let i = 1;
-    while (this.storage.gatekeepers.byBindingName.get(gatekeeperRecord.bindingName) !== undefined) {
-      gatekeeperRecord.bindingName = `${suggestedName}_${++i}`;
+    gatekeeperRecord.resourceTitle = description.title;
+    gatekeeperRecord.resourceUrl = description.url;
+
+    if (isCapsule) {
+      // No need to set binding name. No need to call bumpVersion() since this doesn't affect code.
+    } else {
+      // Update binding name to the suggested name, avoiding conflicts.
+      let suggestedName = description.suggestedBindingName;
+      gatekeeperRecord.bindingName = suggestedName;
+      let i = 1;
+      while (this.storage.gatekeepers.byBindingName.get(gatekeeperRecord.bindingName) !== undefined) {
+        gatekeeperRecord.bindingName = `${suggestedName}_${++i}`;
+      }
+
+      this.bumpVersion();
     }
+
     this.storage.gatekeepers.put(gatekeeperRecord);
-
-    // LSP reports an error here, but tsc does not.
-    // The LSP error is due to bugs that need to be fixed in Cap'n Web.
-    return new GatekeeperClientImpl(this, id!, facet);
-  }
-
-  async addCapsuleGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
-    let id = this.storage.nextGatekeeperId.get();
-    this.storage.nextGatekeeperId.put(id + 1);
-    let gatekeeperRecord = {
-      id,
-      class: cls
-    };
-    this.storage.gatekeepers.put(gatekeeperRecord);
-
-    // Note: Don't call bumpVersion() here because a capsule actually doesn't affect the code.
-
-    let facet = this.getGatekeeperFacet(id!);
 
     // LSP reports an error here, but tsc does not.
     // The LSP error is due to bugs that need to be fixed in Cap'n Web.
@@ -527,62 +571,36 @@ class OverseerImpl implements AgentHooks {
     this.storage.gatekeepers.delete(id);
   }
 
-  startGatekeeperSession(id: number, caller: GatekeeperCaller): Promise<any> {
-    let client = new GatekeeperClientImpl(this, id, this.getGatekeeperFacet(id), caller);
-    return client.openSession();
-  }
-
-  #gatekeeperMetadataCache?: Map<number, CachedGatekeeperMetadata>;
-
-  // Get metadata for a given gatekeeper, caching it in memory to avoid excessive facet startups.
-  async getGatekeeperMetadata(gatekeeperId: number, gatekeeper?: GatekeeperRecord)
-      : Promise<CachedGatekeeperMetadata> {
-    if (!this.#gatekeeperMetadataCache) this.#gatekeeperMetadataCache = new Map();
-
-    let result = this.#gatekeeperMetadataCache.get(gatekeeperId);
-    if (result) return result;
-
-    gatekeeper = gatekeeper || this.storage.gatekeepers.get(gatekeeperId);
-    if (!gatekeeper) {
-      result = {
-        resourceTitle: "(invalid)",
-      };
-    } else {
-      let resourceTitle: string;
-      let resourceUrl: string | undefined;
-
-      try {
-        let facet = this.getGatekeeperFacet(gatekeeperId);
-        resourceTitle = (await facet.describe()).title;
-        resourceUrl = (await facet.describe()).url;
-      } catch (err) {
-        resourceTitle = `${err}`;
+  startGatekeeperSession(id: number | undefined, caller: GatekeeperCaller): Promise<any> {
+    if (id === undefined) {
+      // Loop back to gadget.
+      if (caller.from === "agent") {
+        this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
       }
-
-      result = {
-        bindingName: gatekeeper.bindingName,
-        resourceTitle,
-        resourceUrl,
-      };
+      return this.getGadgetFacet(caller.chatId);
+    } else {
+      let client = new GatekeeperClientImpl(this, id, this.getGatekeeperFacet(id), caller);
+      return client.openSession();
     }
-
-    this.#gatekeeperMetadataCache.set(gatekeeperId, result);
-    return result;
   }
 
   // Maps chat ID to action numbers that were recently performed by that chat's agent. These are
   // added to the chat log after the tool call returns.
-  #capturedActions = new Map<number, number[]>();
+  #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean}>();
+
+  #getOrCreateCapturedActions(chatId: number) {
+    let result = this.#capturedActions.get(chatId);
+    if (!result) {
+      result = {actions: [], accessedGadget: false};
+      this.#capturedActions.set(chatId, result);
+    }
+    return result;
+  }
 
   async #associateAction(caller: GatekeeperCaller, actionId: number) {
     try {
       if (caller.from === "agent") {
-        let list = this.#capturedActions.get(caller.chatId);
-        if (!list) {
-          list = [];
-          this.#capturedActions.set(caller.chatId, list);
-        }
-        list.push(actionId);
+        this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
       } else if (caller.chatId !== undefined && this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
@@ -605,11 +623,15 @@ class OverseerImpl implements AgentHooks {
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+
     let record: ActionRecord = {
       id: actionId,
       gatekeeperId,
       caller,
-      ...(await this.getGatekeeperMetadata(gatekeeperId)),
+      bindingName: gatekeeper?.bindingName,
+      resourceTitle: gatekeeper?.resourceTitle,
+      resourceUrl: gatekeeper?.resourceUrl,
       createdAt: new Date(),
       state: "approved",
       type: "observation",
@@ -626,11 +648,15 @@ class OverseerImpl implements AgentHooks {
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+
     let record: ActionRecord = {
       id: actionId,
       gatekeeperId,
       caller,
-      ...(await this.getGatekeeperMetadata(gatekeeperId)),
+      bindingName: gatekeeper?.bindingName,
+      resourceTitle: gatekeeper?.resourceTitle,
+      resourceUrl: gatekeeper?.resourceUrl,
       action,
       createdAt: new Date(),
       state: "pending",
@@ -794,6 +820,14 @@ class OverseerImpl implements AgentHooks {
   }
 
   async describeBinding(bindingName: string): Promise<string> {
+    if (bindingName === "GADGET") {
+      return `Binding: GADGET\n` +
+          `\n` +
+          `This special binding is an RPC stub that points back at the Gadget's main Durable ` +
+          `Object instance. This is useful especially in hooks and when using the ` +
+          `\`executeCode\` tool to talk back to the Gadget itself.`;
+    }
+
     let gatekeeper = this.storage.gatekeepers.byBindingName.get(bindingName);
     if (!gatekeeper) {
       throw new Error(`No such binding: ${bindingName}`);
@@ -837,6 +871,9 @@ class OverseerImpl implements AgentHooks {
     }
     if (gatekeeper.bindingName) {
       throw new Error(`This capsule has already been bound as: env.${gatekeeper.bindingName}`);
+    }
+    if (bindingName === "GADGET") {
+      throw new Error("The binding name `GADGET` is reserved.");
     }
     gatekeeper.bindingName = bindingName;
     this.storage.gatekeepers.put(gatekeeper);
@@ -918,11 +955,17 @@ class OverseerImpl implements AgentHooks {
     return this.storage.chatContext.get(chatId) || {chatId};
   }
 
-  listBindingNames(): string[] {
-    let result: string[] = [];
+  listBindingInfo(filter?: string[]): {name: string, title: string}[] {
+    let result: {name: string, title: string}[] = [];
+    if (!filter || filter.includes("GADGET")) {
+      result.push({
+        name: "GADGET",
+        title: "RPC stub to the Gadget's Durable Object",
+      });
+    }
     for (let gk of this.storage.gatekeepers.list()) {
-      if (gk.bindingName) {
-        result.push(gk.bindingName);
+      if (gk.bindingName && (!filter || filter.includes(gk.bindingName))) {
+        result.push({name: gk.bindingName, title: gk.resourceTitle || "(title unavailable)"});
       }
     }
     return result;
@@ -1191,7 +1234,7 @@ class OverseerImpl implements AgentHooks {
     return log;
   }
 
-  getCapturedActions(chatId: number): number[] | undefined {
+  consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined {
     let result = this.#capturedActions.get(chatId);
     this.#capturedActions.delete(chatId);
     return result;
@@ -1286,7 +1329,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new OverseerClientInterface(this.impl, owner, notifyDeleted);
   }
 
-  async startGatekeeperSession(id: number, caller: GatekeeperCaller): Promise<any> {
+  async startGatekeeperSession(id: number | undefined, caller: GatekeeperCaller): Promise<any> {
     return this.impl.startGatekeeperSession(id, caller);
   }
 
@@ -1363,11 +1406,14 @@ type GatekeeperCaller = {
 } | {
   from: "gadget";
   chatId?: number;
+} | {
+  from: "user";
+  chatId?: number;
 };
 
 type GatekeeperLoopbackProps = {
   overseerId: string;
-  gatekeeperId: number;
+  gatekeeperId?: number;    // undefined = the gadget itself
   caller: GatekeeperCaller;
 };
 
@@ -1682,60 +1728,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
-    let facet = await this.impl.getGadgetFacet(chatId);
-    let overseerImpl = this.impl;
-
-    // TODO: Make possible to return facet stub over RPC. This Proxy is a hack.
-    return new Proxy(facet, {
-      get(target, prop, receiver) {
-        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
-        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
-        let method = Reflect.get(target, prop, target);
-
-        // Note that all wildcart properties of a stub appear as functions. So this check only
-        // really catches when `get()` returns `undefined`, as it does e.g. for the property
-        // named "then". Also if the prop is a symbol then it's definitely not an RPC so we handle
-        // that here.
-        if (typeof method !== "function" || typeof prop === "symbol") return method;
-
-        // HACK: We're going to assume all top-level properties are methods, and we are going to
-        //   intercept exceptions thrown by these methods and deliver them to the console log
-        //   subscriber. In theory we shouldn't have to do this, because these exceptions should
-        //   be reported to the tail worker. However, for some reason, that isn't working --
-        //   possibly a runtime bug which needs investigation.
-        // TODO: Fix exception reporting it tail workers so we can remove this hack.
-        return (...args: any[]) => {
-          let result: Promise<any> = Reflect.apply(method, target, args);
-          return result.catch((err: any) => {
-            let msg = err;
-            if (err instanceof Error) {
-              // Sadly the caught errors are missing any useful stack at the moment. Perhaps if
-              // we at least specify the method that was called it's somewhat useful to the agent.
-              msg = `${err}\n    at ${prop}()`;
-            }
-
-            let event: ConsoleLogEvent = {
-              timestamp: new Date(),
-              level: "error",
-              message: [msg],
-            };
-            overseerImpl.deliverGadgetLogs(chatId ?? null, [event]);
-            throw err;
-          });
-        }
-      },
-      getPrototypeOf(target) {
-        return RpcTarget.prototype;
-      }
-    });
+    return this.impl.getGadgetFacet(chatId);
   }
 
   async listGatekeepers(): Promise<GatekeeperMetadata[]> {
     let promises = [...this.impl.storage.gatekeepers.list()]
         .filter(gk => gk.bindingName !== undefined)
         .map(async (gatekeeper) => {
-      let result = await this.impl.getGatekeeperMetadata(gatekeeper.id, gatekeeper);
-      return result as GatekeeperMetadata;
+      return {
+        bindingName: gatekeeper.bindingName!,
+        resourceTitle: gatekeeper.resourceTitle || "(title unavailable)",
+      };
     });
 
     return await Promise.all(promises);
@@ -1759,14 +1762,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    return await this.impl.addGatekeeper(await this.owner.getGatekeeperClassFor(
-        accountId, resourceUrl));
+    return await this.impl.addGatekeeper(
+        await this.owner.getGatekeeperClassFor(accountId, resourceUrl), false);
   }
 
   async newCapsuleGatekeeper(accountId: number, resourceUrl: string)
         : Promise<GatekeeperClient<any> | null> {
-    return await this.impl.addCapsuleGatekeeper(
-        await this.owner.getGatekeeperClassFor(accountId, resourceUrl));
+    return await this.impl.addGatekeeper(
+        await this.owner.getGatekeeperClassFor(accountId, resourceUrl), true);
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -1781,7 +1784,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       },
     }
 
-    return await this.impl.addGatekeeper(this.impl.ctx.exports.LanguageModelGatekeeper({props}));
+    return await this.impl.addGatekeeper(
+        this.impl.ctx.exports.LanguageModelGatekeeper({props}), false);
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -1790,7 +1794,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       config
     };
 
-    return await this.impl.addGatekeeper(this.impl.ctx.exports.AgentSpawnerGatekeeper({props}));
+    return await this.impl.addGatekeeper(
+        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), false);
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -2152,7 +2157,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     extends RpcTarget implements GatekeeperClient<Session> {
   constructor(private impl: OverseerImpl, private id: number,
-      private facet: Fetcher<Gatekeeper<Session>>, private caller?: GatekeeperCaller) {
+      private facet: Fetcher<Gatekeeper<Session>>,
+      private caller: GatekeeperCaller = {from: "user"}) {
     super();
   }
 
@@ -2168,6 +2174,9 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     return this.impl.storage.gatekeepers.get(this.id)!.bindingName ?? null;
   }
   async setBindingName(name: string): Promise<void> {
+    if (name === "GADGET") {
+      throw new Error("The binding name `GADGET` is reserved.");
+    }
     let record = this.impl.storage.gatekeepers.get(this.id)!;
     record.bindingName = name;
     this.impl.storage.gatekeepers.put(record);
@@ -2194,7 +2203,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
 class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Action> {
   constructor(private impl: OverseerImpl, private gatekeeperId: number,
-              private caller?: GatekeeperCaller) {
+              private caller: GatekeeperCaller) {
     super();
   }
 

@@ -1938,6 +1938,32 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                           </div>
                         )
                       })()
+                    ) : msg.type === 'useGadget' ? (
+                      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                        <div
+                          style={{
+                            fontSize: '12px',
+                            padding: '8px 12px',
+                            backgroundColor: '#f5f5f5',
+                            border: '1px solid #d9d9d9',
+                            borderRadius: '4px',
+                          }}
+                        >
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '8px',
+                          }}>
+                            <span style={{ color: '#595959' }}>
+                              Agent used the Gadget
+                            </span>
+                            <Text type="secondary" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                              {msg.timestamp.toLocaleTimeString()}
+                            </Text>
+                          </div>
+                        </div>
+                      </div>
                     ) : null}
                   </div>
                 ))}
