@@ -305,7 +305,19 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     }
 
     // Default: Gmail
-    let props: GmailGatekeeperImplProps = this.ctx.props;
+    let props: GmailGatekeeperImplProps = {...this.ctx.props};
+
+    // Parse the URL hash to extract a search or label filter. Gmail URLs encode these in the
+    // fragment:
+    //   #search/from%3Abob%40example.com  ->  search query "from:bob@example.com"
+    //   #label/my-label                   ->  search query "label:my-label"
+    let hash = parsed.hash;
+    if (hash.startsWith("#search/")) {
+      props.searchQuery = decodeURIComponent(hash.slice("#search/".length));
+    } else if (hash.startsWith("#label/")) {
+      props.searchQuery = "label:" + decodeURIComponent(hash.slice("#label/".length));
+    }
+
     return this.ctx.exports.GmailGatekeeperImpl({props});
   }
 
@@ -317,38 +329,76 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 }
 
 class GmailSessionImpl extends RpcTarget implements GmailSession {
-  // Google API access token.
   #gmailApi: GmailApi;
   #approvalQueue: ApprovalQueue<GmailAction>;
+  #searchQuery: string | undefined;
 
-  constructor(gmailApi: GmailApi, approvalQueue: ApprovalQueue<GmailAction>) {
+  // Callback to record/check thread IDs for search-filtered gatekeepers. When a search query is
+  // active, listThreads() stores each returned thread ID via recordAllowedThread(), and
+  // readThread() verifies the ID via isThreadAllowed() before proceeding. Each thread ID is stored
+  // as its own key in DO storage for O(1) lookups that don't degrade as the set grows.
+  #recordAllowedThread: (threadId: string) => void;
+  #isThreadAllowed: (threadId: string) => boolean;
+
+  constructor(
+    gmailApi: GmailApi,
+    approvalQueue: ApprovalQueue<GmailAction>,
+    searchQuery: string | undefined,
+    recordAllowedThread: (threadId: string) => void,
+    isThreadAllowed: (threadId: string) => boolean,
+  ) {
     super();
     this.#gmailApi = gmailApi;
     this.#approvalQueue = approvalQueue;
+    this.#searchQuery = searchQuery;
+    this.#recordAllowedThread = recordAllowedThread;
+    this.#isThreadAllowed = isThreadAllowed;
   }
 
   async listThreads(count: number): Promise<GmailThreadSummary[]> {
+    let queryDesc = this.#searchQuery
+        ? ` matching "${this.#searchQuery}"` : "";
+
     this.#approvalQueue.authorizeObservation({
       title: "List Gmail threads",
-      description: `List the top ${count} threads in the Gmail inbox, including IDs and snippets.`
+      description:
+          `List the top ${count} threads${queryDesc} in the Gmail inbox, including IDs and snippets.`
     });
 
-    return await this.#gmailApi.listThreads(count);
+    let results = await this.#gmailApi.listThreads(count, this.#searchQuery);
+
+    if (this.#searchQuery) {
+      for (let thread of results) {
+        this.#recordAllowedThread(thread.id);
+      }
+    }
+
+    return results;
   }
 
   async readThread(threadId: string): Promise<GmailThreadContent> {
+    if (this.#searchQuery && !this.#isThreadAllowed(threadId)) {
+      throw new Error(
+        `Thread ${threadId} was not found in search results for "${this.#searchQuery}". ` +
+        `Only threads returned by listThreads() can be read.`);
+    }
+
     let result = await this.#gmailApi.readThread(threadId);
 
     this.#approvalQueue.authorizeObservation({
       title: `Read thread: ${result.messages[0].subject}`,
-      description: "Fetch the full content of thread ${threadId}, including all messages."
+      description: `Fetch the full content of thread ${threadId}, including all messages.`
     });
 
     return result;
   }
 
   async applyLabel(threadId: string, label: string): Promise<void> {
-    // TODO: We should probably show the thread subject line?
+    if (this.#searchQuery && !this.#isThreadAllowed(threadId)) {
+      throw new Error(
+        `Thread ${threadId} was not found in search results for "${this.#searchQuery}". ` +
+        `Only threads returned by listThreads() can have labels applied.`);
+    }
 
     let action: GmailAction = {type: "applyLabel", threadId, label};
 
@@ -372,6 +422,12 @@ type GmailRevertInfo = {}
 
 type GmailGatekeeperImplProps = {
   userObjectId: string;
+
+  // If the user pasted a Gmail URL with a search query (e.g. #search/from%3Abob%40example.com),
+  // this is the decoded search query (e.g. "from:bob@example.com"). When set, listThreads()
+  // results are restricted to matching threads, and readThread() only allows threads previously
+  // returned by listThreads().
+  searchQuery?: string;
 }
 
 const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabel"];
@@ -396,6 +452,31 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   }
 
   async describe(): Promise<ResourceDescription> {
+    let searchQuery = this.ctx.props.searchQuery;
+    if (searchQuery) {
+      // If the query is a simple "label:X" filter, produce a nicer label-specific description
+      // with the native #label/ URL form.
+      let labelMatch = searchQuery.match(/^label:(.+)$/);
+      if (labelMatch) {
+        let label = labelMatch[1];
+        return {
+          url: `https://mail.google.com/mail/#label/${encodeURIComponent(label)}`,
+          title: `Gmail label: ${label}`,
+          snippet: `Gmail threads with label: ${label}`,
+          suggestedBindingName: "GMAIL_LABEL",
+          tsType: "GmailSession",
+        };
+      }
+
+      return {
+        url: `https://mail.google.com/mail/#search/${encodeURIComponent(searchQuery)}`,
+        title: `Gmail: ${searchQuery}`,
+        snippet: `Gmail threads matching: ${searchQuery}`,
+        suggestedBindingName: "GMAIL_SEARCH",
+        tsType: "GmailSession",
+      };
+    }
+
     return {
       url: "https://mail.google.com/mail/",
       title: "Gmail Inbox",
@@ -412,7 +493,25 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   async startSession(approvalQueue: RpcStub<ApprovalQueue<GmailAction>>)
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());
-    return new GmailSessionImpl(gmailApi, approvalQueue.dup());
+    let searchQuery = this.ctx.props.searchQuery;
+
+    // Key prefix for storing allowed thread IDs in DO storage. When a search query is active,
+    // each thread ID returned by listThreads() is stored as a separate key for O(1) lookups.
+    let THREAD_KEY_PREFIX = "allowedThread:";
+
+    return new GmailSessionImpl(
+      gmailApi,
+      approvalQueue.dup(),
+      searchQuery,
+      (threadId: string) => {
+        // Fire-and-forget: store the thread ID in DO storage so it persists across sessions.
+        this.ctx.storage.put(THREAD_KEY_PREFIX + threadId, true);
+      },
+      (threadId: string) => {
+        // Synchronous check using the KV cache (which is always in sync with storage).
+        return this.ctx.storage.kv.get(THREAD_KEY_PREFIX + threadId) !== undefined;
+      },
+    );
   }
 
   // ---------------------------------------------------------------------------
