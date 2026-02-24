@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadata, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -28,6 +28,15 @@ type LoginSessionRecord = {
   created: Date,
 }
 
+type GadgetRecord = GadgetMetadata & {
+  created: Date;
+  lastActive?: Date;  // if missing, gadget is provisional
+};
+
+function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
+  return g.lastActive !== undefined;
+}
+
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length != b.length) {
     return false;
@@ -47,7 +56,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       aiModels: collection<UserAiModelRecord>()({
         primaryKey: record => record.profile.id,
       }),
-      gadgets: collection<GadgetMetadata>()({
+      gadgets: collection<GadgetRecord>()({
         primaryKey: "id"
       }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
@@ -337,8 +346,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  async listGadgets(): Promise<GadgetMetadata[]> {
-    return [...this.storage.gadgets.list()];
+  async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
+    let result: GadgetMetadataWithTimestamps[] = [];
+    for (let gadget of this.storage.gadgets.list()) {
+      if (isFullyCreated(gadget)) {
+        result.push(gadget);
+      }
+    }
+    return result;
   }
 
   async updateTitle(gadgetId: string, title: string) {
@@ -356,7 +371,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async newGadget(id: string, title: string): Promise<void> {
     let created = new Date();
-    this.storage.gadgets.put({id, title, created, lastActive: created});
+    this.storage.gadgets.put({id, title, created});
   }
 
   async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {

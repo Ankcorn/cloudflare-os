@@ -56,11 +56,10 @@ export default function GadgetEditor() {
 
   // Derive selectedChatId from URL search params
   const chatParam = searchParams.get('chat')
-  const selectedChatId = chatParam ? Number(chatParam) : null
+  const urlChatId = chatParam ? Number(chatParam) : null
 
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
-  const [metadata, setMetadata] = useState<Omit<GadgetMetadata, 'created' | 'lastActive'> | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)
@@ -75,6 +74,56 @@ export default function GadgetEditor() {
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+
+  // Simple chat mode: full-width chat UI when no code, no bindings, and the only chat
+  // is chat 0. chatCount starts null (unknown) and is treated as compatible with simple
+  // mode so that the UI defaults to simple layout and avoids a flash when opening a new
+  // gadget.
+  const [hasCode, setHasCode] = useState(false)
+  const [chatCount, setChatCount] = useState<number | null>(null)
+  const [hasChatZero, setHasChatZero] = useState(false)
+  const [hasBindings, setHasBindings] = useState(false)
+  // True when the gadget would be in simple mode ignoring proposed changes. Used by
+  // the back button to go home even when proposed changes temporarily force complex mode.
+  const simpleChatBase = !hasCode && !hasBindings
+      && (chatCount === null || (chatCount === 1 && hasChatZero))
+  const simpleChatMode = simpleChatBase && proposedChanges === undefined
+
+  // When the gadget would be in simple mode (ignoring proposed changes), always
+  // show chat 0 regardless of URL. We use simpleChatBase rather than simpleChatMode
+  // so that proposed changes affect only the layout, not the chat selection —
+  // otherwise we'd get an infinite loop (proposedChanges toggles simpleChatMode,
+  // which toggles selectedChatId, which clears proposedChanges, repeat).
+  const selectedChatId = simpleChatBase ? 0 : urlChatId
+
+  const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
+    setChatCount(count)
+    setHasChatZero(chatZeroExists)
+  }, [])
+
+  // Auto-switch to Gadget UI tab when the agent first generates code on chat 0.
+  // Only fires once per gadget to avoid disrupting the user.
+  const hasAutoSwitchedToUiRef = useRef(false)
+  const hadProposedChangesAtAgentStartRef = useRef(false)
+  const proposedChangesRef = useRef(proposedChanges)
+  proposedChangesRef.current = proposedChanges
+  const handleAgentActiveChange = useCallback((chatId: number, isActive: boolean) => {
+    if (chatId !== 0) return
+    if (isActive) {
+      // Agent just started — record whether proposed changes already exist.
+      hadProposedChangesAtAgentStartRef.current = proposedChangesRef.current !== undefined
+    } else {
+      // Agent just finished — switch to UI tab if this is the first code generation.
+      if (
+        !hasAutoSwitchedToUiRef.current
+        && !hadProposedChangesAtAgentStartRef.current
+        && proposedChangesRef.current !== undefined
+      ) {
+        hasAutoSwitchedToUiRef.current = true
+        setActiveTab('ui')
+      }
+    }
+  }, [])
 
   const navigateToChat = useCallback((chatId: number | null, options?: { replace?: boolean }) => {
     if (chatId !== null) {
@@ -117,18 +166,17 @@ export default function GadgetEditor() {
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
     let metadataSubscription: RpcStub<{}> | null = null
+    let cancelled = false
 
     const loadGadget = async () => {
       if (!id) {
         setError('No gadget ID provided')
-        setLoading(false)
         return
       }
 
-      // Only show loading/clear error on initial load
+      // Clear error on initial load
       if (isInitialLoad) {
         setError(null)
-        setLoading(true)
       }
 
       try {
@@ -138,12 +186,15 @@ export default function GadgetEditor() {
 
         // Subscribe to metadata updates. The callback fires immediately with
         // the current metadata, then again whenever it changes.
-        metadataSubscription = await overseerStub.subscribeToMetadata((metadata: Omit<GadgetMetadata, 'created' | 'lastActive'>) => {
+        metadataSubscription = await overseerStub.subscribeToMetadata((metadata: GadgetMetadata) => {
+          if (cancelled) return
           setMetadata(metadata)
           if (!isEditingTitleRef.current) {
             setTitleInput(metadata.title)
           }
         })
+
+        if (cancelled) return
 
         // Clear any error on successful load
         setError(null)
@@ -154,6 +205,7 @@ export default function GadgetEditor() {
           setConnectionLost(false)
         }
       } catch (err) {
+        if (cancelled) return
         console.error('Failed to load gadget:', err)
         // Only set error on initial load - for reconnection attempts, keep the UI visible
         if (isInitialLoad) {
@@ -162,17 +214,16 @@ export default function GadgetEditor() {
           // Track connection lost state but don't show toast
           setConnectionLost(true)
         }
-      } finally {
-        if (isInitialLoad) {
-          setLoading(false)
-        }
       }
     }
 
     loadGadget()
 
-    // Cleanup function to dispose the subscription and overseer stub
+    // Cleanup function to dispose the subscription and overseer stub.
+    // The cancelled flag ensures the async loadGadget does not update state
+    // after cleanup (important in React Strict Mode, which re-runs effects).
     return () => {
+      cancelled = true
       if (metadataSubscription) {
         metadataSubscription[Symbol.dispose]()
       }
@@ -255,6 +306,21 @@ export default function GadgetEditor() {
     setUiReloadTrigger(prev => prev + 1)
   }, [selectedChatId, proposedChanges])
 
+  // When the gadget permanently leaves simple mode (e.g. because the AI wrote code
+  // and the user merged it), navigate to ?chat=0 so the user stays on the same
+  // conversation. We track simpleChatBase (not simpleChatMode) so that proposed
+  // changes alone don't trigger navigation — only permanent changes like code,
+  // bindings, or additional chats.
+  const prevSimpleChatBaseRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    if (chatCount === null) return
+    const prev = prevSimpleChatBaseRef.current
+    prevSimpleChatBaseRef.current = simpleChatBase
+    if (prev === true && !simpleChatBase && urlChatId === null) {
+      navigateToChat(0, { replace: true })
+    }
+  }, [simpleChatBase, chatCount, urlChatId, navigateToChat])
+
   useEffect(() => {
     const fetchUserInfo = async () => {
       try {
@@ -290,7 +356,10 @@ export default function GadgetEditor() {
   }
 
   const handleBack = () => {
-    if (selectedChatId !== null) {
+    if (simpleChatBase) {
+      // In simple chat mode (or complex only due to proposed changes), go home.
+      navigate('/')
+    } else if (selectedChatId !== null) {
       // Push to history so browser back returns to this chat
       navigate(`/gadget/${id}`)
     } else {
@@ -351,26 +420,26 @@ export default function GadgetEditor() {
     ] : []),
   ]
 
-  if (loading) {
+  if (error) {
     return (
       <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <Text>Loading gadget...</Text>
+        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column' }}>
+          <Text type="danger" style={{ fontSize: '18px', marginBottom: 16 }}>
+            {error}
+          </Text>
+          <Button onClick={handleBack}>
+            Back to Home
+          </Button>
         </Content>
       </Layout>
     )
   }
 
-  if (error || !metadata) {
+  if (!metadata) {
     return (
       <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column' }}>
-          <Text type="danger" style={{ fontSize: '18px', marginBottom: 16 }}>
-            {error || 'Failed to load gadget'}
-          </Text>
-          <Button onClick={handleBack}>
-            Back to Home
-          </Button>
+        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <Text>Loading gadget...</Text>
         </Content>
       </Layout>
     )
@@ -462,12 +531,13 @@ export default function GadgetEditor() {
       </Header>
 
       <div style={{ height: 'calc(100vh - 64px)', display: 'flex' }}>
-        {/* Chat Sidebar */}
+        {/* Chat - full width in simple mode, sidebar in full mode */}
         <div
           style={{
-            width: siderWidth,
+            ...(simpleChatMode
+              ? { flex: 1 }
+              : { width: siderWidth, borderRight: '1px solid #f0f0f0' }),
             backgroundColor: 'white',
-            borderRight: '1px solid #f0f0f0',
             height: '100%'
           }}
         >
@@ -487,18 +557,22 @@ export default function GadgetEditor() {
               }
               onConsumeConsoleLogs={consumeConsoleLogs}
               onDiscardConsoleLogs={discardConsoleLogs}
+              hideTitleBar={simpleChatMode}
+              onChatCountChange={handleChatCountChange}
+              onAgentActiveChange={handleAgentActiveChange}
             />
           ) : null}
         </div>
 
-        {/* Resize Handle */}
+        {/* Resize Handle - hidden in simple chat mode */}
         <div
           style={{
             width: '4px',
             backgroundColor: '#f0f0f0',
             cursor: 'col-resize',
             position: 'relative',
-            zIndex: 1
+            zIndex: 1,
+            ...(simpleChatMode ? { display: 'none' } : {})
           }}
           onMouseDown={() => setIsResizing(true)}
         >
@@ -534,8 +608,8 @@ export default function GadgetEditor() {
           </div>
         </div>
 
-        {/* Main Content with Tabs */}
-        <div style={{ backgroundColor: 'white', flex: 1, minWidth: 0 }}>
+        {/* Main Content with Tabs - hidden in simple chat mode (kept mounted for subscriptions) */}
+        <div style={{ backgroundColor: 'white', flex: 1, minWidth: 0, ...(simpleChatMode ? { display: 'none' } : {}) }}>
           <Tabs
             activeKey={activeTab}
             onChange={setActiveTab}
@@ -545,6 +619,7 @@ export default function GadgetEditor() {
               {
                 key: 'code',
                 label: 'Code Editor',
+                forceRender: true,
                 children: overseer ? (
                   <GadgetCodeInterface
                     overseer={overseer.stub}
@@ -552,18 +627,21 @@ export default function GadgetEditor() {
                     onCodeChange={handleCodeChange}
                     proposedChanges={proposedChanges}
                     fileToSelect={fileToSelect}
+                    onHasCodeChange={setHasCode}
                   />
                 ) : null
               },
               {
                 key: 'connections',
                 label: 'Connections',
+                forceRender: true,
                 children: overseer ? (
                   <Connections
                     overseer={overseer.stub}
                     authenticatedApi={authenticatedApi}
                     onConnectionsChange={handleCodeChange}
                     isVisible={activeTab === 'connections'}
+                    onHasGatekeepersChange={setHasBindings}
                   />
                 ) : null
               },

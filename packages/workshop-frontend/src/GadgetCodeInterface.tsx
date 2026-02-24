@@ -56,9 +56,10 @@ interface GadgetCodeInterfaceProps {
   onCodeChange?: () => void
   proposedChanges?: Uint8Array
   fileToSelect?: string
+  onHasCodeChange?: (hasCode: boolean) => void
 }
 
-export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect }: GadgetCodeInterfaceProps) {
+export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect, onHasCodeChange }: GadgetCodeInterfaceProps) {
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))
@@ -101,11 +102,6 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     const updateFileList = () => {
       const names = Array.from(filesMap.keys()).sort()
       setFileNames(names)
-
-      // Set first file as active if none is selected
-      if (!activeFile && names.length > 0) {
-        setActiveFile(names[0])
-      }
     }
 
     // Initial sync
@@ -122,6 +118,31 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       filesMap.unobserve(observer)
     }
   }, []) // Only run once on mount
+
+  // Auto-select first file when files appear and nothing is selected.
+  // In diff mode, files may only exist in the modified document (proposed changes),
+  // so we check the full displayed file list, not just fileNames.
+  // changedFiles is included as a dependency because its update signals that
+  // modifiedFilesMapRef.current has been populated.
+  useEffect(() => {
+    if (activeFile !== null) return
+
+    const modifiedMap = modifiedFilesMapRef.current
+    const displayed = modifiedMap
+      ? Array.from(new Set([...fileNames, ...Array.from(modifiedMap.keys())])).sort()
+      : fileNames
+
+    if (displayed.length > 0) {
+      setActiveFile(displayed[0])
+    }
+  }, [fileNames, activeFile, changedFiles])
+
+  // Notify parent when code file existence changes
+  const onHasCodeChangeRef = useRef(onHasCodeChange)
+  onHasCodeChangeRef.current = onHasCodeChange
+  useEffect(() => {
+    onHasCodeChangeRef.current?.(fileNames.length > 0)
+  }, [fileNames.length > 0])
 
   // Select file when requested from outside
   useEffect(() => {
