@@ -8,16 +8,17 @@ import { extractBaseUrl } from './resourceMatching'
 import ResourcePicker from './ResourcePicker'
 
 
-const { Title, Text } = Typography
+const { Title, Text, Link } = Typography
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
   authenticatedApi: RpcStub<AuthenticatedApi>
   onConnectionsChange?: () => void
   isVisible?: boolean
+  onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
 }
 
-export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
   const [actions, setActions] = useState<ActionLogEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -51,6 +52,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     try {
       const gatekeeperList = await overseer.listGatekeepers()
       setGatekeepers(gatekeeperList)
+      onHasGatekeepersChange?.(gatekeeperList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
       message.error('Failed to load connections')
@@ -397,11 +399,17 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
   const actionsColumns = [
     {
-      title: 'Binding',
-      dataIndex: 'bindingName',
-      key: 'bindingName',
+      title: 'Resource',
+      key: 'resource',
       width: '15%',
-      render: (bindingName: string) => <Text code>{bindingName}</Text>
+      render: (_: any, record: ActionLogEntry) => (
+        <span>
+          {record.bindingName && <><Text code>{record.bindingName}</Text>{' '}</>}
+          {record.resourceUrl
+            ? <Link href={record.resourceUrl} target="_blank">{record.resourceTitle}</Link>
+            : <Text>{record.resourceTitle}</Text>}
+        </span>
+      )
     },
     {
       title: 'Created',
@@ -411,15 +419,15 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       render: (date: Date) => <Text>{formatDate(date)}</Text>
     },
     {
-      title: 'Title',
+      title: 'Action',
       dataIndex: ['description', 'title'],
       key: 'title',
       width: '45%',
       render: (title: string) => <Text>{title}</Text>
     },
     {
-      title: 'Actions',
-      key: 'actions',
+      title: 'Status',
+      key: 'status',
       width: '25%',
       render: (_: any, record: ActionLogEntry) => {
         const isProcessing = processingActions.has(record.id)

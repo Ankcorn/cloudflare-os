@@ -1,11 +1,13 @@
-import { Layout, Typography, Button, Table, Space, Dropdown, Avatar, Tooltip, Modal, message } from 'antd'
-import { DeleteOutlined, LogoutOutlined, PlusOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
+import { Layout, Typography, Button, Table, Card, Space, Dropdown, Avatar, Tooltip, Modal, message } from 'antd'
+import { DeleteOutlined, LogoutOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { CF_ACCESS_MODE } from './useAuth'
 import AlphaWarning from './AlphaWarning'
-import { useState, useEffect } from 'react'
-import { GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { ChatInput } from './ChatInterface'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, Overseer, CapsuleSpecifier } from '@gadgets/workshop-shared/api'
+import { RpcStub } from 'capnweb'
 import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
@@ -35,7 +37,7 @@ function formatRelativeTime(date: Date): string {
 export default function Home() {
   const navigate = useNavigate()
   const { authenticatedApi, logout } = useAuthenticatedApi()
-  const [gadgets, setGadgets] = useState<GadgetMetadata[]>([])
+  const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
   const [loading, setLoading] = useState(true)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
@@ -74,7 +76,7 @@ export default function Home() {
     // No navigation needed - ProtectedRoute will show login overlay
   }
 
-  const handleDeleteGadget = (gadget: GadgetMetadata, e: React.MouseEvent) => {
+  const handleDeleteGadget = (gadget: GadgetMetadataWithTimestamps, e: React.MouseEvent) => {
     e.stopPropagation()
     Modal.confirm({
       title: 'Delete Gadget',
@@ -100,15 +102,121 @@ export default function Home() {
     })
   }
 
-  const handleCreateGadget = async () => {
+  // --- Provisional gadget management for the home prompt ---
+  // These refs track a lazily-created provisional gadget used for capsule creation.
+  // Refs (not state) because no re-render is needed when the provisional gadget is created.
+  const provisionalGadgetIdRef = useRef<string | null>(null)
+  const provisionalOverseerRef = useRef<RpcStub<Overseer> | null>(null)
+  // Guard against concurrent provisional gadget creation
+  const provisionalGadgetPromiseRef = useRef<Promise<RpcStub<Overseer>> | null>(null)
+
+  // Available models and selection for the home prompt
+  const [models, setModels] = useState<AiChatAuthorInfo[]>([])
+  const [selectedModel, setSelectedModel] = useState<string | null>(null)
+
+  // Fetch models on mount (uses AuthenticatedApi.listModels, no gadget needed)
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const modelList = await authenticatedApi.listModels()
+        setModels(modelList)
+        // Default model: check localStorage, fall back to first model
+        const lastSelected = localStorage.getItem('lastSelectedModel')
+        if (lastSelected && modelList.some(m => m.id === lastSelected)) {
+          setSelectedModel(lastSelected)
+        } else if (modelList.length > 0) {
+          setSelectedModel(modelList[0].id)
+        }
+      } catch (error) {
+        console.error('Failed to fetch models:', error)
+      }
+    }
+    fetchModels()
+  }, [authenticatedApi])
+
+  // Re-open provisional gadget on RPC reconnection
+  useEffect(() => {
+    const gadgetId = provisionalGadgetIdRef.current
+    if (gadgetId) {
+      // Use promise pipelining: openGadget returns a promise usable as a stub
+      provisionalOverseerRef.current = authenticatedApi.openGadget(gadgetId)
+    }
+  }, [authenticatedApi])
+
+  // Dispose provisional gadget stub on unmount
+  useEffect(() => {
+    return () => {
+      if (provisionalOverseerRef.current) {
+        provisionalOverseerRef.current[Symbol.dispose]()
+        provisionalOverseerRef.current = null
+      }
+    }
+  }, [])
+
+  // Lazily get or create a provisional gadget. Returns the overseer stub.
+  const getProvisionalOverseer = useCallback(async (): Promise<RpcStub<Overseer>> => {
+    if (provisionalOverseerRef.current) {
+      return provisionalOverseerRef.current
+    }
+    // Guard against concurrent calls: reuse in-flight promise
+    if (provisionalGadgetPromiseRef.current) {
+      return provisionalGadgetPromiseRef.current
+    }
+    const promise = (async () => {
+      const overseer = await authenticatedApi.newGadget()
+      const metadata = await overseer.getMetadata()
+      provisionalGadgetIdRef.current = metadata.id
+      provisionalOverseerRef.current = overseer
+      provisionalGadgetPromiseRef.current = null
+      return overseer
+    })()
+    provisionalGadgetPromiseRef.current = promise
+    return promise
+  }, [authenticatedApi])
+
+  // Capsule creation callback for ChatInput: lazily provisions a gadget if needed
+  const createCapsuleGatekeeper = useCallback(async (accountId: number, url: string) => {
+    const overseer = await getProvisionalOverseer()
+    return overseer.newCapsuleGatekeeper(accountId, url)
+  }, [getProvisionalOverseer])
+
+  // Handle sending a message from the home prompt
+  const handleHomeSend = useCallback(async (messageText: string, modelId: string | null,
+      capsules?: CapsuleSpecifier[]) => {
+    const msg = messageText.trim()
+    if (!msg) return
+
     try {
-      const newGadget = await authenticatedApi.newGadget()
-      const metadata = await newGadget.getMetadata()
-      navigate(`/gadget/${metadata.id}`)
+      // Reuse provisional gadget if one was created (e.g. for capsules), otherwise create new
+      let overseer = provisionalOverseerRef.current
+      let gadgetId = provisionalGadgetIdRef.current
+      if (!overseer) {
+        overseer = await getProvisionalOverseer()
+        gadgetId = provisionalGadgetIdRef.current
+      }
+
+      // Create the chat (also marks the gadget as non-provisional)
+      const chatId = await overseer.newChat(msg, modelId, capsules)
+
+      // Clear provisional refs -- the gadget is now "real" and we're navigating into it.
+      // Don't dispose the stub; GadgetEditor will open its own.
+      provisionalOverseerRef.current = null
+      provisionalGadgetIdRef.current = null
+      provisionalGadgetPromiseRef.current = null
+
+      navigate(`/gadget/${gadgetId}?chat=${chatId}`)
     } catch (error) {
       console.error('Failed to create gadget:', error)
+      message.error('Failed to start gadget')
     }
-  }
+  }, [authenticatedApi, getProvisionalOverseer, navigate])
+
+  const handleModelChange = useCallback((modelId: string | null) => {
+    setSelectedModel(modelId)
+    if (modelId) {
+      localStorage.setItem('lastSelectedModel', modelId)
+    }
+  }, [])
 
   const columns = [
     {
@@ -150,7 +258,7 @@ export default function Home() {
       title: '',
       key: 'actions',
       width: 48,
-      render: (_: any, record: GadgetMetadata) => (
+      render: (_: any, record: GadgetMetadataWithTimestamps) => (
         <Button
           type="text"
           size="small"
@@ -208,24 +316,29 @@ export default function Home() {
 
       <Content style={{ padding: '24px' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-          <div style={{
-            marginBottom: 24,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center'
-          }}>
-            <Title level={2} style={{ margin: 0 }}>
-              Your Gadgets
-            </Title>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={handleCreateGadget}
-              size="large"
-            >
-              New Gadget
-            </Button>
+          {/* Home prompt: start a new gadget by typing a message */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '32px' }}>
+            <div style={{ width: '100%', maxWidth: '600px' }}>
+              <Card>
+                <Title level={4} style={{ margin: '0 0 16px', textAlign: 'center' }}>
+                  What would you like to build?
+                </Title>
+                <ChatInput
+                  createCapsuleGatekeeper={createCapsuleGatekeeper}
+                  onSend={handleHomeSend}
+                  isAgentActive={false}
+                  models={models}
+                  selectedModel={selectedModel}
+                  onModelChange={handleModelChange}
+                  newChat
+                />
+              </Card>
+            </div>
           </div>
+
+          <Title level={4} style={{ margin: '0 0 16px' }}>
+            Your Gadgets
+          </Title>
 
           <Table
             columns={columns}
@@ -243,7 +356,7 @@ export default function Home() {
               emptyText: loading ? 'Loading gadgets...' : (
                 <div style={{ padding: '32px 0' }}>
                   <Text type="secondary">
-                    No gadgets yet. Create your first gadget to get started!
+                    No gadgets yet. Describe what you want to build above to get started!
                   </Text>
                 </div>
               )

@@ -7,6 +7,7 @@ import * as Y from 'yjs'
 import styles from './ChatInterface.module.css'
 import {
   Overseer,
+  GatekeeperClient,
   AiChatMetadata,
   AiChatMessage,
   AiChatSubscriber,
@@ -18,7 +19,7 @@ import CapsuleOverlay from './CapsuleOverlay'
 import type { SelectableItem } from './ResourcePicker'
 
 const { TextArea } = Input
-const { Text, Title } = Typography
+const { Text, Title, Link } = Typography
 
 // Chat input component with internal state to prevent parent re-renders while typing
 const CONSOLE_LOG_SEVERITY_STYLES: Record<string, React.CSSProperties> = {
@@ -38,12 +39,12 @@ interface InputCapsule {
 // Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
 const URL_REGEX = /https?:\/\/[^\s)>\]]+/g
 
-const ChatInput = ({ overseer, onSend, isAgentActive, models,
+export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, models,
     selectedModel, onModelChange,
     pendingConsoleLogCount = 0, consoleLogPreview = '', consoleLogSeverity = 'info',
     onConsumeConsoleLogs = () => '', onDiscardConsoleLogs = () => {},
     newChat = false }: {
-  overseer: RpcStub<Overseer>
+  createCapsuleGatekeeper: (accountId: number, url: string) => Promise<RpcStub<GatekeeperClient<any>> | null>
   onSend: (message: string, modelId: string | null, capsules?: CapsuleSpecifier[]) => void
   isAgentActive: boolean
   models: AiChatAuthorInfo[]
@@ -160,7 +161,7 @@ const ChatInput = ({ overseer, onSend, isAgentActive, models,
 
     try {
       // Create the capsule gatekeeper.
-      const gk = await overseer.newCapsuleGatekeeper(accountId, activeUrl.text)
+      const gk = await createCapsuleGatekeeper(accountId, activeUrl.text)
       if (!gk) {
         console.error('Failed to create capsule gatekeeper')
         return
@@ -639,6 +640,9 @@ interface ChatInterfaceProps {
   consoleLogSeverity: 'error' | 'warn' | 'info'
   onConsumeConsoleLogs: () => string
   onDiscardConsoleLogs: () => void
+  hideTitleBar?: boolean
+  onChatCountChange?: (count: number, hasChatZero: boolean) => void
+  onAgentActiveChange?: (chatId: number, isActive: boolean) => void
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -707,7 +711,7 @@ function renderMessageWithCapsules(message: string, capsules: CapsuleSpecifier[]
   return <>{segments}</>
 }
 
-function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs }: ChatInterfaceProps) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs, hideTitleBar, onChatCountChange, onAgentActiveChange }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -717,12 +721,15 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
   // UI state
   const [_isSubscribed, setIsSubscribed] = useState(false)
+  const [chatListReady, setChatListReady] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [updateCounter, setUpdateCounter] = useState(0) // Force re-render when cache updates
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(new Set())
+  const [expandedActions, setExpandedActions] = useState<Set<number>>(new Set())
+  const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
 
@@ -747,6 +754,17 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   const chatList = Array.from(cacheRef.current.chats.values())
     .sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime())
 
+  // Notify parent when chat list changes. Gated on chatListReady so that we
+  // don't report 0 from the empty initial cache before listChats() has completed.
+  const onChatCountChangeRef = useRef(onChatCountChange)
+  onChatCountChangeRef.current = onChatCountChange
+  const hasChatZero = cacheRef.current.chats.has(0)
+  useEffect(() => {
+    if (chatListReady) {
+      onChatCountChangeRef.current?.(chatList.length, hasChatZero)
+    }
+  }, [chatList.length, chatListReady, hasChatZero])
+
   // Get messages for selected chat (filter out any undefined slots in sparse array)
   // Memoized to prevent creating new array on every render
   const currentMessages = useMemo(() => {
@@ -761,6 +779,17 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
   const isAgentActive = !!currentChatMetadata?.activeAgent
   const activeAgent = currentChatMetadata?.activeAgent
+
+  // Notify parent when agent active state changes
+  const onAgentActiveChangeRef = useRef(onAgentActiveChange)
+  onAgentActiveChangeRef.current = onAgentActiveChange
+  const prevIsAgentActiveRef = useRef(isAgentActive)
+  useEffect(() => {
+    if (selectedChatId !== null && isAgentActive !== prevIsAgentActiveRef.current) {
+      prevIsAgentActiveRef.current = isAgentActive
+      onAgentActiveChangeRef.current?.(selectedChatId, isAgentActive)
+    }
+  }, [isAgentActive, selectedChatId])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -941,6 +970,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
           chats.forEach(chat => {
             cacheRef.current.chats.set(chat.id, chat)
           })
+          setChatListReady(true)
 
           setAvailableModels(models)
 
@@ -981,6 +1011,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   useEffect(() => {
     setExpandedToolCalls(new Set())
     setExpandedReasoning(new Set())
+    setExpandedActions(new Set())
     processedToolCallsRef.current = new Set()
     setIsEditingTitle(false)
   }, [selectedChatId])
@@ -1163,6 +1194,69 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     }
   }
 
+  // Handle approving an action from the chat thread
+  const handleApproveAction = async (actionId: number) => {
+    setProcessingActions(prev => new Set(prev).add(actionId))
+    try {
+      await overseer.approveAction(actionId)
+      // Optimistically update the local message cache
+      if (selectedChatId !== null) {
+        const messages = cacheRef.current.messages.get(selectedChatId)
+        if (messages) {
+          for (const msg of messages) {
+            if (msg?.type === 'action' && msg.actionId === actionId && msg.actionLog) {
+              msg.actionLog.state = 'approved'
+              if (msg.actionLog.type === 'action') {
+                msg.actionLog.appliedAt = new Date()
+              }
+              break
+            }
+          }
+        }
+      }
+      forceUpdate()
+    } catch (err) {
+      console.error('Failed to approve action:', err)
+      message.error('Failed to approve action')
+    } finally {
+      setProcessingActions(prev => {
+        const next = new Set(prev)
+        next.delete(actionId)
+        return next
+      })
+    }
+  }
+
+  // Handle rejecting an action from the chat thread
+  const handleRejectAction = async (actionId: number) => {
+    setProcessingActions(prev => new Set(prev).add(actionId))
+    try {
+      await overseer.rejectAction(actionId)
+      // Optimistically update the local message cache
+      if (selectedChatId !== null) {
+        const messages = cacheRef.current.messages.get(selectedChatId)
+        if (messages) {
+          for (const msg of messages) {
+            if (msg?.type === 'action' && msg.actionId === actionId && msg.actionLog) {
+              msg.actionLog.state = 'rejected'
+              break
+            }
+          }
+        }
+      }
+      forceUpdate()
+    } catch (err) {
+      console.error('Failed to reject action:', err)
+      message.error('Failed to reject action')
+    } finally {
+      setProcessingActions(prev => {
+        const next = new Set(prev)
+        next.delete(actionId)
+        return next
+      })
+    }
+  }
+
   // Toggle tool call expansion
   const toggleToolCallExpansion = (toolCallId: string) => {
     setExpandedToolCalls(prev => {
@@ -1171,6 +1265,19 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
         next.delete(toolCallId)
       } else {
         next.add(toolCallId)
+      }
+      return next
+    })
+  }
+
+  // Toggle action description expansion
+  const toggleActionExpansion = (actionId: number) => {
+    setExpandedActions(prev => {
+      const next = new Set(prev)
+      if (next.has(actionId)) {
+        next.delete(actionId)
+      } else {
+        next.add(actionId)
       }
       return next
     })
@@ -1214,7 +1321,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                 Start a New Chat
               </Title>
               <ChatInput
-                overseer={overseer}
+                createCapsuleGatekeeper={(accountId, url) => overseer.newCapsuleGatekeeper(accountId, url)}
                 onSend={handleSend}
                 isAgentActive={false}
                 models={availableModels}
@@ -1292,8 +1399,8 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
         </div>
       ) : (
         <>
-          {/* Chat header */}
-          <div style={{
+          {/* Chat header - hidden in simple chat mode */}
+          {!hideTitleBar && <div style={{
             padding: '16px',
             borderBottom: '1px solid #f0f0f0',
             display: 'flex',
@@ -1345,7 +1452,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                 title="Delete Chat"
               />
             </Space>
-          </div>
+          </div>}
 
           {/* Messages area */}
           <div style={{
@@ -1366,14 +1473,18 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                     style={{
                       width: '100%',
                       padding: '16px 24px',
-                      backgroundColor: msg.type === 'message' && msg.author.type === 'user'
-                        ? '#f5f5f5'
-                        : 'white',
-                      borderBottom: '1px solid #e8e8e8'
                     }}
                   >
                     {msg.type === 'message' ? (
-                      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                      <div style={{
+                        maxWidth: '800px',
+                        margin: '0 auto',
+                        ...(msg.author.type === 'user' ? {
+                          backgroundColor: '#f5f5f5',
+                          borderRadius: '8px',
+                          padding: '12px 16px',
+                        } : {})
+                      }}>
                         <Space direction="vertical" size="small" style={{ width: '100%' }}>
                           <Text strong style={{ fontSize: '13px' }}>
                             {msg.author.name}
@@ -1700,6 +1811,133 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                           </div>
                         )
                       })()
+                    ) : msg.type === 'action' ? (
+                      // Action/observation message
+                      (() => {
+                        const actionLog = msg.actionLog
+                        if (!actionLog) return null
+
+                        const isAction = actionLog.type === 'action'
+                        const state = actionLog.state
+                        const isExpanded = expandedActions.has(msg.actionId)
+                        const isProcessing = processingActions.has(msg.actionId)
+
+                        // Color scheme: observations always neutral, actions colored by state
+                        const colors = !isAction
+                          ? { bg: '#f5f5f5', border: '#d9d9d9', accent: '#595959' }
+                          : state === 'approved'
+                          ? { bg: '#f6ffed', border: '#b7eb8f', accent: '#52c41a' }
+                          : state === 'rejected'
+                          ? { bg: '#fff2f0', border: '#ffccc7', accent: '#cf1322' }
+                          : { bg: '#e6f7ff', border: '#91d5ff', accent: '#1890ff' }
+
+                        return (
+                          <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                            <div
+                              style={{
+                                fontSize: '12px',
+                                padding: '8px 12px',
+                                backgroundColor: colors.bg,
+                                border: `1px solid ${colors.border}`,
+                                borderRadius: '4px'
+                              }}
+                            >
+                              {/* Header row */}
+                              <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '8px',
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+                                  <span
+                                    onClick={() => toggleActionExpansion(msg.actionId)}
+                                    style={{ fontSize: '10px', cursor: 'pointer', userSelect: 'none', fontFamily: 'monospace' }}
+                                  >
+                                    {isExpanded ? '▼' : '▶'}
+                                  </span>
+                                  <span style={{ fontWeight: 'bold', color: colors.accent }}>
+                                    {isAction ? 'Action' : 'Observation'}
+                                  </span>
+                                  <span style={{ color: 'rgba(0, 0, 0, 0.65)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {actionLog.bindingName && <Text code style={{ fontSize: '11px' }}>{actionLog.bindingName}</Text>}
+                                    {actionLog.bindingName && ' '}
+                                    {actionLog.resourceUrl
+                                      ? <Link href={actionLog.resourceUrl} target="_blank" style={{ fontSize: '12px' }}>{actionLog.resourceTitle}</Link>
+                                      : actionLog.resourceTitle}
+                                  </span>
+                                  {isAction && state === 'approved' && (
+                                    <span style={{ fontSize: '11px', color: '#52c41a', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                                      ✓ approved{actionLog.appliedAt ? ` ${actionLog.appliedAt.toLocaleTimeString()}` : ''}
+                                    </span>
+                                  )}
+                                  {isAction && state === 'rejected' && (
+                                    <span style={{ fontSize: '11px', color: '#cf1322', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
+                                      ✗ rejected
+                                    </span>
+                                  )}
+                                </div>
+                                <Text type="secondary" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                                  {msg.timestamp.toLocaleTimeString()}
+                                </Text>
+                              </div>
+
+                              {/* Action title */}
+                              <div
+                                onClick={() => toggleActionExpansion(msg.actionId)}
+                                style={{
+                                  marginTop: '4px',
+                                  paddingLeft: '18px',
+                                  cursor: 'pointer',
+                                  userSelect: 'none',
+                                  color: 'rgba(0, 0, 0, 0.85)',
+                                }}
+                              >
+                                {actionLog.description.title}
+                              </div>
+
+                              {/* Expanded description */}
+                              {isExpanded && (
+                                <div style={{
+                                  marginTop: '8px',
+                                  paddingLeft: '18px',
+                                  whiteSpace: 'pre-wrap',
+                                  color: 'rgba(0, 0, 0, 0.65)',
+                                  fontSize: '11px',
+                                  borderTop: '1px solid ' + colors.border,
+                                  paddingTop: '8px',
+                                }}>
+                                  {actionLog.description.description}
+                                </div>
+                              )}
+
+                              {/* Approve/reject buttons for pending actions */}
+                              {isAction && state === 'pending' && (
+                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '8px' }}>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    onClick={() => handleApproveAction(msg.actionId)}
+                                    loading={isProcessing}
+                                    disabled={isProcessing}
+                                  >
+                                    Approve
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    danger
+                                    onClick={() => handleRejectAction(msg.actionId)}
+                                    loading={isProcessing}
+                                    disabled={isProcessing}
+                                  >
+                                    Reject
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })()
                     ) : null}
                   </div>
                 ))}
@@ -1709,8 +1947,6 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                     style={{
                       width: '100%',
                       padding: '16px 24px',
-                      backgroundColor: 'white',
-                      borderBottom: '1px solid #e8e8e8'
                     }}
                   >
                     <div style={{ maxWidth: '800px', margin: '0 auto', position: 'relative' }}>
@@ -1740,78 +1976,81 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
             )}
           </div>
 
-          {/* Accept button for proposed changes */}
-          {(() => {
-            if (!currentChatMetadata?.hasProposedChanges || isAgentActive) return null
+          {/* Bottom area: proposed changes banner, input, token summary — constrained to content width */}
+          <div style={{ maxWidth: '800px', margin: '0 auto', width: '100%' }}>
+            {/* Accept button for proposed changes */}
+            {(() => {
+              if (!currentChatMetadata?.hasProposedChanges || isAgentActive) return null
 
-            const { activeChanges } = messageStates
-            if (activeChanges.length === 0) return null
+              const { activeChanges } = messageStates
+              if (activeChanges.length === 0) return null
 
-            // Find the last change message that's still active
-            const lastActiveChange = [...currentMessages]
-              .reverse()
-              .find(m => m.type === 'changes' && messageStates.changeStatus.get(m.sequence) === 'pending')
+              // Find the last change message that's still active
+              const lastActiveChange = [...currentMessages]
+                .reverse()
+                .find(m => m.type === 'changes' && messageStates.changeStatus.get(m.sequence) === 'pending')
 
-            if (!lastActiveChange) return null
+              if (!lastActiveChange) return null
 
-            return (
+              return (
+                <div style={{
+                  padding: '16px',
+                  borderTop: '1px solid #f0f0f0',
+                  backgroundColor: '#f0f7ff',
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
+                    The agent has proposed changes to the code
+                  </span>
+                  <Tooltip title="Merge all changes proposed in this thread into the Gadget's mainline code.">
+                    <Button
+                      type="primary"
+                      icon={<CheckCircleOutlined />}
+                      onClick={() => handleMergeChanges(lastActiveChange.sequence)}
+                    >
+                      Merge All Changes
+                    </Button>
+                  </Tooltip>
+                </div>
+              )
+            })()}
+
+            {/* Input area */}
+            <ChatInput
+              createCapsuleGatekeeper={(accountId, url) => overseer.newCapsuleGatekeeper(accountId, url)}
+              onSend={handleSend}
+              isAgentActive={isAgentActive}
+              models={availableModels}
+              selectedModel={selectedModel}
+              onModelChange={handleModelChange}
+              pendingConsoleLogCount={pendingConsoleLogCount}
+              consoleLogPreview={consoleLogPreview}
+              consoleLogSeverity={consoleLogSeverity}
+              onConsumeConsoleLogs={onConsumeConsoleLogs}
+              onDiscardConsoleLogs={onDiscardConsoleLogs}
+            />
+
+            {/* Token / cost summary */}
+            {(currentChatMetadata?.totalTokens != null || currentChatMetadata?.totalCost != null) && (
               <div style={{
-                padding: '16px',
-                borderTop: '1px solid #f0f0f0',
-                backgroundColor: '#f0f7ff',
+                padding: '0 16px 16px',
                 display: 'flex',
-                gap: '8px',
-                alignItems: 'center'
+                justifyContent: 'flex-end',
+                gap: '16px',
+                fontSize: '12px',
+                color: '#595959',
               }}>
-                <span style={{ flex: 1, fontSize: '14px', color: '#1890ff' }}>
-                  The agent has proposed changes to the code
-                </span>
-                <Tooltip title="Merge all changes proposed in this thread into the Gadget's mainline code.">
-                  <Button
-                    type="primary"
-                    icon={<CheckCircleOutlined />}
-                    onClick={() => handleMergeChanges(lastActiveChange.sequence)}
-                  >
-                    Merge All Changes
-                  </Button>
-                </Tooltip>
+                {currentChatMetadata.totalTokens != null && (
+                  <span>{currentChatMetadata.totalTokens.toLocaleString()} tokens</span>
+                )}
+                {currentChatMetadata.totalCost != null && (
+                  <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
+                )}
               </div>
-            )
-          })()}
-
-          {/* Input area */}
-          <ChatInput
-            overseer={overseer}
-            onSend={handleSend}
-            isAgentActive={isAgentActive}
-            models={availableModels}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            pendingConsoleLogCount={pendingConsoleLogCount}
-            consoleLogPreview={consoleLogPreview}
-            consoleLogSeverity={consoleLogSeverity}
-            onConsumeConsoleLogs={onConsumeConsoleLogs}
-            onDiscardConsoleLogs={onDiscardConsoleLogs}
-          />
-
-          {/* Token / cost summary */}
-          {(currentChatMetadata?.totalTokens != null || currentChatMetadata?.totalCost != null) && (
-            <div style={{
-              padding: '0 16px 16px',
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: '16px',
-              fontSize: '12px',
-              color: '#595959',
-            }}>
-              {currentChatMetadata.totalTokens != null && (
-                <span>{currentChatMetadata.totalTokens.toLocaleString()} tokens</span>
-              )}
-              {currentChatMetadata.totalCost != null && (
-                <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
-              )}
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
     </div>

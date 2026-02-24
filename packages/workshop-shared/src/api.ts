@@ -138,12 +138,20 @@ export interface AuthenticatedApi extends RpcTarget {
   openGadget(id: string): Promise<Overseer>;
 
   // Create a new gadget. It will start out titled "Untitled Gadget".
+  //
+  // Note: A gadget is considered "provisional" until it has some sort of activity, such as a
+  //   chat message or code edit. Provisional gadgets do not appear on the home page and will be
+  //   automatically deleted after some time. Note in particular that calling
+  //   newCapsuleGatekeeper() will not clear the provisional bit, so provisional gadgets are useful
+  //   to allow the user to write an initial chat message without explicitly creating a new gadget.
   newGadget(): Promise<Overseer>;
 
   // List metadata about all the user's Gadgets. Used to display the front-page listing.
   //
+  // Provisional gadgets are hidden.
+  //
   // TODO: Pagination, sort options.
-  listGadgets(): Promise<GadgetMetadata[]>;
+  listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
   // List all third-party services that this account can connect to.
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
@@ -240,10 +248,6 @@ export type GadgetMetadata = {
   // Human-readable title. Can be modified.
   title: string;
 
-  created: Date;
-
-  lastActive: Date;
-
   // Total cost of AI inference in dollars, if known.
   totalCost?: number;
 
@@ -251,6 +255,13 @@ export type GadgetMetadata = {
   // - owner, shared-with
   // - created / modified / activity times
   // - icon? thumbnail?
+}
+
+// GadgetMetadata extended with timestamps. These are available when listing gadgets from the
+// user's collection, but not from the Overseer (which doesn't track them).
+export type GadgetMetadataWithTimestamps = GadgetMetadata & {
+  created: Date;
+  lastActive: Date;
 }
 
 // Describes the client-side UI code for a Gadget. Such code is intended to run inside an iframe
@@ -318,7 +329,9 @@ export type ActionLogEntry = {
   id: number;
 
   // Which binding produced this action?
-  bindingName: string;
+  bindingName?: string;   // omitted for capsules
+  resourceTitle: string;
+  resourceUrl?: string;
 
   createdAt: Date;
   appliedAt?: Date;
@@ -377,7 +390,7 @@ export type AgentSpawnerConfig = {
 // Gadget.
 export interface Overseer extends RpcTarget {
   // Get metadata describing this gadget.
-  getMetadata(): Promise<Omit<GadgetMetadata, 'created' | 'lastActive'>>;
+  getMetadata(): Promise<GadgetMetadata>;
 
   // Get metadata describing this gadget and subscribe to changes.
   //
@@ -386,7 +399,7 @@ export interface Overseer extends RpcTarget {
   //
   // Disposing the returned `RpcStub` will cancel the subscription.
   subscribeToMetadata(
-      callback: RpcStub<(metadata: Omit<GadgetMetadata, 'created' | 'lastActive'>) => void>)
+      callback: RpcStub<(metadata: GadgetMetadata) => void>)
       : Promise<RpcStub<{}>>;
 
   // Change the title.
@@ -436,7 +449,7 @@ export interface Overseer extends RpcTarget {
   getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null>;
 
   // Get an existing gatekeeper by ID number. Throws if the ID doesn't exist.
-  getGatekkeperById(id: number): Promise<GatekeeperClient<any>>;
+  getGatekeeperById(id: number): Promise<GatekeeperClient<any>>;
 
   // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
   //
@@ -634,6 +647,17 @@ export type AiChatMessageBody = {
   // before this point, and any later merge will not include the reverted changes.
   type: "revert";
   revertFrom: number;
+} | {
+  // Indicates that the agent in this chat performed an action.
+  type: "action",
+  actionId: number;
+
+  // Denormalized description of the action.
+  //
+  // This is inlined into the message at the time of query, so it is always present and always
+  // current in messages delivered to the client. It is marked optional only because it is not
+  // present in messages stored in the chat table on the server side.
+  actionLog?: ActionLogEntry;
 };
 
 // Describes a tool call performed by an AI agent as part of a message.

@@ -26,7 +26,9 @@ export interface AgentHooks {
   describeCapsule(name: string, gatekeeperId: number): Promise<string>;
   saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
-  executeCodeMode(code: string, context: AiChatAgentContext, capsules?: number[]): Promise<string>;
+  executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
+                  capsules?: number[]): Promise<string>;
+  getCapturedActions(chatId: number): number[] | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
 }
@@ -409,6 +411,10 @@ export async function runAgent(
         });
         break;
       }
+
+      case "action":
+        // No need to tell the agent about this.
+        break;
 
       default:
         msg satisfies never;
@@ -829,7 +835,7 @@ export async function runAgent(
       }),
       execute: async ({code}, {toolCallId}) => {
         try {
-          let output = await hooks.executeCodeMode(code, agentContext, capsules);
+          let output = await hooks.executeCodeMode(chatId, code, agentContext, capsules);
           toolCallNotes.set(toolCallId, {
             output: `${output}`
           });
@@ -986,6 +992,13 @@ export async function runAgent(
           type: "changes",
           update
         });
+      }
+
+      let capturedActions = hooks.getCapturedActions(chatId);
+      if (capturedActions) {
+        for (let actionId of capturedActions) {
+          msgs.push({type: "action", actionId});
+        }
       }
 
       // TODO: Figure out where to get cf-aig-log-id when using the Workers AI binding.
