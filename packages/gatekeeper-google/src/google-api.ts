@@ -155,12 +155,16 @@ export class GmailApi {
   constructor(private getAccessToken: () => Promise<string>) {}
 
   // List the top `count` threads in the user's inbox.
-  async listThreads(count: number): Promise<GmailThreadSummary[]> {
+  // If `query` is provided, only threads matching the Gmail search query are returned.
+  async listThreads(count: number, query?: string): Promise<GmailThreadSummary[]> {
     const accessToken = await this.getAccessToken();
 
-    const response = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=${count}`,
-      {
+    let url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=${count}`;
+    if (query) {
+      url += `&q=${encodeURIComponent(query)}`;
+    }
+
+    const response = await fetch(url, {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
         },
