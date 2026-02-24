@@ -18,12 +18,15 @@ If you're running this project locally and want to use Google API integrations, 
 
 ### Step 2: Enable Required APIs
 
-Currently, Gmail is the only supported Google API. You'll need to enable additional APIs here as support for them is added.
+You'll need to enable the Google APIs that you want to use. Currently supported: Gmail and Google Docs.
 
 1. In the left sidebar, go to **APIs & Services** > **Library** (or [click here](https://console.cloud.google.com/apis/library))
 2. Search for "Gmail API"
 3. Click on **Gmail API** in the results
 4. Click **Enable**
+5. Go back to the Library, search for "Google Docs API"
+6. Click on **Google Docs API** in the results
+7. Click **Enable**
 
 ### Step 3: Configure the OAuth Consent Screen
 

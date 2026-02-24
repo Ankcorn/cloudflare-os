@@ -2,7 +2,11 @@ import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:
 import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
+import { GoogleDocSession, DocMetadata } from "./docs-types";
+import { GoogleDocsApi } from "./docs-api";
+import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnapshot } from "./markdown-converter";
 import TYPES_CODE from "./types.txt";
+import DOCS_TYPES_CODE from "./docs-types.txt";
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
@@ -69,13 +73,18 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/userinfo.profile",
   "https://www.googleapis.com/auth/userinfo.email",
   "https://www.googleapis.com/auth/gmail.labels",
-  "https://www.googleapis.com/auth/gmail.modify"
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/documents",
 ];
 
 const SUPPORTED_RESOURCES: SupportedResource[] = [{
   urlPattern: "https://mail.google.com/*",
   title: "Gmail Mailbox",
   description: "Read and send emails.",
+}, {
+  urlPattern: "https://docs.google.com/document/d/*",
+  title: "Google Doc",
+  description: "Read and edit a Google Doc.",
 }];
 
 // Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
@@ -178,7 +187,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return TYPES_CODE;
+    return [TYPES_CODE, DOCS_TYPES_CODE].join("\n");
   }
 }
 
@@ -279,8 +288,24 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
-    let props: GmailGatekeeperImplProps = this.ctx.props;
+    let parsed = new URL(url);
 
+    if (parsed.hostname === "docs.google.com" &&
+        parsed.pathname.startsWith("/document/d/")) {
+      // Extract document ID from URL path: /document/d/{documentId}/...
+      let documentId = parsed.pathname.split("/")[3];
+      if (!documentId) {
+        throw new Error("Invalid Google Docs URL: no document ID found");
+      }
+      let props: GoogleDocGatekeeperImplProps = {
+        userObjectId: this.ctx.props.userObjectId,
+        documentId,
+      };
+      return this.ctx.exports.GoogleDocGatekeeperImpl({props});
+    }
+
+    // Default: Gmail
+    let props: GmailGatekeeperImplProps = this.ctx.props;
     return this.ctx.exports.GmailGatekeeperImpl({props});
   }
 
@@ -416,5 +441,245 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
 
   async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
     // Safe to ignore since we don't have a hook!
+  }
+}
+
+// =======================================================================================
+// Google Docs Gatekeeper
+// =======================================================================================
+
+type GoogleDocAction = {
+  type: "batchUpdate";
+  documentId: string;
+  revisionId: string;
+  requests: any[];
+}
+
+type GoogleDocRevertInfo = {}
+
+type GoogleDocGatekeeperImplProps = {
+  userObjectId: string;
+  documentId: string;
+}
+
+export class GoogleDocGatekeeperImpl
+    extends DurableObject<Env, GoogleDocGatekeeperImplProps>
+    implements Gatekeeper<GoogleDocSession, GoogleDocAction, GoogleDocRevertInfo> {
+  #accessToken: GoogleAccessToken | undefined;
+
+  async #getAccessToken(): Promise<string> {
+    if (!this.#accessToken) {
+      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+      this.#accessToken = await stub.getAccessToken();
+
+      let ttl = this.#accessToken.expires.valueOf() - Date.now();
+      setTimeout(() => { this.#accessToken = undefined; }, ttl / 2);
+    }
+    return this.#accessToken.token;
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    let doc = await api.getDocument(this.ctx.props.documentId);
+    return {
+      url: `https://docs.google.com/document/d/${this.ctx.props.documentId}/edit`,
+      title: doc.title,
+      snippet: `Google Doc: ${doc.title}`,
+      suggestedBindingName: "GOOGLE_DOC",
+      tsType: "GoogleDocSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return DOCS_TYPES_CODE;
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<GoogleDocAction>>)
+      : Promise<GoogleDocSession> {
+    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    return new GoogleDocSessionImpl(
+        api, this.ctx.props.documentId, approvalQueue.dup(), this.ctx.storage);
+  }
+
+  async applyAction(action: GoogleDocAction): Promise<void | {revertInfo?: GoogleDocRevertInfo}> {
+    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    switch (action.type) {
+      case "batchUpdate": {
+        await api.batchUpdate(action.documentId, action.requests, action.revisionId);
+        break;
+      }
+      default:
+        throw new Error(`unknown action type: ${(action as any).type}`);
+    }
+  }
+
+  async rejectAction(action: GoogleDocAction): Promise<void | {restart?: boolean}> {
+    // No simulation state to roll back.
+  }
+
+  revertAction(action: GoogleDocAction, revertInfo: GoogleDocRevertInfo):
+      Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
+    throw new Error("revert is not implemented");
+  }
+
+  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+    // No hooks for Google Docs.
+  }
+}
+
+class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
+  #docsApi: GoogleDocsApi;
+  #documentId: string;
+  #approvalQueue: ApprovalQueue<GoogleDocAction>;
+  #storage: DurableObjectStorage;
+
+  constructor(
+    docsApi: GoogleDocsApi,
+    documentId: string,
+    approvalQueue: ApprovalQueue<GoogleDocAction>,
+    storage: DurableObjectStorage,
+  ) {
+    super();
+    this.#docsApi = docsApi;
+    this.#documentId = documentId;
+    this.#approvalQueue = approvalQueue;
+    this.#storage = storage;
+  }
+
+  async #getSnapshot(forceRefresh?: boolean): Promise<DocSnapshot> {
+    if (!forceRefresh) {
+      let cached = await this.#storage.get<DocSnapshot>("docSnapshot");
+      if (cached) {
+        let age = Date.now() - cached.fetchedAt;
+        if (age < 10_000) {
+          return cached;
+        }
+        // TTL expired — check if document has changed.
+        let currentRevisionId = await this.#docsApi.getRevisionId(this.#documentId);
+        if (currentRevisionId === cached.revisionId) {
+          cached.fetchedAt = Date.now();
+          await this.#storage.put("docSnapshot", cached);
+          return cached;
+        }
+      }
+    }
+
+    // Fetch full document and build snapshot.
+    let doc = await this.#docsApi.getDocument(this.#documentId);
+    let snapshot = docToMarkdown(doc);
+    await this.#storage.put("docSnapshot", snapshot);
+    return snapshot;
+  }
+
+  async getMetadata(): Promise<DocMetadata> {
+    let snapshot = await this.#getSnapshot();
+
+    await this.#approvalQueue.authorizeObservation({
+      title: "Read Google Doc metadata",
+      description: "Read the title and modification time of the document.",
+    });
+
+    // The Docs API doesn't return lastModified directly (that's a Drive API field).
+    // For now, use the fetch timestamp as an approximation.
+    // TODO: Use Drive API files.get for actual modifiedTime.
+    return {
+      title: snapshot.title ?? "Untitled document",
+      lastModified: new Date(snapshot.fetchedAt),
+    };
+  }
+
+  async getContent(): Promise<string> {
+    let snapshot = await this.#getSnapshot();
+
+    await this.#approvalQueue.authorizeObservation({
+      title: "Read Google Doc content",
+      description: "Read the full content of the document as Markdown.",
+    });
+
+    return snapshot.markdown;
+  }
+
+  async replaceText(oldMarkdown: string, newMarkdown: string): Promise<void> {
+    let snapshot = await this.#storage.get<DocSnapshot>("docSnapshot");
+    if (!snapshot) {
+      throw new Error("No document snapshot cached. Call getContent() first.");
+    }
+
+    // Find the match in the cached Markdown.
+    let index = snapshot.markdown.indexOf(oldMarkdown);
+    if (index === -1) {
+      throw new Error(
+        "replaceText: oldMarkdown not found in the document snapshot. " +
+        "Make sure the text exactly matches content returned by getContent().");
+    }
+    let secondIndex = snapshot.markdown.indexOf(oldMarkdown, index + 1);
+    if (secondIndex !== -1) {
+      throw new Error(
+        "replaceText: oldMarkdown matches multiple locations in the document. " +
+        "Include more surrounding context to make the match unique.");
+    }
+
+    let matchStart = index;
+    let matchEnd = index + oldMarkdown.length;
+
+    let result = computeReplaceOperations(
+        snapshot.sourceMap, snapshot.markdown, matchStart, matchEnd, newMarkdown);
+
+    if (result.requests.length === 0) {
+      return;
+    }
+
+    let action: GoogleDocAction = {
+      type: "batchUpdate",
+      documentId: this.#documentId,
+      revisionId: snapshot.revisionId,
+      requests: result.requests,
+    };
+
+    let oldPreview = result.trimmedOld.length > 80
+        ? result.trimmedOld.slice(0, 80) + "..."
+        : result.trimmedOld;
+    let newPreview = result.trimmedNew.length > 80
+        ? result.trimmedNew.slice(0, 80) + "..."
+        : result.trimmedNew;
+
+    await this.#approvalQueue.submitAction(action, {
+      title: "Edit Google Doc",
+      description:
+        `Replace text in the document.\n\n` +
+        `**Old:** ${oldPreview}\n\n` +
+        `**New:** ${newPreview}`,
+      implementsRevert: false,
+    });
+  }
+
+  async appendText(markdown: string): Promise<void> {
+    let snapshot = await this.#getSnapshot();
+
+    // Insert before the final newline (bodyEndIndex - 1) since Google Docs
+    // always has a trailing newline that can't be deleted.
+    let insertAt = snapshot.bodyEndIndex - 1;
+
+    // Prepend \n so that the appended content starts a new paragraph rather
+    // than concatenating onto the last existing paragraph.
+    let requests = markdownToDocRequests("\n" + markdown, insertAt);
+
+    let action: GoogleDocAction = {
+      type: "batchUpdate",
+      documentId: this.#documentId,
+      revisionId: snapshot.revisionId,
+      requests,
+    };
+
+    let preview = markdown.length > 100
+        ? markdown.slice(0, 100) + "..."
+        : markdown;
+
+    await this.#approvalQueue.submitAction(action, {
+      title: "Append to Google Doc",
+      description: `Append content to the end of the document:\n\n${preview}`,
+      implementsRevert: false,
+    });
   }
 }
