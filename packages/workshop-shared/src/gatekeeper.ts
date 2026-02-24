@@ -213,7 +213,10 @@ export interface Gatekeeper<
   // access.
   describe(): Promise<ResourceDescription>;
 
-  // Returns the same TypeScript type bundle as GatekeeperVendor.getTypeScriptTypes().
+  // Returns the a subset of the type definitions returned by
+  // GatekeeperVendor.getTypeScriptTypes(), specifically covering types used by this Gatekeeper.
+  // This allows the agent to be provided with only types relevant to them rather than the entire
+  // API space of the vendor, which may support many kinds of resources.
   getTypeScriptTypes(): Promise<string>;
 
   // Get the capability representing this resource's RPC interface which will be provided to the
