@@ -43,6 +43,17 @@ interface CodeModeEntrypoint extends WorkerEntrypoint {
   run(): Promise<void>;
 }
 
+// Work around a Workers Runtime bug introduced in: https://github.com/cloudflare/workerd/pull/6090
+// Reflect.getOwnPropertyDescriptor(stub, anything) incorrectly returns non-null for RPC
+// properties, even though Object.hasOwn(target, prop) returns false. When wrapped in a Proxy,
+// though, hasOwn() is implemented in terms of getOwnPropertyDescriptor(), so it then incorrectly
+// returns true, which breaks RPC. We can fix it by intercepting getOwnPropertyDescriptor() as
+// follows.
+function getOwnPropertyDescriptorWorkaround(target: any, prop: string | symbol) {
+  if (!Object.hasOwn(target, prop)) return undefined;
+  return Reflect.getOwnPropertyDescriptor(target, prop);
+}
+
 // =======================================================================================
 
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
@@ -484,7 +495,8 @@ class OverseerImpl implements AgentHooks {
       },
       getPrototypeOf(target) {
         return RpcTarget.prototype;
-      }
+      },
+      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
 
     // Explicitly construct at RpcStub around the proxy to work around a workerd bug where
@@ -513,7 +525,8 @@ class OverseerImpl implements AgentHooks {
         },
         getPrototypeOf(target) {
           return RpcTarget.prototype;
-        }
+        },
+        getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
       });
     } else {
       throw new Error("Hook is not connected.");
@@ -1441,7 +1454,8 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
       },
       getPrototypeOf(target) {
         return WorkerEntrypoint.prototype;
-      }
+      },
+      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
   }
 
@@ -1477,7 +1491,8 @@ export class GatekeeperHookLoopback
       },
       getPrototypeOf(target) {
         return WorkerEntrypoint.prototype;
-      }
+      },
+      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
   }
 
