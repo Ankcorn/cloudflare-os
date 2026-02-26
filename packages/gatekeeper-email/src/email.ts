@@ -186,10 +186,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 // =======================================================================================
-// UserAccount DO: ephemeral, handles the connectAccount flow.
+// UserAccount DO: handles the connectAccount flow and tracks claimed email addresses.
 //
-// Since email doesn't require OAuth, this DO just stores the callback and completes
-// immediately when the user visits the connection URL.
+// Since email doesn't require OAuth, the connect flow just stores the callback and completes
+// immediately when the user visits the connection URL. After completion, the DO persists to
+// track which email addresses have been claimed by this user account.
 
 export class UserAccount extends DurableObject<Env> {
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
@@ -205,23 +206,36 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("Connection already completed or expired. Please try again.");
     }
 
-    let props: GatekeeperUserImplProps = {};
+    let props: GatekeeperUserImplProps = {
+      userAccountId: this.ctx.id.toString(),
+    };
     await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
 
-    // Clean up.
+    // Clean up the callback, but keep the DO alive to track claimed email addresses.
     this.ctx.storage.deleteAlarm();
-    this.ctx.storage.deleteAll();
+    this.ctx.storage.kv.delete("callback");
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
     // Timed out without completion -- clean up.
     this.ctx.storage.deleteAll();
   }
+
+  async addEmail(emailName: string): Promise<void> {
+    this.ctx.storage.kv.put(`email:${emailName}`, true);
+  }
+
+  async getEmails(): Promise<string[]> {
+    let entries = this.ctx.storage.kv.list({ prefix: "email:" });
+    return [...entries].map(([key]) => key.slice("email:".length));
+  }
 }
 
 // =======================================================================================
 
-type GatekeeperUserImplProps = {};
+type GatekeeperUserImplProps = {
+  userAccountId: string;
+};
 
 export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
                                 implements GatekeeperUser {
@@ -252,12 +266,27 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       throw new Error(`Invalid email URL: ${url}`);
     }
 
-    let props: EmailGatekeeperImplProps = { emailName };
+    let userAccountId = this.ctx.props.userAccountId;
+
+    // Claim the email address. EmailAddress is the source of truth for ownership, so we
+    // check/claim there first, then record the association in UserAccount.
+    await this.ctx.exports.EmailAddress.getByName(emailName).claim(userAccountId);
+
+    let userAccountDOId = this.ctx.exports.UserAccount.idFromString(userAccountId);
+    await this.ctx.exports.UserAccount.get(userAccountDOId).addEmail(emailName);
+
+    let props: EmailGatekeeperImplProps = { emailName, userAccountId };
     return this.ctx.exports.EmailGatekeeperImpl({ props });
   }
 
   async revoke(): Promise<void> {
-    // Nothing to revoke -- email doesn't use external credentials.
+    // Disconnect all hooks, but do NOT release address claims -- they are permanent.
+    let userAccountId = this.ctx.props.userAccountId;
+    let userAccountDOId = this.ctx.exports.UserAccount.idFromString(userAccountId);
+    let emails = await this.ctx.exports.UserAccount.get(userAccountDOId).getEmails();
+    await Promise.all(emails.map(emailName =>
+      this.ctx.exports.EmailAddress.getByName(emailName).setHook(null, userAccountId)
+    ));
   }
 }
 
@@ -282,6 +311,7 @@ class EmailSessionImpl extends RpcTarget implements EmailSession {
 
 type EmailGatekeeperImplProps = {
   emailName: string;
+  userAccountId: string;
 };
 
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
@@ -328,9 +358,10 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
   async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
     // Forward the hook to the EmailAddress DO for this email name.
     let emailName = this.ctx.props.emailName;
+    let userAccountId = this.ctx.props.userAccountId;
     let stub: DurableObjectStub<EmailAddress> =
         this.ctx.exports.EmailAddress.getByName(emailName);
-    await stub.setHook(hook);
+    await stub.setHook(hook, userAccountId);
   }
 }
 
@@ -341,7 +372,25 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
 // Stores the hook Fetcher and dispatches inbound emails to it.
 
 export class EmailAddress extends DurableObject<Env> {
-  async setHook(hook: Fetcher | null): Promise<void> {
+  // Claim this email address for a user account. The first caller to claim an address becomes
+  // its permanent owner. Subsequent calls from the same owner are idempotent. Calls from a
+  // different owner are rejected.
+  async claim(userAccountId: string): Promise<void> {
+    let owner = this.ctx.storage.kv.get<string>("owner");
+    if (owner && owner !== userAccountId) {
+      throw new Error("This email address is claimed by another user");
+    }
+    if (!owner) {
+      this.ctx.storage.kv.put("owner", userAccountId);
+    }
+  }
+
+  async setHook(hook: Fetcher | null, userAccountId: string): Promise<void> {
+    let owner = this.ctx.storage.kv.get<string>("owner");
+    if (owner !== userAccountId) {
+      throw new Error("This email address is not owned by this user account");
+    }
+
     if (hook) {
       this.ctx.storage.kv.put("hook", hook);
     } else {
