@@ -225,8 +225,8 @@ class OverseerImpl implements AgentHooks {
     // If any chat agents were left running by the last instance of this DO, cancel them.
     for (let thread of [...this.storage.chatMeta.list()]) {
       if (thread.activeAgent) {
-        this.postAgentChatMessage(thread.id, thread.activeAgent,
-            "Error: Agent interrupted due to server restart.");
+        this.postAgentErrorMessage(thread.id, thread.activeAgent,
+            "Agent interrupted due to server restart.");
         delete thread.activeAgent;
         this.storage.chatMeta.put(thread);
       }
@@ -952,7 +952,7 @@ class OverseerImpl implements AgentHooks {
       await runAgent(this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal);
     } catch (err) {
       console.error("error in runAgent():", err);
-      this.postAgentChatMessage(chatId, aiModel.profile, `${err}`);
+      this.postAgentErrorMessage(chatId, aiModel.profile, `${err}`);
     } finally {
       this.#cancelSignals.delete(chatId);
       let meta = this.storage.chatMeta.get(chatId);
@@ -998,6 +998,24 @@ class OverseerImpl implements AgentHooks {
       timestamp,
       author,
       type: "message",
+      message
+    });
+  }
+
+  postAgentErrorMessage(chatId: number, author: AiChatAuthorInfo, message: string) {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta) {
+      // Chat thread deleted?
+      return;
+    }
+
+    let timestamp = this.getChatTimestamp();
+    this.storage.chats.put({
+      chatId,
+      sequence: this.nextChatSequence(chatId),
+      timestamp,
+      author,
+      type: "error",
       message
     });
   }
@@ -2162,6 +2180,28 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async stopAgent(chatId: number): Promise<void> {
     this.impl.cancelAgent(chatId);
+  }
+
+  async retryAgent(chatId: number, modelId: string): Promise<void> {
+    let userMeta = await this.clientUser.getChatContext(modelId);
+
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    if (meta.activeAgent) {
+      // Agent is already running, nothing to do.
+      return;
+    }
+    if (!userMeta.aiModel) {
+      throw new Error("No AI model available.");
+    }
+
+    meta.activeAgent = userMeta.aiModel.profile;
+    meta.lastActive = this.impl.getChatTimestamp();
+    this.impl.storage.chatMeta.put(meta);
+
+    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
   }
 
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {

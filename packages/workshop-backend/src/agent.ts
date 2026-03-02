@@ -414,6 +414,7 @@ export async function runAgent(
 
       case "action":
       case "useGadget":
+      case "error":
         // No need to tell the agent about this.
         break;
 

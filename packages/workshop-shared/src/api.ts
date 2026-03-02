@@ -551,6 +551,12 @@ export interface Overseer extends RpcTarget {
   // If no LLM is running, `stop()` does nothing and returns immediately.
   stopAgent(chatId: number): Promise<void>;
 
+  // Retry the agent on the given chat. This starts the agent without adding a new user message.
+  // The agent will re-process the existing chat history using the specified model.
+  //
+  // If an agent is already running, this does nothing.
+  retryAgent(chatId: number, modelId: string): Promise<void>;
+
   // Subscribe to the gadget worker's console logs. This allows the user to observe console logs
   // being produced by the gadget.
   //
@@ -662,6 +668,12 @@ export type AiChatMessageBody = {
   // Indicates that the AI agent accessed the gadget one or more times. This is logged in order
   // to track whether information known to the gadget may have tainted the agent session.
   type: "useGadget";
+} | {
+  // Indicates that the agent run ended with an error (e.g. LLM API failure, abort, server
+  // restart). This is displayed to the user with a "retry" button, but is NOT included in the
+  // chat log sent to the LLM so the agent does not react to it.
+  type: "error";
+  message: string;
 };
 
 // Describes a tool call performed by an AI agent as part of a message.
