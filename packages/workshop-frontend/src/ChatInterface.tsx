@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
@@ -730,6 +730,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set())
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(new Set())
   const [expandedActions, setExpandedActions] = useState<Set<number>>(new Set())
+  const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set())
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
@@ -1027,6 +1028,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     setExpandedToolCalls(new Set())
     setExpandedReasoning(new Set())
     setExpandedActions(new Set())
+    setExpandedErrors(new Set())
     processedToolCallsRef.current = new Set()
     setIsEditingTitle(false)
   }, [selectedChatId])
@@ -1315,6 +1317,31 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     })
   }
 
+  // Toggle error message expansion
+  const toggleErrorExpansion = (messageKey: string) => {
+    setExpandedErrors(prev => {
+      const next = new Set(prev)
+      if (next.has(messageKey)) {
+        next.delete(messageKey)
+      } else {
+        next.add(messageKey)
+      }
+      return next
+    })
+  }
+
+  // Handle retrying the agent after an error
+  const handleRetry = async () => {
+    if (selectedChatId === null || selectedModel === null) return
+
+    try {
+      await overseer.retryAgent(selectedChatId, selectedModel)
+    } catch (err) {
+      console.error('Failed to retry agent:', err)
+      message.error('Failed to retry agent')
+    }
+  }
+
   // Compute message states (merged/reverted status)
   const messageStates = useMemo(
     () => computeMessageStates(currentMessages),
@@ -1486,7 +1513,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
               </div>
             ) : (
               <>
-                {currentMessages.map((msg, _idx) => (
+                {currentMessages.map((msg, idx) => (
                   <div
                     key={`${msg.chatId}-${msg.sequence}`}
                     style={{
@@ -1983,7 +2010,89 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                           </div>
                         </div>
                       </div>
-                    ) : null}
+                    ) : msg.type === 'error' ? (() => {
+                      const messageKey = `${msg.chatId}-${msg.sequence}`
+                      const isLastMessage = idx === currentMessages.length - 1 && !isAgentActive
+                      const isExpanded = isLastMessage || expandedErrors.has(messageKey)
+                      return (
+                        <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                          <div
+                            style={{
+                              fontSize: '12px',
+                              padding: '8px 12px',
+                              backgroundColor: '#fff2f0',
+                              border: '1px solid #ffccc7',
+                              borderRadius: '4px',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '8px',
+                                cursor: isLastMessage ? undefined : 'pointer',
+                              }}
+                              onClick={isLastMessage ? undefined : () => toggleErrorExpansion(messageKey)}
+                            >
+                              <span style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                color: '#cf1322',
+                                fontWeight: 'bold',
+                              }}>
+                                <ExclamationCircleOutlined />
+                                {isExpanded ? 'Error' : 'Error (click to expand)'}
+                              </span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Text type="secondary" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
+                                  {msg.timestamp.toLocaleTimeString()}
+                                </Text>
+                                {!isLastMessage && (
+                                  <span style={{ fontFamily: 'monospace', color: '#cf1322' }}>
+                                    {isExpanded ? '▼' : '▶'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {isExpanded && (
+                              <>
+                                <div style={{
+                                  marginTop: '8px',
+                                  padding: '8px',
+                                  backgroundColor: '#fff1f0',
+                                  border: '1px solid #ffa39e',
+                                  borderRadius: '2px',
+                                  color: '#cf1322',
+                                  fontSize: '11px',
+                                  fontFamily: 'monospace',
+                                  whiteSpace: 'pre-wrap',
+                                  wordBreak: 'break-word',
+                                }}>
+                                  {msg.message}
+                                </div>
+                                {isLastMessage && (
+                                  <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'flex-end' }}>
+                                    <Button
+                                      icon={<ReloadOutlined />}
+                                      onClick={handleRetry}
+                                      size="small"
+                                      type="primary"
+                                      danger
+                                      disabled={selectedModel === null}
+                                      title={selectedModel === null ? 'Select a model to retry' : undefined}
+                                    >
+                                      Retry
+                                    </Button>
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })() : null}
                   </div>
                 ))}
                 {/* Typing indicator when agent is active */}
