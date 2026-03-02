@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined, PaperClipOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
@@ -17,6 +17,7 @@ import {
 import { ResourceDescription } from '@gadgets/workshop-shared/gatekeeper'
 import CapsuleOverlay from './CapsuleOverlay'
 import type { SelectableItem } from './ResourcePicker'
+import NewGatekeeperModal from './NewGatekeeperModal'
 
 const { TextArea } = Input
 const { Text, Title, Link } = Typography
@@ -39,12 +40,15 @@ interface InputCapsule {
 // Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
 const URL_REGEX = /https?:\/\/[^\s)>\]]+/g
 
-export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, models,
+export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgentActive, models,
     selectedModel, onModelChange,
     pendingConsoleLogCount = 0, consoleLogPreview = '', consoleLogSeverity = 'info',
     onConsumeConsoleLogs = () => '', onDiscardConsoleLogs = () => {},
     newChat = false }: {
   createCapsuleGatekeeper: (accountId: number, url: string) => Promise<RpcStub<GatekeeperClient<any>> | null>
+  // Returns an overseer stub, used by the attach modal to create gatekeepers. Can be async
+  // to support lazy provisional-gadget creation on the Home page.
+  getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
   onSend: (message: string, modelId: string | null, capsules?: CapsuleSpecifier[]) => void
   isAgentActive: boolean
   models: AiChatAuthorInfo[]
@@ -63,6 +67,11 @@ export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, mode
   const [overlayIndex, setOverlayIndex] = useState(0)
   const overlayItemsRef = useRef<SelectableItem[]>([])
   const overlayActivateRef = useRef<((index: number) => void) | null>(null)
+
+  // Attach modal state
+  const [attachModalOpen, setAttachModalOpen] = useState(false)
+  // Save the cursor position when the attach modal opens, so we can insert the capsule there.
+  const attachCursorPosRef = useRef(0)
 
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -214,6 +223,67 @@ export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, mode
     } catch (err) {
       console.error('Failed to create capsule:', err)
     }
+  }
+
+  // Opens the attach modal, saving the current cursor position so we can insert there later.
+  const handleAttachOpen = () => {
+    const wrapper = wrapperRef.current
+    if (wrapper) {
+      const textarea = wrapper.querySelector('textarea')
+      if (textarea) {
+        attachCursorPosRef.current = textarea.selectionStart ?? inputValueRef.current.length
+      } else {
+        attachCursorPosRef.current = inputValueRef.current.length
+      }
+    } else {
+      attachCursorPosRef.current = inputValueRef.current.length
+    }
+    setAttachModalOpen(true)
+  }
+
+  // Called by the NewGatekeeperModal when a gatekeeper is created via the attach flow.
+  // Inserts a capsule at the previously-saved cursor position.
+  const handleAttachCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
+    // Fetch ID and description in parallel (promise pipelining).
+    const [id, description] = await Promise.all([gk.getId(), gk.describe()])
+    gk[Symbol.dispose]()
+
+    const insertPos = attachCursorPosRef.current
+    // Pad the title with spaces so the mirror highlight has visible interior padding.
+    const paddedTitle = ` ${description.title} `
+
+    // Insert the capsule title at the saved cursor position.
+    setInputValue(prev => prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos))
+
+    // Adjust positions of existing capsules that come after the insertion point.
+    setCapsules(prev => {
+      const adjusted = prev.map(c => {
+        if (c.start >= insertPos) {
+          return { ...c, start: c.start + paddedTitle.length }
+        }
+        return c
+      })
+      return [...adjusted, {
+        start: insertPos,
+        length: paddedTitle.length,
+        gatekeeperId: id,
+        description,
+      }]
+    })
+
+    setAttachModalOpen(false)
+
+    // Move cursor to end of inserted capsule and focus the textarea.
+    requestAnimationFrame(() => {
+      const wrapper = wrapperRef.current
+      if (!wrapper) return
+      const textarea = wrapper.querySelector('textarea')
+      if (textarea) {
+        const cursorPos = insertPos + paddedTitle.length
+        textarea.setSelectionRange(cursorPos, cursorPos)
+        textarea.focus()
+      }
+    })
   }
 
   // Handle text changes: detect if edits overlap any capsule and remove broken ones.
@@ -472,6 +542,15 @@ export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, mode
               </Button>
             </Space>
           )}
+          <Tooltip title="Attach resource">
+            <Button
+              size="small"
+              type="text"
+              icon={<PaperClipOutlined />}
+              onClick={handleAttachOpen}
+              style={pendingConsoleLogCount > 0 ? {} : { marginLeft: 'auto' }}
+            />
+          </Tooltip>
         </div>
         <div style={{ display: 'flex', width: '100%' }}>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
@@ -565,6 +644,12 @@ export const ChatInput = ({ createCapsuleGatekeeper, onSend, isAgentActive, mode
           </Button>
         )}
       </Space>
+      <NewGatekeeperModal
+        open={attachModalOpen}
+        onClose={() => setAttachModalOpen(false)}
+        getOverseer={getOverseer}
+        onCreated={handleAttachCreated}
+      />
     </div>
   )
 }
@@ -1367,7 +1452,8 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                 Start a New Chat
               </Title>
               <ChatInput
-                createCapsuleGatekeeper={(accountId, url) => overseer.newCapsuleGatekeeper(accountId, url)}
+                createCapsuleGatekeeper={(accountId, url) => overseer.newGatekeeper(accountId, url)}
+                getOverseer={() => overseer}
                 onSend={handleSend}
                 isAgentActive={false}
                 models={availableModels}
@@ -2173,7 +2259,8 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
             {/* Input area */}
             <ChatInput
-              createCapsuleGatekeeper={(accountId, url) => overseer.newCapsuleGatekeeper(accountId, url)}
+              createCapsuleGatekeeper={(accountId, url) => overseer.newGatekeeper(accountId, url)}
+              getOverseer={() => overseer}
               onSend={handleSend}
               isAgentActive={isAgentActive}
               models={availableModels}

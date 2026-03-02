@@ -142,8 +142,9 @@ export interface AuthenticatedApi extends RpcTarget {
   // Note: A gadget is considered "provisional" until it has some sort of activity, such as a
   //   chat message or code edit. Provisional gadgets do not appear on the home page and will be
   //   automatically deleted after some time. Note in particular that calling
-  //   newCapsuleGatekeeper() will not clear the provisional bit, so provisional gadgets are useful
-  //   to allow the user to write an initial chat message without explicitly creating a new gadget.
+  //   new*Gatekeeper() will not clear the provisional bit (as long as no binding name is
+  //   assigned), so provisional gadgets are useful to allow the user to write an initial chat
+  //   message without explicitly creating a new gadget.
   newGadget(): Promise<Overseer>;
 
   // List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -451,17 +452,15 @@ export interface Overseer extends RpcTarget {
   // Get an existing gatekeeper by ID number. Throws if the ID doesn't exist.
   getGatekeeperById(id: number): Promise<GatekeeperClient<any>>;
 
-  // Try to create a new gatekeeper for this URL. A binding name will be automatically assigned.
+  // Try to create a new gatekeeper for this URL.
   //
   // `accountId` is the user's connected account to use to access this resource. To determine an
   // appropriate account, use `subscribeConnectedAccounts()` with a `filter` for this URL, then
   // let the user choose one.
+  //
+  // The new gatekeeper is not assigned a binding name by default. Call setSuggestedBindingName()
+  // on the returned object to assign one.
   newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
-
-  // Like newGatekeeper() but creates a gatekeeper for use in a capsule embedded in a chat session.
-  // See `CapsuleSpecifier` for more on capsules.
-  newCapsuleGatekeeper(accountId: number, resourceUrl: string)
-      : Promise<GatekeeperClient<any> | null>;
 
   // Create a new gatekeeper for an AI model binding. The model can be any returned by
   // listModels().
@@ -751,7 +750,7 @@ export type CapsuleSpecifier = {
   position: number;
   length: number;
 
-  // ID of the gatekeeper, which should have been created using newCapsuleGatekeeper().
+  // ID of the gatekeeper, which should have been created using newGatekeeper() or similar.
   gatekeeperId: number;
 
   // Denormalized resource description from calling GatekeeperClient.describe() at the time of
@@ -816,6 +815,10 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
   // a gatekeeper later to promote it to a permanent member of `env`.
   getBindingName(): Promise<string | null>;
   setBindingName(name: string): Promise<void>;
+
+  // If the gatekeeper doesn't already have a binding name set, assign one based on the resource's
+  // own suggestion. Return whatever the binding name is now.
+  setSuggestedBindingName(): Promise<string>;
 
   // Get the resource description, including the schema of its RPC interface.
   describe(): Promise<ResourceDescription>;

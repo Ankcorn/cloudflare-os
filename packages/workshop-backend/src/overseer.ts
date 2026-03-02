@@ -543,7 +543,7 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  async addGatekeeper(cls: GatekeeperClass, isCapsule: boolean): Promise<GatekeeperClient<any>> {
+  async addGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
     this.storage.nextGatekeeperId.put(id + 1);
     let gatekeeperRecord: GatekeeperRecord = {
@@ -557,20 +557,6 @@ class OverseerImpl implements AgentHooks {
 
     gatekeeperRecord.resourceTitle = description.title;
     gatekeeperRecord.resourceUrl = description.url;
-
-    if (isCapsule) {
-      // No need to set binding name. No need to call bumpVersion() since this doesn't affect code.
-    } else {
-      // Update binding name to the suggested name, avoiding conflicts.
-      let suggestedName = description.suggestedBindingName;
-      gatekeeperRecord.bindingName = suggestedName;
-      let i = 1;
-      while (this.storage.gatekeepers.byBindingName.get(gatekeeperRecord.bindingName) !== undefined) {
-        gatekeeperRecord.bindingName = `${suggestedName}_${++i}`;
-      }
-
-      this.bumpVersion();
-    }
 
     this.storage.gatekeepers.put(gatekeeperRecord);
 
@@ -1796,13 +1782,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
     return await this.impl.addGatekeeper(
-        await this.owner.getGatekeeperClassFor(accountId, resourceUrl), false);
-  }
-
-  async newCapsuleGatekeeper(accountId: number, resourceUrl: string)
-        : Promise<GatekeeperClient<any> | null> {
-    return await this.impl.addGatekeeper(
-        await this.owner.getGatekeeperClassFor(accountId, resourceUrl), true);
+        await this.owner.getGatekeeperClassFor(accountId, resourceUrl));
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -1818,7 +1798,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     return await this.impl.addGatekeeper(
-        this.impl.ctx.exports.LanguageModelGatekeeper({props}), false);
+        this.impl.ctx.exports.LanguageModelGatekeeper({props}));
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -1828,7 +1808,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     };
 
     return await this.impl.addGatekeeper(
-        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), false);
+        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}));
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -2232,10 +2212,29 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     if (name === "GADGET") {
       throw new Error("The binding name `GADGET` is reserved.");
     }
+    if (this.impl.storage.gatekeepers.byBindingName.get(name)) {
+      throw new Error(`There is already a binding named "${name}".`);
+    }
     let record = this.impl.storage.gatekeepers.get(this.id)!;
     record.bindingName = name;
     this.impl.storage.gatekeepers.put(record);
     this.impl.bumpVersion();
+  }
+
+  async setSuggestedBindingName(): Promise<string> {
+    let existingName = this.impl.storage.gatekeepers.get(this.id)!.bindingName;
+    if (existingName) {
+      return existingName;
+    }
+
+    let description = await this.facet.describe();
+    let suggestedName = description.suggestedBindingName;
+    let i = 1;
+    while (this.impl.storage.gatekeepers.byBindingName.get(suggestedName) !== undefined) {
+      suggestedName = `${description.suggestedBindingName}_${++i}`;
+    }
+    await this.setBindingName(suggestedName);
+    return suggestedName;
   }
 
   async describe(): Promise<ResourceDescription> {
