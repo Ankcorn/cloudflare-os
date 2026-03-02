@@ -177,7 +177,7 @@ export default function Home() {
   // Capsule creation callback for ChatInput: lazily provisions a gadget if needed
   const createCapsuleGatekeeper = useCallback(async (accountId: number, url: string) => {
     const overseer = await getProvisionalOverseer()
-    return overseer.newCapsuleGatekeeper(accountId, url)
+    return overseer.newGatekeeper(accountId, url)
   }, [getProvisionalOverseer])
 
   // Handle sending a message from the home prompt
@@ -325,6 +325,7 @@ export default function Home() {
                 </Title>
                 <ChatInput
                   createCapsuleGatekeeper={createCapsuleGatekeeper}
+                  getOverseer={getProvisionalOverseer}
                   onSend={handleHomeSend}
                   isAgentActive={false}
                   models={models}
