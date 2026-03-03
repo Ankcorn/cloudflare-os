@@ -134,8 +134,13 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Open an existing gadget.
   //
-  // To allow for pipelining ,this throws an exception if the gadget doesn't exist.
-  openGadget(id: string): Promise<Overseer>;
+  // If `shareKey` is provided, the server redeems it before opening, adding the caller as a
+  // collaborator. If the key is invalid or expired, the call throws an exception. This design
+  // allows share-key redemption and gadget opening in a single round trip, and further calls
+  // can be pipelined on the returned Overseer.
+  //
+  // To allow for pipelining, this throws an exception if the gadget doesn't exist.
+  openGadget(id: string, shareKey?: string): Promise<Overseer>;
 
   // Create a new gadget. It will start out titled "Untitled Gadget".
   //
@@ -177,6 +182,10 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Remove a connected account, revoking the token.
   disconnectAccount(accountId: number): Promise<void>;
+
+  // Remove a shared gadget from the user's home page listing. Does NOT revoke the user's
+  // access -- if they open the gadget again (e.g., via link), it reappears on their home page.
+  dismissSharedGadget(gadgetId: string): Promise<void>;
 
   // TODO:
   // - Recreate token on a connected account.
@@ -252,8 +261,11 @@ export type GadgetMetadata = {
   // Total cost of AI inference in dollars, if known.
   totalCost?: number;
 
+  // Set when the gadget is not owned by the current user. Presence of this field indicates the
+  // user is a collaborator, not the owner.
+  owner?: AiChatAuthorInfo;
+
   // TODO:
-  // - owner, shared-with
   // - created / modified / activity times
   // - icon? thumbnail?
 }
@@ -565,8 +577,59 @@ export interface Overseer extends RpcTarget {
   // To unsubscribe, dispose the returned stub.
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>>;
 
-  // TODO:
-  // - Sharing / access control functions
+  // --- Collaborator management ---
+
+  // List all collaborators. Available to owner and all collaborators.
+  listCollaborators(): Promise<CollaboratorInfo[]>;
+
+  // Add a collaborator by username/email. The caller must be the owner or an existing
+  // collaborator. Returns the new collaborator's info, or null if the username doesn't
+  // correspond to an existing account.
+  addCollaborator(username: string, note?: string): Promise<CollaboratorInfo | null>;
+
+  // Remove a collaborator (identified by profile.id).
+  //
+  // Owner can remove anyone. A non-owner collaborator can only remove their own edge(s)
+  // from the target. If the target still has edges from other sources, they keep access
+  // and the return is an empty array. If no edges remain, the target is fully removed.
+  //
+  // When a target is fully removed, `keepUsers` lists the profile.ids of users who would
+  // lose access transitively but should be retained. Their PermissionEdges through the
+  // removed user are replaced with new edges from the caller. Users reachable only through
+  // the removed user who are NOT in `keepUsers` are also removed.
+  //
+  // Returns the list of users who were actually removed (including the primary target).
+  // An empty array means the caller's edge was removed but the target retained access
+  // through other edges.
+  removeCollaborator(profileId: string, keepUsers: string[]): Promise<CollaboratorInfo[]>;
+
+  // Preview what would happen if a collaborator were removed. For a non-owner caller,
+  // if the target has edges from other sources that would survive, returns an empty array
+  // (the target would not actually be removed). Otherwise, returns the list of users whose
+  // only path to access runs through the given user, so the caller can present checkboxes
+  // for which to keep vs. remove.
+  previewRemoveCollaborator(profileId: string): Promise<CollaboratorInfo[]>;
+
+  // --- Share key management ---
+
+  // Create a share key. The server generates a random 128-bit key, stores its HMAC-SHA-256
+  // hash, and returns the raw key (hex-encoded). The caller constructs a URL from it. The
+  // raw key is never stored server-side.
+  createShareKey(note?: string): Promise<{ key: string }>;
+
+  // List active share keys (for management UI).
+  listShareKeys(): Promise<ShareKeyInfo[]>;
+
+  // Revoke a share key by its ID (the HMAC hash). Users who gained access solely through
+  // this key (and have no other edges) will be transitively removed. `keepUsers` lists
+  // profile.ids of users who should be retained with fresh edges from the caller.
+  // Returns the list of users who were actually removed.
+  revokeShareKey(keyId: string, keepUsers: string[]): Promise<CollaboratorInfo[]>;
+
+  // Preview what would happen if a share key were revoked. Returns the list of users who
+  // would lose access (those whose only path to access runs through this key), so the
+  // caller can present checkboxes for which to keep vs. remove.
+  previewRevokeShareKey(keyId: string): Promise<CollaboratorInfo[]>;
 }
 
 export type AiChatMetadata = {
@@ -836,3 +899,31 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 
   // TODO: Get/set permissions.
 }
+
+// Describes how one user came to have collaborator access.
+export type PermissionEdge = {
+  created: Date;
+} & ({
+  // Granted directly by another user.
+  type: "user";
+  sharer: string;  // profile.id of the person who shared
+  note?: string;
+} | {
+  // Gained by redeeming a share key.
+  type: "shareKey";
+  keyId: string;   // HMAC-SHA-256 hex of the raw key
+});
+
+// Information about a single collaborator, returned by list/add operations.
+export type CollaboratorInfo = {
+  profile: AiChatAuthorInfo;
+  addedBy: PermissionEdge[];
+};
+
+// Information about a share key, for the management UI.
+export type ShareKeyInfo = {
+  keyId: string;
+  note?: string;
+  created: Date;
+  createdBy: AiChatAuthorInfo;
+};

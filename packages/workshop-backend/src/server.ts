@@ -73,13 +73,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
-  async openGadget(id: string): Promise<Overseer> {
+  async openGadget(id: string, shareKey?: string): Promise<Overseer> {
     let userId = this.user.id.toString();
-
+    let profileId = this.user.id.name!;
     let overseer = this.overseers.get(this.overseers.idFromString(id));
 
     // @ts-ignore -- Cap'n Web RPC types can trigger "excessively deep" errors.
-    return overseer.open(userId);
+    return overseer.open(userId, profileId, shareKey);
   }
 
   async newGadget(): Promise<Overseer> {
@@ -113,6 +113,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   disconnectAccount(accountId: number): Promise<void> {
     return this.user.disconnectAccount(accountId);
+  }
+
+  async dismissSharedGadget(gadgetId: string): Promise<void> {
+    return this.user.dismissSharedGadget(gadgetId);
   }
 }
 
