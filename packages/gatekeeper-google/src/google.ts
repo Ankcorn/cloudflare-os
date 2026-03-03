@@ -77,15 +77,19 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/documents",
 ];
 
-const SUPPORTED_RESOURCES: SupportedResource[] = [{
+const GMAIL_RESOURCE: SupportedResource = {
   urlPattern: "https://mail.google.com/*",
   title: "Gmail Mailbox",
   description: "Read and send emails.",
-}, {
+};
+
+const GOOGLE_DOC_RESOURCE: SupportedResource = {
   urlPattern: "https://docs.google.com/document/d/*",
   title: "Google Doc",
   description: "Read and edit a Google Doc.",
-}];
+};
+
+const SUPPORTED_RESOURCES: SupportedResource[] = [GMAIL_RESOURCE, GOOGLE_DOC_RESOURCE];
 
 // Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
 export default {
@@ -287,7 +291,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return SUPPORTED_RESOURCES;
   }
 
-  async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
+  async getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }> {
     let parsed = new URL(url);
 
     if (parsed.hostname === "docs.google.com" &&
@@ -301,7 +308,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         userObjectId: this.ctx.props.userObjectId,
         documentId,
       };
-      return this.ctx.exports.GoogleDocGatekeeperImpl({props});
+      return {class: this.ctx.exports.GoogleDocGatekeeperImpl({props}), resource: GOOGLE_DOC_RESOURCE};
     }
 
     // Default: Gmail
@@ -318,7 +325,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       props.searchQuery = "label:" + decodeURIComponent(hash.slice("#label/".length));
     }
 
-    return this.ctx.exports.GmailGatekeeperImpl({props});
+    return {class: this.ctx.exports.GmailGatekeeperImpl({props}), resource: GMAIL_RESOURCE};
   }
 
   async revoke(): Promise<void> {

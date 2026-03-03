@@ -6,6 +6,7 @@ import GadgetEditor from './GadgetEditor'
 import SettingsPage from './SettingsPage'
 import ProtectedRoute from './ProtectedRoute'
 import SignupPage from './SignupPage'
+import BlueprintLandingPage from './BlueprintLandingPage'
 import { CF_ACCESS_MODE } from './useAuth'
 
 interface AppProps {
@@ -40,6 +41,11 @@ function App({ rpcStub }: AppProps) {
             <GadgetEditor />
           </ProtectedRoute>
         }
+      />
+
+      <Route
+        path="/blueprint/:id"
+        element={<BlueprintLandingPage rpcStub={rpcStub} />}
       />
 
       {/* Signup is not available in CF Access mode — identity is managed by Access. */}

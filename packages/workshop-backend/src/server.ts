@@ -1,11 +1,12 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, BlueprintMetadata, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback } from "./overseer";
+import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 
 // Re-export entrypoint types from ai-models.ts.
 export { LanguageModelGatekeeper };
@@ -73,16 +74,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
-  async openGadget(id: string, shareKey?: string): Promise<Overseer> {
+  async openGadget(id: string, shareKey?: string): Promise<NativeRpcStub<Overseer>> {
     let userId = this.user.id.toString();
     let profileId = this.user.id.name!;
     let overseer = this.overseers.get(this.overseers.idFromString(id));
 
-    // @ts-ignore -- Cap'n Web RPC types can trigger "excessively deep" errors.
     return overseer.open(userId, profileId, shareKey);
   }
 
-  async newGadget(): Promise<Overseer> {
+  async newGadget(): Promise<NativeRpcStub<Overseer>> {
     let id = this.overseers.newUniqueId().toString();
     await this.user.newGadget(id, "Untitled Gadget");
     let result = await this.openGadget(id);
@@ -117,6 +117,111 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async dismissSharedGadget(gadgetId: string): Promise<void> {
     return this.user.dismissSharedGadget(gadgetId);
+  }
+
+  async listOwnBlueprints(): Promise<BlueprintUserSummary[]> {
+    return this.user.listBlueprints();
+  }
+
+  async newGadgetFromBlueprint(
+    blueprintId: string,
+    bindings: Record<string, BlueprintBindingAssignment>
+  ): Promise<Overseer> {
+    // 1. Read blueprint from KV.
+    let raw = await this.env.BLUEPRINTS.get(blueprintId);
+    if (!raw) throw new Error("Blueprint not found.");
+
+    let kvRecord = JSON.parse(raw) as {
+      metadata: BlueprintMetadata;
+      ownerId: string;
+      gadgetId: string;
+    };
+
+    // Revive dates.
+    kvRecord.metadata.created = new Date(kvRecord.metadata.created);
+    kvRecord.metadata.lastUpdated = new Date(kvRecord.metadata.lastUpdated);
+
+    // 2. Read gzip-compressed Yjs doc from R2 and decompress.
+    let r2Key = `${blueprintId}/${kvRecord.metadata.version}`;
+    let r2Object = await this.env.BLUEPRINT_CONTENT.get(r2Key);
+    if (!r2Object) throw new Error("Blueprint content not found in R2.");
+
+    let decompressed = r2Object.body.pipeThrough(new DecompressionStream("gzip"));
+    let codeBytes = new Uint8Array(await new Response(decompressed).arrayBuffer());
+
+    // 3. Create new Overseer DO (same as newGadget()).
+    let id = this.overseers.newUniqueId().toString();
+    await this.user.newGadget(id, kvRecord.metadata.title);
+    let overseerResult = await this.openGadget(id);
+
+    // 4. Initialize from blueprint code.
+    let overseerDo = this.overseers.get(this.overseers.idFromString(id));
+    await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title);
+
+    // 5. Create gatekeepers from assignments.
+    let blueprintBindings = kvRecord.metadata.bindings;
+    let gkPromises: Promise<void>[] = [];
+
+    for (let [bindingName, assignment] of Object.entries(bindings)) {
+      let blueprintBinding = blueprintBindings[bindingName];
+      if (!blueprintBinding) {
+        throw new Error(`Unknown binding name: ${bindingName}`);
+      }
+
+      gkPromises.push((async () => {
+        if (assignment.type === "gatekeeper") {
+          using gk = await overseerResult.newGatekeeper(assignment.accountId, assignment.resourceUrl);
+          if (!gk) {
+            throw new Error(`Failed to create gatekeeper for binding "${bindingName}".`);
+          }
+          await gk.setBindingName(bindingName);
+        } else if (assignment.type === "aiModel") {
+          using gk = await overseerResult.newAiModelGatekeeper(assignment.modelId);
+          await gk.setBindingName(bindingName);
+        } else if (assignment.type === "agentSpawner") {
+          if (blueprintBinding.type !== "agentSpawner") {
+            throw new Error(`Binding "${bindingName}" type mismatch.`);
+          }
+          let config: AgentSpawnerConfig = {
+            ...blueprintBinding.config,
+            modelId: assignment.modelId,
+          };
+          using gk = await overseerResult.newAgentSpawnerGatekeeper(config);
+          await gk.setBindingName(bindingName);
+        }
+      })());
+    }
+
+    await Promise.all(gkPromises);
+
+    return overseerResult;
+  }
+
+  async deleteOrphanedBlueprint(blueprintId: string): Promise<void> {
+    // Read from KV to verify ownership.
+    let raw = await this.env.BLUEPRINTS.get(blueprintId);
+    if (!raw) throw new Error("Blueprint not found.");
+
+    let kvRecord = JSON.parse(raw) as {
+      metadata: BlueprintMetadata;
+      ownerId: string;
+      gadgetId: string;
+    };
+
+    if (kvRecord.ownerId !== this.user.id.toString()) {
+      throw new Error("You don't own this blueprint.");
+    }
+
+    // Delete from KV.
+    await this.env.BLUEPRINTS.delete(blueprintId);
+
+    // Delete all R2 objects with the blueprint ID prefix.
+    for (let v = 1; v <= kvRecord.metadata.version; v++) {
+      await this.env.BLUEPRINT_CONTENT.delete(`${blueprintId}/${v}`);
+    }
+
+    // Delete from User DO.
+    await this.user.deleteBlueprint(blueprintId);
   }
 }
 
@@ -184,6 +289,26 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (!token) return null;
 
     return `${username}:${token}`;
+  }
+
+  async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
+    let raw = await this.env.BLUEPRINTS.get(id);
+    if (!raw) return null;
+
+    let kvRecord = JSON.parse(raw) as {
+      metadata: BlueprintMetadata;
+      ownerId: string;
+      gadgetId: string;
+    };
+
+    // Revive Date objects from JSON serialization.
+    kvRecord.metadata.created = new Date(kvRecord.metadata.created);
+    kvRecord.metadata.lastUpdated = new Date(kvRecord.metadata.lastUpdated);
+
+    return {
+      id,
+      metadata: kvRecord.metadata,
+    };
   }
 }
 

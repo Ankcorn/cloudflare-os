@@ -35,12 +35,16 @@ function getBasePath(env: Env) {
   return new URL(getBaseUrl(env)).pathname;
 }
 
-function getSupportedResourcesList(env: Env): SupportedResource[] {
-  return [{
+function getEmailMailboxResource(env: Env): SupportedResource {
+  return {
     urlPattern: `${getBaseUrl(env)}/mailbox/*`,
     title: "Email Mailbox",
     description: "Send and receive emails.",
-  }];
+  };
+}
+
+function getSupportedResourcesList(env: Env): SupportedResource[] {
+  return [getEmailMailboxResource(env)];
 }
 
 function getEmailHost(env: Env) {
@@ -251,7 +255,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return getSupportedResourcesList(this.env);
   }
 
-  async getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>> {
+  async getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }> {
     // Parse the URL to extract the email name.
     // URL format: <BASE_URL>/mailbox/<name>
     // Strip the base path prefix before checking for /mailbox/.
@@ -276,7 +283,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.ctx.exports.UserAccount.get(userAccountDOId).addEmail(emailName);
 
     let props: EmailGatekeeperImplProps = { emailName, userAccountId };
-    return this.ctx.exports.EmailGatekeeperImpl({ props });
+    return {class: this.ctx.exports.EmailGatekeeperImpl({ props }), resource: getEmailMailboxResource(this.env)};
   }
 
   async revoke(): Promise<void> {

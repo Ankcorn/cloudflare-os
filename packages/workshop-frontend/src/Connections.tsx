@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import { Button, Table, Input, Space, Typography, Modal, message, Empty } from 'antd'
-import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined } from '@ant-design/icons'
+import { Button, Table, Input, Space, Typography, Modal, message, Empty, Popover, Switch, Form } from 'antd'
+import { PlusOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CaretRightOutlined, ShareAltOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
-import { Overseer, GatekeeperMetadata, ActionLogEntry, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, ActionLogEntry, AuthenticatedApi, BlueprintBindingAnnotation } from '@gadgets/workshop-shared/api'
 import NewGatekeeperModal from './NewGatekeeperModal'
 
 
@@ -155,6 +155,111 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
     return new Date(date).toLocaleString()
   }
 
+  // Blueprint annotation popover for a single binding.
+  function BlueprintAnnotationPopover({ bindingName, resourceTitle }: { bindingName: string, resourceTitle: string }) {
+    const [open, setOpen] = useState(false)
+    const [annotation, setAnnotation] = useState<BlueprintBindingAnnotation>({
+      included: true,
+      title: resourceTitle,
+      description: '',
+      suggestValue: false,
+    })
+    const [loaded, setLoaded] = useState(false)
+    const [saving, setSaving] = useState(false)
+
+    const loadAnnotation = async () => {
+      try {
+        using gk = await overseer.getGatekeeper(bindingName)
+        if (gk) {
+          let existing = await gk.getBlueprintAnnotation()
+          if (existing) {
+            setAnnotation(existing)
+          } else {
+            setAnnotation({ included: true, title: resourceTitle, description: '', suggestValue: false })
+          }
+          setLoaded(true)
+        }
+      } catch (err) {
+        console.error('Failed to load annotation:', err)
+      }
+    }
+
+    const handleSave = async () => {
+      setSaving(true)
+      try {
+        using gk = await overseer.getGatekeeper(bindingName)
+        if (gk) {
+          await gk.setBlueprintAnnotation(annotation)
+          message.success('Blueprint annotation saved.')
+          setOpen(false)
+        }
+      } catch (err: any) {
+        message.error(err.message || 'Failed to save annotation.')
+      } finally {
+        setSaving(false)
+      }
+    }
+
+    const content = (
+      <div style={{ width: 280 }}>
+        <Form layout="vertical" size="small">
+          <Form.Item label="Include in blueprints">
+            <Switch
+              checked={annotation.included}
+              onChange={(checked) => setAnnotation(prev => ({ ...prev, included: checked }))}
+            />
+          </Form.Item>
+          {annotation.included && (
+            <>
+              <Form.Item label="Title">
+                <Input
+                  value={annotation.title}
+                  onChange={(e) => setAnnotation(prev => ({ ...prev, title: e.target.value }))}
+                  placeholder="Display name for this binding"
+                />
+              </Form.Item>
+              <Form.Item label="Description">
+                <Input.TextArea
+                  value={annotation.description}
+                  onChange={(e) => setAnnotation(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Explain what kind of resource to connect"
+                  rows={2}
+                />
+              </Form.Item>
+              <Form.Item label="Suggest specific resource">
+                <Switch
+                  checked={annotation.suggestValue}
+                  onChange={(checked) => setAnnotation(prev => ({ ...prev, suggestValue: checked }))}
+                />
+              </Form.Item>
+            </>
+          )}
+          <Button type="primary" block onClick={handleSave} loading={saving}>Save</Button>
+        </Form>
+      </div>
+    )
+
+    return (
+      <Popover
+        content={content}
+        title="Blueprint annotation"
+        trigger="click"
+        open={open}
+        onOpenChange={(visible) => {
+          setOpen(visible)
+          if (visible && !loaded) loadAnnotation()
+        }}
+      >
+        <Button
+          size="small"
+          type="text"
+          icon={<ShareAltOutlined />}
+          title="Blueprint annotation"
+        />
+      </Popover>
+    )
+  }
+
   const columns = [
     {
       title: 'Binding Name',
@@ -195,6 +300,10 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
               type="text"
               icon={<EditOutlined />}
               onClick={() => handleEditStart(bindingName)}
+            />
+            <BlueprintAnnotationPopover
+              bindingName={bindingName}
+              resourceTitle={gatekeepers.find(g => g.bindingName === bindingName)?.resourceTitle || ''}
             />
             <Button
               size="small"

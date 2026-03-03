@@ -22,6 +22,18 @@
       "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "BLUEPRINTS",
+      "preview_id": "gadgets-blueprint-metadata"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLUEPRINT_CONTENT",
+      "bucket_name": "gadgets-blueprint-content"
+    }
+  ],
   "worker_loaders": [
     {
       "binding": "LOADER"

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Modal, Tabs, Input, Button, Table, Space, Typography, message, Checkbox, Alert } from 'antd'
-import { CopyOutlined, DeleteOutlined, PlusOutlined, LinkOutlined } from '@ant-design/icons'
+import { Modal, Tabs, Input, Button, Table, Space, Typography, message, Checkbox, Alert, Popconfirm, Tag } from 'antd'
+import { CopyOutlined, DeleteOutlined, PlusOutlined, LinkOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
-import { Overseer, CollaboratorInfo, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { Overseer, CollaboratorInfo, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo, BlueprintGadgetSummary } from '@gadgets/workshop-shared/api'
 
 // Rows shown in the collaborator table: the owner (always first) plus actual collaborators.
 type CollaboratorRow =
@@ -45,6 +45,18 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
   const [creatingKey, setCreatingKey] = useState(false)
 
+  // Blueprint state
+  const [blueprints, setBlueprints] = useState<BlueprintGadgetSummary[]>([])
+  const [blueprintsLoading, setBlueprintsLoading] = useState(false)
+  const [newBpTitle, setNewBpTitle] = useState('')
+  const [newBpDescription, setNewBpDescription] = useState('')
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [creatingBp, setCreatingBp] = useState(false)
+  const [editingBpTitle, setEditingBpTitle] = useState<string | null>(null)
+  const [editingBpDesc, setEditingBpDesc] = useState<string | null>(null)
+  const [editTitleValue, setEditTitleValue] = useState('')
+  const [editDescValue, setEditDescValue] = useState('')
+
   const isOwner = !metadata.owner
 
   const loadData = useCallback(async () => {
@@ -63,12 +75,25 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
   }, [overseer])
 
+  const loadBlueprints = useCallback(async () => {
+    setBlueprintsLoading(true)
+    try {
+      const bps = await overseer.listBlueprints()
+      setBlueprints(bps)
+    } catch (err) {
+      console.error('Failed to load blueprints:', err)
+    } finally {
+      setBlueprintsLoading(false)
+    }
+  }, [overseer])
+
   useEffect(() => {
     if (open) {
       loadData()
+      loadBlueprints()
       setNewShareLink(null)
     }
-  }, [open, loadData])
+  }, [open, loadData, loadBlueprints])
 
   const handleAddCollaborator = async () => {
     if (!addUsername.trim()) return
@@ -357,8 +382,203 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             key: 'blueprints',
             label: 'Blueprints',
             children: (
-              <div style={{ padding: '24px 0', textAlign: 'center' }}>
-                <Text type="secondary">Coming soon.</Text>
+              <div>
+                {/* Existing blueprints */}
+                {blueprints.map(bp => (
+                  <div key={bp.id} style={{
+                    padding: '12px',
+                    background: '#fafafa',
+                    borderRadius: 4,
+                    marginBottom: 8,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      {editingBpTitle === bp.id ? (
+                        <Space.Compact style={{ flex: 1 }}>
+                          <Input
+                            value={editTitleValue}
+                            onChange={(e) => setEditTitleValue(e.target.value)}
+                            size="small"
+                            onPressEnter={async () => {
+                              await overseer.updateBlueprint(bp.id, { title: editTitleValue })
+                              setEditingBpTitle(null)
+                              loadBlueprints()
+                            }}
+                          />
+                          <Button size="small" type="primary" onClick={async () => {
+                            await overseer.updateBlueprint(bp.id, { title: editTitleValue })
+                            setEditingBpTitle(null)
+                            loadBlueprints()
+                          }}>Save</Button>
+                          <Button size="small" onClick={() => setEditingBpTitle(null)}>Cancel</Button>
+                        </Space.Compact>
+                      ) : (
+                        <Text strong style={{ cursor: 'pointer', flex: 1 }} onClick={() => {
+                          setEditingBpTitle(bp.id)
+                          setEditTitleValue(bp.title)
+                        }}>{bp.title}</Text>
+                      )}
+                      {bp.dirty && (
+                        <Tag icon={<WarningOutlined />} color="warning">
+                          Publish failed
+                        </Tag>
+                      )}
+                    </div>
+
+                    {editingBpDesc === bp.id ? (
+                      <div style={{ marginBottom: 8 }}>
+                        <Input.TextArea
+                          value={editDescValue}
+                          onChange={(e) => setEditDescValue(e.target.value)}
+                          rows={2}
+                          size="small"
+                        />
+                        <Space style={{ marginTop: 4 }}>
+                          <Button size="small" type="primary" onClick={async () => {
+                            await overseer.updateBlueprint(bp.id, { description: editDescValue })
+                            setEditingBpDesc(null)
+                            loadBlueprints()
+                          }}>Save</Button>
+                          <Button size="small" onClick={() => setEditingBpDesc(null)}>Cancel</Button>
+                        </Space>
+                      </div>
+                    ) : (
+                      <Text type="secondary" style={{ fontSize: 12, cursor: 'pointer', display: 'block', marginBottom: 4 }}
+                        onClick={() => {
+                          setEditingBpDesc(bp.id)
+                          setEditDescValue(bp.description)
+                        }}>
+                        {bp.description || '(click to add description)'}
+                      </Text>
+                    )}
+
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      v{bp.version} - Code from {new Date(bp.codeVersionDate).toLocaleDateString()}
+                    </Text>
+
+                    <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+                      <Button size="small" onClick={async () => {
+                        try {
+                          await overseer.updateBlueprint(bp.id, { updateCode: true })
+                          message.success('Blueprint updated to current code.')
+                          loadBlueprints()
+                        } catch (err: any) {
+                          message.error(err.message || 'Failed to update blueprint.')
+                        }
+                      }}>
+                        <SyncOutlined /> Update code
+                      </Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => {
+                        let url = `${window.location.origin}/blueprint/${bp.id}`
+                        navigator.clipboard.writeText(url)
+                        message.success('Blueprint link copied.')
+                      }}>
+                        Copy link
+                      </Button>
+                      {bp.dirty && (
+                        <Button size="small" onClick={async () => {
+                          try {
+                            await overseer.retryBlueprintPublish(bp.id)
+                            message.success('Blueprint published successfully.')
+                            loadBlueprints()
+                          } catch (err: any) {
+                            message.error(err.message || 'Retry failed.')
+                          }
+                        }}>
+                          Retry publish
+                        </Button>
+                      )}
+                      <Popconfirm
+                        title="Delete this blueprint?"
+                        description="This cannot be undone."
+                        onConfirm={async () => {
+                          try {
+                            await overseer.deleteBlueprint(bp.id)
+                            message.success('Blueprint deleted.')
+                            loadBlueprints()
+                          } catch (err: any) {
+                            message.error(err.message || 'Failed to delete blueprint.')
+                          }
+                        }}
+                        okText="Delete"
+                        okType="danger"
+                      >
+                        <Button size="small" danger icon={<DeleteOutlined />}>Delete</Button>
+                      </Popconfirm>
+                    </div>
+                  </div>
+                ))}
+
+                {blueprints.length === 0 && !blueprintsLoading && (
+                  <div style={{ textAlign: 'center', padding: '16px 0' }}>
+                    <Text type="secondary">No blueprints yet.</Text>
+                  </div>
+                )}
+
+                {/* Create new blueprint */}
+                {showCreateForm ? (
+                  <div style={{ marginTop: 16, padding: 12, background: '#fafafa', borderRadius: 4 }}>
+                    <Text strong>New Blueprint</Text>
+                    <Input
+                      placeholder="Title"
+                      value={newBpTitle}
+                      onChange={(e) => setNewBpTitle(e.target.value)}
+                      style={{ marginTop: 8 }}
+                    />
+                    <Input.TextArea
+                      placeholder="Description (optional)"
+                      value={newBpDescription}
+                      onChange={(e) => setNewBpDescription(e.target.value)}
+                      rows={2}
+                      style={{ marginTop: 8 }}
+                    />
+                    <Space style={{ marginTop: 8 }}>
+                      <Button
+                        type="primary"
+                        loading={creatingBp}
+                        onClick={async () => {
+                          setCreatingBp(true)
+                          try {
+                            await overseer.createBlueprint(
+                              newBpTitle.trim() || undefined,
+                              newBpDescription.trim() || undefined,
+                            )
+                            message.success('Blueprint created.')
+                            setShowCreateForm(false)
+                            setNewBpTitle('')
+                            setNewBpDescription('')
+                            loadBlueprints()
+                          } catch (err: any) {
+                            message.error(err.message || 'Failed to create blueprint.')
+                          } finally {
+                            setCreatingBp(false)
+                          }
+                        }}
+                      >
+                        Create
+                      </Button>
+                      <Button onClick={() => {
+                        setShowCreateForm(false)
+                        setNewBpTitle('')
+                        setNewBpDescription('')
+                      }}>
+                        Cancel
+                      </Button>
+                    </Space>
+                  </div>
+                ) : (
+                  <Button
+                    type="dashed"
+                    icon={<PlusOutlined />}
+                    block
+                    style={{ marginTop: 12 }}
+                    onClick={() => {
+                      setNewBpTitle(metadata.title)
+                      setShowCreateForm(true)
+                    }}
+                  >
+                    Create Blueprint
+                  </Button>
+                )}
               </div>
             ),
           },
