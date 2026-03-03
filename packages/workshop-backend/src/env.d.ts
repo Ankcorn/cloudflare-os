@@ -11,5 +11,9 @@ declare namespace Cloudflare {
     CF_AI_GATEWAY_ACCOUNT_ID?: string;  // Cloudflare account ID (for constructing gateway URLs)
     CF_AI_GATEWAY_API_TOKEN?: string;   // Cloudflare API token (used for non-Cloudflare providers)
     CF_AI_GATEWAY_WAI?: string;         // Alternate gateway name for Workers AI (optional)
+
+    // Blueprint storage bindings.
+    BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
+    BLUEPRINT_CONTENT: R2Bucket;         // R2 bucket for blueprint code snapshots
   }
 }

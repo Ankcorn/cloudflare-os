@@ -184,8 +184,11 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // usually after first calling describe() to find out what the resource can do.
   //
   // The returned class is imbued (via `ctx.props`) with the user's credentials and the resource
-  // ID.
-  getGatekeeperClassFor(url: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
+  // ID. The returned `resource` indicates which SupportedResource matched the URL.
+  getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }>;
 
   // Revoke this account connection. The GatekeeperUser, and all Gatekeepers created through it,
   // become broken.

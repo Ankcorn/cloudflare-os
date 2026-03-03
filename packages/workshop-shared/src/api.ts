@@ -77,6 +77,10 @@ export interface PublicApi extends RpcTarget {
   // This API may be disabled when the server uses SSO for authentication.
   createAccount(username: string, displayName: string, passwordHash: Uint8Array)
       : Promise<string | null>;
+
+  // Fetch blueprint metadata by ID. Returns null if the blueprint doesn't exist. No
+  // authentication required (knowing the ID is sufficient, since a blueprint is "just data").
+  getBlueprint(id: string): Promise<BlueprintPublicInfo | null>;
 }
 
 // Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
@@ -186,6 +190,27 @@ export interface AuthenticatedApi extends RpcTarget {
   // Remove a shared gadget from the user's home page listing. Does NOT revoke the user's
   // access -- if they open the gadget again (e.g., via link), it reappears on their home page.
   dismissSharedGadget(gadgetId: string): Promise<void>;
+
+  // List all blueprints created by the current user (from User DO). Useful for an audit
+  // view in Settings.
+  listOwnBlueprints(): Promise<BlueprintUserSummary[]>;
+
+  // Create a new gadget from a blueprint. Reads the blueprint from KV, downloads code from
+  // R2, creates a new Overseer DO, initializes it with the blueprint's code, and creates
+  // gatekeepers from the provided binding assignments.
+  //
+  // Every required binding in the blueprint must have a corresponding entry in `bindings`,
+  // keyed by binding name. Throws if any are missing or if accountId/modelId are invalid.
+  //
+  // The returned Overseer can be used immediately (pipelining-friendly).
+  newGadgetFromBlueprint(
+    blueprintId: string,
+    bindings: Record<string, BlueprintBindingAssignment>
+  ): Promise<Overseer>;
+
+  // Delete a blueprint that the user owns. Works even if the source gadget has been deleted
+  // (operates on User DO + KV directly).
+  deleteOrphanedBlueprint(blueprintId: string): Promise<void>;
 
   // TODO:
   // - Recreate token on a connected account.
@@ -577,6 +602,41 @@ export interface Overseer extends RpcTarget {
   // To unsubscribe, dispose the returned stub.
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>>;
 
+  // --- Blueprint management ---
+
+  // List blueprints created from this gadget.
+  listBlueprints(): Promise<BlueprintGadgetSummary[]>;
+
+  // Create a new blueprint from the gadget's current committed code.
+  // `title` defaults to the gadget's title if omitted.
+  //
+  // The blueprint is always owned by the gadget owner, regardless of who calls this method.
+  //
+  // Steps: generate ID, snapshot code, collect binding metadata, store locally, propagate
+  // to User DO + KV + R2.
+  createBlueprint(title?: string, description?: string): Promise<BlueprintGadgetSummary>;
+
+  // Update an existing blueprint. Any combination of metadata and code can be updated
+  // atomically in a single call with one propagation pass.
+  //
+  // - `title` / `description`: if provided, update the respective field.
+  // - `updateCode`: if true, snapshot the gadget's current committed code into the
+  //   blueprint and increment the blueprint version.
+  //
+  // At least one option must be provided.
+  updateBlueprint(blueprintId: string, options: {
+    title?: string;
+    description?: string;
+    updateCode?: boolean;
+  }): Promise<void>;
+
+  // Delete a blueprint. Cleans up KV, R2, User DO, and local storage.
+  deleteBlueprint(blueprintId: string): Promise<void>;
+
+  // Retry publishing a blueprint whose `dirty` flag is set (meaning a previous propagation
+  // to User DO / KV / R2 failed).
+  retryBlueprintPublish(blueprintId: string): Promise<void>;
+
   // --- Collaborator management ---
 
   // List all collaborators. Available to owner and all collaborators.
@@ -864,6 +924,138 @@ export type GatekeeperMetadata = {
   resourceTitle: string;
 };
 
+// =======================================================================================
+// Blueprint types
+// =======================================================================================
+
+// Describes how a gatekeeper was originally created. Stored on each GatekeeperRecord so that
+// bindings can be recreated and blueprint metadata can be derived.
+export type GatekeeperCreationSpec = {
+  type: "gatekeeper";
+  vendorId: string;        // identifies the gatekeeper adapter (e.g. "google")
+  resourceUrl: string;
+  typeUrlPattern: string;  // URL pattern from the vendor's SupportedResource (not the specific URL)
+} | {
+  type: "aiModel";
+  modelId: string;         // the user's configured model ID
+  provider: string;        // provider name (e.g. "anthropic")
+  modelName: string;       // model name on the provider's API (e.g. "claude-sonnet-4-6")
+} | {
+  type: "agentSpawner";
+  config: AgentSpawnerConfig;
+
+  // Denormalized from the creating user's model config at binding creation time.
+  // Absent when config.modelId is null. Used to populate blueprint suggestedModel
+  // without requiring a live lookup.
+  modelProvider?: string;
+  modelName?: string;
+};
+
+// User-provided metadata controlling how a gatekeeper binding should appear in blueprints.
+// Stored on each GatekeeperRecord. Every named binding must have an annotation before a
+// blueprint can be created or updated with code.
+export type BlueprintBindingAnnotation = {
+  included: boolean;       // false = explicitly excluded from blueprints
+  title: string;           // display title for blueprint consumers (ignored if not included)
+  description: string;     // explains what resource to connect (ignored if not included)
+  suggestValue?: boolean;  // include the specific URL/model as a suggestion
+};
+
+// Describes one binding required by a blueprint. Stored in BlueprintMetadata.bindings as a
+// Record keyed by binding name.
+export type BlueprintBinding = {
+  title: string;        // human-readable name, e.g. "Google Drive" or "Code Assistant"
+  description: string;  // explains what resource to connect here
+} & ({
+  // A regular external-resource gatekeeper binding.
+  type: "gatekeeper";
+
+  // Identifies the gatekeeper adapter (currently mapped to the workshop's
+  // GATEKEEPER_<name> service binding).
+  gatekeeperName: string;
+
+  // URL pattern describing the type of resource this binding accepts.
+  typeUrlPattern: string;
+
+  // The specific resource URL from the source gadget (suggestion only).
+  resourceUrl?: string;
+} | {
+  // An AI model binding. The user instantiating the blueprint picks one of their own
+  // configured models.
+  type: "aiModel";
+
+  // The blueprint creator may suggest a particular model to use, or omit this to leave
+  // it up to the recipient.
+  suggestedModel?: {provider: string, modelName: string};
+} | {
+  // An agent spawner binding. The config carries over from the source gadget.
+  type: "agentSpawner";
+
+  // The blueprint creator may suggest a particular model to use, or omit this. (The
+  // value is `null` if the suggestion is that AgentSpawnerConfig.modelId should be
+  // configured as `null`. This is different from `undefined`, which means no suggestion.)
+  suggestedModel?: {provider: string, modelName: string} | null;
+
+  // Rest of the agent spawner config for the binding.
+  config: Omit<AgentSpawnerConfig, "modelId">;
+});
+
+// General metadata about a blueprint. Stored (in slightly different wrapper records) in
+// three locations: Gadget DO, User DO, and KV.
+export type BlueprintMetadata = {
+  title: string;
+  description: string;  // longer-form description of what the blueprint does
+  author: AiChatAuthorInfo;
+  created: Date;
+
+  version: number;       // increments every time the blueprint is updated
+  lastUpdated: Date;
+
+  // Key = binding name.
+  bindings: Record<string, BlueprintBinding>;
+};
+
+// Public view (returned by PublicApi.getBlueprint).
+export type BlueprintPublicInfo = {
+  id: string;
+  metadata: BlueprintMetadata;
+};
+
+// Gadget-side summary (returned by Overseer.listBlueprints).
+export type BlueprintGadgetSummary = {
+  id: string;
+  title: string;
+  description: string;
+  version: number;
+  codeVersionDate: Date;  // timestamp of the exported code version
+  dirty?: boolean;        // true if last publish failed and needs retry
+};
+
+// User-side summary (returned by AuthenticatedApi.listOwnBlueprints).
+export type BlueprintUserSummary = {
+  id: string;
+  title: string;
+  gadgetId: string;       // source gadget (may no longer exist)
+  gadgetTitle: string;
+  version: number;
+  lastUpdated: Date;
+};
+
+// Binding assignment (input to newGadgetFromBlueprint).
+// When instantiating a blueprint, the user provides a Record mapping binding name ->
+// assignment. Every required binding in the blueprint must have a corresponding entry.
+export type BlueprintBindingAssignment = {
+  type: "gatekeeper";
+  accountId: number;      // user's connected account ID
+  resourceUrl: string;
+} | {
+  type: "aiModel";
+  modelId: string;        // one of the user's configured models
+} | {
+  type: "agentSpawner";
+  modelId: string | null; // model to run, or null for no agent
+};
+
 export interface GatekeeperClient<Session extends RpcCompatible<Session>> extends RpcTarget {
   // Remove this gatekeeper from the Gadget.
   remove(): Promise<void>;
@@ -896,6 +1088,16 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 
   // Set the hook to target a particular exported class (or none).
   setHook(exportName: string | null): Promise<void>;
+
+  // Get the creation spec describing how this gatekeeper was originally created.
+  getCreationSpec(): Promise<GatekeeperCreationSpec>;
+
+  // Get the blueprint annotation for this binding, if one has been set.
+  getBlueprintAnnotation(): Promise<BlueprintBindingAnnotation | null>;
+
+  // Set the blueprint annotation for this binding. The gatekeeper must have a bindingName
+  // assigned (annotations only apply to named bindings).
+  setBlueprintAnnotation(annotation: BlueprintBindingAnnotation): Promise<void>;
 
   // TODO: Get/set permissions.
 }

@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -10,6 +10,7 @@ type ConnectedAccountRecord = {
   account: Fetcher<GatekeeperUser>;
   vendorDescription: VendorDescription;
   description: AccountDescription;
+  vendorId: string;   // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
 };
 
 export type UserAiModelRecord = {
@@ -27,6 +28,13 @@ type LoginSessionRecord = {
   tokenId: string,  // sha256 hash of token, hex-formatted
   created: Date,
 }
+
+// Blueprint record stored in the user's `blueprints` collection.
+type BlueprintUserRecord = {
+  id: string;
+  metadata: BlueprintMetadata;
+  gadgetId: string;
+};
 
 type GadgetRecord = GadgetMetadata & {
   created: Date;
@@ -66,6 +74,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       }),
       sessions: collection<LoginSessionRecord>()({
         primaryKey: "tokenId",
+      }),
+      blueprints: collection<BlueprintUserRecord>()({
+        primaryKey: "id",
       }),
     },
     singletons: {
@@ -435,6 +446,33 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.delete(id);
   }
 
+  // --- Blueprint methods (called by Overseer during propagation) ---
+
+  async updateBlueprint(id: string, metadata: BlueprintMetadata, gadgetId: string): Promise<void> {
+    this.storage.blueprints.put({id, metadata, gadgetId});
+  }
+
+  async deleteBlueprint(id: string): Promise<void> {
+    this.storage.blueprints.delete(id);
+  }
+
+  async listBlueprints(): Promise<BlueprintUserSummary[]> {
+    let result: BlueprintUserSummary[] = [];
+    for (let record of this.storage.blueprints.list()) {
+      // Try to look up the gadget title; fall back to "Deleted Gadget" if gone.
+      let gadget = this.storage.gadgets.get(record.gadgetId);
+      result.push({
+        id: record.id,
+        title: record.metadata.title,
+        gadgetId: record.gadgetId,
+        gadgetTitle: gadget?.title ?? "Deleted Gadget",
+        version: record.metadata.version,
+        lastUpdated: record.metadata.lastUpdated,
+      });
+    }
+    return result;
+  }
+
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
       : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
     let promises: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}|null>[] = [];
@@ -470,6 +508,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let props = {
       userId: this.ctx.id.toString(),
       accountId,
+      vendorId,
       vendorDescription,
     };
 
@@ -568,16 +607,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async getGatekeeperClassFor(accountId: number, url: string)
-      : Promise<DurableObjectClass<Gatekeeper<any>>> {
+      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
+                 typeUrlPattern: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
-    return await account.account.getGatekeeperClassFor(url);
+    let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+
+    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 }
 
 type GatekeeperConnectCallbackProps = {
   userId: string;
   accountId: number;
+  vendorId: string;
   vendorDescription: VendorDescription;
 }
 
@@ -592,7 +635,8 @@ export class GatekeeperConnectCallbackImpl
       id: this.ctx.props.accountId,
       account,
       description: await account.describe(),
-      vendorDescription: this.ctx.props.vendorDescription
+      vendorDescription: this.ctx.props.vendorDescription,
+      vendorId: this.ctx.props.vendorId,
     });
   }
 }

@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -85,6 +85,13 @@ type GatekeeperRecord = {
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
+
+  // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
+  creationSpec?: GatekeeperCreationSpec;
+
+  // User-provided metadata for how this binding should appear in blueprints.
+  // Absence means not yet configured.
+  blueprintAnnotation?: BlueprintBindingAnnotation;
 };
 
 // Each gadget stores its collaborator list.
@@ -94,6 +101,26 @@ type CollaboratorRecord = {
 
   // How this collaborator got access. Multiple edges are possible.
   addedBy: PermissionEdge[];
+};
+
+// Blueprint record stored in the Overseer DO's `blueprints` collection.
+type BlueprintGadgetRecord = {
+  id: string;
+  metadata: BlueprintMetadata;
+
+  // Version of the gadget code (from the code collection) that was exported into this blueprint.
+  codeVersion: number;
+
+  // Set true before propagating to User DO / KV; cleared on success.
+  // If persistently true, the UI should show a retry indicator.
+  dirty?: boolean;
+};
+
+// KV record type for the BLUEPRINTS namespace.
+type BlueprintKvRecord = {
+  metadata: BlueprintMetadata;
+  ownerId: string;
+  gadgetId: string;
 };
 
 // Share keys table. The actual key is never stored server-side; only its HMAC hash.
@@ -234,6 +261,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       }),
 
       shareKeys: collection<ShareKeyRecord>()({
+        primaryKey: "id"
+      }),
+
+      blueprints: collection<BlueprintGadgetRecord>()({
         primaryKey: "id"
       }),
     }
@@ -592,12 +623,14 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  async addGatekeeper(cls: GatekeeperClass): Promise<GatekeeperClient<any>> {
+  async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec)
+      : Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
     this.storage.nextGatekeeperId.put(id + 1);
     let gatekeeperRecord: GatekeeperRecord = {
       id,
-      class: cls
+      class: cls,
+      creationSpec,
     };
     this.storage.gatekeepers.put(gatekeeperRecord);
 
@@ -1017,6 +1050,162 @@ class OverseerImpl implements AgentHooks {
       }
     }
     return result;
+  }
+
+  // =======================================================================================
+  // Blueprint helpers
+  // =======================================================================================
+
+  // Collect binding metadata from all named gatekeepers for blueprint creation/update.
+  collectBindingMetadata(): Record<string, BlueprintBinding> {
+    let bindings: Record<string, BlueprintBinding> = {};
+
+    for (let gk of this.storage.gatekeepers.list()) {
+      if (!gk.bindingName) continue;
+
+      if (!gk.blueprintAnnotation) {
+        throw new Error(
+          `Binding "${gk.bindingName}" has no blueprint annotation configured. ` +
+          `All named bindings must be configured before creating or updating a blueprint.`
+        );
+      }
+
+      if (!gk.blueprintAnnotation.included) continue;
+
+      let annotation = gk.blueprintAnnotation;
+      let spec = gk.creationSpec;
+
+      if (!spec) {
+        throw new Error(
+          `Binding "${gk.bindingName}" has no creation spec (created before blueprint support).`
+        );
+      }
+
+      let base = {
+        title: annotation.title,
+        description: annotation.description,
+      };
+
+      if (spec.type === "gatekeeper") {
+        bindings[gk.bindingName] = {
+          ...base,
+          type: "gatekeeper",
+          gatekeeperName: spec.vendorId,
+          // Use the vendor's URL pattern, not the specific resource URL.
+          // Fall back to resourceUrl for gatekeepers created before typeUrlPattern was stored.
+          typeUrlPattern: spec.typeUrlPattern || spec.resourceUrl,
+          ...(annotation.suggestValue ? {resourceUrl: spec.resourceUrl} : {}),
+        };
+      } else if (spec.type === "aiModel") {
+        bindings[gk.bindingName] = {
+          ...base,
+          type: "aiModel",
+          ...(annotation.suggestValue
+            ? {suggestedModel: {provider: spec.provider, modelName: spec.modelName}}
+            : {}),
+        };
+      } else if (spec.type === "agentSpawner") {
+        let {modelId, ...restConfig} = spec.config;
+        let binding: BlueprintBinding = {
+          ...base,
+          type: "agentSpawner",
+          config: restConfig,
+        };
+        if (annotation.suggestValue) {
+          if (spec.config.modelId === null) {
+            binding.suggestedModel = null;
+          } else if (spec.modelProvider && spec.modelName) {
+            binding.suggestedModel = {provider: spec.modelProvider, modelName: spec.modelName};
+          }
+        }
+        bindings[gk.bindingName] = binding;
+      }
+    }
+
+    return bindings;
+  }
+
+  // Create a minimal Yjs doc snapshot (no edit history) from code at the given version.
+  // Returns a gzip-compressed Yjs V2 encoded state update.
+  async snapshotCode(version: number | "current" = "current"): Promise<Uint8Array> {
+    let {ydoc} = this.buildYDoc(version);
+
+    // Create a clean doc with only final content (one insert per file, no history).
+    let cleanDoc = new Y.Doc();
+    let cleanMap = cleanDoc.getMap<Y.Text>();
+    let sourceMap = ydoc.getMap<Y.Text>();
+
+    for (let [file, content] of sourceMap) {
+      let text = cleanMap.set(file, new Y.Text());
+      text.insert(0, content.toString());
+    }
+
+    let encoded = Y.encodeStateAsUpdateV2(cleanDoc);
+
+    // Compress with gzip via CompressionStream.
+    let cs = new CompressionStream("gzip");
+    let writer = cs.writable.getWriter();
+    writer.write(encoded);
+    writer.close();
+    return new Uint8Array(await new Response(cs.readable).arrayBuffer());
+  }
+
+  // Propagate a blueprint to User DO, KV, and R2.
+  // If codeSnapshot is provided, it is uploaded to R2. If omitted (metadata-only update),
+  // the R2 content is left unchanged.
+  async propagateBlueprint(record: BlueprintGadgetRecord, codeSnapshot?: Uint8Array)
+      : Promise<void> {
+    if (!this.ownerId) throw new Error("Gadget not initialized.");
+
+    // Mark dirty.
+    record.dirty = true;
+    this.storage.blueprints.put(record);
+
+    // Upload code snapshot to R2 (only when code is being created/updated).
+    if (codeSnapshot) {
+      await this.env.BLUEPRINT_CONTENT.put(
+        `${record.id}/${record.metadata.version}`,
+        codeSnapshot
+      );
+    }
+
+    // Propagate to User DO.
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    await owner.updateBlueprint(
+      record.id, record.metadata, this.ctx.id.toString()
+    );
+
+    // Write to KV.
+    let kvRecord: BlueprintKvRecord = {
+      metadata: record.metadata,
+      ownerId: this.ownerId,
+      gadgetId: this.ctx.id.toString(),
+    };
+    await this.env.BLUEPRINTS.put(record.id, JSON.stringify(kvRecord));
+
+    // Clear dirty flag.
+    record.dirty = false;
+    this.storage.blueprints.put(record);
+  }
+
+  // Delete a blueprint's propagated data (KV, R2, User DO, local).
+  async deleteBlueprintPropagation(record: BlueprintGadgetRecord): Promise<void> {
+    if (!this.ownerId) throw new Error("Gadget not initialized.");
+
+    // Delete from KV first (stops public access).
+    await this.env.BLUEPRINTS.delete(record.id);
+
+    // Delete all historical versions from R2.
+    for (let v = 1; v <= record.metadata.version; v++) {
+      await this.env.BLUEPRINT_CONTENT.delete(`${record.id}/${v}`);
+    }
+
+    // Delete from User DO.
+    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    await owner.deleteBlueprint(record.id);
+
+    // Delete from local collection.
+    this.storage.blueprints.delete(record.id);
   }
 
   postAgentChatMessage(chatId: number, author: AiChatAuthorInfo, message: string) {
@@ -1474,6 +1663,34 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         this.impl, owner, clientUser, profileId, isOwner, notifyDeleted);
   }
 
+  // Initialize this gadget from a blueprint's code snapshot. Called by
+  // AuthenticatedApi.newGadgetFromBlueprint() after creating the DO.
+  async initializeFromBlueprint(code: Uint8Array, title: string): Promise<void> {
+    // Set the title.
+    this.impl.storage.title.put(title);
+
+    // Apply the blueprint's Yjs state as the initial code.
+    // The code is a V2-encoded Yjs update.
+    let ydoc = new Y.Doc();
+    Y.applyUpdateV2(ydoc, code);
+    let update = Y.encodeStateAsUpdateV2(ydoc);
+
+    // Overwrite the initial empty version with the blueprint's content.
+    let version = this.impl.storage.codeVersion.get() + 1;
+    this.impl.storage.codeVersion.put(version);
+    this.impl.storage.code.put({
+      version,
+      timestamp: new Date(),
+      update,
+    });
+
+    // Mark gadget as non-provisional (it has code, so it should appear in the gadget list).
+    if (this.impl.ownerId) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
+      await owner.setGadgetLastActive(this.ctx.id.toString(), new Date(), undefined);
+    }
+  }
+
   async startGatekeeperSession(id: number | undefined, caller: GatekeeperCaller): Promise<any> {
     return this.impl.startGatekeeperSession(id, caller);
   }
@@ -1924,8 +2141,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    return await this.impl.addGatekeeper(
-        await this.clientUser.getGatekeeperClassFor(accountId, resourceUrl));
+    let {class: cls, vendorId, typeUrlPattern} =
+        await this.clientUser.getGatekeeperClassFor(accountId, resourceUrl);
+    let creationSpec: GatekeeperCreationSpec = {
+      type: "gatekeeper",
+      vendorId,
+      resourceUrl,
+      typeUrlPattern,
+    };
+    return await this.impl.addGatekeeper(cls, creationSpec);
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -1940,8 +2164,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       },
     }
 
+    let creationSpec: GatekeeperCreationSpec = {
+      type: "aiModel",
+      modelId,
+      provider: chatMeta.aiModel!.config.provider,
+      modelName: chatMeta.aiModel!.config.model,
+    };
+
     return await this.impl.addGatekeeper(
-        this.impl.ctx.exports.LanguageModelGatekeeper({props}));
+        this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec);
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -1951,8 +2182,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       creatorUserId: this.clientUser.id.toString(),
     };
 
+    // Resolve model provider/name for blueprint metadata.
+    let creationSpec: GatekeeperCreationSpec = {
+      type: "agentSpawner",
+      config,
+    };
+    if (config.modelId) {
+      let chatMeta = await this.clientUser.getChatContext(config.modelId);
+      if (chatMeta.aiModel) {
+        creationSpec.modelProvider = chatMeta.aiModel.config.provider;
+        creationSpec.modelName = chatMeta.aiModel.config.model;
+      }
+    }
+
     return await this.impl.addGatekeeper(
-        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}));
+        this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec);
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -2330,6 +2574,137 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
     return this.impl.subscribeToConsoleLogs(subscriber);
+  }
+
+  // --- Blueprint management ---
+
+  async listBlueprints(): Promise<BlueprintGadgetSummary[]> {
+    let result: BlueprintGadgetSummary[] = [];
+    for (let record of this.impl.storage.blueprints.list()) {
+      // Look up the timestamp of the exported code version.
+      let codeUpdate = this.impl.storage.code.get(record.codeVersion);
+      result.push({
+        id: record.id,
+        title: record.metadata.title,
+        description: record.metadata.description,
+        version: record.metadata.version,
+        codeVersionDate: codeUpdate?.timestamp ?? record.metadata.lastUpdated,
+        dirty: record.dirty,
+      });
+    }
+    return result;
+  }
+
+  async createBlueprint(title?: string, description?: string): Promise<BlueprintGadgetSummary> {
+    if (!this.impl.ownerId) throw new Error("Gadget not initialized.");
+
+    // NOTE: It is INTENTIONAL that collaborators can publish blueprints on behalf of the owner.
+    //   We may in the future create different collaborator permission levels, in which case we'd
+    //   need an auth check here and the following methods.
+
+    // Generate 128-bit random ID as hex.
+    let idBytes = new Uint8Array(16);
+    crypto.getRandomValues(idBytes);
+    let id = idBytes.toHex();
+
+    // Collect binding metadata (validates all annotations are configured).
+    let bindings = this.impl.collectBindingMetadata();
+
+    // Get gadget owner's profile for the author field.
+    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
+    let ownerProfile = await owner.whoami();
+
+    let codeVersion = this.impl.storage.codeVersion.get();
+    let now = new Date();
+
+    let metadata: BlueprintMetadata = {
+      title: title || this.impl.storage.title.get(),
+      description: description || "",
+      author: ownerProfile,
+      created: now,
+      version: 1,
+      lastUpdated: now,
+      bindings,
+    };
+
+    let record: BlueprintGadgetRecord = {
+      id,
+      metadata,
+      codeVersion,
+    };
+
+    // Snapshot current code and propagate to User DO, KV, R2.
+    let codeSnapshot = await this.impl.snapshotCode();
+    await this.impl.propagateBlueprint(record, codeSnapshot);
+
+    // Derive codeVersionDate from the code collection.
+    let codeUpdate = this.impl.storage.code.get(codeVersion);
+
+    return {
+      id,
+      title: metadata.title,
+      description: metadata.description,
+      version: metadata.version,
+      codeVersionDate: codeUpdate?.timestamp ?? now,
+      dirty: record.dirty,
+    };
+  }
+
+  async updateBlueprint(blueprintId: string, options: {
+    title?: string;
+    description?: string;
+    updateCode?: boolean;
+  }): Promise<void> {
+    let record = this.impl.storage.blueprints.get(blueprintId);
+    if (!record) throw new Error("No such blueprint.");
+
+    if (options.title === undefined && options.description === undefined && !options.updateCode) {
+      throw new Error("At least one update option must be provided.");
+    }
+
+    if (options.title !== undefined) {
+      record.metadata.title = options.title;
+    }
+    if (options.description !== undefined) {
+      record.metadata.description = options.description;
+    }
+
+    let codeSnapshot: Uint8Array | undefined;
+    if (options.updateCode) {
+      // Re-collect binding metadata (validates annotations).
+      record.metadata.bindings = this.impl.collectBindingMetadata();
+      record.codeVersion = this.impl.storage.codeVersion.get();
+      record.metadata.version++;
+      codeSnapshot = await this.impl.snapshotCode();
+    }
+
+    record.metadata.lastUpdated = new Date();
+
+    await this.impl.propagateBlueprint(record, codeSnapshot);
+  }
+
+  async deleteBlueprint(blueprintId: string): Promise<void> {
+    let record = this.impl.storage.blueprints.get(blueprintId);
+    if (!record) throw new Error("No such blueprint.");
+
+    try {
+      await this.impl.deleteBlueprintPropagation(record);
+    } catch (err) {
+      // If deletion fails partway through, mark as dirty so the user can retry.
+      record.dirty = true;
+      this.impl.storage.blueprints.put(record);
+      throw err;
+    }
+  }
+
+  async retryBlueprintPublish(blueprintId: string): Promise<void> {
+    let record = this.impl.storage.blueprints.get(blueprintId);
+    if (!record) throw new Error("No such blueprint.");
+    if (!record.dirty) return;  // nothing to retry
+
+    // Reconstruct the code snapshot at the original codeVersion, not the current code.
+    let codeSnapshot = await this.impl.snapshotCode(record.codeVersion);
+    await this.impl.propagateBlueprint(record, codeSnapshot);
   }
 
   // --- Collaborator management ---
@@ -2749,6 +3124,31 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async setHook(exportName: string | null): Promise<void> {
     await this.impl.setBindingHook(this.id, exportName);
+  }
+
+  async getCreationSpec(): Promise<GatekeeperCreationSpec> {
+    let record = this.impl.storage.gatekeepers.get(this.id);
+    if (!record) throw new Error("No such gatekeeper.");
+    if (!record.creationSpec) {
+      throw new Error("This gatekeeper has no creation spec (created before blueprint support).");
+    }
+    return record.creationSpec;
+  }
+
+  async getBlueprintAnnotation(): Promise<BlueprintBindingAnnotation | null> {
+    let record = this.impl.storage.gatekeepers.get(this.id);
+    if (!record) throw new Error("No such gatekeeper.");
+    return record.blueprintAnnotation ?? null;
+  }
+
+  async setBlueprintAnnotation(annotation: BlueprintBindingAnnotation): Promise<void> {
+    let record = this.impl.storage.gatekeepers.get(this.id);
+    if (!record) throw new Error("No such gatekeeper.");
+    if (!record.bindingName) {
+      throw new Error("Cannot set blueprint annotation on a gatekeeper without a binding name.");
+    }
+    record.blueprintAnnotation = annotation;
+    this.impl.storage.gatekeepers.put(record);
   }
 }
 
