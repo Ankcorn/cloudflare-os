@@ -271,6 +271,8 @@ export async function runAgent(
               if (toolCall.error) {
                 toolOutput = {type: "error-text", value: `${toolCall.error}`};
               } else switch (toolCall.toolName) {
+                // Note that if we get here, we know the tool succeeded originally, so for many
+                // branches below we can just return success unconditionally.
                 case "readFile": {
                   if (chatMessageStatus[msg.sequence] === "reverted") {
                     // It would be a total waste of tokens to actually include this file
@@ -310,10 +312,32 @@ export async function runAgent(
                     value: {success: true, changeId: nextChangeId},
                   };
                   break;
-                case "describeBinding":
+                case "describeBinding": {
+                  let name = toolCall.input.name;
+                  let value: string;
+                  if (typeof name === "number") {
+                    if (!capsules || capsules[name] === undefined) {
+                      throw new Error(`No such capsule binding env[${name}].`);
+                    } else {
+                      value = await hooks.describeCapsule(`env[${name}]`, capsules[name]);
+                    }
+                  } else {
+                    value = await hooks.describeBinding(name);
+                  }
+
+                  toolOutput = { type: "text", value };
+                  break;
+                }
+                case "setBindingHook":
                   toolOutput = {
-                    type: "text",
-                    value: await hooks.describeBinding(toolCall.input.bindingName),
+                    type: "json",
+                    value: {success: true},
+                  };
+                  break;
+                case "saveCapsuleAsBinding":
+                  toolOutput = {
+                    type: "json",
+                    value: {success: true},
                   };
                   break;
                 case "executeCode":
@@ -340,6 +364,9 @@ export async function runAgent(
               }
             } catch (err) {
               toolOutput = {type: "error-text", value: `${err}`};
+
+              // This indicates a bug in the replay logic, so report it to logs.
+              console.error("Error in tool call replay:", err);
             }
 
             modelMessages.push({
@@ -797,7 +824,7 @@ export async function runAgent(
             throw new Error(
                 "Inappropriate binding name. Binding names should be ALL_CAPS_WITH_UNDERSCORES.");
           }
-          hooks.saveCapsuleAsBinding(capsuleId, bindingName);
+          hooks.saveCapsuleAsBinding(capsules[capsuleId], bindingName);
           return {success: true};
         } catch (error) {
           toolCallNotes.set(toolCallId, {

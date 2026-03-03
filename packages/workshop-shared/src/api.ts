@@ -830,6 +830,18 @@ export type AiToolCall = {
 } | {
   toolName: "describeBinding";
   input: {
+    name: string | number;
+  };
+} | {
+  toolName: "setBindingHook";
+  input: {
+    bindingName: string;
+    entrypoint: string | null;
+  };
+} | {
+  toolName: "saveCapsuleAsBinding";
+  input: {
+    capsuleId: number;
     bindingName: string;
   };
 } | {
