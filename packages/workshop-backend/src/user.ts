@@ -31,6 +31,8 @@ type LoginSessionRecord = {
 type GadgetRecord = GadgetMetadata & {
   created: Date;
   lastActive?: Date;  // if missing, gadget is provisional
+  // If we're not the gadget owner (it was shared with us), `owner` is set (inherited from
+  // GadgetMetadata).
 };
 
 function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
@@ -245,6 +247,50 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async whoami(): Promise<AiChatAuthorInfo> {
     return this.storage.profile.get();
+  }
+
+  // Like whoami(), but returns null if the account was never initialized.
+  async whoamiIfExists(): Promise<AiChatAuthorInfo | null> {
+    if (!this.storage.created.get()) {
+      return null;
+    }
+    return this.storage.profile.get();
+  }
+
+  // Called by the overseer every time a collaborator opens a shared gadget.
+  // Creates the record on first open; updates lastActive on subsequent opens.
+  async recordSharedGadgetOpen(
+      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo
+  ): Promise<void> {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (record && !record.owner) {
+      throw new Error("User owns this Gadget; it's not shared with them.");
+    }
+    let now = new Date();
+    if (record) {
+      // Already tracked -- update lastActive and cached fields.
+      record.lastActive = now;
+      record.title = title;
+      record.owner = ownerProfile;
+      this.storage.gadgets.put(record);
+    } else {
+      // First time opening this shared gadget.
+      this.storage.gadgets.put({
+        id: gadgetId,
+        title,
+        owner: ownerProfile,
+        created: now,
+        lastActive: now,
+      });
+    }
+  }
+
+  // Removes a shared gadget from the user's home page listing. Does not revoke access.
+  async dismissSharedGadget(gadgetId: string): Promise<void> {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (record && record.owner) {
+      this.storage.gadgets.delete(gadgetId);
+    }
   }
 
   async setOwnDisplayName(name: string): Promise<void> {

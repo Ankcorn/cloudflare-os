@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { Layout, Typography, Button, Input, Space, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined, ShareAltOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import { CF_ACCESS_MODE } from './useAuth'
@@ -11,6 +11,7 @@ import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
 import ChatInterface from './ChatInterface'
+import ShareModal from './ShareModal'
 import type { MenuProps } from 'antd'
 
 const { Header, Content } = Layout
@@ -74,6 +75,7 @@ export default function GadgetEditor() {
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
 
   // Simple chat mode: full-width chat UI when no code, no bindings, and the only chat
   // is chat 0. chatCount starts null (unknown) and is treated as compatible with simple
@@ -180,8 +182,19 @@ export default function GadgetEditor() {
       }
 
       try {
+        // Check for a share key in the URL fragment and redeem it as part of opening.
+        // The key is placed in the fragment (not a query parameter) so that it is never
+        // sent to the server in the HTTP request for the page, never appears in Referer
+        // headers, and never ends up in CDN or access logs.
+        const hash = window.location.hash // e.g. "#share=abc123"
+        const shareKey = hash.startsWith('#share=') ? hash.slice('#share='.length) : undefined
+        if (shareKey) {
+          // Strip the share key from the URL immediately so it's not visible or re-used.
+          window.history.replaceState({}, '', `/gadget/${id}`)
+        }
+
         // Use promise pipelining - use the promise itself as the stub
-        overseerStub = authenticatedApi.openGadget(id)
+        overseerStub = authenticatedApi.openGadget(id, shareKey)
         setOverseer({ stub: overseerStub })
 
         // Subscribe to metadata updates. The callback fires immediately with
@@ -204,9 +217,13 @@ export default function GadgetEditor() {
         if (connectionLost) {
           setConnectionLost(false)
         }
-      } catch (err) {
+      } catch (err: any) {
         if (cancelled) return
         console.error('Failed to load gadget:', err)
+        const errMsg = err?.message || ''
+        if (errMsg.includes('Invalid or expired share key')) {
+          message.error('Invalid or expired share link.')
+        }
         // Only set error on initial load - for reconnection attempts, keep the UI visible
         if (isInitialLoad) {
           setError('Failed to load gadget')
@@ -512,13 +529,22 @@ export default function GadgetEditor() {
             </Text>
           )}
           <Button
-            icon={<DeleteOutlined />}
-            onClick={handleDelete}
-            danger
-            type="text"
-            size="large"
-            title="Delete Gadget"
-          />
+            icon={<ShareAltOutlined />}
+            onClick={() => setShareModalOpen(true)}
+            type="primary"
+          >
+            Share
+          </Button>
+          {!metadata.owner && (
+            <Button
+              icon={<DeleteOutlined />}
+              onClick={handleDelete}
+              danger
+              type="text"
+              size="large"
+              title="Delete Gadget"
+            />
+          )}
           <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
             <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
               <Space>
@@ -663,6 +689,16 @@ export default function GadgetEditor() {
           />
         </div>
       </div>
+
+      {overseer && metadata && (
+        <ShareModal
+          open={shareModalOpen}
+          onClose={() => setShareModalOpen(false)}
+          overseer={overseer.stub}
+          metadata={metadata}
+          currentUser={userInfo}
+        />
+      )}
     </Layout>
   )
 }

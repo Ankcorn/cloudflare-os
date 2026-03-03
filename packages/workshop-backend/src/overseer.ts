@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -56,6 +56,26 @@ function getOwnPropertyDescriptorWorkaround(target: any, prop: string | symbol) 
 
 // =======================================================================================
 
+// Fixed 256-bit key used to domain-separate share key hashes from other hashes in the system.
+// Not secret -- it only provides personalization.
+const SHARE_KEY_HMAC_KEY = new Uint8Array([
+  0x09, 0x2a, 0x64, 0x37, 0xae, 0x8a, 0xce, 0x43,
+  0x03, 0x81, 0x17, 0xed, 0x5b, 0x0c, 0x4a, 0xca,
+  0x82, 0x23, 0x41, 0x11, 0x0b, 0x28, 0x48, 0x8f,
+  0x57, 0x53, 0x25, 0x2a, 0xda, 0xa0, 0xbf, 0xd7,
+]);
+
+export async function shareKeyId(rawKey: string): Promise<string> {
+  let hmacKey = await crypto.subtle.importKey(
+      "raw", SHARE_KEY_HMAC_KEY, { name: "HMAC", hash: "SHA-256" },
+      false, ["sign"]);
+  let sig = new Uint8Array(await crypto.subtle.sign(
+      "HMAC", hmacKey, Uint8Array.fromHex(rawKey)));
+  return sig.toHex();
+}
+
+// =======================================================================================
+
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
 type GatekeeperRecord = {
@@ -65,6 +85,23 @@ type GatekeeperRecord = {
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
+};
+
+// Each gadget stores its collaborator list.
+type CollaboratorRecord = {
+  // Denormalized profile snapshot for display without hitting the user's DO.
+  profile: AiChatAuthorInfo;
+
+  // How this collaborator got access. Multiple edges are possible.
+  addedBy: PermissionEdge[];
+};
+
+// Share keys table. The actual key is never stored server-side; only its HMAC hash.
+type ShareKeyRecord = {
+  id: string;        // HMAC-SHA-256 hex of the raw key
+  note?: string;
+  created: Date;
+  createdBy: string; // profile.id of the creator
 };
 
 type ActionRecord = {
@@ -191,6 +228,14 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       nextChatSequences: collection<{chatId: number, nextSequence: number}>()({
         primaryKey: "chatId"
       }),
+
+      collaborators: collection<CollaboratorRecord>()({
+        primaryKey: record => record.profile.id
+      }),
+
+      shareKeys: collection<ShareKeyRecord>()({
+        primaryKey: "id"
+      }),
     }
   });
 }
@@ -207,6 +252,10 @@ class OverseerImpl implements AgentHooks {
 
   // If not set, this gadget doesn't exist yet.
   ownerId?: string;
+  // The owner's profile.id (username/email). Cached in memory (not persisted) for use
+  // in permission graph calculations. Populated when the owner calls open(), or lazily
+  // via an RPC to the owner's UserDO when needed.
+  ownerProfileId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
 
@@ -1294,6 +1343,20 @@ class OverseerImpl implements AgentHooks {
       console.error(`Received unexpected code mode trace: ${executionId}`);
     }
   }
+
+  // Get the owner's profile ID, using the in-memory cache when available. The owner's
+  // profile ID never changes, so this is safe to cache for the lifetime of the DO instance.
+  // The cache is populated eagerly when the owner calls open(), but if only collaborators
+  // have opened this instance we fetch it via RPC on first use.
+  async getOwnerProfileId(): Promise<string> {
+    if (!this.ownerProfileId) {
+      if (!this.ownerId) throw new Error("Gadget is not initialized.");
+      let ownerDo = this.users.get(this.users.idFromString(this.ownerId));
+      let ownerProfile = await ownerDo.whoami();
+      this.ownerProfileId = ownerProfile.id;
+    }
+    return this.ownerProfileId;
+  }
 }
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
@@ -1304,22 +1367,30 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl = new OverseerImpl(ctx, env);
   }
 
-  async open(ownerId: string): Promise<Overseer> {
+  async open(userId: string, profileId: string, shareKey?: string): Promise<Overseer> {
     if (!this.impl.ownerId) {
       // This Overseer hasn't been initialized yet.
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
         // any new gadgets first before the gadget is actually opened.
-        let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
+        let owner = this.impl.users.get(this.impl.users.idFromString(userId));
         let meta = await owner.getGadget(this.ctx.id.toString());
         if (!meta) {
           throw new Error("Not Found");
         }
+        if (meta.owner) {
+          // The user's DO contains a record indicating that this gadget was shared to them by
+          // some other owner. This gadget may have existed in the past, and then was deleted,
+          // which does not proactively clean up share recipient's references. We need to treat
+          // this as "Not Found" otherwise we'll inadvertently create a new gadget with this ID
+          // belonging to a different user than the original!
+          throw new Error("Not Found");
+        }
 
         // Owner says we exist, so let's initialize ourselves.
-        this.impl.ownerId = ownerId;
+        this.impl.ownerId = userId;
 
-        this.impl.storage.ownerId.put(ownerId);
+        this.impl.storage.ownerId.put(userId);
 
         let ydoc = new Y.Doc();
         ydoc.getMap<Y.Text>();
@@ -1334,16 +1405,73 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       });
     }
 
-    if (ownerId != this.impl.ownerId) {
-      throw new Error("Unauthorized");
+    let isOwner = (userId == this.impl.ownerId);
+
+    // Cache the owner's profileId in memory when the owner opens.
+    if (isOwner) {
+      this.impl.ownerProfileId = profileId;
     }
 
     let notifyDeleted = () => {
       this.impl.ownerId = undefined;
     };
 
-    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
-    return new OverseerClientInterface(this.impl, owner, notifyDeleted);
+    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
+    let clientUser = isOwner
+        ? owner
+        : this.impl.users.get(this.impl.users.idFromString(userId));
+
+    if (!isOwner) {
+      // If a share key was provided, compute its HMAC hash and redeem it.
+      // The owner already has full access and should not appear in the collaborators table.
+      if (shareKey) {
+        let keyId = await shareKeyId(shareKey);
+        let keyRecord = this.impl.storage.shareKeys.get(keyId);
+        if (keyRecord) {
+          let existing = this.impl.storage.collaborators.get(profileId);
+          if (existing) {
+            // User is already a collaborator. Only add an edge if they don't already have one
+            // for this exact key.
+            let alreadyHasEdge = existing.addedBy.some(
+                e => e.type === "shareKey" && e.keyId === keyId);
+            if (!alreadyHasEdge) {
+              existing.addedBy.push({
+                type: "shareKey",
+                keyId,
+                created: new Date(),
+              });
+              this.impl.storage.collaborators.put(existing);
+            }
+          } else {
+            // New collaborator -- need full profile from their user DO.
+            let profile = await clientUser.whoami();
+            this.impl.storage.collaborators.put({
+              profile,
+              addedBy: [{
+                type: "shareKey",
+                keyId,
+                created: new Date(),
+              }],
+            });
+          }
+        }
+      }
+
+      // Check authorization.
+      let collab = this.impl.storage.collaborators.get(profileId);
+      if (!collab) throw new Error("Unauthorized");
+
+      // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
+      // (or is refreshed on) their home page.
+      let title = this.impl.storage.title.get();
+      let gadgetId = this.impl.ctx.id.toString();
+      owner.whoami().then(ownerProfile => {
+        clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile);
+      }).catch(err => console.error(err));
+    }
+
+    return new OverseerClientInterface(
+        this.impl, owner, clientUser, profileId, isOwner, notifyDeleted);
   }
 
   async startGatekeeperSession(id: number | undefined, caller: GatekeeperCaller): Promise<any> {
@@ -1366,11 +1494,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async spawnAgent(
-      title: string, prompt: string, config: AgentSpawnerConfig, props: unknown): Promise<void> {
+      title: string, prompt: string, config: AgentSpawnerConfig,
+      props: unknown, creatorUserId?: string): Promise<void> {
     if (!this.impl.ownerId) throw new Error("Gadget has been deleted.");
 
-    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
-    let userMeta = await owner.getChatContext(config.modelId);
+    // Resolve the model from the creating user's account (falls back to owner for
+    // bindings created before collaborator support).
+    let resolveUserId = creatorUserId ?? this.impl.ownerId;
+    let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
+    let userMeta = await user.getChatContext(config.modelId);
 
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
@@ -1611,22 +1743,25 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
 }
 
 class OverseerClientInterface extends RpcTarget implements Overseer {
-  private clientUser: DurableObjectStub<UserDurableObject>;
-
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
+              private clientUser: DurableObjectStub<UserDurableObject>,
+              private clientProfileId: string,
+              private isOwner: boolean,
               private notifyDeleted: () => void) {
     super();
-
-    // TODO: When sharing is supported, set this to the client user, not the owner.
-    this.clientUser = owner;
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
-    let title: string = this.impl.storage.title.get();
-    let totalCost = this.impl.storage.totalCost.get();
-
-    return { id: this.impl.ctx.id.toString(), title, totalCost };
+    let result: GadgetMetadata = {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      totalCost: this.impl.storage.totalCost.get(),
+    };
+    if (!this.isOwner) {
+      result.owner = await this.owner.whoami();
+    }
+    return result;
   }
 
   async subscribeToMetadata(
@@ -1639,6 +1774,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get()
     };
+
+    // For collaborators, include owner info.
+    if (!this.isOwner) {
+      metadata.owner = await this.owner.whoami();
+    }
 
     let titleSubscriber = {
       update(value: string) {
@@ -1677,6 +1817,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async deleteSelf(): Promise<void> {
+    if (!this.isOwner) {
+      throw new Error("Only the gadget owner can delete it.");
+    }
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
@@ -1782,7 +1925,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
     return await this.impl.addGatekeeper(
-        await this.owner.getGatekeeperClassFor(accountId, resourceUrl));
+        await this.clientUser.getGatekeeperClassFor(accountId, resourceUrl));
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -1804,7 +1947,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     let props: AgentSpawnerBindingProps = {
       overseerId: this.impl.ctx.id.toString(),
-      config
+      config,
+      creatorUserId: this.clientUser.id.toString(),
     };
 
     return await this.impl.addGatekeeper(
@@ -2187,6 +2331,359 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
     return this.impl.subscribeToConsoleLogs(subscriber);
   }
+
+  // --- Collaborator management ---
+
+  async listCollaborators(): Promise<CollaboratorInfo[]> {
+    let result: CollaboratorInfo[] = [];
+    for (let record of this.impl.storage.collaborators.list()) {
+      result.push({ profile: record.profile, addedBy: record.addedBy });
+    }
+    return result;
+  }
+
+  async addCollaborator(username: string, note?: string): Promise<CollaboratorInfo | null> {
+    // Look up the user DO to check if the account exists.
+    let userDoId = this.impl.users.idFromName(username);
+    let userDo = this.impl.users.get(userDoId);
+    let profile = await userDo.whoamiIfExists();
+    if (!profile) {
+      return null;
+    }
+
+    // Don't add the owner as a collaborator.
+    if (userDoId.toString() === this.impl.ownerId) {
+      throw new Error("Cannot add the gadget owner as a collaborator.");
+    }
+
+    let existing = this.impl.storage.collaborators.get(profile.id);
+    let edge: PermissionEdge = {
+      type: "user",
+      sharer: this.clientProfileId,
+      created: new Date(),
+      note,
+    };
+
+    if (existing) {
+      // Already a collaborator -- add an edge if they don't have one from this sharer.
+      let alreadyHasEdge = existing.addedBy.some(
+          e => e.type === "user" && e.sharer === this.clientProfileId);
+      if (!alreadyHasEdge) {
+        existing.addedBy.push(edge);
+        this.impl.storage.collaborators.put(existing);
+      }
+      return { profile: existing.profile, addedBy: existing.addedBy };
+    }
+
+    let record: CollaboratorRecord = {
+      profile,
+      addedBy: [edge],
+    };
+    this.impl.storage.collaborators.put(record);
+    return { profile: record.profile, addedBy: record.addedBy };
+  }
+
+  async previewRemoveCollaborator(profileId: string): Promise<CollaboratorInfo[]> {
+    let target = this.impl.storage.collaborators.get(profileId);
+    if (!target) return [];
+
+    if (!this.isOwner) {
+      // Non-owner: simulate removing only the caller's edges. If the target would still
+      // have remaining edges, no one will actually be removed.
+      let remaining = target.addedBy.filter(
+          e => !(e.type === "user" && e.sharer === this.clientProfileId));
+      if (remaining.length > 0) return [];
+    }
+
+    // The target would be fully removed. Find transitively dependent users.
+    return await this.#findDependentUsers(profileId, null, new Set());
+  }
+
+  async removeCollaborator(profileId: string, keepUsers: string[]): Promise<CollaboratorInfo[]> {
+    let target = this.impl.storage.collaborators.get(profileId);
+    if (!target) {
+      throw new Error("User is not a collaborator.");
+    }
+
+    // Permission check: owner can remove anyone; collaborators can only remove users
+    // they themselves added.
+    if (!this.isOwner) {
+      let hasEdgeFromCaller = target.addedBy.some(
+          e => e.type === "user" && e.sharer === this.clientProfileId);
+      if (!hasEdgeFromCaller) {
+        throw new Error("You can only remove users that you added.");
+      }
+
+      // Non-owner: remove only the caller's edges from the target.
+      target.addedBy = target.addedBy.filter(
+          e => !(e.type === "user" && e.sharer === this.clientProfileId));
+
+      if (target.addedBy.length > 0) {
+        // Target still has edges from other sources — they keep access.
+        this.impl.storage.collaborators.put(target);
+        return [];
+      }
+
+      // Target has no remaining edges — fall through to full removal below.
+    }
+
+    // Full removal of the target plus transitive cleanup.
+    // The walk returns exactly the users to remove (accounting for keepUsers).
+    let keepSet = new Set(keepUsers);
+    let dependents = await this.#findDependentUsers(profileId, null, keepSet);
+
+    return this.#applyRemoval(profileId, dependents, keepSet);
+  }
+
+  async previewRevokeShareKey(keyId: string): Promise<CollaboratorInfo[]> {
+    let keyRecord = this.impl.storage.shareKeys.get(keyId);
+    if (!keyRecord) return [];
+
+    // Permission check: owner can revoke any key; collaborators can only revoke
+    // keys they themselves created.
+    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
+      throw new Error("You can only revoke share keys that you created.");
+    }
+
+    return await this.#findDependentUsers(null, keyId, new Set());
+  }
+
+  async revokeShareKey(keyId: string, keepUsers: string[]): Promise<CollaboratorInfo[]> {
+    let keyRecord = this.impl.storage.shareKeys.get(keyId);
+    if (!keyRecord) {
+      throw new Error("Share key not found.");
+    }
+
+    // Permission check: owner can revoke any key; collaborators can only revoke
+    // keys they themselves created.
+    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
+      throw new Error("You can only revoke share keys that you created.");
+    }
+
+    let keepSet = new Set(keepUsers);
+    let dependents = await this.#findDependentUsers(null, keyId, keepSet);
+
+    // Revoke the key itself.
+    this.impl.storage.shareKeys.delete(keyId);
+
+    // Apply transitive removal (no primary target user to remove).
+    return this.#applyRemoval(null, dependents, keepSet, keyId);
+  }
+
+  // Apply removal of dependent users, clean up edges and share keys.
+  // `primaryTarget` is the profileId of the user being directly removed (if any).
+  // `dependents` is the list from #findDependentUsers (all users to delete).
+  // `keepUsers` are users that should be retained with fresh edges from the caller.
+  // `explicitlyRevokedKeyId` is a key that was explicitly revoked (by revokeShareKey),
+  //   whose edges also need to be cleaned from retained/remaining users.
+  #applyRemoval(
+      primaryTarget: string | null,
+      dependents: CollaboratorInfo[],
+      keepUsers: Set<string>,
+      explicitlyRevokedKeyId?: string): CollaboratorInfo[] {
+    // Collect all removed profileIds.
+    let removedSet = new Set<string>();
+    if (primaryTarget) removedSet.add(primaryTarget);
+    for (let dep of dependents) {
+      removedSet.add(dep.profile.id);
+    }
+
+    // Collect all share key IDs that will be revoked (created by removed users,
+    // plus any explicitly revoked key).
+    let revokedKeyIds = new Set<string>();
+    if (explicitlyRevokedKeyId) revokedKeyIds.add(explicitlyRevokedKeyId);
+    for (let keyRecord of this.impl.storage.shareKeys.list()) {
+      if (removedSet.has(keyRecord.createdBy)) {
+        revokedKeyIds.add(keyRecord.id);
+      }
+    }
+
+    // Build the removed list (primary target first, if any).
+    let removed: CollaboratorInfo[] = [];
+    if (primaryTarget) {
+      let targetRecord = this.impl.storage.collaborators.get(primaryTarget);
+      if (targetRecord) {
+        removed.push({ profile: targetRecord.profile, addedBy: targetRecord.addedBy });
+        this.impl.storage.collaborators.delete(primaryTarget);
+      }
+    }
+
+    // Delete dependent users.
+    for (let dep of dependents) {
+      this.impl.storage.collaborators.delete(dep.profile.id);
+      removed.push(dep);
+    }
+
+    // Fix up kept users: clean stale edges and add fresh edge from the caller.
+    for (let profileId of keepUsers) {
+      let record = this.impl.storage.collaborators.get(profileId);
+      if (!record) continue;
+      let before = record.addedBy.length;
+      record.addedBy = record.addedBy.filter(e => {
+        if (e.type === "user" && removedSet.has(e.sharer)) return false;
+        if (e.type === "shareKey" && revokedKeyIds.has(e.keyId)) return false;
+        return true;
+      });
+      if (record.addedBy.length !== before) {
+        // Some edges were cleaned — add a fresh edge from the caller.
+        record.addedBy.push({
+          type: "user",
+          sharer: this.clientProfileId,
+          created: new Date(),
+        });
+        this.impl.storage.collaborators.put(record);
+      }
+    }
+
+    // Clean stale edges from all remaining collaborators (those not kept or removed).
+    for (let record of this.impl.storage.collaborators.list()) {
+      if (keepUsers.has(record.profile.id)) continue;  // already handled above
+      let filtered = record.addedBy.filter(e => {
+        if (e.type === "user" && removedSet.has(e.sharer)) return false;
+        if (e.type === "shareKey" && revokedKeyIds.has(e.keyId)) return false;
+        return true;
+      });
+      if (filtered.length !== record.addedBy.length) {
+        record.addedBy = filtered;
+        this.impl.storage.collaborators.put(record);
+      }
+    }
+
+    // Revoke share keys created by removed users.
+    for (let keyId of revokedKeyIds) {
+      this.impl.storage.shareKeys.delete(keyId);
+    }
+
+    return removed;
+  }
+
+  // Find collaborators who would lose access given a user removal or key revocation.
+  //
+  // - `removedUser`: a profileId to treat as removed (excluded from the graph).
+  // - `revokedKeyId`: a keyId to treat as explicitly revoked.
+  // - `keepUsers`: profileIds to pre-mark as supported regardless of their edges.
+  //
+  // A collaborator is "supported" if they have at least one valid edge:
+  //   - A "user" edge is valid if the sharer is the owner or a supported collaborator.
+  //   - A "shareKey" edge is valid if the key is not revoked and the key's creator is
+  //     the owner or a supported collaborator.
+  //
+  // Returns all collaborators who are NOT supported (i.e., would lose access).
+  async #findDependentUsers(
+      removedUser: string | null,
+      revokedKeyId: string | null,
+      keepUsers: Set<string>): Promise<CollaboratorInfo[]> {
+    let ownerProfileId = await this.impl.getOwnerProfileId();
+
+    // Build a map of keyId → creatorProfileId for share key support checks.
+    let keyCreators = new Map<string, string>();
+    for (let keyRecord of this.impl.storage.shareKeys.list()) {
+      keyCreators.set(keyRecord.id, keyRecord.createdBy);
+    }
+
+    // Build the set of all collaborators except the removed user.
+    let allCollabs = new Map<string, CollaboratorRecord>();
+    for (let record of this.impl.storage.collaborators.list()) {
+      if (record.profile.id !== removedUser) {
+        allCollabs.set(record.profile.id, record);
+      }
+    }
+
+    // Fixed-point iteration: mark users as supported if they have at least one valid edge.
+    // Users in keepUsers are pre-marked as supported.
+    let supported = new Set<string>(keepUsers);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let [id, record] of allCollabs) {
+        if (supported.has(id)) continue;
+        for (let edge of record.addedBy) {
+          if (edge.type === "shareKey") {
+            // Share key edge: valid if the key is not explicitly revoked and the
+            // key's creator is the owner or a supported collaborator.
+            if (edge.keyId === revokedKeyId) continue;
+            let creator = keyCreators.get(edge.keyId);
+            if (!creator) continue;  // key no longer exists
+            if (creator === ownerProfileId || supported.has(creator)) {
+              supported.add(id);
+              changed = true;
+              break;
+            }
+          } else {
+            // User edge: valid if the sharer is the owner or a supported collaborator.
+            if (edge.sharer === removedUser) continue;
+            if (edge.sharer === ownerProfileId || supported.has(edge.sharer)) {
+              supported.add(id);
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Users not in the supported set would lose access.
+    let result: CollaboratorInfo[] = [];
+    for (let [id, record] of allCollabs) {
+      if (!supported.has(id)) {
+        result.push({ profile: record.profile, addedBy: record.addedBy });
+      }
+    }
+    return result;
+  }
+
+  // --- Share key management ---
+
+  async createShareKey(note?: string): Promise<{ key: string }> {
+    let rawBytes = new Uint8Array(16);
+    crypto.getRandomValues(rawBytes);
+    let key = rawBytes.toHex();
+
+    let keyId = await shareKeyId(key);
+    this.impl.storage.shareKeys.put({
+      id: keyId,
+      note,
+      created: new Date(),
+      createdBy: this.clientProfileId,
+    });
+    return { key };
+  }
+
+  async listShareKeys(): Promise<ShareKeyInfo[]> {
+    let result: ShareKeyInfo[] = [];
+    // Cache profile lookups.
+    let profileCache = new Map<string, AiChatAuthorInfo>();
+
+    for (let record of this.impl.storage.shareKeys.list()) {
+      let createdBy = profileCache.get(record.createdBy);
+      if (!createdBy) {
+        // Check if the creator is the owner.
+        let ownerProfileId = await this.impl.getOwnerProfileId();
+        if (ownerProfileId === record.createdBy) {
+          createdBy = await this.owner.whoami();
+        }
+        // Check if the creator is a collaborator.
+        if (!createdBy) {
+          let collab = this.impl.storage.collaborators.get(record.createdBy);
+          if (collab) {
+            createdBy = collab.profile;
+          }
+        }
+        // Fallback.
+        if (!createdBy) {
+          createdBy = { type: "user", id: record.createdBy, name: record.createdBy };
+        }
+        profileCache.set(record.createdBy, createdBy);
+      }
+      result.push({
+        keyId: record.id,
+        note: record.note,
+        created: record.created,
+        createdBy,
+      });
+    }
+    return result;
+  }
 }
 
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
@@ -2277,6 +2774,11 @@ type AgentSpawnerBindingProps = {
   overseerId: string,
 
   config: AgentSpawnerConfig,
+
+  // DO ID of the user who created this binding. When agents are spawned, the model is
+  // resolved from this user's account. Falls back to the gadget owner for bindings
+  // created before collaborator support was added.
+  creatorUserId?: string,
 };
 
 type AgentSpawnerAction = {
@@ -2347,6 +2849,7 @@ class AgentSpawnerBindingImpl<Props> extends RpcTarget implements AgentSpawnerBi
     let ns = this.ctx.exports.OverseerDurableObject;
     let id = ns.idFromString(this.ctx.props.overseerId);
     let overseer = ns.get(id);
-    return overseer.spawnAgent(title, prompt, this.ctx.props.config, props);
+    return overseer.spawnAgent(
+        title, prompt, this.ctx.props.config, props, this.ctx.props.creatorUserId);
   }
 }

@@ -1,5 +1,5 @@
 import { Layout, Typography, Button, Table, Card, Space, Dropdown, Avatar, Tooltip, Modal, message } from 'antd'
-import { DeleteOutlined, LogoutOutlined, UserOutlined, SettingOutlined } from '@ant-design/icons'
+import { DeleteOutlined, LogoutOutlined, UserOutlined, SettingOutlined, CloseOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
 import { CF_ACCESS_MODE } from './useAuth'
@@ -97,6 +97,26 @@ export default function Home() {
         } catch (err) {
           console.error('Failed to delete gadget:', err)
           message.error('Failed to delete gadget')
+        }
+      }
+    })
+  }
+
+  const handleDismissGadget = (gadget: GadgetMetadataWithTimestamps, e: React.MouseEvent) => {
+    e.stopPropagation()
+    Modal.confirm({
+      title: 'Remove from Home Page',
+      content: 'Remove this gadget from your home page? You can still access it via its link.',
+      okText: 'Remove',
+      cancelText: 'Cancel',
+      onOk: async () => {
+        try {
+          await authenticatedApi.dismissSharedGadget(gadget.id)
+          message.success('Gadget removed from home page.')
+          setGadgets(prev => prev.filter(g => g.id !== gadget.id))
+        } catch (err) {
+          console.error('Failed to dismiss gadget:', err)
+          message.error('Failed to remove gadget')
         }
       }
     })
@@ -230,8 +250,8 @@ export default function Home() {
     {
       title: 'Owner',
       key: 'owner',
-      render: () => (
-        <Text type="secondary">—</Text>
+      render: (_: any, record: GadgetMetadataWithTimestamps) => (
+        <Text type="secondary">{record.owner ? record.owner.name : 'You'}</Text>
       ),
     },
     {
@@ -246,11 +266,10 @@ export default function Home() {
     },
     {
       title: 'Cost',
-      dataIndex: 'totalCost',
       key: 'totalCost',
-      render: (totalCost: number | undefined) => (
+      render: (_: any, record: GadgetMetadataWithTimestamps) => (
         <Text style={{ color: '#595959' }}>
-          {totalCost != null ? `$${totalCost.toFixed(4)}` : '—'}
+          {record.owner ? '—' : (record.totalCost != null ? `$${record.totalCost.toFixed(4)}` : '—')}
         </Text>
       ),
     },
@@ -258,7 +277,16 @@ export default function Home() {
       title: '',
       key: 'actions',
       width: 48,
-      render: (_: any, record: GadgetMetadataWithTimestamps) => (
+      render: (_: any, record: GadgetMetadataWithTimestamps) => record.owner ? (
+        <Tooltip title="Remove from home page">
+          <Button
+            type="text"
+            size="small"
+            icon={<CloseOutlined />}
+            onClick={(e) => handleDismissGadget(record, e)}
+          />
+        </Tooltip>
+      ) : (
         <Button
           type="text"
           size="small"
