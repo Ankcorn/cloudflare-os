@@ -162,6 +162,16 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
 
       if (event.data === 'handshake' && event.ports && event.ports[0]) {
         try {
+          // Dispose previous stubs if this is a re-handshake (e.g. iframe reload)
+          if (gadgetStubRef.current) {
+            gadgetStubRef.current[Symbol.dispose]?.()
+            gadgetStubRef.current = null
+          }
+          if (rpcSessionRef.current) {
+            rpcSessionRef.current[Symbol.dispose]?.()
+            rpcSessionRef.current = null
+          }
+
           // Get the gadget stub from overseer
           const gadgetStub = await overseer.connectToGadget(chatId)
           gadgetStubRef.current = gadgetStub
@@ -185,13 +195,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
     window.addEventListener('message', handleMessage)
     return () => {
       window.removeEventListener('message', handleMessage)
-    }
-  }, [overseer, chatId])
-
-  // Effect to handle cleanup when component unmounts or reloads
-  useEffect(() => {
-    return () => {
-      // Dispose of RPC resources
+      // Dispose stubs on cleanup (overseer/chatId change or unmount)
       if (gadgetStubRef.current) {
         gadgetStubRef.current[Symbol.dispose]?.()
         gadgetStubRef.current = null
@@ -201,7 +205,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         rpcSessionRef.current = null
       }
     }
-  }, [reloadTrigger])
+  }, [overseer, chatId])
 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded

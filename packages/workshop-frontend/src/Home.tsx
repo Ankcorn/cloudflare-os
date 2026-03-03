@@ -138,6 +138,10 @@ export default function Home() {
   useEffect(() => {
     const gadgetId = provisionalGadgetIdRef.current
     if (gadgetId) {
+      // Dispose old stub before creating new one
+      if (provisionalOverseerRef.current) {
+        provisionalOverseerRef.current[Symbol.dispose]()
+      }
       // Use promise pipelining: openGadget returns a promise usable as a stub
       provisionalOverseerRef.current = authenticatedApi.openGadget(gadgetId)
     }
@@ -199,7 +203,8 @@ export default function Home() {
       const chatId = await overseer.newChat(msg, modelId, capsules)
 
       // Clear provisional refs -- the gadget is now "real" and we're navigating into it.
-      // Don't dispose the stub; GadgetEditor will open its own.
+      // GadgetEditor will open its own overseer stub; dispose this one.
+      overseer[Symbol.dispose]()
       provisionalOverseerRef.current = null
       provisionalGadgetIdRef.current = null
       provisionalGadgetPromiseRef.current = null
