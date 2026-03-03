@@ -176,50 +176,53 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
         return
       }
 
-      // Fetch ID and description in parallel (promise pipelining).
-      const [id, description] = await Promise.all([gk.getId(), gk.describe()])
-      gk[Symbol.dispose]()
+      try {
+        // Fetch ID and description in parallel (promise pipelining).
+        const [id, description] = await Promise.all([gk.getId(), gk.describe()])
 
-      // Snapshot the activeUrl position before any state updates.
-      const urlStart = activeUrl.start
-      const urlEnd = activeUrl.end
-      // Pad the title with spaces so the mirror highlight has visible interior padding.
-      const paddedTitle = ` ${description.title} `
-      const lengthDiff = paddedTitle.length - (urlEnd - urlStart)
+        // Snapshot the activeUrl position before any state updates.
+        const urlStart = activeUrl.start
+        const urlEnd = activeUrl.end
+        // Pad the title with spaces so the mirror highlight has visible interior padding.
+        const paddedTitle = ` ${description.title} `
+        const lengthDiff = paddedTitle.length - (urlEnd - urlStart)
 
-      // Replace the URL text with the padded title in inputValue.
-      setInputValue(prev => prev.slice(0, urlStart) + paddedTitle + prev.slice(urlEnd))
+        // Replace the URL text with the padded title in inputValue.
+        setInputValue(prev => prev.slice(0, urlStart) + paddedTitle + prev.slice(urlEnd))
 
-      // Adjust positions of existing capsules and add the new one.
-      setCapsules(prev => {
-        const adjusted = prev.map(c => {
-          if (c.start >= urlEnd) {
-            return { ...c, start: c.start + lengthDiff }
-          }
-          return c
+        // Adjust positions of existing capsules and add the new one.
+        setCapsules(prev => {
+          const adjusted = prev.map(c => {
+            if (c.start >= urlEnd) {
+              return { ...c, start: c.start + lengthDiff }
+            }
+            return c
+          })
+          return [...adjusted, {
+            start: urlStart,
+            length: paddedTitle.length,
+            gatekeeperId: id,
+            description,
+          }]
         })
-        return [...adjusted, {
-          start: urlStart,
-          length: paddedTitle.length,
-          gatekeeperId: id,
-          description,
-        }]
-      })
 
-      // Clear activeUrl so the overlay dismisses.
-      setActiveUrl(null)
+        // Clear activeUrl so the overlay dismisses.
+        setActiveUrl(null)
 
-      // Move cursor to end of inserted title on next tick.
-      requestAnimationFrame(() => {
-        const wrapper = wrapperRef.current
-        if (!wrapper) return
-        const textarea = wrapper.querySelector('textarea')
-        if (textarea) {
-          const cursorPos = urlStart + paddedTitle.length
-          textarea.setSelectionRange(cursorPos, cursorPos)
-          textarea.focus()
-        }
-      })
+        // Move cursor to end of inserted title on next tick.
+        requestAnimationFrame(() => {
+          const wrapper = wrapperRef.current
+          if (!wrapper) return
+          const textarea = wrapper.querySelector('textarea')
+          if (textarea) {
+            const cursorPos = urlStart + paddedTitle.length
+            textarea.setSelectionRange(cursorPos, cursorPos)
+            textarea.focus()
+          }
+        })
+      } finally {
+        gk[Symbol.dispose]()
+      }
     } catch (err) {
       console.error('Failed to create capsule:', err)
     }
@@ -244,46 +247,49 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
   // Called by the NewGatekeeperModal when a gatekeeper is created via the attach flow.
   // Inserts a capsule at the previously-saved cursor position.
   const handleAttachCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
-    // Fetch ID and description in parallel (promise pipelining).
-    const [id, description] = await Promise.all([gk.getId(), gk.describe()])
-    gk[Symbol.dispose]()
+    try {
+      // Fetch ID and description in parallel (promise pipelining).
+      const [id, description] = await Promise.all([gk.getId(), gk.describe()])
 
-    const insertPos = attachCursorPosRef.current
-    // Pad the title with spaces so the mirror highlight has visible interior padding.
-    const paddedTitle = ` ${description.title} `
+      const insertPos = attachCursorPosRef.current
+      // Pad the title with spaces so the mirror highlight has visible interior padding.
+      const paddedTitle = ` ${description.title} `
 
-    // Insert the capsule title at the saved cursor position.
-    setInputValue(prev => prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos))
+      // Insert the capsule title at the saved cursor position.
+      setInputValue(prev => prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos))
 
-    // Adjust positions of existing capsules that come after the insertion point.
-    setCapsules(prev => {
-      const adjusted = prev.map(c => {
-        if (c.start >= insertPos) {
-          return { ...c, start: c.start + paddedTitle.length }
-        }
-        return c
+      // Adjust positions of existing capsules that come after the insertion point.
+      setCapsules(prev => {
+        const adjusted = prev.map(c => {
+          if (c.start >= insertPos) {
+            return { ...c, start: c.start + paddedTitle.length }
+          }
+          return c
+        })
+        return [...adjusted, {
+          start: insertPos,
+          length: paddedTitle.length,
+          gatekeeperId: id,
+          description,
+        }]
       })
-      return [...adjusted, {
-        start: insertPos,
-        length: paddedTitle.length,
-        gatekeeperId: id,
-        description,
-      }]
-    })
 
-    setAttachModalOpen(false)
+      setAttachModalOpen(false)
 
-    // Move cursor to end of inserted capsule and focus the textarea.
-    requestAnimationFrame(() => {
-      const wrapper = wrapperRef.current
-      if (!wrapper) return
-      const textarea = wrapper.querySelector('textarea')
-      if (textarea) {
-        const cursorPos = insertPos + paddedTitle.length
-        textarea.setSelectionRange(cursorPos, cursorPos)
-        textarea.focus()
-      }
-    })
+      // Move cursor to end of inserted capsule and focus the textarea.
+      requestAnimationFrame(() => {
+        const wrapper = wrapperRef.current
+        if (!wrapper) return
+        const textarea = wrapper.querySelector('textarea')
+        if (textarea) {
+          const cursorPos = insertPos + paddedTitle.length
+          textarea.setSelectionRange(cursorPos, cursorPos)
+          textarea.focus()
+        }
+      })
+    } finally {
+      gk[Symbol.dispose]()
+    }
   }
 
   // Handle text changes: detect if edits overlap any capsule and remove broken ones.

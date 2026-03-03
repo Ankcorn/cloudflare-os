@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -21,6 +21,11 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     error: null
   })
 
+  // Track current authenticated API stub for cleanup on unmount.
+  // State closures go stale in cleanup functions, so we use a ref.
+  const authenticatedApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
+  authenticatedApiRef.current = authState.authenticatedApi
+
   useEffect(() => {
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
@@ -31,6 +36,11 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       } else {
         setAuthState(prev => ({ ...prev, isLoading: false }))
       }
+    }
+    return () => {
+      // The authenticateWithXxx functions also dispose the old stub via their setAuthState
+      // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
+      authenticatedApiRef.current?.[Symbol.dispose]()
     }
   }, [publicApi])
 
@@ -84,21 +94,22 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const logout = () => {
-    // Dispose the current authenticated API stub if it exists
-    if (authState.authenticatedApi) {
-      authState.authenticatedApi[Symbol.dispose]()
-    }
+    // Use functional updater to read current state (avoids stale closure).
+    setAuthState(prev => {
+      if (prev.authenticatedApi) {
+        prev.authenticatedApi[Symbol.dispose]()
+      }
+      return {
+        token: null,
+        authenticatedApi: null,
+        isLoading: false,
+        error: null
+      }
+    })
 
     if (!CF_ACCESS_MODE) {
       localStorage.removeItem('authToken')
     }
-
-    setAuthState({
-      token: null,
-      authenticatedApi: null,
-      isLoading: false,
-      error: null
-    })
   }
 
   return {
