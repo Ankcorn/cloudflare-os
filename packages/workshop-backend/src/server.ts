@@ -74,7 +74,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
-  async openGadget(id: string, shareKey?: string): Promise<NativeRpcStub<Overseer>> {
+  #openGadgetInternal(id: string, shareKey?: string): Promise<NativeRpcStub<Overseer>> {
     let userId = this.user.id.toString();
     let profileId = this.user.id.name!;
     let overseer = this.overseers.get(this.overseers.idFromString(id));
@@ -82,7 +82,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return overseer.open(userId, profileId, shareKey);
   }
 
-  async newGadget(): Promise<NativeRpcStub<Overseer>> {
+  async openGadget(id: string, shareKey?: string): Promise<RpcStub<Overseer>> {
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openGadgetInternal(id, shareKey);
+  }
+
+  async newGadget(): Promise<RpcStub<Overseer>> {
     let id = this.overseers.newUniqueId().toString();
     await this.user.newGadget(id, "Untitled Gadget");
     let result = await this.openGadget(id);
@@ -126,7 +132,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async newGadgetFromBlueprint(
     blueprintId: string,
     bindings: Record<string, BlueprintBindingAssignment>
-  ): Promise<Overseer> {
+  ): Promise<RpcStub<Overseer>> {
     // 1. Read blueprint from KV.
     let raw = await this.env.BLUEPRINTS.get(blueprintId);
     if (!raw) throw new Error("Blueprint not found.");
@@ -152,7 +158,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
     await this.user.newGadget(id, kvRecord.metadata.title);
-    let overseerResult = await this.openGadget(id);
+    let overseerResult = await this.#openGadgetInternal(id);
 
     // 4. Initialize from blueprint code.
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));
@@ -194,6 +200,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     await Promise.all(gkPromises);
 
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
     return overseerResult;
   }
 

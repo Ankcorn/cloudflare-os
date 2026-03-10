@@ -144,7 +144,7 @@ export interface AuthenticatedApi extends RpcTarget {
   // can be pipelined on the returned Overseer.
   //
   // To allow for pipelining, this throws an exception if the gadget doesn't exist.
-  openGadget(id: string, shareKey?: string): Promise<Overseer>;
+  openGadget(id: string, shareKey?: string): Promise<RpcStub<Overseer>>;
 
   // Create a new gadget. It will start out titled "Untitled Gadget".
   //
@@ -154,7 +154,7 @@ export interface AuthenticatedApi extends RpcTarget {
   //   new*Gatekeeper() will not clear the provisional bit (as long as no binding name is
   //   assigned), so provisional gadgets are useful to allow the user to write an initial chat
   //   message without explicitly creating a new gadget.
-  newGadget(): Promise<Overseer>;
+  newGadget(): Promise<RpcStub<Overseer>>;
 
   // List metadata about all the user's Gadgets. Used to display the front-page listing.
   //
@@ -206,7 +206,7 @@ export interface AuthenticatedApi extends RpcTarget {
   newGadgetFromBlueprint(
     blueprintId: string,
     bindings: Record<string, BlueprintBindingAssignment>
-  ): Promise<Overseer>;
+  ): Promise<RpcStub<Overseer>>;
 
   // Delete a blueprint that the user owns. Works even if the source gadget has been deleted
   // (operates on User DO + KV directly).
@@ -269,7 +269,9 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
     "qwen3-coder:30b": "Qwen 3 Coder 30B (ollama)",
   },
   "openai": {
-    "gpt-5.2-codex": "ChatGPT 5.2 Codex",
+    "gpt-5.3-codex": "ChatGPT 5.3 Codex",
+    "gpt-5.4-2026-03-05": "ChatGPT 5.4",
+//    "gpt-5.4-pro-2026-03-05": "ChatGPT 5.4 Pro",     // doesn't work? just hangs?
   },
 };
 
