@@ -11,11 +11,11 @@
   },
   "dependencies": {
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "^0.4.0",
+    "capnweb": "^0.6.1",
     "postal-mime": "^2.7.3"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "wrangler": "^4.68.1"
+    "wrangler": "^4.71.0"
   }
 }

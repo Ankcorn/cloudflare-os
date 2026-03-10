@@ -20,8 +20,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^4.20260304.0",
-    "capnweb": "^0.4.0"
+    "@cloudflare/workers-types": "^4.20260307.1",
+    "capnweb": "^0.6.1"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

@@ -3025,11 +3025,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listShareKeys(): Promise<ShareKeyInfo[]> {
+    // Collect all records synchronously to release the kv.list() iterator before any await
+    // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
+    // calls (e.g. listCollaborators) may start their own.
+    let records = [...this.impl.storage.shareKeys.list()];
+
     let result: ShareKeyInfo[] = [];
     // Cache profile lookups.
     let profileCache = new Map<string, AiChatAuthorInfo>();
 
-    for (let record of this.impl.storage.shareKeys.list()) {
+    for (let record of records) {
       let createdBy = profileCache.get(record.createdBy);
       if (!createdBy) {
         // Check if the creator is the owner.

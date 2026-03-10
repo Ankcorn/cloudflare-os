@@ -115,7 +115,7 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
     observer.observe(textarea)
 
     return () => observer.disconnect()
-  })
+  }, [])
 
   // Reset overlay selection when the overlay appears or changes URL.
   useEffect(() => {
@@ -293,7 +293,7 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
   }
 
   // Handle text changes: detect if edits overlap any capsule and remove broken ones.
-  const handleInputChange = (newValue: string) => {
+  const handleInputChange = (newValue: string, editCursorPos?: number) => {
     const oldValue = inputValueRef.current
 
     if (capsulesRef.current.length === 0) {
@@ -317,6 +317,23 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
     }
 
     // The edit replaced oldValue[diffStart..oldEnd) with newValue[diffStart..newEnd).
+
+    // Use the cursor position to disambiguate where the edit actually occurred. The
+    // text-diff algorithm attributes the edit to the end of the matching prefix, which
+    // is wrong when editing within a run of identical characters (e.g., spaces before a
+    // capsule whose leading char is also a space). The cursor position after the edit
+    // tells us exactly where the edited region ends in the new value.
+    if (editCursorPos !== undefined && editCursorPos < newEnd) {
+      const insertedLen = newEnd - diffStart
+      const deletedLen = oldEnd - diffStart
+      const cursorBasedStart = editCursorPos - insertedLen
+      if (cursorBasedStart >= 0) {
+        diffStart = cursorBasedStart
+        newEnd = editCursorPos
+        oldEnd = cursorBasedStart + deletedLen
+      }
+    }
+
     const isPureInsertion = oldEnd === diffStart
 
     // If the insertion (no deletion) landed inside a capsule, reject the edit.
@@ -581,7 +598,7 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
             <TextArea
               value={inputValue}
               onChange={(e) => {
-                handleInputChange(e.target.value)
+                handleInputChange(e.target.value, e.target.selectionStart)
                 // Re-check URL detection after text changes (cursor position updates on next tick).
                 requestAnimationFrame(handleCursorChange)
               }}
