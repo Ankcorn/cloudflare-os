@@ -252,7 +252,6 @@ export type AiModelConfig = {
 // the model ID should be used both for `AiModelConfig.model` and `AiChatAuthorInfo.id`.
 export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
   "anthropic": {
-    "claude-haiku-4-5": "Claude Haiku 4.5",
     "claude-sonnet-4-6": "Claude Sonnet 4.6",
     "claude-opus-4-6": "Claude Opus 4.6",
   },
