@@ -496,6 +496,12 @@ class OverseerImpl implements AgentHooks {
       return {
         // TODO: compatibility date configuration
         compatibilityDate: "2026-02-01",
+        compatibilityFlags: [
+          // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
+          //   This should soon no longer require "experimental".
+          "experimental",
+        ],
+        allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
         mainModule: "server.js",
         modules,
         env: this.getEnvForLoader({from: "gadget", chatId}),
@@ -1438,9 +1444,16 @@ class OverseerImpl implements AgentHooks {
 
       return {
         compatibilityDate: "2026-02-01",
-        // disallow_importable_env also disallows importable ctx.exports, to prevent the code
-        // from calling itself in a loop.
-        compatibilityFlags: ["disallow_importable_env"],
+        compatibilityFlags: [
+          // disallow_importable_env also disallows importable ctx.exports, to prevent the code
+          // from calling itself in a loop.
+          "disallow_importable_env",
+
+          // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
+          //   This should soon no longer require "experimental".
+          "experimental",
+        ],
+        allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
         mainModule: "harness.js",
         modules: {
           "harness.js": CODE_MODE_HARNESS,
