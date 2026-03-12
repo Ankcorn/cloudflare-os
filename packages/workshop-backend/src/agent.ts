@@ -1076,6 +1076,9 @@ export async function runAgent(
     messages: modelMessages,
     abortSignal,
     maxOutputTokens,
+    providerOptions: {
+      anthropic: { thinking: { type: 'adaptive' } },
+    },
 
     // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
     //   you want to support multiple steps at all? What if you don't want to set a limit?
