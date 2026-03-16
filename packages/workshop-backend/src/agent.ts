@@ -2,6 +2,7 @@ import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSp
 import * as Y from "yjs";
 import { generateText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
+import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -16,8 +17,18 @@ export type AiChatAgentContext = {
   props?: unknown;
 };
 
+// Describes a capsule entry — either a gatekeeper reference or a value capsule from a
+// agent callback.
+export type CapsuleEntry =
+  | { type: "gatekeeper"; gatekeeperId: number }
+  | { type: "value"; messageSequence: number };
+
 // Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
 // dependencies.
+// TODO(cleanup): This is getting a bit large, and there's a lot of state that is passed into the
+//   agent just so that it can be passed back to these hooks, like `chatId`. We could probably
+//   factor out some sort of chat context object here -- maybe merge with LiveChatContext in
+//   overseer.ts?
 export interface AgentHooks {
   getChatAgentContext(chatId: number): AiChatAgentContext;
   buildYDoc(version: number | "current"): {ydoc: Y.Doc, version: number};
@@ -27,7 +38,9 @@ export interface AgentHooks {
   saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
   executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
-                  capsules?: number[]): Promise<string>;
+                  initiator: AiChatAuthorInfo, initiatorModelId: string,
+                  capsules?: CapsuleEntry[]): Promise<string>;
+  resolveAgentCallback(chatId: number, sequence: number, value: unknown): void;
   consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
@@ -127,7 +140,8 @@ export async function runAgent(
     chatId: number,
     author: AiChatAuthorInfo,
     chatMessages: AiChatMessage[],
-    abortSignal: AbortSignal): Promise<void> {
+    abortSignal: AbortSignal,
+    initiator: AiChatAuthorInfo): Promise<void> {
   // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
   // this session.
   let ydoc: Y.Doc | undefined;
@@ -190,8 +204,8 @@ export async function runAgent(
   // Map sequence numbers to change IDs.
   let changeIdMap = new Map<number, number>();
 
-  // Map capsule indices to gatekeeper IDs.
-  let capsules: number[] | undefined;
+  // Map capsule indices to their entries (gatekeeper refs or value capsules).
+  let capsules: CapsuleEntry[] | undefined;
 
   // Map gatekeeper IDs that are already in `capsules` back to their index.
   let seenCapsuleGatekeeperIds = new Map<number, number>();
@@ -217,7 +231,7 @@ export async function runAgent(
             if (idx === undefined) {
               capsules = capsules ?? [];
               idx = capsules.length;
-              capsules.push(capsule.gatekeeperId);
+              capsules.push({ type: "gatekeeper", gatekeeperId: capsule.gatekeeperId });
               seenCapsuleGatekeeperIds.set(capsule.gatekeeperId, idx);
             }
 
@@ -227,6 +241,13 @@ export async function runAgent(
           }
           parts.push(content.slice(pos));
           content = parts.join("");
+        }
+
+        if (msg.message === "") {
+          // Anthropic's API will throw an error if you try to send it an empty message.
+          // Annoyingly, though, Claude will sometimes produce empty messages. Anyway, let's just
+          // drop the message from the log...
+          continue;
         }
 
         let modelMessage: ModelMessage;
@@ -318,10 +339,20 @@ export async function runAgent(
                   let name = toolCall.input.name;
                   let value: string;
                   if (typeof name === "number") {
-                    if (!capsules || capsules[name] === undefined) {
+                    let entry = capsules?.[name];
+                    if (!entry) {
                       throw new Error(`No such capsule binding env[${name}].`);
-                    } else {
-                      value = await hooks.describeCapsule(`env[${name}]`, capsules[name]);
+                    } else switch (entry.type) {
+                      case "gatekeeper":
+                        value = await hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
+                        break;
+                      case "value":
+                        value = `env[${name}] is a value capsule containing agent callback ` +
+                            `arguments. Access it directly as env[${name}] in executeCode.`;
+                        break;
+                      default:
+                        entry satisfies never;
+                        value = "";  // make TS happy below
                     }
                   } else {
                     value = await hooks.describeBinding(name);
@@ -355,6 +386,12 @@ export async function runAgent(
                   };
                   break;
                 case "reportOutcome":
+                  toolOutput = {
+                    type: "json",
+                    value: {acknowledged: true},
+                  }
+                  break;
+                case "return":
                   toolOutput = {
                     type: "json",
                     value: {acknowledged: true},
@@ -438,6 +475,21 @@ export async function runAgent(
             },
           }]
         });
+        break;
+      }
+
+      case "agentCallback": {
+        // Assign a capsule index for this callback's args.
+        capsules = capsules ?? [];
+        let capsuleIdx = capsules.length;
+        capsules.push({ type: "value", messageSequence: msg.sequence });
+
+        let content =
+            `A callback was received: \`self.${msg.methodName}()\`\n\n` +
+            `Arguments (env[${capsuleIdx}]):\n${msg.argsSummary}\n\n` +
+            `Access the full data as \`env[${capsuleIdx}]\` in executeCode.`;
+
+        modelMessages.push({ role: "user", content });
         break;
       }
 
@@ -736,10 +788,20 @@ export async function runAgent(
       execute: async ({name}, {toolCallId}) => {
         try {
           if (typeof name === "number") {
-            if (!capsules || capsules[name] === undefined) {
+            let entry = capsules?.[name];
+            if (!entry) {
               throw new Error(`No such capsule binding env[${name}].`);
-            } else {
-              return await hooks.describeCapsule(`env[${name}]`, capsules[name]);
+            } else switch (entry.type) {
+              case "gatekeeper":
+                return await hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
+              case "value":
+                // TODO: Maybe replay the value's summary? Better yet, can we obtain the argumnets'
+                //     types from somewhere? (Don't forget to update the replay code, too.)
+                return `env[${name}] is a value capsule containing agent callback ` +
+                    `arguments. Access it directly as env[${name}] in executeCode.`;
+              default:
+                entry satisfies never;
+                return "";  // never actually happens
             }
           } else {
             return await hooks.describeBinding(name);
@@ -819,14 +881,20 @@ export async function runAgent(
       }),
       execute: ({capsuleId, bindingName}, {toolCallId}) => {
         try {
-          if (!capsules || capsules[capsuleId] === undefined) {
+          let entry = capsules?.[capsuleId];
+          if (!entry) {
             throw new Error(`No such capsule binding env[${capsuleId}].`);
+          }
+          if (entry.type !== "gatekeeper") {
+            // TODO: Allow saveCapsuleAsBinding for value capsules? Why not?
+            throw new Error(`env[${capsuleId}] is a value capsule (agent callback args), ` +
+                `not a gatekeeper resource. Only gatekeeper capsules can be saved as bindings.`);
           }
           if (!/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$/.test(bindingName)) {
             throw new Error(
                 "Inappropriate binding name. Binding names should be ALL_CAPS_WITH_UNDERSCORES.");
           }
-          hooks.saveCapsuleAsBinding(capsules[capsuleId], bindingName);
+          hooks.saveCapsuleAsBinding(entry.gatekeeperId, bindingName);
           return {success: true};
         } catch (error) {
           toolCallNotes.set(toolCallId, {
@@ -852,25 +920,33 @@ export async function runAgent(
           "Sometimes user messages may contain text like `[Resource Title](env[3])`. " +
           "This is called a \"capsule\". When you see this, it means that the user has " +
           "granted you access to an external resource for use within this chat session. " +
-          "You may access these bindings within your function executed with this tool.",
+          "You may access these bindings within your function executed with this tool.\n" +
+          "\n" +
+          "The function also receives a `self` parameter which is a magic object that points " +
+          "back to this chat thread. Calling any method on `self`, like `self.foo(123)`, " +
+          "delivers a callback message to this chat and activates you to respond. `self` can be " +
+          "passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV " +
+          "storage for long-term callbacks. When a agent callback is received, its arguments " +
+          "are placed directly in `env[N]` as a capsule.",
       inputSchema: z.object({
         code: z.string().describe(
             "Code to execute. This must be a complete self-contained JavaScript module " +
             "which exports a single async function, like so:\n" +
             "\n" +
             "```\n" +
-            "export default async function(env, ctx) {\n" +
+            "export default async function(self, env, ctx) {\n" +
             "  // ... code to execute ...\n" +
             "}\n" +
             "```\n" +
             "\n" +
             "`env` and `ctx` are the usual objects passed to Cloudflare Workers event " +
             "handlers. `env` contains the bindings, and `ctx` contains various functions " +
-            "and information related to the execution context."),
+            "and information related to the execution context. `self` is a magic object " +
+            "that points back to this chat thread."),
       }),
       execute: async ({code}, {toolCallId}) => {
         try {
-          let output = await hooks.executeCodeMode(chatId, code, agentContext, capsules);
+          let output = await hooks.executeCodeMode(chatId, code, agentContext, initiator, author.id, capsules);
           toolCallNotes.set(toolCallId, {
             output: `${output}`
           });
@@ -883,6 +959,31 @@ export async function runAgent(
         }
       }
     }),
+
+    return: tool({
+      description: "Returns a value to the caller of a agent callback. When a callback is " +
+          "received on `self` (e.g. `self.onUpdate(data)`), the caller is blocked waiting " +
+          "for a response. Use this tool to unblock the caller and provide a return value. " +
+          "The capsuleIndex identifies which callback to return for (the N in the env[N] " +
+          "reference shown in the callback message). Note: after calling return for a " +
+          "callback, any transient RPC stubs in that callback's args become invalid. " +
+          "If you don't call this tool, the caller receives undefined when your turn ends.",
+      inputSchema: z.object({
+        value: z.any().describe("The value to return to the caller."),
+        capsuleIndex: z.number().describe(
+            "The capsule index of the callback to return for (the N in env[N])."),
+      }),
+      execute: ({value, capsuleIndex}, {toolCallId}) => {
+        // Map the agent-facing capsule index back to the message sequence number,
+        // which is how the Overseer tracks callbacks.
+        let entry = capsules?.[capsuleIndex];
+        if (!entry || entry.type !== "value") {
+          throw new Error(`env[${capsuleIndex}] is not a agent callback capsule.`);
+        }
+        hooks.resolveAgentCallback(chatId, entry.messageSequence, value);
+        return {acknowledged: true};
+      }
+    }),
   };
 
   if (agentContext.spawnerConfig) {
@@ -890,6 +991,7 @@ export async function runAgent(
     tools = {
       describeBinding: tools.describeBinding,
       executeCode: tools.executeCode,
+      return: tools.return,
 
       reportOutcome: tool({
         description:
@@ -1044,4 +1146,124 @@ export async function runAgent(
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
     },
   });
+}
+
+// =======================================================================================
+// Agent callback args processing utilities.
+
+// Checks if a value is a plain object (not a class instance, not a native type).
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  let proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+// Produces the storable version of callback args: deep copy where NativeRpcStub instances
+// are replaced with TransientStubLoopback Fetchers. ServiceStub/Fetcher instances and other
+// native types are kept as-is. Throws if depth exceeds 64.
+//
+// Each transient RpcStub found is collected into `transientStubs` (side output). The
+// `replaceTransientStub` callback creates a TransientStubLoopback Fetcher for the given
+// stub index.
+export function makeStorableArgs(
+    value: unknown,
+    replaceTransientStub: (stubIndex: number) => unknown,
+    // TODO: When NativeStub<unknown> works, change `any[]` to `NativeStub<unknown>[]`.
+    transientStubs: any[],
+    depth: number = 0): unknown {
+  if (depth > 64) {
+    throw new Error("Agent callback arguments exceed maximum nesting depth of 64.");
+  }
+
+  // Transient RPC stubs → collect and replace with loopback.
+  if (value instanceof NativeRpcStub) {
+    let index = transientStubs.length;
+    // @ts-ignore RPC types cause excessively deep instantiation.
+    transientStubs.push(value);
+    return replaceTransientStub(index);
+  }
+
+  if (Array.isArray(value)) {
+    return (value as unknown[]).map(
+        item => makeStorableArgs(item, replaceTransientStub, transientStubs, depth + 1));
+  }
+
+  // Recurse into plain objects.
+  if (isPlainObject(value)) {
+    let result: Record<string, unknown> = {};
+    for (let key of Object.keys(value)) {
+      result[key] = makeStorableArgs(
+          value[key], replaceTransientStub, transientStubs, depth + 1);
+    }
+    return result;
+  }
+
+  // Everything else (primitives, Dates, Uint8Arrays, Fetchers, etc.) kept as-is.
+  // TODO: Handle streams? Request? Response? Map? Set?
+  return value;
+}
+
+// Produces a depth-limited summary string for callback args. Stubs and large content are
+// replaced with placeholders.
+export function summarizeArgs(args: unknown[]): string {
+  return args.map((arg, i) => `[${i}]: ${summarizeValue(arg, 0)}`).join("\n");
+}
+
+// Summarize the content of params passed to an agent callback. This is presented to the agent
+// in the chat log, but the agent can use executeCode to get access to the full value. If the
+// value has a lot of data, we don't want to bloat the agent's context with it, but we also don't
+// want to truncate too execessively as it forces the agent to perform round trips with
+// executeCode.
+// TODO: summarizeValue() can probably be optimized further. We also need to experiment with how
+//   to best explain to the agent that it's seeing something truncated -- I've noticed the "..."
+//   confuses it a bit.
+function summarizeValue(value: unknown, depth: number): string {
+  if (depth > 3) return "...";
+
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+
+  switch (typeof value) {
+    case "string":
+      if (value.length > 100) return JSON.stringify(value.slice(0, 100) + "...");
+      return JSON.stringify(value);
+    case "number":
+    case "boolean":
+      return String(value);
+    case "bigint":
+      return `${value}n`;
+  }
+
+  if (value instanceof NativeRpcStub) return "RpcStub";
+  if (value instanceof Date) return `Date("${value.toISOString()}")`;
+  if (value instanceof Uint8Array) return `Uint8Array(${value.length})`;
+
+  // TODO: Export ServiceStub from cloudflare:workers so we can represent it here. For now we
+  //   guess that it's a stub if it has the constructor name "Fetcher".
+  if (typeof value === "object" && value.constructor?.name === "Fetcher") {
+    return "PersistentRpcStub";
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    let maxItems = 30;
+    let items = value.slice(0, maxItems).map(v => summarizeValue(v, depth + 1));
+    if (value.length > maxItems) items.push(`...${value.length - maxItems} more`);
+    return `[${items.join(", ")}]`;
+  }
+
+  if (isPlainObject(value)) {
+    let keys = Object.keys(value);
+    if (keys.length === 0) return "{}";
+    let maxKeys = 15;
+    let entries = keys.slice(0, maxKeys).map(
+        k => `${k}: ${summarizeValue(value[k], depth + 1)}`);
+    if (keys.length > maxKeys) entries.push(`...${keys.length - maxKeys} more`);
+    return `{${entries.join(", ")}}`;
+  }
+
+  // Other native objects
+  if (typeof value === "object") return `${value.constructor?.name ?? "object"}`;
+
+  return String(value);
 }

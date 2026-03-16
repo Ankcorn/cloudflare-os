@@ -797,6 +797,18 @@ export type AiChatMessageBody = {
   // chat log sent to the LLM so the agent does not react to it.
   type: "error";
   message: string;
+} | {
+  // Indicates that a callback was received on the agent's `self` object. When the agent uses
+  // `executeCode`, the executed code receives a `self` parameter. Calling any method on `self`
+  // (e.g., `self.onUpdate(data)`) delivers a callback message back to this chat thread and
+  // activates the agent to respond.
+  type: "agentCallback";
+
+  // The method name that was called on `self`.
+  methodName: string;
+
+  // A depth-limited summary string of the arguments for the agent's context window.
+  argsSummary: string;
 };
 
 // Describes a tool call performed by an AI agent as part of a message.
@@ -857,6 +869,12 @@ export type AiToolCall = {
   toolName: "reportOutcome";
   input: {
     success: boolean
+  };
+} | {
+  toolName: "return";
+  input: {
+    value: unknown;
+    capsuleIndex: number;
   };
 } | {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
