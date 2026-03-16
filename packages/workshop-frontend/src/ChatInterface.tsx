@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
-import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined, PaperClipOutlined } from '@ant-design/icons'
+import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined, PaperClipOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import ReactMarkdown from 'react-markdown'
 import * as Y from 'yjs'
@@ -2201,7 +2201,42 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                           </div>
                         </div>
                       )
-                    })() : null}
+                    })() : msg.type === 'agentCallback' ? (
+                      <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                        <div
+                          style={{
+                            fontSize: '12px',
+                            padding: '8px 12px',
+                            backgroundColor: '#f0f5ff',
+                            border: '1px solid #adc6ff',
+                            borderRadius: '4px',
+                          }}
+                        >
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            color: '#1d39c4',
+                            fontWeight: 'bold',
+                            marginBottom: '4px',
+                          }}>
+                            <ThunderboltOutlined />
+                            self.{msg.methodName}() callback received
+                          </div>
+                          <pre style={{
+                            margin: 0,
+                            fontSize: '11px',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            maxHeight: '120px',
+                            overflow: 'auto',
+                            color: '#595959',
+                          }}>
+                            {msg.argsSummary}
+                          </pre>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 ))}
                 {/* Typing indicator when agent is active */}
