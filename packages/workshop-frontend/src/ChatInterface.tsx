@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, Fragment, type ReactNode } from 'react'
 import { Input, Button, List, Typography, Space, Card, Empty, Spin, message, Modal, Select, Tag, Tooltip } from 'antd'
 import { SendOutlined, StopOutlined, MessageOutlined, RobotOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, CheckCircleOutlined, ReloadOutlined, ExclamationCircleOutlined, PaperClipOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -531,12 +531,12 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Text type="secondary" style={{ fontSize: '12px' }}>Model:</Text>
           <Select
-            value={selectedModel}
-            onChange={onModelChange}
+            value={selectedModel ?? ''}
+            onChange={v => onModelChange(v === '' ? null : v)}
             style={{ width: 200 }}
             size="small"
             options={[
-              { label: '(none)', value: null },
+              { label: '(none)', value: '' },
               ...models.map(model => ({ label: model.name, value: model.id }))
             ]}
           />
@@ -856,6 +856,8 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
 
   // Ref for auto-scrolling messages
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const isScrolledToBottomRef = useRef(true)
 
   // Force a re-render when cache is updated
   const forceUpdate = () => setUpdateCounter(prev => prev + 1)
@@ -901,10 +903,26 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     }
   }, [isAgentActive, selectedChatId])
 
-  // Auto-scroll to bottom when messages change
+  // Track whether user is scrolled to the bottom of the messages area
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    // Consider "at bottom" if within 30px of the end
+    isScrolledToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30
+  }, [])
+
+  // Auto-scroll to bottom when messages change, but only if already at bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (isScrolledToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [currentMessages])
+
+  // Always scroll to bottom when switching chats
+  useEffect(() => {
+    isScrolledToBottomRef.current = true
+    messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+  }, [selectedChatId])
 
   // Initialize title input when selecting a chat
   useEffect(() => {
@@ -1610,7 +1628,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
           </div>}
 
           {/* Messages area */}
-          <div style={{
+          <div ref={messagesContainerRef} onScroll={handleMessagesScroll} style={{
             flex: 1,
             overflowY: 'auto',
             display: 'flex',

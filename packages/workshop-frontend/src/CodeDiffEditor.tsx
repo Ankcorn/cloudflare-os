@@ -174,6 +174,8 @@ export default function CodeDiffEditor({
         language={getLanguage(filename)}
         original=""
         modified=""
+        keepCurrentOriginalModel={true}
+        keepCurrentModifiedModel={true}
         onMount={handleEditorDidMount}
         theme="vs"
         options={{

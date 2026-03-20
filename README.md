@@ -2,7 +2,7 @@
 
 1. Install pnpm if you haven't already: `npm install -g pnpm`
 2. Run `pnpm install`.
-3. Run `pnpm build`. THIS WILL FAIL. Don't worry it did what it needed to before failing.
+3. Run `pnpm build`.
 4. Start the server: `pnpm run dev-server`
 5. Start the client: `pnpm run dev-client`
 6. Visit `localhost:3000`

@@ -155,8 +155,12 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
   // Effect to handle iframe RPC handshake
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
-      // Only handle messages from our iframe
-      if (event.source !== iframeRef.current?.contentWindow) {
+      // Only handle messages from our iframe. As an extra level of paranoia, also make sure it's
+      // from the null origin, just in case somehow the frame managed to browse away (though that
+      // should be blocked). Yes, the null origin is identified by the string value "null", not the
+      // JS `null`.
+      if (event.source !== iframeRef.current?.contentWindow ||
+          event.origin !== "null") {
         return
       }
 
@@ -279,6 +283,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         ref={iframeRef}
         srcDoc={sandboxedHtml}
         style={{
+          display: 'block',
           width: '100%',
           height: '100%',
           border: 'none'
