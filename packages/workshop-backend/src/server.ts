@@ -74,12 +74,36 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
-  #openGadgetInternal(id: string, shareKey?: string): Promise<NativeRpcStub<Overseer>> {
+  async #openGadgetInternal(id: string, shareKey?: string): Promise<NativeRpcStub<Overseer>> {
     let userId = this.user.id.toString();
     let profileId = this.user.id.name!;
     let overseer = this.overseers.get(this.overseers.idFromString(id));
 
-    return overseer.open(userId, profileId, shareKey);
+    // HACK: Detect loss of the connection to the DO by:
+    // - Pass a callback to overseer.open() which it should call when the session is disposed.
+    // - Detect if the callback itself is disposed before being called, suggesting the connection
+    //   was lost.
+    // If the connection is lost, we abort this I/O context, which kills the WebSocket from the
+    // client, forcing it to engage its reconnect logic, which should recover.
+    // TODO: Implement onRpcBroken() in the built-in RPC system, matching Cap'n Web, and use that
+    //   instead.
+    // TODO: Consider how to reconnect to one DO without resetting the whole WebSocket. Probably
+    //   needs new code on the client side. However, typically a client only ever opens one
+    //   gadget at a time (since each tab is a separate client), so it's probably fine for now.
+    let closed = false;
+    let started = false;
+    let notifyClosed = () => {
+      closed = true;
+    };
+    (notifyClosed as any)[Symbol.dispose] = () => {
+      if (started && !closed) {
+        this.ctx.abort(new Error("lost connection to gadget DO"));
+      }
+    }
+
+    let result = await overseer.open(userId, profileId, notifyClosed, shareKey);
+    started = true;
+    return result;
   }
 
   async openGadget(id: string, shareKey?: string): Promise<RpcStub<Overseer>> {

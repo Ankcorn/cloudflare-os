@@ -43,17 +43,6 @@ interface CodeModeEntrypoint extends WorkerEntrypoint {
   run(self?: unknown): Promise<void>;
 }
 
-// Work around a Workers Runtime bug introduced in: https://github.com/cloudflare/workerd/pull/6090
-// Reflect.getOwnPropertyDescriptor(stub, anything) incorrectly returns non-null for RPC
-// properties, even though Object.hasOwn(target, prop) returns false. When wrapped in a Proxy,
-// though, hasOwn() is implemented in terms of getOwnPropertyDescriptor(), so it then incorrectly
-// returns true, which breaks RPC. We can fix it by intercepting getOwnPropertyDescriptor() as
-// follows.
-function getOwnPropertyDescriptorWorkaround(target: any, prop: string | symbol) {
-  if (!Object.hasOwn(target, prop)) return undefined;
-  return Reflect.getOwnPropertyDescriptor(target, prop);
-}
-
 // =======================================================================================
 
 // Fixed 256-bit key used to domain-separate share key hashes from other hashes in the system.
@@ -679,7 +668,6 @@ class OverseerImpl implements AgentHooks {
       getPrototypeOf(target) {
         return RpcTarget.prototype;
       },
-      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
 
     // Explicitly construct at RpcStub around the proxy to work around a workerd bug where
@@ -710,7 +698,6 @@ class OverseerImpl implements AgentHooks {
         getPrototypeOf(target) {
           return RpcTarget.prototype;
         },
-        getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
       });
     } else {
       throw new Error("Hook is not connected.");
@@ -898,7 +885,11 @@ class OverseerImpl implements AgentHooks {
 
   async #bumpLastActiveImpl() {
     try {
-      if (!this.ownerId) throw new Error("not created, can't bump?");
+      if (!this.ownerId) {
+        // Gadget must have been deleted, ignore.
+        return;
+      }
+
       let owner = this.users.get(this.users.idFromString(this.ownerId));
 
       this.#lastActiveTimeKnownToUserDo = this.#lastActiveTimeKnownToUs!;
@@ -1857,7 +1848,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl = new OverseerImpl(ctx, env);
   }
 
-  async open(userId: string, profileId: string, shareKey?: string): Promise<Overseer> {
+  // `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
+  // by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
+  async open(userId: string, profileId: string,
+             notifyClosed: NativeRpcStub<() => void>,
+             shareKey?: string): Promise<Overseer> {
     if (!this.impl.ownerId) {
       // This Overseer hasn't been initialized yet.
       await this.ctx.blockConcurrencyWhile(async () => {
@@ -1901,10 +1896,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     if (isOwner) {
       this.impl.ownerProfileId = profileId;
     }
-
-    let notifyDeleted = () => {
-      this.impl.ownerId = undefined;
-    };
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
     let clientUser = isOwner
@@ -1961,7 +1952,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     return new OverseerClientInterface(
-        this.impl, owner, clientUser, profileId, isOwner, notifyDeleted);
+        this.impl, owner, clientUser, profileId, isOwner, notifyClosed.dup());
   }
 
   // Initialize this gadget from a blueprint's code snapshot. Called by
@@ -2124,7 +2115,6 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
       getPrototypeOf(target) {
         return WorkerEntrypoint.prototype;
       },
-      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
   }
 
@@ -2161,7 +2151,6 @@ export class GatekeeperHookLoopback
       getPrototypeOf(target) {
         return WorkerEntrypoint.prototype;
       },
-      getOwnPropertyDescriptor: getOwnPropertyDescriptorWorkaround,
     });
   }
 
@@ -2362,8 +2351,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               private clientUser: DurableObjectStub<UserDurableObject>,
               private clientProfileId: string,
               private isOwner: boolean,
-              private notifyDeleted: () => void) {
+              private notifyClosed: NativeRpcStub<() => void>) {
     super();
+  }
+
+  [Symbol.dispose]() {
+    this.notifyClosed();
+    this.notifyClosed[Symbol.dispose]();
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
@@ -2442,7 +2436,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
-      this.notifyDeleted();
+      this.impl.ownerId = undefined;
     });
   }
 
