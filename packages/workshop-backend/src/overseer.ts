@@ -1830,13 +1830,16 @@ class OverseerImpl implements AgentHooks {
   // The cache is populated eagerly when the owner calls open(), but if only collaborators
   // have opened this instance we fetch it via RPC on first use.
   async getOwnerProfileId(): Promise<string> {
-    if (!this.ownerProfileId) {
-      if (!this.ownerId) throw new Error("Gadget is not initialized.");
-      let ownerDo = this.users.get(this.users.idFromString(this.ownerId));
-      let ownerProfile = await ownerDo.whoami();
-      this.ownerProfileId = ownerProfile.id;
+    const ownerProfileId = this.ownerProfileId;
+    if (ownerProfileId !== undefined) {
+      return ownerProfileId;
     }
-    return this.ownerProfileId;
+
+    if (!this.ownerId) throw new Error("Gadget is not initialized.");
+    const ownerDo = this.users.get(this.users.idFromString(this.ownerId));
+    const ownerProfile = await ownerDo.whoami();
+    this.ownerProfileId = ownerProfile.id;
+    return ownerProfile.id;
   }
 }
 
@@ -1946,9 +1949,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // (or is refreshed on) their home page.
       let title = this.impl.storage.title.get();
       let gadgetId = this.impl.ctx.id.toString();
-      owner.whoami().then(ownerProfile => {
-        clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile);
-      }).catch(err => console.error(err));
+      void (async () => {
+        try {
+          const ownerProfile = await owner.whoami();
+          clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile);
+        } catch (err) {
+          console.error(err);
+        }
+      })();
     }
 
     return new OverseerClientInterface(
