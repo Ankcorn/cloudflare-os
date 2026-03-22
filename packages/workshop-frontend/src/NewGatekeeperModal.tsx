@@ -50,8 +50,6 @@ export default function NewGatekeeperModal({
   // Agent Spawner tab state
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
-  const [spawnerPropsTypeName, setSpawnerPropsTypeName] = useState('')
-  const [spawnerPropsTsTypes, setSpawnerPropsTsTypes] = useState('')
   const [spawnerLimitEnv, setSpawnerLimitEnv] = useState(false)
   const [spawnerEnv, setSpawnerEnv] = useState<string[]>([])
 
@@ -67,8 +65,6 @@ export default function NewGatekeeperModal({
       setResourceUrlInput('')
       setSelectedModelId(undefined)
       setSpawnerDisplayName('')
-      setSpawnerPropsTypeName('')
-      setSpawnerPropsTsTypes('')
       setSpawnerLimitEnv(false)
       setSpawnerEnv([])
       // Load models from the user's account (doesn't require an overseer).
@@ -151,10 +147,6 @@ export default function NewGatekeeperModal({
       displayName: spawnerDisplayName.trim(),
       modelId: spawnerModelId,
     }
-    const trimmedTypeName = spawnerPropsTypeName.trim()
-    if (trimmedTypeName) config.propsTypeName = trimmedTypeName
-    const trimmedTsTypes = spawnerPropsTsTypes.trim()
-    if (trimmedTsTypes) config.propsTsTypes = trimmedTsTypes
     if (spawnerLimitEnv) config.env = spawnerEnv
 
     setCreating(true)
@@ -345,34 +337,6 @@ export default function NewGatekeeperModal({
                         value: model.id
                       }))
                     ]}
-                  />
-                </div>
-
-                <div style={{ marginBottom: '12px' }}>
-                  <Text strong style={{ display: 'block', marginBottom: 4 }}>Props Type Name</Text>
-                  <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
-                    TypeScript type name for the props passed to each spawned agent. Leave
-                    blank to default to <Text code>{'{}'}</Text>.
-                  </Text>
-                  <Input
-                    placeholder="{}"
-                    value={spawnerPropsTypeName}
-                    onChange={(e) => setSpawnerPropsTypeName(e.target.value)}
-                  />
-                </div>
-
-                <div style={{ marginBottom: '12px' }}>
-                  <Text strong style={{ display: 'block', marginBottom: 4 }}>Props Type Declarations</Text>
-                  <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
-                    TypeScript type declarations that define the props type above. These will be
-                    available to the agent and to code that calls the spawner.
-                  </Text>
-                  <Input.TextArea
-                    placeholder={'type SpawnerProps = {\n  greeter: Service<Greeter>\n}'}
-                    value={spawnerPropsTsTypes}
-                    onChange={(e) => setSpawnerPropsTsTypes(e.target.value)}
-                    rows={4}
-                    style={{ fontFamily: 'monospace', fontSize: 12 }}
                   />
                 </div>
 

@@ -1,57 +1,29 @@
 // Binding which spawns agents.
-export interface AgentSpawnerBinding<Props = {}> {
-  // Spawn an agent to perform a task. Returns as soon as the agent has been successfully started
-  // (does not wait for it to complete).
+export interface AgentSpawnerBinding {
+  // Spawn an agent to perform a task.
   //
-  // `title` is the title of the new agent chat which will appear in the gadget's chat history.
+  // `title` is the title of the new agent chat which will appear in the Gadget's chat history.
   //
   // `prompt` tells the agent what to do. This effectively creates a new AI agent chat (which the
   // user will be able to see in the conversation history) beginning with this prompt as the first
   // message.
+  spawn(title: string, prompt: string): Promise<void>;
+
+  // Like spawn(), but the agent does not start immediately. The chat thread is initialized with
+  // the first message, but then waits for a call.
   //
-  // `props` is an object which will be made available to the agent. When the agent uses its
-  // `executeCode` tool to run arbitrary JavaScript code, the code will be able to access this
-  // object via `ctx.props`. `props` must be serializable according to the usual rules for
-  // `ctx.props` serialization: it can contain any plain data type normally supported by Workers
-  // RPC, as well as service binding stubs.
+  // This method returns a special stub that delivers calls to the new chat thread. This behaves
+  // exactly like the `self` reference available to the `executeCode` tool, but targets the
+  // newly-spawned agent. You may call any method name on this stub; the method's name and
+  // parameters will be delivered to the agent, and it will then begin executing. The call returns
+  // a promise that resolves when the agent finishes its turn, or when the agent explicitly
+  // returns a value.
   //
-  // Keep in mind that a worker can reference its own entrypoints as service bindings via
-  // `ctx.exports` (or `this.ctx.exports` inside a `WorkerEntrypoint` or `DurableObject`
-  // implementation). `ctx.exports` contains a loopback service binding corresponding to every
-  // top-level `WorkerEntrypoint` class exported by a worker. You can specialize this service
-  // binding with `props` that get passed back to it.
+  // The `prompt` message should explain to the agent what kind of calls to expect, perhaps even
+  // defining a TypeScript interface which the agent is meant to "implement".
   //
-  // For exmaple, imagine a spawner binding called `AGENT_SPAWNER` declared as
-  // `AgentSpawnerBinding<SpawnerProps>`, with these additional types:
-  //
-  //   type SpawnerProps = {
-  //     greeter: Service<Greeter>
-  //   }
-  //
-  //   // A service that creates friendly greetings for people, based on their name.
-  //   interface Greeter extends WorkerEntrypoint {
-  //     greet(name: string): Promise<string>;
-  //   }
-  //
-  // You could invoke the agent spawner providing it a `Greeter` callback like:
-  //
-  //   import { WorkerEntrypoint } from "cloudflare:workers";
-  //
-  //   // Define a hook entrypoint whose run() method spawns an agent.
-  //   export class AgentHook extends WorkerEntrypoint {
-  //     async run() {
-  //       let howdyGreeter = this.ctx.exports.Greeter({props: {greeting: "Howdy"}});
-  //       let prompt = "Please use the provided greeter, props.greeter, to greet the user.";
-  //       env.AGENT_SPAWNER.spawn(prompt, {greeter: howdyGreeter});
-  //     }
-  //   }
-  //
-  //   // Entrypoint that generates greetings. Can be configured with a custom greeting.
-  //   export class Greeter extends WorkerEntrypoint {
-  //     greet(name) {
-  //       let greeting = this.ctx.props.greeting || "Hello";
-  //       return `${greeting}, ${name}!`;
-  //     }
-  //   }
-  spawn(title: string, prompt: string, props: Props): Promise<void>;
+  // The returned stub can be stored in Durable Object storage in order to invoke the same agent
+  // again in the future. Of course, you should only reuse the same agent when continuing the same
+  // logical task; it's better to spawn a new agent for a new task.
+  spawnCallable(title: string, prompt: string): Promise<Fetcher<any>>;
 }

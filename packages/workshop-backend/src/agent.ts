@@ -12,9 +12,6 @@ export type AiChatAgentContext = {
   // If present, this chat was spawned using a spawner, and this was the spawner config at the
   // time.
   spawnerConfig?: AgentSpawnerConfig;
-
-  // If present, the `ctx.props` value for use with `executeCode`.
-  props?: unknown;
 };
 
 // Describes a capsule entry — either a gatekeeper reference or a value capsule from a
@@ -40,7 +37,8 @@ export interface AgentHooks {
   executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
                   initiator: AiChatAuthorInfo, initiatorModelId: string,
                   capsules?: CapsuleEntry[]): Promise<string>;
-  resolveAgentCallback(chatId: number, sequence: number, value: unknown): void;
+  activeAgentCallbackCount(chatId: number): number;
+  rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
@@ -130,8 +128,6 @@ Gadgets execute on a restricted and heavily-sandboxed variant of Cloudflare Work
 You were started programmatically by the Gadget to perform a task. The specific task will be described in the first message in this chat. The message is not directly from the user but rather from an automated system. If you receive any further messages after the first, then these additional messages are directly from a human user making additional requests regarding the task.
 
 Typically (but not always), you will need to use the \`executeCode\` tool to complete the task, invoking the available bindings (members of the env object) and other APIs available to you.
-
-Upon completion of your task, invoke the \`reportOutcome\` tool to indicate success or failure. One you have invoked the \`reportOutcome\` tool, you can end the conversation normally.
 `.trim();
 
 export async function runAgent(
@@ -141,7 +137,8 @@ export async function runAgent(
     author: AiChatAuthorInfo,
     chatMessages: AiChatMessage[],
     abortSignal: AbortSignal,
-    initiator: AiChatAuthorInfo): Promise<void> {
+    initiator: AiChatAuthorInfo,
+    callbackInitiated: boolean): Promise<void> {
   // On first use, we'll build a copy of the Y.Doc, then reuse it for further tool calls in
   // this session.
   let ydoc: Y.Doc | undefined;
@@ -347,8 +344,10 @@ export async function runAgent(
                         value = await hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
                         break;
                       case "value":
-                        value = `env[${name}] is a value capsule containing agent callback ` +
-                            `arguments. Access it directly as env[${name}] in executeCode.`;
+                        value = `env[${name}] is an agent callback capsule. ` +
+                            `Access the callback arguments as env[${name}].args in executeCode. ` +
+                            `Call env[${name}].resolve(value) to return a value, ` +
+                            `or env[${name}].reject(error) to reject with an error.`;
                         break;
                       default:
                         entry satisfies never;
@@ -379,23 +378,17 @@ export async function runAgent(
                     value: toolCall.output!,
                   };
                   break;
+                case "giveUp":
+                  toolOutput = {
+                    type: "json",
+                    value: {rejected: true},
+                  };
+                  break;
                 case "observeUserChanges":
                   toolOutput = {
                     type: "json",
                     value: {},
                   };
-                  break;
-                case "reportOutcome":
-                  toolOutput = {
-                    type: "json",
-                    value: {acknowledged: true},
-                  }
-                  break;
-                case "return":
-                  toolOutput = {
-                    type: "json",
-                    value: {acknowledged: true},
-                  }
                   break;
                 default:
                   toolCall satisfies never;
@@ -486,12 +479,21 @@ export async function runAgent(
 
         let content =
             `A callback was received: \`self.${msg.methodName}()\`\n\n` +
-            `Arguments (env[${capsuleIdx}]):\n${msg.argsSummary}\n\n` +
-            `Access the full data as \`env[${capsuleIdx}]\` in executeCode.`;
+            `Arguments (env[${capsuleIdx}].args):\n${msg.argsSummary}\n\n` +
+            `Access the full data as \`env[${capsuleIdx}].args\` in executeCode. ` +
+            `You MUST resolve or reject this callback using ` +
+            `\`env[${capsuleIdx}].resolve(value)\` or \`env[${capsuleIdx}].reject(error)\`. ` +
+            `The caller is blocked until you do so. Once you resolve or reject all open ` +
+            `callbacks, your turn will end immediately; be sure to complete everything ` +
+            `you need to do before that.`;
 
         modelMessages.push({ role: "user", content });
         break;
       }
+
+      case "agentNudge":
+        modelMessages.push({ role: "user", content: msg.text });
+        break;
 
       case "action":
       case "useGadget":
@@ -522,24 +524,6 @@ export async function runAgent(
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt.
 
-    let systemPromptProps: string = "";
-    let propsType = agentContext.spawnerConfig.propsTypeName;
-    if (propsType && propsType !== "{}") {
-      systemPromptProps =
-          "You have been provided with a 'ctx.props' object which provides APIs that you likely " +
-          "need to complete your task. This object is specific to the task you have been " +
-          "assigned, as opposed to the env bindings which are given to every agent. The " +
-          `ctx.props object has the following TypeScript type: ${propsType}`;
-
-      let tsTypes = agentContext.spawnerConfig.propsTsTypes;
-      if (tsTypes) {
-        systemPromptProps += "\n\n" +
-            "The ctx.props type refers to other TypeScript types. The following type definitions " +
-            "have been provided to help you understand the type of ctx.props:\n\n" +
-            "```\n" + tsTypes.trim() + "\n```";
-      }
-    }
-
     let bindingInfo = hooks.listBindingInfo(agentContext.spawnerConfig.env);
     let systemPromptBindings: string;
     if (bindingInfo.length == 0) {
@@ -553,7 +537,7 @@ export async function runAgent(
 
     // Split the system prompt into static and dynamic parts for better caching.
     modelMessages[0].content = SPAWNER_SYSTEM_PROMPT;
-    modelMessages[1].content = `${systemPromptProps}\n\n${systemPromptBindings}`;
+    modelMessages[1].content = systemPromptBindings;
   } else {
     // This is a regular coding agent.
 
@@ -926,8 +910,9 @@ export async function runAgent(
           "back to this chat thread. Calling any method on `self`, like `self.foo(123)`, " +
           "delivers a callback message to this chat and activates you to respond. `self` can be " +
           "passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV " +
-          "storage for long-term callbacks. When a agent callback is received, its arguments " +
-          "are placed directly in `env[N]` as a capsule.",
+          "storage for long-term callbacks. When an agent callback is received, it appears as " +
+          "`env[N]` with `.args` (the callback arguments), `.resolve(value)` (to return a " +
+          "value to the caller), and `.reject(error)` (to reject with an error).",
       inputSchema: z.object({
         code: z.string().describe(
             "Code to execute. This must be a complete self-contained JavaScript module " +
@@ -959,53 +944,31 @@ export async function runAgent(
         }
       }
     }),
-
-    return: tool({
-      description: "Returns a value to the caller of a agent callback. When a callback is " +
-          "received on `self` (e.g. `self.onUpdate(data)`), the caller is blocked waiting " +
-          "for a response. Use this tool to unblock the caller and provide a return value. " +
-          "The capsuleIndex identifies which callback to return for (the N in the env[N] " +
-          "reference shown in the callback message). Note: after calling return for a " +
-          "callback, any transient RPC stubs in that callback's args become invalid. " +
-          "If you don't call this tool, the caller receives undefined when your turn ends.",
-      inputSchema: z.object({
-        value: z.any().describe("The value to return to the caller."),
-        capsuleIndex: z.number().describe(
-            "The capsule index of the callback to return for (the N in env[N])."),
-      }),
-      execute: ({value, capsuleIndex}, {toolCallId}) => {
-        // Map the agent-facing capsule index back to the message sequence number,
-        // which is how the Overseer tracks callbacks.
-        let entry = capsules?.[capsuleIndex];
-        if (!entry || entry.type !== "value") {
-          throw new Error(`env[${capsuleIndex}] is not a agent callback capsule.`);
-        }
-        hooks.resolveAgentCallback(chatId, entry.messageSequence, value);
-        return {acknowledged: true};
-      }
-    }),
   };
+
+  // When the agent was started to handle callbacks, add the giveUp tool so it can bail out.
+  if (callbackInitiated) {
+    tools.giveUp = tool({
+      description: "Gives up on handling the current callbacks, rejecting all outstanding " +
+          "callbacks with an error. Use this if you cannot fulfill the callbacks after " +
+          "attempting to do so.",
+      inputSchema: z.object({
+        error: z.string().describe(
+            "Error message explaining why the callbacks cannot be fulfilled."),
+      }),
+      execute: ({error}) => {
+        hooks.rejectAllAgentCallbacks(chatId, error);
+        return {rejected: true};
+      }
+    });
+  }
 
   if (agentContext.spawnerConfig) {
     // Restrict to a narrower set of tools.
     tools = {
       describeBinding: tools.describeBinding,
       executeCode: tools.executeCode,
-      return: tools.return,
-
-      reportOutcome: tool({
-        description:
-            "Declares that your task is complete and reports whether it succeeded or failed.",
-        inputSchema: z.object({
-          success: z.boolean().describe(
-              "Pass true to indicate that the task was completed successfully, or false to " +
-              "indicate that something went wrong and that the user should investigate."),
-        }),
-        execute: ({success}, {toolCallId}) => {
-          // TODO: Actually pay attention to success value and potentially notify user.
-          return {acknowledged: true};
-        }
-      })
+      ...(callbackInitiated ? {giveUp: tools.giveUp} : {}),
     };
   }
 
@@ -1084,10 +1047,11 @@ export async function runAgent(
     //   you want to support multiple steps at all? What if you don't want to set a limit?
     // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
     //   anything.
-    // Note: I added reportOutcome as ending the conversation because some dumb models will go
-    //   into a loop of repeatly reporting the outcome instead of just ending the conversation
-    //   themselves.
-    stopWhen: [stepCountIs(30), hasToolCall("reportOutcome")],
+    stopWhen: [
+      stepCountIs(30),
+      // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
+      ...(callbackInitiated ? [() => hooks.activeAgentCallbackCount(chatId) === 0] : []),
+    ],
 
     tools,
 

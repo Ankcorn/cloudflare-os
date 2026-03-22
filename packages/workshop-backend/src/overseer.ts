@@ -32,15 +32,29 @@ import agent from "agent.js";
 
 export default class extends WorkerEntrypoint {
   verify() {}
-  async run(self) {
-    await agent(self, this.env, this.ctx);
+  async run(self, callbackResolvers) {
+    let env = this.env;
+    if (callbackResolvers) {
+      for (let [index, {resolve, reject}] of Object.entries(callbackResolvers)) {
+        env[index] = {
+          args: env[index],
+          resolve,
+          reject,
+        };
+      }
+    }
+    await agent(self, env, this.ctx);
   }
 }
 `;
 
 interface CodeModeEntrypoint extends WorkerEntrypoint {
   verify(): void;
-  run(self?: unknown): Promise<void>;
+  run(self?: unknown,
+      callbackResolvers?: Record<number, {
+        resolve: NativeRpcStub<(v: unknown) => void>,
+        reject: NativeRpcStub<(e: unknown) => void>
+      }>): Promise<void>;
 }
 
 // =======================================================================================
@@ -79,7 +93,7 @@ type LiveChatContext = {
   activeAgentCallbacks: Map<number, {
     transientStubs: any[];
     resolve: (v: unknown) => void;
-    reject: (e: Error) => void;
+    reject: (e: unknown) => void;
   }>;
 };
 
@@ -1104,17 +1118,72 @@ class OverseerImpl implements AgentHooks {
   }
 
   async startAgent(chatId: number, aiModel: UserAiModelRecord,
-                   initiator: AiChatAuthorInfo): Promise<void> {
+                   initiator: AiChatAuthorInfo,
+                   callbackInitiated: boolean = false): Promise<void> {
     let liveChat = this.#getLiveChat(chatId);
     try {
       let chosenModel = getModel(this.env, aiModel.config, initiator);
-      let chatMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
 
       let controller = new AbortController();
       liveChat.cancelController = controller;
 
-      await runAgent(this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
-                     initiator);
+      let hasBeenNudged = false;
+      while (true) {
+        let chatMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
+        let callbackCountBefore = liveChat.activeAgentCallbacks.size;
+
+        await runAgent(this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
+                       initiator, callbackInitiated);
+
+        // If not callback-initiated, or all callbacks are resolved, we're done.
+        if (!callbackInitiated || liveChat.activeAgentCallbacks.size === 0) {
+          break;
+        }
+
+        // Callbacks still outstanding. Check if the agent made progress.
+        // On the first run we always nudge once (the agent may not have understood what
+        // was expected). After a nudge, we bail out if no progress was made.
+        if (hasBeenNudged && liveChat.activeAgentCallbacks.size >= callbackCountBefore) {
+          // No progress after being nudged — reject remaining callbacks and bail out.
+          let count = liveChat.activeAgentCallbacks.size;
+          this.rejectAllAgentCallbacks(chatId,
+              "Agent failed to resolve callbacks after multiple attempts.");
+          this.postAgentErrorMessage(chatId, aiModel.profile,
+              `Failed to resolve ${count} outstanding callback(s).`);
+          break;
+        }
+
+        // Progress was made but callbacks remain. Nudge the agent with details about
+        // which callbacks are still outstanding so it knows exactly what to resolve.
+        let outstandingSeqs = new Set(liveChat.activeAgentCallbacks.keys());
+        let outstandingDescriptions: string[] = [];
+        // Scan chat messages to find method names and compute capsule indices for
+        // the outstanding callbacks. Capsule indices are assigned sequentially
+        // across all capsule types (gatekeeper + value) in message order.
+        let capsuleIdx = 0;
+        let reloadedMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
+        for (let msg of reloadedMessages) {
+          if (msg.type === "agentCallback") {
+            if (outstandingSeqs.has(msg.sequence)) {
+              outstandingDescriptions.push(`env[${capsuleIdx}] (self.${msg.methodName}())`);
+            }
+            capsuleIdx++;
+          } else if (msg.type === "message" && msg.capsules && msg.capsules.length > 0) {
+            capsuleIdx += msg.capsules.length;
+          }
+        }
+
+        let nudgeText =
+            `You still have ${outstandingDescriptions.length} unresolved callback(s): ` +
+            `${outstandingDescriptions.join(", ")}. ` +
+            `Use executeCode to call env[N].resolve(value) or env[N].reject(error) for each, ` +
+            `or use giveUp to reject them all with an error.`;
+        this.addChatMessages(chatId, initiator, [{
+          type: "agentNudge",
+          text: nudgeText,
+        }]);
+        hasBeenNudged = true;
+      }
     } catch (err) {
       console.error("error in runAgent():", err);
       this.postAgentErrorMessage(chatId, aiModel.profile, `${err}`);
@@ -1152,8 +1221,6 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Resolve a agent callback return value, keyed by message sequence number.
-  // Called by the agent's `return` tool (which maps capsuleIndex → sequence via the
-  // local capsules table in agent.ts).
   resolveAgentCallback(chatId: number, sequence: number, value: unknown): void {
     let liveChat = this.#liveChats.get(chatId);
     if (!liveChat) return;
@@ -1164,6 +1231,33 @@ class OverseerImpl implements AgentHooks {
       // deliverAgentCallback RPC returns.
       liveChat.activeAgentCallbacks.delete(sequence);
     }
+  }
+
+  // Reject a agent callback, keyed by message sequence number.
+  rejectAgentCallback(chatId: number, sequence: number, error: unknown): void {
+    let liveChat = this.#liveChats.get(chatId);
+    if (!liveChat) return;
+    let cb = liveChat.activeAgentCallbacks.get(sequence);
+    if (cb) {
+      cb.reject(error instanceof Error ? error : new Error(`${error}`));
+      liveChat.activeAgentCallbacks.delete(sequence);
+    }
+  }
+
+  // Returns the number of active (unresolved) agent callbacks for the given chat.
+  activeAgentCallbackCount(chatId: number): number {
+    return this.#liveChats.get(chatId)?.activeAgentCallbacks.size ?? 0;
+  }
+
+  // Reject all active agent callbacks for the given chat with the given error.
+  rejectAllAgentCallbacks(chatId: number, error: string): void {
+    let liveChat = this.#liveChats.get(chatId);
+    if (!liveChat) return;
+    let err = new Error(error);
+    for (let [, cb] of liveChat.activeAgentCallbacks) {
+      cb.reject(err);
+    }
+    liveChat.activeAgentCallbacks.clear();
   }
 
   // Retrieve a transient RPC stub from a agent callback by message sequence and stub index.
@@ -1295,7 +1389,7 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
-      this.startAgent(chatId, userMeta.aiModel, author);
+      this.startAgent(chatId, userMeta.aiModel, author, /* callbackInitiated */ true);
     } catch (err) {
       // Failure to set up the agent. Make sure to reject all callbacks.
       liveChat.pendingAgentCallbacks = [];
@@ -1734,7 +1828,7 @@ class OverseerImpl implements AgentHooks {
       };
     });
 
-    let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined, {props: context.props});
+    let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined);
     // First check the code actually starts up. Treat startup errors as total failures.
     await entrypoint.verify();
 
@@ -1747,9 +1841,32 @@ class OverseerImpl implements AgentHooks {
       initiatorModelId,
     }});
 
+    // Build callback resolvers for any value capsules (agent callbacks). Each resolver
+    // provides resolve() and reject() functions that the executed code can call to
+    // return a value or throw an error back to the callback's caller.
+    let callbackResolvers: Record<number,
+        {resolve: (v: unknown) => void, reject: (e: unknown) => void}> | undefined;
+    if (capsules) {
+      for (let i = 0; i < capsules.length; i++) {
+        let entry = capsules[i];
+        if (entry.type === "value") {
+          callbackResolvers ??= {};
+          let sequence = entry.messageSequence;
+          callbackResolvers[i] = {
+            resolve: (value: unknown) => {
+              this.resolveAgentCallback(chatId, sequence, value);
+            },
+            reject: (error: unknown) => {
+              this.rejectAgentCallback(chatId, sequence, error);
+            },
+          };
+        }
+      }
+    }
+
     let error: string | undefined;
     try {
-      await entrypoint.run(selfStub);
+      await entrypoint.run(selfStub, callbackResolvers);
     } catch (err) {
       if (err instanceof Error && err.stack) {
         error = err.stack;
@@ -2028,8 +2145,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   async spawnAgent(
       title: string, prompt: string, config: AgentSpawnerConfig,
-      props: unknown, creatorUserId?: string): Promise<void> {
+      creatorUserId?: string, callable?: boolean) {
     if (!this.impl.ownerId) throw new Error("Gadget has been deleted.");
+    if (callable && !config.modelId) {
+      throw new Error("Cannot create a callable agent without a model.");
+    }
 
     // Resolve the model from the creating user's account (falls back to owner for
     // bindings created before collaborator support).
@@ -2046,7 +2166,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       lastActive: timestamp,
       spawnerName: config.displayName,
     };
-    if (userMeta.aiModel) {
+    if (!callable && userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
     this.impl.storage.chatMeta.put(meta);
@@ -2054,7 +2174,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl.storage.chatContext.put({
       chatId,
       spawnerConfig: config,
-      props
     });
 
     let author: AiChatAuthorInfo = {
@@ -2073,7 +2192,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       message: prompt,
     });
 
-    if (userMeta.aiModel) {
+    if (callable) {
+      // Return a stub that delivers calls to the new chat thread, like the `self` magic object.
+      // The agent will be started on first callback via deliverAgentCallback().
+      return this.impl.ctx.exports.AgentSelfLoopback({props: {
+        overseerId: this.impl.ctx.id.toString(),
+        chatId,
+        initiatorUserId: this.impl.users.idFromString(resolveUserId).toString(),
+        initiatorModelId: config.modelId!,
+      }}) as any;
+    } else if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
       this.impl.startAgent(chatId, userMeta.aiModel, author);
     } else {
@@ -2111,6 +2239,7 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let ns = ctx.exports.OverseerDurableObject;
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
+    // @ts-ignore: LSP-only RPC types bug, "type instantiation is excessively deep"
     let gatekeeper = stub.startGatekeeperSession(
         this.ctx.props.gatekeeperId, this.ctx.props.caller);
 
@@ -3624,21 +3753,17 @@ export class AgentSpawnerGatekeeper
 
       suggestedBindingName: "AGENT_SPAWNER",
 
-      tsType: `AgentSpawnerBinding<${this.ctx.props.config.propsTypeName || '{}'}>`,
+      tsType: `AgentSpawnerBinding`,
     };
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    if (this.ctx.props.config.propsTsTypes) {
-      return `${AGENT_SPAWNER_BINDING_TYPES}\n${this.ctx.props.config.propsTsTypes}`
-    } else {
-      return AGENT_SPAWNER_BINDING_TYPES;
-    }
+    return AGENT_SPAWNER_BINDING_TYPES;
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue<AgentSpawnerAction>>)
       : Promise<AgentSpawnerBinding> {
-    return new AgentSpawnerBindingImpl<unknown>(this.ctx);
+    return new AgentSpawnerBindingImpl(this.ctx);
   }
 
   applyAction(action: AgentSpawnerAction): Promise<void | {revertInfo?: AgentSpawnerRevertInfo}> {
@@ -3657,20 +3782,27 @@ export class AgentSpawnerGatekeeper
   }
 }
 
-class AgentSpawnerBindingImpl<Props> extends RpcTarget implements AgentSpawnerBinding<Props> {
+class AgentSpawnerBindingImpl extends RpcTarget implements AgentSpawnerBinding {
   constructor(private ctx: DurableObjectState<AgentSpawnerBindingProps>) {
     super();
   }
 
-  async spawn(title: string, prompt: string, props: Props): Promise<void> {
+  #getOverseer() {
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let id = ns.idFromString(this.ctx.props.overseerId);
+    return ns.get(id);
+  }
+
+  async spawn(title: string, prompt: string): Promise<void> {
     // TODO: Should we be calling authorizeObservation() here? It's not really observing anything,
     //   but you might want the audit logs? But also, the agents show up in the chat history so
     //   maybe it's not really necessary to include them in the audit log too.
+    return this.#getOverseer().spawnAgent(
+        title, prompt, this.ctx.props.config, this.ctx.props.creatorUserId);
+  }
 
-    let ns = this.ctx.exports.OverseerDurableObject;
-    let id = ns.idFromString(this.ctx.props.overseerId);
-    let overseer = ns.get(id);
-    return overseer.spawnAgent(
-        title, prompt, this.ctx.props.config, props, this.ctx.props.creatorUserId);
+  async spawnCallable(title: string, prompt: string): Promise<Fetcher<any>> {
+    return this.#getOverseer().spawnAgent(
+        title, prompt, this.ctx.props.config, this.ctx.props.creatorUserId, true);
   }
 }
