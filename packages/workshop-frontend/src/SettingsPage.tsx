@@ -1,5 +1,5 @@
 import { Layout, Typography, Button, Space, Input, Avatar, Table, Modal, message, Card, Select, Spin, Form, Alert, Dropdown, Tag } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined, LogoutOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, UserOutlined, DeleteOutlined, PlusOutlined, LockOutlined, LogoutOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { useAuthenticatedApi } from './AuthContext'
@@ -30,8 +30,9 @@ export default function SettingsPage() {
   const [quickModel, setQuickModel] = useState<string | null>(null)
   const [quickModelLoading, setQuickModelLoading] = useState(true)
   const [connectModalVisible, setConnectModalVisible] = useState(false)
-  const [connectedAccounts, setConnectedAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription }>>(new Map())
+  const [connectedAccounts, setConnectedAccounts] = useState<Map<number, { description: AccountDescription, vendor: VendorDescription, credentialsValid: boolean }>>(new Map())
   const [_accountsReady, setAccountsReady] = useState(false)
+  const [reconnectingAccount, setReconnectingAccount] = useState<number | null>(null)
   const [passwordLoading, setPasswordLoading] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordForm] = Form.useForm()
@@ -103,13 +104,17 @@ export default function SettingsPage() {
 
   // Create a stable subscriber class for connected accounts
   class ConnectedAccountsSubscriberImpl extends RpcTarget implements ConnenctedAccountsSubscriber {
-    add(id: number, description: AccountDescription, vendor: VendorDescription) {
+    add(id: number, description: AccountDescription, vendor: VendorDescription, _supportedResources: any[] = [], credentialsValid: boolean = true) {
       seenAccountIdsRef.current.add(id)
       setConnectedAccounts(prev => {
         const next = new Map(prev)
-        next.set(id, { description, vendor })
+        next.set(id, { description, vendor, credentialsValid })
         return next
       })
+      // Clear reconnecting state if this account was being reconnected and is now valid.
+      if (credentialsValid) {
+        setReconnectingAccount(prev => prev === id ? null : prev)
+      }
     }
 
     remove(id: number) {
@@ -188,6 +193,19 @@ export default function SettingsPage() {
         }
       }
     })
+  }
+
+  const handleReconnectAccount = async (accountId: number) => {
+    setReconnectingAccount(accountId)
+    try {
+      const result = await authenticatedApi.reconnectAccount(accountId)
+      window.open(result.url, '_blank')
+      // The subscription will fire add() with credentialsValid: true when reconnect completes.
+    } catch (error) {
+      console.error('Failed to initiate reconnection:', error)
+      message.error('Failed to start re-authentication flow')
+      setReconnectingAccount(null)
+    }
   }
 
   const handleQuickModelChange = async (value: string | null) => {
@@ -469,28 +487,49 @@ export default function SettingsPage() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {connectedAccountsArray.map(account => (
+              {connectedAccountsArray.map(account => {
+                const isExpired = !account.credentialsValid
+                const isReconnecting = reconnectingAccount === account.id
+                return (
                 <AccountCard
                   key={account.id}
                   account={account.description}
                   vendor={account.vendor}
                   showTooltip
                   actions={
-                    <Button
-                      icon={<DeleteOutlined />}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleDisconnectAccount(
-                          account.id,
-                          account.description.displayName || account.description.uniqueName || account.vendor.displayName
-                        )
-                      }}
-                      danger
-                      type="text"
-                    />
+                    <Space size={4}>
+                      {isExpired && (
+                        <Tag icon={<WarningOutlined />} color="warning" style={{ margin: 0 }}>
+                          Expired
+                        </Tag>
+                      )}
+                      <Button
+                        icon={<ReloadOutlined />}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleReconnectAccount(account.id)
+                        }}
+                        type="text"
+                        loading={isReconnecting}
+                        title="Refresh credentials"
+                      />
+                      <Button
+                        icon={<DeleteOutlined />}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleDisconnectAccount(
+                            account.id,
+                            account.description.displayName || account.description.uniqueName || account.vendor.displayName
+                          )
+                        }}
+                        danger
+                        type="text"
+                      />
+                    </Space>
                   }
                 />
-              ))}
+              )})}
+            
             </div>
           )}
         </Card>

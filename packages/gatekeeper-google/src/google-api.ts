@@ -58,7 +58,7 @@ export async function exchangeAuthCode(
 
 // Exchange a refresh token for an access token.
 export async function getAccessToken(refreshToken: string, clientId: string, clientSecret: string)
-    : Promise<GoogleAccessToken> {
+    : Promise<GoogleAccessToken | null> {
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: {
@@ -73,7 +73,20 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
+    let contentType = response.headers.get("Content-Type");
+    let isJson = contentType && contentType.startsWith("application/json");
+
+    if (isJson) {
+      let body = await response.json<{error?: string, error_description?: string}>();
+      if (body.error === "invalid_grant") {
+        // Refresh token has been expired or revoked.
+        return null;
+      }
+      throw new Error(
+          `Failed to refresh access token: ${body.error} ${body.error_description}`);
+    }
+
+    let errorText = await response.text();
     throw new Error(`Failed to refresh access token: ${response.status} ${errorText}`);
   }
 

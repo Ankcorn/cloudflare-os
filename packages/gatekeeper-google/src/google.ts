@@ -207,6 +207,12 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put("callback", callback);
   }
 
+  // Prepare this account for a reconnect flow. The next acceptAuthCode() call will replace the
+  // existing refresh token and notify via credentialsRestored() instead of complete().
+  async prepareReconnect() {
+    this.ctx.storage.kv.put<boolean>("reconnecting", true);
+  }
+
   async acceptAuthCode(code: string) {
     if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
       throw new Error("The Google Gatekeeper is not configured.");
@@ -229,12 +235,20 @@ export class UserAccount extends DurableObject<Env> {
 
     // TODO: Cache the access token.
 
-    try {
-      let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-      await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
-    } catch (err) {
-      this.ctx.storage.kv.delete("refreshToken");
-      throw err;
+    let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+    if (reconnecting) {
+      // Reconnect flow: replace credentials and notify restoration.
+      this.ctx.storage.kv.delete("reconnecting");
+      await callback.credentialsRestored();
+    } else {
+      // Initial connect flow: create the user entrypoint and notify completion.
+      try {
+        let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
+        await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
+      } catch (err) {
+        this.ctx.storage.kv.delete("refreshToken");
+        throw err;
+      }
     }
   }
 
@@ -247,7 +261,7 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("The Google Gatekeeper is not configured.");
     }
 
-    let refreshToken = await this.ctx.storage.get<string>("refreshToken");
+    let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     if (!refreshToken) {
       throw new Error("no refresh token set");
     }
@@ -255,7 +269,19 @@ export class UserAccount extends DurableObject<Env> {
     // TODO: Cache the access token.
     // TODO: If new refresh token returned, use it.
 
-    return await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
+    let result = await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
+    if (result === null) {
+      // Credentials expired or revoked. Notify the workshop.
+      let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+      if (callback) {
+        // Fire and forget — don't let notification failure block the error propagation.
+        callback.credentialsExpired().catch(notifyErr => {
+          console.error("Failed to notify credential expiry:", notifyErr);
+        });
+      }
+      throw new Error("Google credentials have expired or been revoked. Please re-authenticate.");
+    }
+    return result;
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
@@ -332,6 +358,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     let obj = this.ctx.exports.UserAccount.get(id);
     await obj.revoke();
+  }
+
+  async reconnect(): Promise<{url: string}> {
+    let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    let obj = this.ctx.exports.UserAccount.get(id);
+    await obj.prepareReconnect();
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}` };
   }
 }
 

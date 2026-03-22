@@ -295,6 +295,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       this.ctx.exports.EmailAddress.getByName(emailName).setHook(null, userAccountId)
     ));
   }
+
+  async reconnect(): Promise<{url: string}> {
+    // Email connections do not use OAuth and never expire.
+    throw new Error("Email connections do not require re-authentication.");
+  }
 }
 
 // =======================================================================================

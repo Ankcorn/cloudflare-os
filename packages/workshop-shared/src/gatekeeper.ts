@@ -148,15 +148,27 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   // Indicates the connection completed successfully.
-  complete(user: Fetcher<GatekeeperUser>): Promise<void>;
+  //
+  // `expiresAt`, if provided, indicates when the credentials are expected to expire. This allows
+  // the Workshop to proactively show the account as expired in the UI without waiting for an
+  // operation to fail. If not provided, the system relies on the gatekeeper calling
+  // `credentialsExpired()` when a failure is detected.
+  complete(user: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void>;
 
   // Note: If the authorization flow fails, the error can be displayed directly to the user, and
   // the callback can be discarded.
 
-  // TODO:
-  // - Allow replacing the grant?
-  // - Notify of revocation?
-  // - Or maybe these should be system-level features?
+  // Called when the gatekeeper discovers that credentials have expired or been revoked (e.g., a
+  // token refresh fails with an authorization error). The Workshop records this and notifies
+  // subscribers so the UI can reflect the expired state.
+  //
+  // The gatekeeper should avoid calling this repeatedly -- once is sufficient. Subsequent calls
+  // are harmless but redundant.
+  credentialsExpired(): Promise<void>;
+
+  // Called when credentials have been restored (e.g., after a reconnect flow completes).
+  // `expiresAt` is the new expected expiration date, if known.
+  credentialsRestored(expiresAt?: Date): Promise<void>;
 }
 
 // RPC interface to an Adapter. This is a privileged interface exposed to the Gadget Workshop UI
@@ -194,13 +206,15 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // become broken.
   revoke(): Promise<void>;
 
-  // TODO:
-  // - Description of user account (name, email, avatar, etc.) to display in an account
-  //   chooser / settings dialog.
-  // - Query whether account has scope to access a particular URL.
+  // Start the flow to refresh/replace credentials on this account. Returns the URL for the user
+  // to visit in a new tab to complete re-authentication. When the flow completes, the
+  // GatekeeperConnectCallback (provided during the original connectAccount() flow) will be
+  // notified via credentialsRestored(). The existing account Fetcher and all gatekeeper bindings
+  // created through it continue to work with the new credentials.
+  reconnect(): Promise<{url: string}>;
 
   // TODO:
-  // - Some way to check if the grant is expired/revoked? (Or is that a system-level feature?)
+  // - Query whether account has scope to access a particular URL.
 }
 
 // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
