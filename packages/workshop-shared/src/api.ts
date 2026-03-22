@@ -85,7 +85,10 @@ export interface PublicApi extends RpcTarget {
 
 // Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
 export interface ConnenctedAccountsSubscriber {
-  add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[]): void;
+  // If `credentialsValid` is false, the account's credentials are known to be expired, and the
+  // UI should call reconnectAccount() to fix this if the user tries to select this account.
+  add(id: number, description: AccountDescription, vendor: VendorDescription,
+      supportedResources: SupportedResource[], credentialsValid: boolean): void;
   remove(id: number): void;
 
   // Called after add() has been called for all accounts known so far.
@@ -212,8 +215,12 @@ export interface AuthenticatedApi extends RpcTarget {
   // (operates on User DO + KV directly).
   deleteOrphanedBlueprint(blueprintId: string): Promise<void>;
 
+  // Re-authenticate a connected account whose credentials have expired (or may be about to
+  // expire). Returns the URL to open in a new tab. When the OAuth flow completes, the account
+  // is updated and subscribers are notified with credentialsValid: true.
+  reconnectAccount(accountId: number): Promise<{url: string}>;
+
   // TODO:
-  // - Recreate token on a connected account.
   // - Edit permissions on a connected account.
 }
 

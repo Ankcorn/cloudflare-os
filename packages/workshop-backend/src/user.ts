@@ -11,7 +11,15 @@ type ConnectedAccountRecord = {
   vendorDescription: VendorDescription;
   description: AccountDescription;
   vendorId: string;   // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
+  credentialExpiresAt?: Date;    // When credentials are expected to expire, if known.
+  credentialsExpired?: boolean;  // Set true by async notification from gatekeeper.
 };
+
+function areCredentialsValid(record: ConnectedAccountRecord): boolean {
+  if (record.credentialsExpired) return false;
+  if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
+  return true;
+}
 
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
@@ -527,25 +535,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let seenIds = new Set<number>();
 
+    async function notifyAdd(record: ConnectedAccountRecord) {
+      if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
+        return;
+      }
+
+      let supportedResources: SupportedResource[] = [];
+      try {
+        supportedResources = await record.account.getSupportedResources();
+      } catch (err) {
+        console.error("getSupportedResources() failed for account", record.id, err);
+      }
+
+      let credentialsValid = areCredentialsValid(record);
+
+      seenIds.add(record.id);
+      subscriber.add(record.id, record.description, record.vendorDescription,
+          supportedResources, credentialsValid).catch(unsubscribe)
+    }
+
     let dbSubscriber = {
       async add(record: ConnectedAccountRecord) {
-        if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
-          return;
-        }
-
-        let supportedResources: SupportedResource[] = [];
-        try {
-          supportedResources = await record.account.getSupportedResources();
-        } catch (err) {
-          console.error("getSupportedResources() failed for account", record.id, err);
-        }
-
-        seenIds.add(record.id);
-        subscriber.add(record.id, record.description, record.vendorDescription, supportedResources)
-            .catch(err => { connectedAccounts.unsubscribe(dbSubscriber) });
+        await notifyAdd(record);
       },
-      update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord): void {
-        // Never happens.
+      async update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord) {
+        await notifyAdd(newRecord);
       },
       remove(record: ConnectedAccountRecord): void {
         if (seenIds.has(record.id)) {
@@ -564,19 +578,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     for (let record of connectedAccounts.list()) {
       promises.push((async () => {
-        if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
-          return;
-        }
-
-        let supportedResources: SupportedResource[] = [];
-        try {
-          supportedResources = await record.account.getSupportedResources();
-        } catch (err) {
-          console.error("getSupportedResources() failed for account", record.id, err);
-        }
-
-        seenIds.add(record.id);
-        subscriber.add(record.id, record.description, record.vendorDescription, supportedResources).catch(unsubscribe);
+        await notifyAdd(record);
       })());
     }
 
@@ -602,7 +604,34 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  async reconnectAccount(accountId: number): Promise<{url: string}> {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record) throw new Error("No such account.");
+    return record.account.reconnect();
+  }
+
   async putConnectedAccount(record: ConnectedAccountRecord) {
+    this.storage.connectedAccounts.put(record);
+  }
+
+  async markCredentialsExpired(accountId: number) {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record) throw new Error("No such account.");
+
+    if (!record.credentialsExpired) {
+      record.credentialsExpired = true;
+      this.storage.connectedAccounts.put(record);
+    }
+  }
+
+  async markCredentialsRestored(accountId: number, expiresAt?: Date) {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record) throw new Error("No such account.");
+
+    // Re-fetch description since the user may have re-authed with different info.
+    record.description = await record.account.describe();
+    record.credentialsExpired = false;
+    record.credentialExpiresAt = expiresAt;
     this.storage.connectedAccounts.put(record);
   }
 
@@ -627,9 +656,13 @@ type GatekeeperConnectCallbackProps = {
 export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
-  async complete(account: Fetcher<GatekeeperUser>): Promise<void> {
+  #getUserStub() {
     let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
-    let userStub = this.ctx.exports.UserDurableObject.get(userId);
+    return this.ctx.exports.UserDurableObject.get(userId);
+  }
+
+  async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
+    let userStub = this.#getUserStub();
 
     await userStub.putConnectedAccount({
       id: this.ctx.props.accountId,
@@ -637,7 +670,18 @@ export class GatekeeperConnectCallbackImpl
       description: await account.describe(),
       vendorDescription: this.ctx.props.vendorDescription,
       vendorId: this.ctx.props.vendorId,
+      credentialExpiresAt: expiresAt,
     });
+  }
+
+  async credentialsExpired(): Promise<void> {
+    let userStub = this.#getUserStub();
+    await userStub.markCredentialsExpired(this.ctx.props.accountId);
+  }
+
+  async credentialsRestored(expiresAt?: Date): Promise<void> {
+    let userStub = this.#getUserStub();
+    await userStub.markCredentialsRestored(this.ctx.props.accountId, expiresAt);
   }
 }
 

@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo, type MutableRefObject } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, type MutableRefObject } from 'react'
 import { Typography, Spin, message } from 'antd'
-import { PlusOutlined, RightOutlined } from '@ant-design/icons'
+import { PlusOutlined, RightOutlined, WarningOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
@@ -49,11 +49,12 @@ export default function ResourcePicker({
   activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
   const [allAccounts, setAllAccounts] = useState<
-    Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] }>
+    Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[], credentialsValid: boolean }>
   >(new Map())
   const [allVendors, setAllVendors] = useState<VendorOption[]>([])
   const [vendorsLoading, setVendorsLoading] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
+  const [reconnectingAccount, setReconnectingAccount] = useState<number | null>(null)
 
   const subscriptionRef = useRef<{ stub: { [Symbol.dispose](): void } } | null>(null)
   const seenAccountIdsRef = useRef(new Set<number>())
@@ -63,13 +64,17 @@ export default function ResourcePicker({
     seenAccountIdsRef.current = new Set()
 
     class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
-      add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = []) {
+      add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = [], credentialsValid: boolean = true) {
         seenAccountIdsRef.current.add(id)
         setAllAccounts(prev => {
           const next = new Map(prev)
-          next.set(id, { description, vendor, supportedResources })
+          next.set(id, { description, vendor, supportedResources, credentialsValid })
           return next
         })
+        // Clear reconnecting state if this account was being reconnected and is now valid.
+        if (credentialsValid) {
+          setReconnectingAccount(prev => prev === id ? null : prev)
+        }
       }
 
       remove(id: number) {
@@ -228,7 +233,12 @@ export default function ResourcePicker({
         const item = selectableItems[index]
         if (!item) return
         if (item.type === 'account') {
-          onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
+          const accountData = allAccounts.get(item.accountId)
+          if (accountData && !accountData.credentialsValid) {
+            handleReconnect(item.accountId)
+          } else {
+            onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
+          }
         } else {
           handleConnectNew(item.vendorId)
         }
@@ -251,6 +261,22 @@ export default function ResourcePicker({
       setConnectingVendor(null)
     }
   }
+
+  // --- Reconnect expired account handler ---
+
+  const handleReconnect = useCallback(async (accountId: number) => {
+    setReconnectingAccount(accountId)
+    try {
+      const result = await authenticatedApi.reconnectAccount(accountId)
+      window.open(result.url, '_blank')
+      // The subscription will fire add() with credentialsValid: true when reconnect completes.
+      // The reconnectingAccount state is cleared at that point.
+    } catch (error) {
+      console.error('Failed to initiate reconnection:', error)
+      message.error('Failed to start re-authentication flow')
+      setReconnectingAccount(null)
+    }
+  }, [authenticatedApi])
 
   // --- Render ---
 
@@ -309,17 +335,26 @@ export default function ResourcePicker({
                 {vendorAccounts.map(account => {
                   const isActive = itemIdx === activeIndex
                   const currentIdx = itemIdx++
+                  const isExpired = !account.credentialsValid
+                  const isReconnecting = reconnectingAccount === account.id
                   return (
                     <div
                       key={account.id}
-                      onClick={() => onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)}
+                      onClick={() => {
+                        if (isExpired || isReconnecting) {
+                          if (!isReconnecting) handleReconnect(account.id)
+                        } else {
+                          onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
+                        }
+                      }}
                       style={{
                         padding: '6px 16px 6px 32px',
-                        cursor: 'pointer',
+                        cursor: isReconnecting ? 'wait' : 'pointer',
                         display: 'flex',
                         alignItems: 'center',
                         borderTop: '1px solid #f5f5f5',
                         backgroundColor: isActive ? '#e6f4ff' : undefined,
+                        opacity: isExpired && !isReconnecting ? 0.7 : undefined,
                       }}
                       onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
                       onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
@@ -334,7 +369,16 @@ export default function ResourcePicker({
                           </Text>
                         )}
                       </div>
-                      <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
+                      {isReconnecting ? (
+                        <Spin size="small" style={{ flexShrink: 0 }} />
+                      ) : isExpired ? (
+                        <span style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
+                          <WarningOutlined style={{ color: '#faad14', fontSize: 12 }} />
+                          <Text type="warning" style={{ fontSize: 11 }}>Expired — click to re-authenticate</Text>
+                        </span>
+                      ) : (
+                        <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
+                      )}
                     </div>
                   )
                 })}
