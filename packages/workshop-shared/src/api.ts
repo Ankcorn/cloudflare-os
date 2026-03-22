@@ -411,21 +411,6 @@ export type AgentSpawnerConfig = {
   // same as for an agent chat where the agent fails to mark the task complete.
   modelId: string | null,
 
-  // Type name of the `Props` type parameter to `AgentSpawnerBinding`. Defaults to `{}`.
-  propsTypeName?: string,
-
-  // TypeScript type declarations backing `propsTypeName`, if needed. This will be appended to
-  // the types in `agent-spawner-binding.d.ts`, in order to fully define
-  // `AgentSpawnerBinding<PropsType>` describing this spawner.
-  //
-  // In the UI to configure a spawner, the user should be presented with a text box to paste in
-  // TypeScript type definitions.
-  //
-  // It also makes sense to include comments here that explain more about the purpose of the
-  // spawner, if needed, since these types will be presented both to the agent in its system
-  // prompt, and to coding agents writing code to call the spawner.
-  propsTsTypes?: string;
-
   // Environment variables (bindings) to inherit from the gadget. If omitted, inherit all. This can
   // be used to restrict agents spawned by this spawner to access only certain bindings /
   // gatekeepers.
@@ -816,6 +801,12 @@ export type AiChatMessageBody = {
 
   // A depth-limited summary string of the arguments for the agent's context window.
   argsSummary: string;
+} | {
+  // A system-generated nudge message sent to the agent when it tries to end its turn while
+  // agent callbacks are still unresolved. This is displayed as a user message to the LLM
+  // so it can be prompted to continue.
+  type: "agentNudge";
+  text: string;
 };
 
 // Describes a tool call performed by an AI agent as part of a message.
@@ -873,15 +864,9 @@ export type AiToolCall = {
   // Output, if the code actually ran. (Otherwise, `error` should be present.)
   output?: string;
 } | {
-  toolName: "reportOutcome";
+  toolName: "giveUp";
   input: {
-    success: boolean
-  };
-} | {
-  toolName: "return";
-  input: {
-    value: unknown;
-    capsuleIndex: number;
+    error: string;
   };
 } | {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
