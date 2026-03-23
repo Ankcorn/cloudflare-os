@@ -4,7 +4,7 @@ import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, Obse
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
-import { generateText } from "ai";
+import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
 import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
 import { UserDurableObject, UserAiModelRecord } from "./user";
@@ -1184,9 +1184,28 @@ class OverseerImpl implements AgentHooks {
         }]);
         hasBeenNudged = true;
       }
-    } catch (err) {
-      console.error("error in runAgent():", err);
-      this.postAgentErrorMessage(chatId, aiModel.profile, `${err}`);
+    } catch (err: unknown) {
+      // Extract the APICallError if present — either thrown directly
+      // (non-retryable) or wrapped in RetryError (retryable, exhausted).
+      // Only log specific fields — the full error includes the entire
+      // prompt which exceeds the 256KB Workers log limit.
+      let apiError =
+        APICallError.isInstance(err) ? err :
+        RetryError.isInstance(err) && APICallError.isInstance(err.lastError) ? err.lastError :
+        null;
+
+      let errorMessage: string;
+      if (apiError) {
+        let { statusCode, url, responseBody } = apiError;
+        let summary = err instanceof Error ? err.message : `${err}`;
+        console.error("error in runAgent():", summary, `| ${statusCode} ${url} | body: ${responseBody}`);
+        errorMessage = `${summary} — ${responseBody ?? statusCode}`;
+      } else {
+        errorMessage = `${err}`;
+        console.error("error in runAgent():", errorMessage);
+      }
+
+      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);

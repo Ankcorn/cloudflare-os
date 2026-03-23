@@ -1,6 +1,6 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import * as Y from "yjs";
-import { generateText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
+import { streamText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 
@@ -972,7 +972,7 @@ export async function runAgent(
     };
   }
 
-  let prepareStep: Parameters<typeof generateText>[0]["prepareStep"];
+  let prepareStep: Parameters<typeof streamText>[0]["prepareStep"];
 
   if (typeof chosenModel === "object" && chosenModel.provider &&
       chosenModel.provider.startsWith("anthropic")) {
@@ -985,9 +985,9 @@ export async function runAgent(
     // 2. The last message, so the whole conversation is written to cache.
     // 3. The second-to-last mesasge, in hopes that it is read from cache.
     // 4. The last user message that is not one of the last two messages. This is specifically to
-    //    avoid a possible subtle problem: within a single call to generateText(), the AI SDK
+    //    avoid a possible subtle problem: within a single call to streamText(), the AI SDK
     //    is adding new messages to the messages list and sending them back to the LLM for each
-    //    step. But the next time we call generateText(), we recerate these messages just from
+    //    step. But the next time we call streamText(), we recerate these messages just from
     //    the information we stored. It could easily be the case that we don't recreate them
     //    exactly as AI SDK would have internally; we might drop some information by accident.
     //    So we might have a cache miss on the second-to-last message because of this, but we
@@ -1034,7 +1034,11 @@ export async function runAgent(
     };
   }
 
-  await generateText({
+  // The AI SDK sets stream: false on the upstream request if we use
+  // generateText, which causes intermittent proxies to time out during
+  // extended thinking. streamText avoids this. We consume the stream
+  // fully via consumeStream() so app behavior is unchanged.
+  let stream = streamText({
     model: chosenModel,
     messages: modelMessages,
     abortSignal,
@@ -1042,6 +1046,11 @@ export async function runAgent(
     providerOptions: {
       anthropic: { thinking: { type: 'adaptive' } },
     },
+
+    // streamText swallows API errors by default — it enqueues them as stream
+    // parts and calls this callback instead of throwing. Re-throw so errors
+    // propagate to the catch block in startAgent().
+    onError: ({ error }) => { throw error; },
 
     // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
     //   you want to support multiple steps at all? What if you don't want to set a limit?
@@ -1113,6 +1122,10 @@ export async function runAgent(
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
     },
   });
+
+  // streamText silently swallows stream errors unless onError is provided.
+  // Re-throw so errors propagate to the catch block in startAgent().
+  await stream.consumeStream({ onError: (e) => { throw e; } });
 }
 
 // =======================================================================================
