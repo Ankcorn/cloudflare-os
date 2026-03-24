@@ -20,6 +20,25 @@ import {
 import { MySession } from "./types";
 import TYPES_CODE from "./types.txt";
 
+const NONCE_BYTES = 32;
+const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
+
+function hexEncode(bytes: Uint8Array): string {
+  return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function generateNonce(): string {
+  return hexEncode(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  let encoder = new TextEncoder();
+  let bufA = encoder.encode(a);
+  let bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
 type Env = Cloudflare.Env & {
   BASE_URL?: string,
 };
@@ -47,12 +66,38 @@ const MY_RESOURCE: SupportedResource = {
 };
 
 // ---------------------------------------------------------------------------
-// HTTP handler — serves the OAuth flow
+// HTTP handler — serves the browser-based auth flow.
+// For a complete OAuth example, see gatekeeper-google/src/google.ts.
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
-    // Route OAuth initiation and callback URLs.
-    // See gatekeeper-google/src/google.ts for a complete OAuth flow example.
+    let url = new URL(req.url);
+    let basePath = getBasePath(env);
+    if (!url.pathname.startsWith(basePath + "/") && url.pathname !== basePath) {
+      throw new Error(`Request path ${url.pathname} does not match BASE_URL path ${basePath}`);
+    }
+    let relPath = url.pathname.slice(basePath.length);
+    let path = relPath.slice(1).split("/");
+
+    if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
+      // Auth initiation: the user has visited the connect URL.
+      let doId = path[0];
+      let nonce = path[1];
+      let stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      if (!await stub.verifyNonce(nonce)) {
+        // Show a friendly error page for expired/replayed links.
+        return new Response("TODO: error HTML", {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+      }
+
+      // TODO: Redirect to external auth provider, or present an auth form.
+      // For OAuth, generate a second nonce for the `state` parameter here —
+      // see gatekeeper-google for the full pattern.
+      throw new Error("TODO: implement auth initiation");
+    } else {
+      return new Response("Not Found", {status: 404});
+    }
   }
 };
 
@@ -69,8 +114,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}` };
+    let nonce = generateNonce();
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}` };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -83,50 +129,57 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 // ---------------------------------------------------------------------------
-// UserAccount DO — stores the user's credentials
-
+// UserAccount DO — stores per-user credentials (tokens, API keys, etc.).
+// For a full OAuth implementation with two-phase nonces and reconnect support,
+// see gatekeeper-google.
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
-    if (!this.ctx.storage.kv.get<string>("refreshToken")) {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string) {
+    // Self-destruct if the connect flow is never completed.
+    if (!this.ctx.storage.kv.get<string>("credentials")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
     this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put("nonce", { value: nonce, expiresAt: Date.now() + NONCE_LIFETIME_MS });
   }
 
-  async acceptAuthCode(code: string) {
+  // Verify and consume the nonce from the initiation URL. Prevents replay.
+  // Returns false if the nonce is invalid or expired.
+  async verifyNonce(nonce: string): Promise<boolean> {
+    let stored = this.ctx.storage.kv.get<{value: string, expiresAt: number}>("nonce");
+    if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) {
+      return false;
+    }
+    this.ctx.storage.kv.delete("nonce");
+    return true;
+  }
+
+  // Called when the user completes authorization. Store credentials and notify the workshop.
+  async completeConnection(/* auth result params */) {
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
       throw new Error("Authorization timed out. Please try again.");
     }
 
-    // TODO: Exchange auth code for tokens via the service's OAuth endpoint
-    let refreshToken = "TODO";
-    this.ctx.storage.kv.put<string>("refreshToken", refreshToken);
+    // TODO: Store credentials obtained from the auth flow
+    this.ctx.storage.kv.put<string>("credentials", "TODO");
 
     let props: MyUserImplProps = { userObjectId: this.ctx.id.toString() };
     try {
       await callback.complete(this.ctx.exports.MyUserImpl({ props }));
     } catch (err) {
-      this.ctx.storage.kv.delete("refreshToken");
+      this.ctx.storage.kv.delete("credentials");
       throw err;
     }
   }
 
-  async getAccessToken(): Promise<string> {
-    let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
-    if (!refreshToken) throw new Error("No refresh token set");
-    // TODO: Exchange refresh token for access token, with caching
-    return "TODO";
-  }
-
   async alarm() {
-    if (!this.ctx.storage.kv.get<string>("refreshToken")) {
+    if (!this.ctx.storage.kv.get<string>("credentials")) {
       this.ctx.storage.deleteAll();
     }
   }
 
   async revoke() {
-    // TODO: Revoke token with the external service
+    // TODO: Revoke credentials with the external service
     this.ctx.storage.deleteAlarm();
     this.ctx.storage.deleteAll();
   }

@@ -8,6 +8,34 @@ import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnap
 import TYPES_CODE from "./types.txt";
 import DOCS_TYPES_CODE from "./docs-types.txt";
 
+// A nonce stored in UserAccount KV to protect the OAuth flow. Only one nonce is active at a time;
+// the `stage` field tracks where we are in the flow.
+type StoredNonce = {
+  value: string;
+  expiresAt: number;
+  stage: "initiation" | "oauth";
+};
+
+const NONCE_BYTES = 32;
+const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
+const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;    // 10 minutes
+
+function hexEncode(bytes: Uint8Array): string {
+  return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function generateNonce(): string {
+  return hexEncode(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  let encoder = new TextEncoder();
+  let bufA = encoder.encode(a);
+  let bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
@@ -50,6 +78,22 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
   <body>
     <script type="text/javascript">window.close();</script>
     <p>Authorization complete. You may close this tab and return to the Gadgets Workshop.
+  </body>
+</html>`;
+
+const INVALID_LINK_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorization Link Expired</title>
+  </head>
+  <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
+    <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
+      <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to the Gadgets Workshop and try again.</p>
+      <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #d97706; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
+    </div>
   </body>
 </html>`;
 
@@ -102,12 +146,22 @@ export default {
     let relPath = url.pathname.slice(basePath.length);
     let path = relPath.slice(1).split("/");
 
-    if (path.length === 1 && path[0].length == 64) {
+    if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
         return new Response(NOT_CONFIGURED_HTML, {
           headers: {
             "Content-Type": "text/html; charset=utf-8"
           }
+        });
+      }
+
+      let doId = path[0];
+      let initiationNonce = path[1];
+      let stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      let oauthNonce = await stub.beginOAuthFlow(initiationNonce);
+      if (oauthNonce === null) {
+        return new Response(INVALID_LINK_HTML, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
 
@@ -118,11 +172,7 @@ export default {
       newUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
       newUrl.searchParams.set("access_type", "offline");
       newUrl.searchParams.set("prompt", "consent");
-
-      // TODO: SECURITY: This is not secure enough! We need a new nonce every time. In fact
-      // we should include a nonce in the URL that initiated this request, too, so people can't
-      // just visit the same URL again later.
-      newUrl.searchParams.set("state", path[0]);
+      newUrl.searchParams.set("state", `${doId}:${oauthNonce}`);
 
       return Response.redirect(newUrl.toString(), 302);
     } else if (relPath === "/oauth") {
@@ -135,14 +185,23 @@ export default {
 
       let state = url.searchParams.get("state");
       if (!state) return new Response("Error: no 'state' provided");
+      let colonIdx = state.indexOf(":");
+      if (colonIdx < 0) return new Response("Error: malformed state");
+      let doId = state.slice(0, colonIdx);
+      let oauthNonce = state.slice(colonIdx + 1);
+
       let code = url.searchParams.get("code");
       if (!code) return new Response("Error: no 'code' provided");
 
       // TODO: check actual scopes granted, update our "scope" list accordingly
 
-      let userObjectId = ctx.exports.UserAccount.idFromString(state);
+      let userObjectId = ctx.exports.UserAccount.idFromString(doId);
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
-      await stub.acceptAuthCode(code);
+      if (!await stub.acceptAuthCode(code, oauthNonce)) {
+        return new Response(INVALID_LINK_HTML, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+      }
       return new Response(SELF_CLOSING_HTML, {
         headers: {
           "Content-Type": "text/html; charset=utf-8"
@@ -172,11 +231,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
+    let initiationNonce = generateNonce();
 
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
 
     return {
-      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}`
+      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`
     };
   }
 
@@ -195,25 +255,62 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 }
 
-// TODO: More security on UserAccount. The object ID is unguessable, but it would be bad if it
-// leaked.
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string) {
     // If we have no API key in 1 hour, delete this object.
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
 
     this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+      value: initiationNonce,
+      expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
+      stage: "initiation",
+    });
   }
 
   // Prepare this account for a reconnect flow. The next acceptAuthCode() call will replace the
   // existing refresh token and notify via credentialsRestored() instead of complete().
-  async prepareReconnect() {
+  async prepareReconnect(initiationNonce: string) {
     this.ctx.storage.kv.put<boolean>("reconnecting", true);
+    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+      value: initiationNonce,
+      expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
+      stage: "initiation",
+    });
   }
 
-  async acceptAuthCode(code: string) {
+  // Called by the fetch handler when the user visits the initiation URL. Verifies the initiation
+  // nonce, consumes it, and returns a fresh OAuth nonce to use as the `state` parameter.
+  // Returns null if the nonce is invalid or expired.
+  async beginOAuthFlow(initiationNonce: string): Promise<string | null> {
+    let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (!stored || stored.stage !== "initiation" ||
+        Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, initiationNonce)) {
+      return null;
+    }
+
+    // Replace the consumed initiation nonce with a fresh OAuth nonce.
+    let oauthNonce = generateNonce();
+    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+      value: oauthNonce,
+      expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
+      stage: "oauth",
+    });
+    return oauthNonce;
+  }
+
+  // Returns false if the OAuth nonce is invalid or expired.
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
+    // Verify and consume the OAuth nonce.
+    let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (!stored || stored.stage !== "oauth" ||
+        Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, oauthNonce)) {
+      return false;
+    }
+    this.ctx.storage.kv.delete("nonce");
+
     if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
       throw new Error("The Google Gatekeeper is not configured.");
     }
@@ -250,6 +347,8 @@ export class UserAccount extends DurableObject<Env> {
         throw err;
       }
     }
+
+    return true;
   }
 
   hasRefreshToken() {
@@ -363,8 +462,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async reconnect(): Promise<{url: string}> {
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     let obj = this.ctx.exports.UserAccount.get(id);
-    await obj.prepareReconnect();
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}` };
+    let initiationNonce = generateNonce();
+    await obj.prepareReconnect(initiationNonce);
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 }
 
