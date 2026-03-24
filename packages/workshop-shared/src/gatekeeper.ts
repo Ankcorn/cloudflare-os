@@ -117,11 +117,14 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // When the flow completes, `callback.complete()` should be called to add the connection to the
   // user's list of authorizations. (`callback` can be stored.)
   //
-  // A typical implementation might create a short-lived Durable Object to manage the authorization
-  // flow, storing the callback in its storage, then directing the user to a URL that interacts
-  // with said object. Once the user completes the flow, the DO invokes the callback and deletes
-  // itself. The DO might also set an alarm to delete itself after some timeout if the user fails
-  // to complete the flow.
+  // A typical implementation creates a UserAccount Durable Object to manage the authorization
+  // flow, storing the callback in its storage, then directing the user to a URL that references
+  // the DO. Once the user completes the flow, the DO invokes the callback. The DO should set an
+  // alarm to delete itself after some timeout if the user fails to complete the flow.
+  //
+  // SECURITY: The returned URL must include a cryptographic nonce (in addition to the DO ID) to
+  // prevent replay attacks. The nonce should be stored in the DO and verified when the user visits
+  // the URL. See gatekeeper-google for a reference implementation.
   connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
 
   // Get the list of resource types this vendor supports. Each entry describes a category of
@@ -211,6 +214,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // GatekeeperConnectCallback (provided during the original connectAccount() flow) will be
   // notified via credentialsRestored(). The existing account Fetcher and all gatekeeper bindings
   // created through it continue to work with the new credentials.
+  //
+  // SECURITY: As with connectAccount(), the returned URL must include a cryptographic nonce to
+  // prevent replay attacks.
   reconnect(): Promise<{url: string}>;
 
   // TODO:

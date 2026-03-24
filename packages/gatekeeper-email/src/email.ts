@@ -20,6 +20,25 @@ import PostalMime from "postal-mime";
 import type { Email } from "postal-mime";
 import TYPES_CODE from "./types.txt";
 
+const NONCE_BYTES = 32;
+const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
+
+function hexEncode(bytes: Uint8Array): string {
+  return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function generateNonce(): string {
+  return hexEncode(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  let encoder = new TextEncoder();
+  let bufA = encoder.encode(a);
+  let bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
@@ -66,6 +85,22 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
+const INVALID_LINK_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorization Link Expired</title>
+  </head>
+  <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
+    <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
+      <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to the Gadgets Workshop and try again.</p>
+      <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #d97706; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
+    </div>
+  </body>
+</html>`;
+
 // =======================================================================================
 // Default export: fetch handler (for connectAccount flow) and email handler (for inbound).
 
@@ -79,11 +114,15 @@ export default {
     let relPath = url.pathname.slice(basePath.length);
     let path = relPath.slice(1).split("/");
 
-    if (path.length === 1 && path[0].length === 64) {
+    if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
       // This is a connectAccount completion URL. Route to the UserAccount DO.
       let userObjectId = ctx.exports.UserAccount.idFromString(path[0]);
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
-      await stub.complete();
+      if (!await stub.complete(path[1])) {
+        return new Response(INVALID_LINK_HTML, {
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        });
+      }
       return new Response(SELF_CLOSING_HTML, {
         headers: {
           "Content-Type": "text/html; charset=utf-8"
@@ -172,11 +211,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
+    let nonce = generateNonce();
 
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback);
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
 
     return {
-      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}`
+      url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}`
     };
   }
 
@@ -197,17 +237,25 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // track which email addresses have been claimed by this user account.
 
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>) {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string) {
     // Self-delete after 1 hour if never completed.
     this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
 
     this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put("nonce", { value: nonce, expiresAt: Date.now() + NONCE_LIFETIME_MS });
   }
 
-  async complete() {
+  // Returns false if the nonce is invalid or expired.
+  async complete(nonce: string): Promise<boolean> {
+    let stored = this.ctx.storage.kv.get<{value: string, expiresAt: number}>("nonce");
+    if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) {
+      return false;
+    }
+    this.ctx.storage.kv.delete("nonce");
+
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
-      throw new Error("Connection already completed or expired. Please try again.");
+      return false;
     }
 
     let props: GatekeeperUserImplProps = {
@@ -218,6 +266,8 @@ export class UserAccount extends DurableObject<Env> {
     // Clean up the callback, but keep the DO alive to track claimed email addresses.
     this.ctx.storage.deleteAlarm();
     this.ctx.storage.kv.delete("callback");
+
+    return true;
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
