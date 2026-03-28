@@ -183,6 +183,18 @@ type ActionRecord = {
   description: ObservationDescription;
 });
 
+// Safely convert an unknown thrown value to a human-readable string.
+// Plain objects (e.g. from AI SDK stream error parts) would otherwise render as "[object Object]".
+function stringifyError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // TODO: ActionRecord and ActionLogEntry are almost identical. The main differences are:
   // - ActionRecord contains the gatekeeperId, but we could safely share that.
@@ -1197,11 +1209,11 @@ class OverseerImpl implements AgentHooks {
       let errorMessage: string;
       if (apiError) {
         let { statusCode, url, responseBody } = apiError;
-        let summary = err instanceof Error ? err.message : `${err}`;
+        let summary = stringifyError(err);
         console.error("error in runAgent():", summary, `| ${statusCode} ${url} | body: ${responseBody}`);
         errorMessage = `${summary} — ${responseBody ?? statusCode}`;
       } else {
-        errorMessage = `${err}`;
+        errorMessage = stringifyError(err);
         console.error("error in runAgent():", errorMessage);
       }
 
