@@ -60,6 +60,7 @@ function getModelViaGateway(
   } else {
     // We can just use our binding.
     gatewayWrapper = createAiGateway({
+      // @ts-expect-error ai-gateway-provider types are temporarily running ahead of workers-types
       binding: env.WORKERS_AI.gateway(gwConfig.gateway),
       options: { metadata },
     });
