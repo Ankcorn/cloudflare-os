@@ -276,7 +276,7 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
   },
   "openai": {
     "gpt-5.3-codex": "ChatGPT 5.3 Codex",
-    "gpt-5.4-2026-03-05": "ChatGPT 5.4",
+    "gpt-5.4": "ChatGPT 5.4",
 //    "gpt-5.4-pro-2026-03-05": "ChatGPT 5.4 Pro",     // doesn't work? just hangs?
   },
 };

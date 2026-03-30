@@ -765,7 +765,13 @@ export async function runAgent(
           "This is called a \"capsule\". When you see this, it means that the user has " +
           "granted you access to an external resource for use within this chat session. " +
           "These resources can also be described using the `describeBinding` tool, by passing " +
-          "the index number in place of the name.",
+          "the index number in place of the name.\n" +
+          "\n" +
+          "IMPORTANT: The objects found in `env` most likely do NOT implement any API " +
+          "you are familiar with from your training. DO NOT try to guess what API they " +
+          "implement, and DO NOT use executeCode to try to enumerate them programmatically " +
+          "(this will not work, as they are RPC interfaces). Use the describeBinding " +
+          "tool to learn what interface they provide before writing any code.",
       inputSchema: z.object({
         name: z.string().or(z.number()).describe("Name of the binding (a property of `env`)."),
       }),
