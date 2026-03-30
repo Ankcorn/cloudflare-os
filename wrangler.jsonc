@@ -13,6 +13,10 @@
       "service": "gatekeeper-google"
     },
     {
+      "binding": "GATEKEEPER_GITHUB",
+      "service": "gatekeeper-github"
+    },
+    {
       "binding": "GATEKEEPER_EMAIL",
       "service": "gatekeeper-email"
     }

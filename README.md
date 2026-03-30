@@ -16,6 +16,7 @@ Hint: Try "Make me a tic tac toe game."
 
 To enable support for external APIs, you must do further configuration to register credentials to access each API. This is described in the README.md files in various gatekeeper packages:
 
+* [GitHub API](packages/gatekeeper-github/README.md)
 * [Google API](packages/gatekeeper-google/README.md)
 * [Email Workers](packages/gatekeeper-email/README.md)
 

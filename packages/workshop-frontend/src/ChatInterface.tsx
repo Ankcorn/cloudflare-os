@@ -18,6 +18,7 @@ import { ResourceDescription } from '@gadgets/workshop-shared/gatekeeper'
 import CapsuleOverlay from './CapsuleOverlay'
 import type { SelectableItem } from './ResourcePicker'
 import NewGatekeeperModal from './NewGatekeeperModal'
+import { handlePickerKeyDown } from './pickerNavigation'
 
 const { TextArea } = Input
 const { Text, Title, Link } = Typography
@@ -38,7 +39,7 @@ interface InputCapsule {
 }
 
 // Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
-const URL_REGEX = /https?:\/\/[^\s)>\]]+/g
+const URL_REGEX = /https?:\/\/[^\s)>\]]*/g
 
 export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgentActive, models,
     selectedModel, onModelChange,
@@ -226,6 +227,46 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
     } catch (err) {
       console.error('Failed to create capsule:', err)
     }
+  }
+
+  // Called when the user selects a prefix-match "refine" row in the CapsuleOverlay.
+  // Replaces the URL in the input with the new (extended) URL and selects the first placeholder.
+  const handleRefine = (newUrl: string, placeholderStart: number, placeholderEnd: number) => {
+    if (!activeUrl) return
+
+    const urlStart = activeUrl.start
+    const urlEnd = activeUrl.end
+    const lengthDiff = newUrl.length - (urlEnd - urlStart)
+
+    // Replace the old URL text with the new URL (which includes the suffix + placeholders).
+    setInputValue(prev => prev.slice(0, urlStart) + newUrl + prev.slice(urlEnd))
+
+    // Adjust positions of any capsules that come after the URL.
+    if (lengthDiff !== 0) {
+      setCapsules(prev => {
+        const adjusted = prev.map(c =>
+          c.start >= urlEnd ? { ...c, start: c.start + lengthDiff } : c
+        )
+        return adjusted
+      })
+    }
+
+    // Update activeUrl to reflect the new URL bounds.
+    setActiveUrl({ text: newUrl, start: urlStart, end: urlStart + newUrl.length })
+
+    // Reset overlay index so the first item is selected after the picker re-evaluates.
+    setOverlayIndex(0)
+
+    // Select the first placeholder in the textarea on the next frame.
+    requestAnimationFrame(() => {
+      const wrapper = wrapperRef.current
+      if (!wrapper) return
+      const textarea = wrapper.querySelector('textarea')
+      if (textarea) {
+        textarea.setSelectionRange(urlStart + placeholderStart, urlStart + placeholderEnd)
+        textarea.focus()
+      }
+    })
   }
 
   // Opens the attach modal, saving the current cursor position so we can insert there later.
@@ -584,6 +625,7 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
                 onSelectAccount={(accountId) => {
                   handleCapsuleCreate(accountId)
                 }}
+                onRefine={handleRefine}
                 onDismiss={() => setActiveUrl(null)}
                 activeIndex={overlayIndex}
                 onItems={(items) => { overlayItemsRef.current = items }}
@@ -612,18 +654,8 @@ export const ChatInput = ({ createCapsuleGatekeeper, getOverseer, onSend, isAgen
               }
               autoSize={newChat ? { minRows: 4, maxRows: 12 } : { minRows: 1, maxRows: 4 }}
               onKeyDown={(e) => {
-                if (activeUrl && overlayItemsRef.current.length > 0) {
-                  const count = overlayItemsRef.current.length
-                  if (e.key === 'ArrowDown') {
-                    e.preventDefault()
-                    setOverlayIndex(i => (i + 1) % count)
-                  } else if (e.key === 'ArrowUp') {
-                    e.preventDefault()
-                    setOverlayIndex(i => (i - 1 + count) % count)
-                  } else if (e.key === 'Tab') {
-                    e.preventDefault()
-                    overlayActivateRef.current?.(overlayIndex)
-                  }
+                if (activeUrl) {
+                  handlePickerKeyDown(e, activeUrl.text, activeUrl.start, overlayIndex, setOverlayIndex, overlayItemsRef, overlayActivateRef)
                 }
               }}
               onPressEnter={(e) => {

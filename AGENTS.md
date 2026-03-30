@@ -17,6 +17,9 @@ The project structure is:
 * packages/workshop-shared: Shared API definitions between client and server.
     * This defines the application's RPC interface.
     * The RPC protocol is Cap'n Web, which has similar semantics to Cloudflare's Worker-to-Worker RPC system, while being able to run in a browser over WebSocket. Read the readme for details.
+* packages/gatekeeper-*: Gatekeeper workers for external service integrations.
+    * Each gatekeeper runs as a separate Cloudflare Worker.
+    * Gatekeepers handle OAuth flows and provide sandboxed access to external APIs.
 
 The dev server for the frontend runs at http://localhost:3000. Use Playwrite MCP to test the UI.
 

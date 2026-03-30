@@ -4,7 +4,7 @@ import { PlusOutlined, RightOutlined, WarningOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
-import { extractHostname, matchesResource } from './resourceMatching'
+import { extractHostname, matchesResource, classifyMatch, getPlaceholderRanges } from './resourceMatching'
 
 const { Text } = Typography
 
@@ -25,6 +25,11 @@ export type SelectableItem = {
   type: 'connect'
   vendorId: string
   vendorDescription: VendorDescription
+} | {
+  type: 'refine'
+  resource: SupportedResource
+  vendorDescription: VendorDescription
+  suffix: string
 }
 
 export interface ResourcePickerProps {
@@ -37,6 +42,7 @@ export interface ResourcePickerProps {
     accountDescription: AccountDescription,
     vendorDescription: VendorDescription,
   ) => void
+  onRefine?: (newUrl: string, placeholderStart: number, placeholderEnd: number) => void
   compact?: boolean
   style?: React.CSSProperties
   activeIndex?: number
@@ -45,7 +51,7 @@ export interface ResourcePickerProps {
 }
 
 export default function ResourcePicker({
-  authenticatedApi, searchText, onSelectAccount, compact, style,
+  authenticatedApi, searchText, onSelectAccount, onRefine, compact, style,
   activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
   const [allAccounts, setAllAccounts] = useState<
@@ -143,7 +149,7 @@ export default function ResourcePicker({
     loadVendors()
   }, [authenticatedApi])
 
-  // --- Filtering logic ---
+  // --- Filtering and classification logic ---
 
   const lowerSearch = searchText.toLowerCase().trim()
 
@@ -151,10 +157,50 @@ export default function ResourcePicker({
     v.supportedResources.map(r => ({ resource: r, vendor: v }))
   )
 
-  let matchedResources: { resource: SupportedResource, vendor: VendorOption, accountsOnly?: boolean }[] =
-    lowerSearch
-      ? allResourceItems.filter(({ resource }) => matchesResource(searchText, resource))
-      : [...allResourceItems]
+  // Check if the search URL still contains placeholder tokens (:name or *).
+  const searchHasPlaceholders = lowerSearch ? getPlaceholderRanges(searchText.trim()).length > 0 : false
+
+  type MatchedResource = {
+    resource: SupportedResource
+    vendor: VendorOption
+    classification: 'full' | 'prefix' | 'none'
+    suffix?: string
+    accountsOnly?: boolean
+  }
+
+  let matchedResources: MatchedResource[] = []
+
+  if (lowerSearch) {
+    for (const { resource, vendor } of allResourceItems) {
+      if (!matchesResource(searchText, resource)) continue
+      const cls = classifyMatch(searchText.trim(), resource.urlPattern)
+      // When onRefine is provided, only show full and prefix matches — suppress
+      // text-only matches (none) since they have no useful URL suffix.
+      if (cls.type === 'none' && onRefine) continue
+      matchedResources.push({
+        resource, vendor,
+        classification: cls.type,
+        suffix: cls.type === 'prefix' ? cls.suffix : undefined,
+      })
+    }
+  } else {
+    // No search text: show all resources. When onRefine is provided (URL input context),
+    // show as prefix matches so the user sees completable suggestions rather than accounts.
+    matchedResources = allResourceItems.map(({ resource, vendor }) => ({
+      resource, vendor,
+      classification: onRefine ? 'prefix' as const : 'full' as const,
+      suffix: onRefine ? resource.urlPattern : undefined,
+    }))
+  }
+
+  // Sort: full matches first, prefix second, text-only (none) third.
+  // Within each group, sort by URL pattern so less-specific patterns (shorter paths)
+  // appear before more-specific ones, grouping related patterns logically.
+  const classOrder = { full: 0, prefix: 1, none: 2 }
+  matchedResources.sort((a, b) =>
+    classOrder[a.classification] - classOrder[b.classification]
+    || a.resource.urlPattern.localeCompare(b.resource.urlPattern)
+  )
 
   // HTTP wildcard (`https://*`) shouldn't match when specific resources also match.
   // But connected HTTP accounts whose details match the search should still show.
@@ -185,7 +231,18 @@ export default function ResourcePicker({
 
   const selectableItems = useMemo(() => {
     const items: SelectableItem[] = []
-    for (const { resource, vendor, accountsOnly } of matchedResources) {
+    for (const { resource, vendor, classification, suffix, accountsOnly } of matchedResources) {
+      // Prefix matches: show a single "refine" row (only when onRefine is provided).
+      if (classification === 'prefix' && onRefine && suffix) {
+        items.push({
+          type: 'refine',
+          resource,
+          vendorDescription: vendor.description,
+          suffix,
+        })
+        continue
+      }
+
       let vendorAccounts = [...allAccounts.entries()]
         .filter(([_, { vendor: v }]) => v.displayName === vendor.description.displayName)
         .map(([id, data]) => ({ id, ...data }))
@@ -220,7 +277,7 @@ export default function ResourcePicker({
       }
     }
     return items
-  }, [matchedResources, allAccounts, lowerSearch])
+  }, [matchedResources, allAccounts, lowerSearch, onRefine])
 
   useEffect(() => {
     onItems?.(selectableItems)
@@ -232,7 +289,19 @@ export default function ResourcePicker({
       activateRef.current = (index: number) => {
         const item = selectableItems[index]
         if (!item) return
-        if (item.type === 'account') {
+        if (item.type === 'refine') {
+          if (onRefine) {
+            const newUrl = searchText.trim() + item.suffix
+            const placeholders = getPlaceholderRanges(newUrl)
+            if (placeholders.length > 0) {
+              onRefine(newUrl, placeholders[0].start, placeholders[0].end)
+            } else {
+              onRefine(newUrl, newUrl.length, newUrl.length)
+            }
+          }
+        } else if (item.type === 'account') {
+          // Don't allow account activation if the URL still has placeholders.
+          if (searchHasPlaceholders) return
           const accountData = allAccounts.get(item.accountId)
           if (accountData && !accountData.credentialsValid) {
             handleReconnect(item.accountId)
@@ -301,7 +370,45 @@ export default function ResourcePicker({
           </div>
         ) : (() => {
           let itemIdx = 0
-          return matchedResources.map(({ resource, vendor, accountsOnly }, i) => {
+          return matchedResources.map(({ resource, vendor, classification, suffix, accountsOnly }, i) => {
+            // --- Prefix match: render as a single compact "refine" row ---
+            if (classification === 'prefix' && onRefine && suffix) {
+              const isActive = itemIdx === activeIndex
+              const currentIdx = itemIdx++
+              return (
+                <div
+                  key={`${vendor.id}-${resource.urlPattern}`}
+                  onClick={() => {
+                    const newUrl = searchText.trim() + suffix
+                    const placeholders = getPlaceholderRanges(newUrl)
+                    if (placeholders.length > 0) {
+                      onRefine(newUrl, placeholders[0].start, placeholders[0].end)
+                    } else {
+                      onRefine(newUrl, newUrl.length, newUrl.length)
+                    }
+                  }}
+                  style={{
+                    padding: '6px 16px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    borderTop: i > 0 ? '1px solid #e8e8e8' : undefined,
+                    backgroundColor: isActive ? '#e6f4ff' : undefined,
+                  }}
+                  onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
+                  onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ fontSize: 13, fontWeight: 500 }}>{resource.title}</Text>
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 12, fontFamily: 'monospace', flexShrink: 0 }}>
+                    {resource.urlPattern.replace(/^https?:\/\//, '')}
+                  </Text>
+                </div>
+              )
+            }
+
+            // --- Full match or no-refine prefix: render with accounts ---
             let vendorAccounts = [...allAccounts.entries()]
               .filter(([_, { vendor: v }]) => v.displayName === vendor.description.displayName)
               .map(([id, data]) => ({ id, ...data }))
@@ -341,6 +448,7 @@ export default function ResourcePicker({
                     <div
                       key={account.id}
                       onClick={() => {
+                        if (searchHasPlaceholders) return
                         if (isExpired || isReconnecting) {
                           if (!isReconnecting) handleReconnect(account.id)
                         } else {
@@ -349,12 +457,12 @@ export default function ResourcePicker({
                       }}
                       style={{
                         padding: '6px 16px 6px 32px',
-                        cursor: isReconnecting ? 'wait' : 'pointer',
+                        cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
                         display: 'flex',
                         alignItems: 'center',
                         borderTop: '1px solid #f5f5f5',
                         backgroundColor: isActive ? '#e6f4ff' : undefined,
-                        opacity: isExpired && !isReconnecting ? 0.7 : undefined,
+                        opacity: (isExpired && !isReconnecting) || searchHasPlaceholders ? 0.7 : undefined,
                       }}
                       onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
                       onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}

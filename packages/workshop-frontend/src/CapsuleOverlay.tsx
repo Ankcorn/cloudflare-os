@@ -16,6 +16,7 @@ export interface CapsuleOverlayProps {
     accountDescription: AccountDescription,
     vendorDescription: VendorDescription,
   ) => void
+  onRefine?: (newUrl: string, placeholderStart: number, placeholderEnd: number) => void
   onDismiss: () => void
   activeIndex?: number
   onItems?: (items: SelectableItem[]) => void
@@ -23,10 +24,10 @@ export interface CapsuleOverlayProps {
   below?: boolean
 }
 
-// Minimum URL length to trigger showing the overlay (must have at least a hostname char).
-const MIN_URL_LENGTH = 'https://x'.length
+// Minimum URL length to trigger showing the overlay (show once the scheme is complete).
+const MIN_URL_LENGTH = 'http://'.length
 
-export default function CapsuleOverlay({ url, onSelectAccount, onDismiss, activeIndex, onItems, activateRef, below }: CapsuleOverlayProps) {
+export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismiss, activeIndex, onItems, activateRef, below }: CapsuleOverlayProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const overlayRef = useRef<HTMLDivElement>(null)
 
@@ -55,6 +56,7 @@ export default function CapsuleOverlay({ url, onSelectAccount, onDismiss, active
         authenticatedApi={authenticatedApi}
         searchText={url}
         onSelectAccount={onSelectAccount}
+        onRefine={onRefine}
         compact
         activeIndex={activeIndex}
         onItems={onItems}
