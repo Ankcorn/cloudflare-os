@@ -1439,7 +1439,9 @@ class OverseerImpl implements AgentHooks {
     if (!filter || filter.includes("GADGET")) {
       result.push({
         name: "GADGET",
-        title: "RPC stub to the Gadget's Durable Object",
+        title: "RPC stub to the Gadget's Durable Object. If the user asks you to interact with " +
+               "the Gadget itself, or asks if you can \"see\" it, use this binding to do so. " +
+               "Read the Gadget's server code to learn what RPC methods it exposes.",
       });
     }
     for (let gk of this.storage.gatekeepers.list()) {
