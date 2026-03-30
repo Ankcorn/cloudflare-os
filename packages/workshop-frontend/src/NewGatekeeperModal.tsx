@@ -1,12 +1,13 @@
-import { useState, useEffect } from 'react'
-import { Button, Input, Modal, Select, Tabs, Typography, Checkbox, message } from 'antd'
-import { ArrowLeftOutlined, SearchOutlined } from '@ant-design/icons'
+import { useState, useEffect, useRef } from 'react'
+import { Input, Modal, Select, Tabs, Typography, Checkbox, message } from 'antd'
+import type { InputRef } from 'antd'
+import { SearchOutlined } from '@ant-design/icons'
 import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperClient, AiChatAuthorInfo, AgentSpawnerConfig } from '@gadgets/workshop-shared/api'
-import { AccountDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
-import { extractBaseUrl } from './resourceMatching'
-import ResourcePicker from './ResourcePicker'
+import { getPlaceholderRanges } from './resourceMatching'
+import ResourcePicker, { type SelectableItem } from './ResourcePicker'
+import { handlePickerKeyDown } from './pickerNavigation'
 
 const { Text } = Typography
 
@@ -37,11 +38,12 @@ export default function NewGatekeeperModal({
 
   // Resource tab state
   const [searchText, setSearchText] = useState('')
-  const [selectedAccountForUrl, setSelectedAccountForUrl] = useState<number | null>(null)
-  const [selectedVendorForUrl, setSelectedVendorForUrl] = useState<string | null>(null)
-  const [selectedVendorName, setSelectedVendorName] = useState('')
-  const [selectedAccountDescription, setSelectedAccountDescription] = useState<AccountDescription | null>(null)
-  const [resourceUrlInput, setResourceUrlInput] = useState('')
+
+  // Picker navigation state (arrow keys, Tab, refine)
+  const [overlayIndex, setOverlayIndex] = useState(0)
+  const overlayItemsRef = useRef<SelectableItem[]>([])
+  const overlayActivateRef = useRef<((index: number) => void) | null>(null)
+  const inputRef = useRef<InputRef>(null)
 
   // AI Model tab state
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
@@ -58,15 +60,11 @@ export default function NewGatekeeperModal({
     if (open) {
       setTabKey('resource')
       setSearchText('')
-      setSelectedAccountForUrl(null)
-      setSelectedVendorForUrl(null)
-      setSelectedVendorName('')
-      setSelectedAccountDescription(null)
-      setResourceUrlInput('')
       setSelectedModelId(undefined)
       setSpawnerDisplayName('')
       setSpawnerLimitEnv(false)
       setSpawnerEnv([])
+      setOverlayIndex(0)
       // Load models from the user's account (doesn't require an overseer).
       authenticatedApi.listModels().then(models => {
         setAvailableModels(models)
@@ -85,13 +83,10 @@ export default function NewGatekeeperModal({
     }
   }, [open, authenticatedApi])
 
-  const handleBackFromUrlEntry = () => {
-    setSelectedAccountForUrl(null)
-    setSelectedVendorForUrl(null)
-    setSelectedVendorName('')
-    setSelectedAccountDescription(null)
-    setResourceUrlInput('')
-  }
+  // Reset overlay index when search text changes.
+  useEffect(() => {
+    setOverlayIndex(0)
+  }, [searchText])
 
   // --- Creation handlers ---
   // Each creates the gatekeeper, then calls onCreated() so the caller can decide what to do.
@@ -167,68 +162,57 @@ export default function NewGatekeeperModal({
     }
   }
 
+  // --- Refine handler ---
+  // Called when the user selects a prefix-match "refine" row. Replaces the search
+  // text with the extended URL and selects the first placeholder.
+  const handleRefine = (newUrl: string, placeholderStart: number, placeholderEnd: number) => {
+    setSearchText(newUrl)
+    setOverlayIndex(0)
+    requestAnimationFrame(() => {
+      const input = inputRef.current?.input
+      if (input) {
+        input.setSelectionRange(placeholderStart, placeholderEnd)
+        input.focus()
+      }
+    })
+  }
+
   // --- Rendering ---
 
   const renderResourceTabContent = () => {
-    // Sub-step: user picked a (resource, account) pair and is entering the resource URL.
-    if (selectedVendorForUrl !== null && selectedAccountForUrl !== null) {
-      return (
-        <div style={{ minHeight: 200 }}>
-          <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Button type="text" icon={<ArrowLeftOutlined />} onClick={handleBackFromUrlEntry} size="small" />
-            <Text type="secondary">
-              {selectedVendorName} · <Text strong>{selectedAccountDescription?.displayName || selectedAccountDescription?.uniqueName}</Text>
-            </Text>
-          </div>
-          <Input
-            placeholder="https://example.com/resource"
-            value={resourceUrlInput}
-            onChange={(e) => setResourceUrlInput(e.target.value)}
-            autoFocus
-            style={{ marginBottom: 16 }}
-          />
-          <Button
-            type="primary"
-            block
-            disabled={!resourceUrlInput.trim()}
-            loading={creating}
-            onClick={() => handleCreateResource(selectedAccountForUrl!, resourceUrlInput.trim())}
-          >
-            Create Connection
-          </Button>
-        </div>
-      )
-    }
-
     return (
       <div>
         <Input
-          placeholder="Search resources or paste a URL..."
+          ref={inputRef}
+          placeholder="Paste a URL or search..."
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           autoFocus
           allowClear
           prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
           style={{ borderRadius: 8 }}
+          onKeyDown={(e) => {
+            handlePickerKeyDown(
+              e, searchText, 0,
+              overlayIndex, setOverlayIndex,
+              overlayItemsRef, overlayActivateRef,
+            )
+          }}
         />
         <ResourcePicker
           authenticatedApi={authenticatedApi}
           searchText={searchText}
-          onSelectAccount={(accountId, vendorId, resource, accountDescription, vendorDescription) => {
-            setSelectedVendorForUrl(vendorId)
-            setSelectedAccountForUrl(accountId)
-            setSelectedVendorName(vendorDescription.displayName)
-            setSelectedAccountDescription(accountDescription)
-            const baseUrl = extractBaseUrl(resource.urlPattern) || 'https://'
-            const search = searchText.trim()
-            // If the user already typed a URL that extends the base pattern, keep it
-            // instead of truncating (e.g. don't replace ".../documents/1234" with ".../documents/")
-            if (search.length > baseUrl.length && search.toLowerCase().startsWith(baseUrl.toLowerCase())) {
-              setResourceUrlInput(search)
-            } else {
-              setResourceUrlInput(baseUrl)
+          onSelectAccount={(accountId, _vendorId, _resource, _accountDescription, _vendorDescription) => {
+            // The URL has no placeholders (ResourcePicker enforces this), so create directly.
+            const url = searchText.trim()
+            if (url && getPlaceholderRanges(url).length === 0) {
+              handleCreateResource(accountId, url)
             }
           }}
+          onRefine={handleRefine}
+          activeIndex={overlayIndex}
+          onItems={(items) => { overlayItemsRef.current = items }}
+          activateRef={overlayActivateRef}
           style={{ marginTop: 8 }}
         />
       </div>
@@ -263,9 +247,8 @@ export default function NewGatekeeperModal({
         onChange={(key) => {
           setTabKey(key as 'resource' | 'ai-model' | 'agent-spawner')
           if (key === 'resource') {
-            setSelectedAccountForUrl(null)
-            setSelectedVendorForUrl(null)
-            setResourceUrlInput('')
+            setSearchText('')
+            setOverlayIndex(0)
           }
         }}
         items={[
