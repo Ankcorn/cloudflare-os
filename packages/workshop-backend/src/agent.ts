@@ -1047,7 +1047,7 @@ export async function runAgent(
   let stream = streamText({
     model: chosenModel,
     messages: modelMessages,
-    abortSignal,
+//    abortSignal,    // temporarily remove until AI gateway supports it
     maxOutputTokens,
     providerOptions: {
       anthropic: { thinking: { type: 'adaptive' } },
