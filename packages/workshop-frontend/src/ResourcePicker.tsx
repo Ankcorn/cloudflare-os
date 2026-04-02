@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback, type MutableRefObject } from 'react'
-import { Typography, Spin, message } from 'antd'
+import { Typography, Spin, Tooltip, message } from 'antd'
 import { PlusOutlined, RightOutlined, WarningOutlined } from '@ant-design/icons'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
@@ -445,49 +445,53 @@ export default function ResourcePicker({
                   const isExpired = !account.credentialsValid
                   const isReconnecting = reconnectingAccount === account.id
                   return (
-                    <div
+                    <Tooltip
                       key={account.id}
-                      onClick={() => {
-                        if (searchHasPlaceholders) return
-                        if (isExpired || isReconnecting) {
-                          if (!isReconnecting) handleReconnect(account.id)
-                        } else {
-                          onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
-                        }
-                      }}
-                      style={{
-                        padding: '6px 16px 6px 32px',
-                        cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        borderTop: '1px solid #f5f5f5',
-                        backgroundColor: isActive ? '#e6f4ff' : undefined,
-                        opacity: (isExpired && !isReconnecting) || searchHasPlaceholders ? 0.7 : undefined,
-                      }}
-                      onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
-                      onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
+                      title={searchHasPlaceholders ? 'Replace all placeholders in the URL before selecting an account' : undefined}
                     >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={{ fontSize: 13 }}>
-                          {account.description.uniqueName || account.description.displayName}
-                        </Text>
-                        {hostname && hostname !== '*' && (
-                          <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
-                            {hostname}
+                      <div
+                        onClick={() => {
+                          if (searchHasPlaceholders) return
+                          if (isExpired || isReconnecting) {
+                            if (!isReconnecting) handleReconnect(account.id)
+                          } else {
+                            onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
+                          }
+                        }}
+                        style={{
+                          padding: '6px 16px 6px 32px',
+                          cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          borderTop: '1px solid #f5f5f5',
+                          backgroundColor: isActive ? '#e6f4ff' : undefined,
+                          opacity: (isExpired && !isReconnecting) || searchHasPlaceholders ? 0.7 : undefined,
+                        }}
+                        onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
+                        onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={{ fontSize: 13 }}>
+                            {account.description.uniqueName || account.description.displayName}
                           </Text>
+                          {hostname && hostname !== '*' && (
+                            <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
+                              {hostname}
+                            </Text>
+                          )}
+                        </div>
+                        {isReconnecting ? (
+                          <Spin size="small" style={{ flexShrink: 0 }} />
+                        ) : isExpired ? (
+                          <span style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
+                            <WarningOutlined style={{ color: '#faad14', fontSize: 12 }} />
+                            <Text type="warning" style={{ fontSize: 11 }}>Expired — click to re-authenticate</Text>
+                          </span>
+                        ) : (
+                          <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
                         )}
                       </div>
-                      {isReconnecting ? (
-                        <Spin size="small" style={{ flexShrink: 0 }} />
-                      ) : isExpired ? (
-                        <span style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
-                          <WarningOutlined style={{ color: '#faad14', fontSize: 12 }} />
-                          <Text type="warning" style={{ fontSize: 11 }}>Expired — click to re-authenticate</Text>
-                        </span>
-                      ) : (
-                        <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
-                      )}
-                    </div>
+                    </Tooltip>
                   )
                 })}
 
