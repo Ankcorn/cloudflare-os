@@ -27,6 +27,7 @@ test:
     - pnpm install --frozen-lockfile
   script:
     - pnpm build
+    - pnpm test
 
 include:
   # ---------------------------------------------------------------------------

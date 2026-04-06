@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "build": "pnpm run --recursive build",
+    "test": "pnpm run --recursive --if-present test",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "wrangler dev -c wrangler.jsonc -c packages/workshop-backend/wrangler.jsonc -c packages/gatekeeper-google/wrangler.jsonc -c packages/gatekeeper-github/wrangler.jsonc -c packages/gatekeeper-email/wrangler.jsonc",
     "clean": "pnpm run --recursive clean"

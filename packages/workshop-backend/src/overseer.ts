@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -350,6 +350,15 @@ class OverseerImpl implements AgentHooks {
 
   // Per-chat in-memory state for running agents and pending agent callbacks.
   #liveChats = new Map<number, LiveChatContext>();
+  #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
+
+  addChatSubscriber(subscriber: RpcStub<AiChatSubscriber>) {
+    this.#chatSubscribers.add(subscriber);
+  }
+
+  removeChatSubscriber(subscriber: RpcStub<AiChatSubscriber>) {
+    this.#chatSubscribers.delete(subscriber);
+  }
 
   #getLiveChat(chatId: number): LiveChatContext {
     let ctx = this.#liveChats.get(chatId);
@@ -1226,6 +1235,8 @@ class OverseerImpl implements AgentHooks {
       }
       liveChat.activeAgentCallbacks.clear();
     } finally {
+      this.emitChatStreamEvent(chatId, {type: "clear"});
+
       liveChat.cancelController = undefined;
 
       let meta = this.storage.chatMeta.get(chatId);
@@ -1819,115 +1830,127 @@ class OverseerImpl implements AgentHooks {
   }
 
   #codeModeResolvers = new Map<string, (trace: TraceItem) => void>();
+  #codeModeOutputSubscribers = new Map<string, (delta: string) => void>();
 
   async executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
                         initiator: AiChatAuthorInfo, initiatorModelId: string,
-                        capsules?: CapsuleEntry[]): Promise<string> {
+                        capsules?: CapsuleEntry[], onOutputText?: (delta: string) => void)
+      : Promise<string> {
     let bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
     let executionId: string = bytes.toBase64();
+
+    if (onOutputText) {
+      this.#codeModeOutputSubscribers.set(executionId, onOutputText);
+    }
 
     let tracePromise = new Promise<TraceItem>(resolve => {
       this.#codeModeResolvers.set(executionId, resolve);
     });
 
-    let worker = this.env.LOADER.get(null, () => {
-      let tailProps = {
-        executionId,
+    try {
+      let worker = this.env.LOADER.get(null, () => {
+        let tailProps = {
+          executionId,
+          overseerId: this.ctx.id.toString(),
+        };
+
+        return {
+          compatibilityDate: "2026-02-01",
+          compatibilityFlags: [
+            // disallow_importable_env also disallows importable ctx.exports, to prevent the code
+            // from calling itself in a loop.
+            "disallow_importable_env",
+
+            // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
+            //   This should soon no longer require "experimental".
+            "experimental",
+          ],
+          allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
+          mainModule: "harness.js",
+          modules: {
+            "harness.js": CODE_MODE_HARNESS,
+            "agent.js": code,
+          },
+          env: this.getEnvForLoader({from: "agent", chatId}, context.spawnerConfig?.env,
+                                    capsules, chatId),
+          tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
+          globalOutbound: null,
+        };
+      });
+
+      let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined);
+      // First check the code actually starts up. Treat startup errors as total failures.
+      await entrypoint.verify();
+
+      // Create the `self` magic object that allows executed code to call back into this
+      // chat thread. Uses the initiator's user ID for model resolution on callbacks.
+      let selfStub = this.ctx.exports.AgentSelfLoopback({props: {
         overseerId: this.ctx.id.toString(),
-      };
+        chatId,
+        initiatorUserId: this.users.idFromName(initiator.id).toString(),
+        initiatorModelId,
+      }});
 
-      return {
-        compatibilityDate: "2026-02-01",
-        compatibilityFlags: [
-          // disallow_importable_env also disallows importable ctx.exports, to prevent the code
-          // from calling itself in a loop.
-          "disallow_importable_env",
-
-          // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
-          //   This should soon no longer require "experimental".
-          "experimental",
-        ],
-        allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
-        mainModule: "harness.js",
-        modules: {
-          "harness.js": CODE_MODE_HARNESS,
-          "agent.js": code,
-        },
-        env: this.getEnvForLoader({from: "agent", chatId}, context.spawnerConfig?.env,
-                                  capsules, chatId),
-        tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
-        globalOutbound: null,
-      };
-    });
-
-    let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined);
-    // First check the code actually starts up. Treat startup errors as total failures.
-    await entrypoint.verify();
-
-    // Create the `self` magic object that allows executed code to call back into this
-    // chat thread. Uses the initiator's user ID for model resolution on callbacks.
-    let selfStub = this.ctx.exports.AgentSelfLoopback({props: {
-      overseerId: this.ctx.id.toString(),
-      chatId,
-      initiatorUserId: this.users.idFromName(initiator.id).toString(),
-      initiatorModelId,
-    }});
-
-    // Build callback resolvers for any value capsules (agent callbacks). Each resolver
-    // provides resolve() and reject() functions that the executed code can call to
-    // return a value or throw an error back to the callback's caller.
-    let callbackResolvers: Record<number,
-        {resolve: (v: unknown) => void, reject: (e: unknown) => void}> | undefined;
-    if (capsules) {
-      for (let i = 0; i < capsules.length; i++) {
-        let entry = capsules[i];
-        if (entry.type === "value") {
-          callbackResolvers ??= {};
-          let sequence = entry.messageSequence;
-          callbackResolvers[i] = {
-            resolve: (value: unknown) => {
-              this.resolveAgentCallback(chatId, sequence, value);
-            },
-            reject: (error: unknown) => {
-              this.rejectAgentCallback(chatId, sequence, error);
-            },
-          };
+      // Build callback resolvers for any value capsules (agent callbacks). Each resolver
+      // provides resolve() and reject() functions that the executed code can call to
+      // return a value or throw an error back to the callback's caller.
+      let callbackResolvers: Record<number,
+          {resolve: (v: unknown) => void, reject: (e: unknown) => void}> | undefined;
+      if (capsules) {
+        for (let i = 0; i < capsules.length; i++) {
+          let entry = capsules[i];
+          if (entry.type === "value") {
+            callbackResolvers ??= {};
+            let sequence = entry.messageSequence;
+            callbackResolvers[i] = {
+              resolve: (value: unknown) => {
+                this.resolveAgentCallback(chatId, sequence, value);
+              },
+              reject: (error: unknown) => {
+                this.rejectAgentCallback(chatId, sequence, error);
+              },
+            };
+          }
         }
       }
-    }
 
-    let error: string | undefined;
-    try {
-      await entrypoint.run(selfStub, callbackResolvers);
-    } catch (err) {
-      if (err instanceof Error && err.stack) {
-        error = err.stack;
-      } else {
-        error = `${err}`;
+      let error: string | undefined;
+      try {
+        await entrypoint.run(selfStub, callbackResolvers);
+      } catch (err) {
+        if (err instanceof Error && err.stack) {
+          error = err.stack;
+        } else {
+          error = `${err}`;
+        }
+        onOutputText?.(`\n\nUncaught exception: ${error}`);
       }
+
+      let timeout = scheduler.wait(5000).then(() => { return null; })
+      let trace = await Promise.race([tracePromise, timeout])
+
+      if (!trace) {
+        // Trace must have been lost... give up waiting.
+        throw new Error("Timed out waiting for logs from code execution.");
+      }
+
+      let log = trace.logs.map(log => {
+        // Message is an array of params.
+        return (log.message as any[]).map(part => {
+          return typeof part === "string" ? part : JSON.stringify(part)
+        }).join(" ");
+      }).join("\n");
+
+      if (error) {
+        log += `\n\nUncaught exception: ${error}`;
+      }
+
+      return log;
+    } finally {
+      this.#codeModeOutputSubscribers.delete(executionId);
+      this.#codeModeResolvers.delete(executionId);
     }
-
-    let timeout = scheduler.wait(5000).then(() => { return null; })
-    let trace = await Promise.race([tracePromise, timeout])
-
-    if (!trace) {
-      // Trace must have been lost... give up waiting.
-      throw new Error("Timed out waiting for logs from code execution.");
-    }
-
-    let log = trace.logs.map(log => {
-      // Message is an array of params.
-      return (log.message as any[]).map(part => {
-        return typeof part === "string" ? part : JSON.stringify(part)
-      }).join(" ");
-    }).join("\n");
-
-    if (error) {
-      log += `\n\nUncaught exception: ${error}`;
-    }
-
-    return log;
   }
 
   consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined {
@@ -1949,18 +1972,19 @@ class OverseerImpl implements AgentHooks {
 
   async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
     let sub = subscriber.dup();
-    sub.onRpcBroken(_ => {
-      this.#tailSubscribers.delete(sub);
-      sub[Symbol.dispose]();
-    });
+    sub.onRpcBroken(_ => unsubscribe());
     this.#tailSubscribers.add(sub);
 
     let self = this;
+    function unsubscribe() {
+      self.#tailSubscribers.delete(sub);
+      sub[Symbol.dispose]();
+    }
+
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
       [Symbol.dispose]() {
-        self.#tailSubscribers.delete(sub);
-        sub[Symbol.dispose]();
+        unsubscribe();
       }
     });
   }
@@ -1972,6 +1996,19 @@ class OverseerImpl implements AgentHooks {
       this.#codeModeResolvers.delete(executionId);
     } else {
       console.error(`Received unexpected code mode trace: ${executionId}`);
+    }
+  }
+
+  deliverCodeModeText(executionId: string, delta: string) {
+    this.#codeModeOutputSubscribers.get(executionId)?.(delta);
+  }
+
+  emitChatStreamEvent(chatId: number, event: AiChatStreamEvent): void {
+    for (let subscriber of this.#chatSubscribers) {
+      subscriber.stream(chatId, event).catch(() => {
+        subscriber[Symbol.dispose]();
+        this.#chatSubscribers.delete(subscriber);
+      });
     }
   }
 
@@ -2158,6 +2195,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   async deliverCodeModeTrace(executionId: string, trace: TraceItem) {
     return this.impl.deliverCodeModeTrace(executionId, trace);
+  }
+
+  deliverCodeModeText(executionId: string, delta: string) {
+    return this.impl.deliverCodeModeText(executionId, delta);
   }
 
   // Called by AgentSelfLoopback when any method is called on the `self` object.
@@ -2492,9 +2533,12 @@ type CodeModeLoopbackProps = {
 };
 
 export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeModeLoopbackProps> {
+  // TODO: Use tailStream here, but see comment in GadgetTailLoopback about excessive log spam
+  //   on workerd console, need to fix that first.
+
   async tail(events: TraceItem[]) {
     if (events.length != 1) {
-      console.error("Unexpected code mode trace size: ${events.length}");
+      console.error(`Unexpected code mode trace size: ${events.length}`);
       return;
     }
 
@@ -2848,6 +2892,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chatMeta = this.impl.storage.chatMeta;
 
     subscriber = subscriber.dup();  // keep stub after return
+    this.impl.addChatSubscriber(subscriber);
+    subscriber.onRpcBroken(_ => unsubscribe());
 
     let metaSubscriber = {
       add(record: AiChatMetadata) {
@@ -2884,6 +2930,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
+      self.impl.removeChatSubscriber(subscriber);
       subscriber[Symbol.dispose]();
     };
 
