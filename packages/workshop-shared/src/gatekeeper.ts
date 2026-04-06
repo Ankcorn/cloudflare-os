@@ -317,7 +317,7 @@ export interface Gatekeeper<
   // If the gatekeeper offers a hook, set the hook. Setting to `null` disables the hook.
   //
   // If the gatekeeper doesn't offer a hook, this does nothing.
-  setHook(hook: Fetcher<Hook> | null): Promise<void>;
+  setHook(hook: Fetcher<HookInitiator<Hook, Action>> | null): Promise<void>;
 }
 
 // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
@@ -358,6 +358,18 @@ export interface ApprovalQueue<Action> extends RpcTarget {
   // TODO: It would be nice if we can link this with the output gate so that if the submission
   //   does not complete, any SQL writes performed just before submit() are rolled back...
   submitAction(action: Action, description: ActionDescription): Promise<void>;
+}
+
+// Callback the Gatekeeper uses to invoke a hook when the corresponding event arrives, including
+// recording the actions / observations.
+export interface HookInitiator<Hook extends WorkerEntrypoint, Action> extends WorkerEntrypoint {
+  // Indicates that the hook is about to be invoked.
+  //
+  // This returns an ApprovalQueue which the gatekeeper may use to register observations and
+  // actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
+  // observation. Some hooks may pass callbacks or interpret the return value in a way that causes
+  // side effects, which should be registered as actions.
+  startHook(): Promise<{hook: Fetcher<Hook>, approvalQueue: ApprovalQueue<Action>}>;
 }
 
 export type ObservationDescription = {

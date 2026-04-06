@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
@@ -784,7 +784,8 @@ class OverseerImpl implements AgentHooks {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).accessedGadget = true;
       }
-      return this.getGadgetFacet(caller.chatId);
+      let chatId = "chatId" in caller ? caller.chatId : undefined;
+      return this.getGadgetFacet(chatId);
     } else {
       let client = new GatekeeperClientImpl(this, id, this.getGatekeeperFacet(id), caller);
       return client.openSession();
@@ -808,7 +809,7 @@ class OverseerImpl implements AgentHooks {
     try {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
-      } else if (caller.chatId !== undefined && this.ownerId) {
+      } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
 
@@ -2189,6 +2190,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
+  createHookApprovalQueue(gatekeeperId: number): ApprovalQueueImpl<any> {
+    return new ApprovalQueueImpl(this.impl, gatekeeperId, {from: "hook"});
+  }
+
   async deliverGadgetLogs(chatId: number | null, logs: ConsoleLogEvent[]) {
     return this.impl.deliverGadgetLogs(chatId, logs);
   }
@@ -2293,6 +2298,8 @@ type GatekeeperCaller = {
 } | {
   from: "user";
   chatId?: number;
+} | {
+  from: "hook";
 };
 
 type GatekeeperLoopbackProps = {
@@ -2339,13 +2346,37 @@ type GatekeeperHookLoopbackProps = {
   gatekeeperId: number;
 };
 
-// Hack in the other direction: When we connect a gatekeeper's hook, we connect it to an instance
-// of this class which in turn forwards into the Gadget. This is needed since direct stubs to
+// When a gatekeeper's hook is connected, it receives a Fetcher to this class, which implements
+// the HookInitiator interface. When the gatekeeper wants to invoke the hook, it calls
+// startHook(), which returns both the actual hook Fetcher (a GatekeeperHookProxy) and an
+// ApprovalQueue for logging observations and actions. This is needed because direct stubs to
 // entrypoints of a dynamic worker cannot be persisted (since the system doesn't know how to start
 // the dynamic worker back up again without the overseer's help).
 export class GatekeeperHookLoopback
+    extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
+    implements HookInitiator<WorkerEntrypoint, any> {
+  async startHook() {
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let overseer: DurableObjectStub<OverseerDurableObject> =
+        ns.get(ns.idFromString(this.ctx.props.overseerId));
+
+    // Get an ApprovalQueue for this hook invocation from the overseer.
+    let approvalQueue = overseer.createHookApprovalQueue(this.ctx.props.gatekeeperId);
+
+    // Create a serializable Fetcher that proxies to the gadget's hook entrypoint.
+    let hook = this.ctx.exports.GatekeeperHookProxy({props: this.ctx.props});
+
+    return {hook, approvalQueue};
+  }
+}
+
+// Transparent proxy that wraps the gadget's hook entrypoint into a serializable Fetcher. This is
+// needed because the gadget's dynamic worker entrypoints produce non-serializable Fetchers that
+// cannot travel over RPC. GatekeeperHookLoopback.startHook() returns an instance of this class
+// as the hook Fetcher.
+export class GatekeeperHookProxy
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps> {
-  constructor(ctx: ExecutionContext<GatekeeperLoopbackProps>, env: Cloudflare.Env) {
+  constructor(ctx: ExecutionContext<GatekeeperHookLoopbackProps>, env: Cloudflare.Env) {
     super(ctx, env);
 
     let ns = ctx.exports.OverseerDurableObject;
@@ -2353,7 +2384,7 @@ export class GatekeeperHookLoopback
         ns.get(ns.idFromString(ctx.props.overseerId));
     let hook = stub.startGatekeeperHook(this.ctx.props.gatekeeperId);
 
-    return new Proxy<GatekeeperHookLoopback>(<any>hook, {
+    return new Proxy<GatekeeperHookProxy>(<any>hook, {
       get(target, prop, receiver) {
         // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
         //   we'll get an illegal invocation, as `receiver` points to our Proxy.
@@ -3083,11 +3114,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let isFirstChange = [...this.impl.storage.code.list({limit: 1, start: 2})].length === 0;
 
     let version = this.impl.updateCode(Y.mergeUpdatesV2(updates.map(up => up.update)));
+    let timestamp = this.impl.getChatTimestamp();
 
     this.impl.storage.chats.put({
       chatId,
       sequence: this.impl.nextChatSequence(chatId),
-      timestamp: meta.lastActive,
+      timestamp,
       author: userMeta.profile,
 
       type: "merge",
@@ -3095,7 +3127,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       version,
     });
 
-    meta.lastActive = this.impl.getChatTimestamp();
+    meta.lastActive = timestamp;
     this.impl.storage.chatMeta.put(meta);
 
     // Maybe generate gadget title if this was the first accepted code.
@@ -3136,10 +3168,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return;
     }
 
+    let timestamp = this.impl.getChatTimestamp();
+
     this.impl.storage.chats.put({
       chatId,
       sequence: this.impl.nextChatSequence(chatId),
-      timestamp: meta.lastActive,
+      timestamp,
       author,
 
       type: "revert",
@@ -3152,7 +3186,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       delete meta.hasProposedChanges;
     }
 
-    meta.lastActive = this.impl.getChatTimestamp();
+    meta.lastActive = timestamp;
     this.impl.storage.chatMeta.put(meta);
     this.impl.proposedChangesChanged(chatId);
   }
@@ -3857,7 +3891,7 @@ export class AgentSpawnerGatekeeper
     throw new Error("This gatekeeper implements no actions.");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+  async setHook(_hook: Fetcher | null): Promise<void> {
     // Safe to ignore since we don't have a hook!
   }
 }

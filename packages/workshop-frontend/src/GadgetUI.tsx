@@ -47,6 +47,32 @@ for (let level of ['debug', 'info', 'log', 'warn', 'error']) {
   };
 }
 
+// Allow user-activated target=_blank links, but block programmatic popups.
+const blockedOpen = () => {
+  console.error('window.open() is disabled in Gadget UIs. Use a link with target="_blank" instead.');
+  return null;
+};
+window.open = blockedOpen;
+globalThis.open = blockedOpen;
+try {
+  Window.prototype.open = blockedOpen;
+} catch {}
+
+window.addEventListener('click', (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+
+  const anchor = event.target.closest('a[href][target]');
+  if (!anchor || anchor.target.toLowerCase() !== '_blank') {
+    return;
+  }
+
+  const rel = new Set((anchor.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
+  rel.add('noopener');
+  anchor.setAttribute('rel', Array.from(rel).join(' '));
+}, true);
+
 // Capture unhandled exceptions and promise rejections.
 window.addEventListener('error', (event) => {
   window.parent.postMessage({
@@ -288,7 +314,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
           height: '100%',
           border: 'none'
         }}
-        sandbox="allow-scripts"
+        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
         title="Gadget UI"
       />
     </div>

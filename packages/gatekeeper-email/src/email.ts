@@ -3,6 +3,7 @@ import {
   GatekeeperUser,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
+  HookInitiator,
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
@@ -12,6 +13,7 @@ import {
 } from '@gadgets/workshop-shared/gatekeeper';
 import {
   EmailSession,
+  EmailHook,
   IncomingEmail,
   EmailAddress as EmailAddressType,
   EmailAttachment,
@@ -376,8 +378,12 @@ type EmailGatekeeperImplProps = {
   userAccountId: string;
 };
 
+// Use intersection type: EmailHook for the hook-specific methods, WorkerEntrypoint to satisfy
+// the Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
+type EmailHookEntrypoint = WorkerEntrypoint & EmailHook;
+
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
-    implements Gatekeeper<EmailSession, never, never> {
+    implements Gatekeeper<EmailSession, never, never, EmailHookEntrypoint> {
 
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;
@@ -417,8 +423,8 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     throw new Error("Email gatekeeper has no actions to revert");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
-    // Forward the hook to the EmailAddress DO for this email name.
+  async setHook(hook: Fetcher<HookInitiator<EmailHookEntrypoint, never>> | null): Promise<void> {
+    // Forward the hook initiator to the EmailAddress DO for this email name.
     let emailName = this.ctx.props.emailName;
     let userAccountId = this.ctx.props.userAccountId;
     let stub: DurableObjectStub<EmailAddress> =
@@ -447,7 +453,9 @@ export class EmailAddress extends DurableObject<Env> {
     }
   }
 
-  async setHook(hook: Fetcher | null, userAccountId: string): Promise<void> {
+  async setHook(
+      hook: Fetcher<HookInitiator<EmailHookEntrypoint, never>> | null,
+      userAccountId: string): Promise<void> {
     let owner = this.ctx.storage.kv.get<string>("owner");
     if (owner !== userAccountId) {
       throw new Error("This email address is not owned by this user account");
@@ -461,13 +469,38 @@ export class EmailAddress extends DurableObject<Env> {
   }
 
   async receiveEmail(email: IncomingEmail): Promise<void> {
-    let hook = this.ctx.storage.kv.get<Fetcher>("hook");
-    if (!hook) {
+    let hookInitiator =
+        this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookEntrypoint, never>>>("hook");
+    if (!hookInitiator) {
       throw new Error("No hook configured for this email address");
     }
 
-    // The hook is a Fetcher to a WorkerEntrypoint implementing the EmailHook interface.
-    // We call receiveEmail() via RPC.
-    await (hook as any).receiveEmail(email);
+    // The stored Fetcher is a HookInitiator. Call startHook() to get the actual hook entrypoint
+    // and an ApprovalQueue for logging observations. Use `using` to dispose the result (and its
+    // contained stubs, including approvalQueue) at end of scope.
+    using startHookResult = hookInitiator.startHook();
+
+    // Pipeline: access approvalQueue on the not-yet-resolved promise and call through it.
+    let sender = email.from.name
+        ? `${email.from.name} <${email.from.address}>`
+        : email.from.address;
+    await startHookResult.approvalQueue.authorizeObservation({
+      title: `Email from ${email.from.address}: ${email.subject}`,
+      description: `Received email from ${sender}\n\n`
+          + `**Subject:** ${email.subject}\n`
+          + `**Date:** ${email.date}\n`
+          + (email.to.length > 0
+              ? `**To:** ${email.to.map(a => a.address).join(", ")}\n`
+              : "")
+          + (email.cc.length > 0
+              ? `**CC:** ${email.cc.map(a => a.address).join(", ")}\n`
+              : ""),
+    });
+
+    // Fetcher doesn't support pipelining, so we must await to get the hook.
+    let {hook} = await startHookResult;
+
+    // Deliver the email to the gadget's hook entrypoint.
+    await hook.receiveEmail(email);
   }
 }

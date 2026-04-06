@@ -3401,6 +3401,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async setHook(_hook: Fetcher | null): Promise<void> {
+    // No hooks for GitHub repos.
   }
 
   async repoMetadata(): Promise<GitHubRepoMetadata> {
