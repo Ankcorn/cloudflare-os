@@ -10,6 +10,7 @@ import {
   GatekeeperUser,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
+  HookInitiator,
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
@@ -17,7 +18,7 @@ import {
   AccountDescription,
   SupportedResource,
 } from '@gadgets/workshop-shared/gatekeeper';
-import { MySession } from "./types";
+import { MySession, MyHook as MyHookIface } from "./types";  // Remove MyHook if no hooks
 import TYPES_CODE from "./types.txt";
 
 const NONCE_BYTES = 32;
@@ -243,6 +244,13 @@ type MyRevertInfo = {
 };
 
 // ---------------------------------------------------------------------------
+// Hook type — remove this section if the gatekeeper doesn't support hooks.
+// Intersect the hook interface from types.d.ts with WorkerEntrypoint so it satisfies the
+// Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
+
+type MyHook = WorkerEntrypoint & MyHookIface;
+
+// ---------------------------------------------------------------------------
 // GatekeeperImpl DO — per-resource instance, runs as a facet of the Overseer
 
 type MyGatekeeperImplProps = {
@@ -251,7 +259,7 @@ type MyGatekeeperImplProps = {
 };
 
 export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
-    implements Gatekeeper<MySession, MyAction, MyRevertInfo> {
+    implements Gatekeeper<MySession, MyAction, MyRevertInfo, MyHook> {
 
   async describe(): Promise<ResourceDescription> {
     return {
@@ -260,7 +268,7 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
       snippet: "TODO",
       suggestedBindingName: "MY_RESOURCE",  // Based on type, not instance
       tsType: "MySession",
-      // hookTsType: "MyHook",  // Uncomment if hooks are supported
+      hookTsType: "MyHook",  // Remove if hooks are not supported
     };
   }
 
@@ -296,8 +304,11 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
     throw new Error("Revert not implemented");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
-    // No-op if hooks are not supported.
+  async setHook(hook: Fetcher<HookInitiator<MyHook, MyAction>> | null): Promise<void> {
+    // Remove the Hook type parameter from Gatekeeper<> above if hooks are not supported.
+    // If hooks are supported, store the HookInitiator Fetcher and call its startHook()
+    // method when an event arrives. startHook() returns {hook, approvalQueue} -- use the
+    // approvalQueue to register observations/actions, then call methods on the hook.
   }
 }
 

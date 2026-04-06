@@ -5,7 +5,7 @@ import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/g
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
-import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
+import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GatekeeperHookProxy, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 
 // Re-export entrypoint types from ai-models.ts.
@@ -15,8 +15,9 @@ export { LanguageModelGatekeeper };
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
 
 // Re-export entrypoint types from overseer.ts.
-export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback, CodeModeTailLoopback,
-    AgentSpawnerGatekeeper, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback };
+export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback, GatekeeperHookProxy,
+    CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback, AgentSelfLoopback,
+    TransientStubLoopback };
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {

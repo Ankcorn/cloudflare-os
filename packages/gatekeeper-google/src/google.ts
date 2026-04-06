@@ -678,8 +678,8 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     throw new Error("revert is not implemented");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
-    // Safe to ignore since we don't have a hook!
+  async setHook(_hook: Fetcher | null): Promise<void> {
+    // No hooks for Gmail.
   }
 }
 
@@ -762,7 +762,7 @@ export class GoogleDocGatekeeperImpl
     throw new Error("revert is not implemented");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+  async setHook(_hook: Fetcher | null): Promise<void> {
     // No hooks for Google Docs.
   }
 }

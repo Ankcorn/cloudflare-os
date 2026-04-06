@@ -171,7 +171,7 @@ export class LanguageModelGatekeeper
     throw new Error("This gatekeeper implements no actions.");
   }
 
-  async setHook(hook: Fetcher<WorkerEntrypoint> | null): Promise<void> {
+  async setHook(_hook: Fetcher | null): Promise<void> {
     // Safe to ignore since we don't have a hook!
   }
 }
