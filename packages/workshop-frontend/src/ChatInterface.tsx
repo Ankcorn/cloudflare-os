@@ -13,12 +13,19 @@ import {
   AiChatSubscriber,
   AiChatAuthorInfo,
   CapsuleSpecifier,
+  AiChatStreamEvent,
+  AiToolCall,
 } from '@gadgets/workshop-shared/api'
 import { ResourceDescription } from '@gadgets/workshop-shared/gatekeeper'
 import CapsuleOverlay from './CapsuleOverlay'
 import type { SelectableItem } from './ResourcePicker'
 import NewGatekeeperModal from './NewGatekeeperModal'
 import { handlePickerKeyDown } from './pickerNavigation'
+
+export interface StreamingProposedChanges {
+  updates: Uint8Array[]
+  count: number
+}
 
 const { TextArea } = Input
 const { Text, Title, Link } = Typography
@@ -774,6 +781,7 @@ interface ChatInterfaceProps {
   selectedChatId: number | null
   onNavigateToChat: (chatId: number | null, options?: { replace?: boolean }) => void
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void
+  onStreamingProposedChangesChange?: (updates: StreamingProposedChanges | undefined) => void
   onFileEdited?: (filename: string) => void
   pendingConsoleLogCount: number
   consoleLogPreview: string
@@ -790,6 +798,76 @@ interface ChatCache {
   chats: Map<number, AiChatMetadata>
   messages: Map<number, AiChatMessage[]>
   lastMessageTimestamp: Date | null
+}
+
+type ProvisionalToolCallState = {
+  toolCallId: string
+  toolName: AiToolCall['toolName'] | null
+  code: string
+  output: string
+  error?: string
+  finished: boolean
+}
+
+type ProvisionalChatState = {
+  text: string
+  reasoning: string
+  toolCalls: ProvisionalToolCallState[]
+  toolCallsById: Map<string, ProvisionalToolCallState>
+  codeUpdates: Uint8Array[]
+}
+
+function createProvisionalChatState(): ProvisionalChatState {
+  return {
+    text: '',
+    reasoning: '',
+    toolCalls: [],
+    toolCallsById: new Map(),
+    codeUpdates: [],
+  }
+}
+
+function clearProvisionalTextState(state: ProvisionalChatState) {
+  state.text = ''
+  state.reasoning = ''
+  state.toolCalls = []
+  state.toolCallsById.clear()
+}
+
+function clearProvisionalCodeState(state: ProvisionalChatState) {
+  state.codeUpdates = []
+}
+
+function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
+  return state.text === ''
+    && state.reasoning === ''
+    && state.toolCalls.length === 0
+    && state.codeUpdates.length === 0
+}
+
+function getOrCreateProvisionalToolCall(
+  state: ProvisionalChatState,
+  toolCallId: string,
+  toolName: AiToolCall['toolName'] | null,
+) {
+  let toolCall = state.toolCallsById.get(toolCallId)
+  if (toolCall) {
+    if (toolName !== null) {
+      toolCall.toolName = toolName
+    }
+    return toolCall
+  }
+
+  toolCall = {
+    toolCallId,
+    toolName,
+    code: '',
+    output: '',
+    finished: false,
+  }
+  state.toolCallsById.set(toolCallId, toolCall)
+  state.toolCalls.push(toolCall)
+  return toolCall
 }
 
 // Render a text segment as inline markdown, preserving leading/trailing whitespace
@@ -851,13 +929,14 @@ function renderMessageWithCapsules(message: string, capsules: CapsuleSpecifier[]
   return <>{segments}</>
 }
 
-function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs, hideTitleBar, onChatCountChange, onAgentActiveChange }: ChatInterfaceProps) {
+function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedChangesChange, onStreamingProposedChangesChange, onFileEdited, pendingConsoleLogCount, consoleLogPreview, consoleLogSeverity, onConsumeConsoleLogs, onDiscardConsoleLogs, hideTitleBar, onChatCountChange, onAgentActiveChange }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
     lastMessageTimestamp: null
   })
+  const provisionalRef = useRef<Map<number, ProvisionalChatState>>(new Map())
 
   // UI state
   const [_isSubscribed, setIsSubscribed] = useState(false)
@@ -894,6 +973,19 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   // Force a re-render when cache is updated
   const forceUpdate = () => setUpdateCounter(prev => prev + 1)
 
+  // Batched version of forceUpdate for high-frequency stream events.
+  // Coalesces multiple updates within a single animation frame.
+  const pendingUpdateRef = useRef(false)
+  const scheduleUpdate = () => {
+    if (!pendingUpdateRef.current) {
+      pendingUpdateRef.current = true
+      requestAnimationFrame(() => {
+        pendingUpdateRef.current = false
+        forceUpdate()
+      })
+    }
+  }
+
   // Get sorted list of chats from cache
   const chatList = Array.from(cacheRef.current.chats.values())
     .sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime())
@@ -920,6 +1012,32 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
   const currentChatMetadata = selectedChatId !== null
     ? cacheRef.current.chats.get(selectedChatId)
     : null
+
+  const currentProvisionalState = selectedChatId !== null
+    ? provisionalRef.current.get(selectedChatId) ?? null
+    : null
+
+  const visibleProvisionalToolCalls = currentProvisionalState?.toolCalls.filter(toolCall => {
+    return toolCall.toolName === 'executeCode'
+  }) ?? []
+
+  const currentStreamingChanges = currentProvisionalState?.codeUpdates
+  const currentStreamingChangesCount = currentStreamingChanges?.length ?? 0
+  const currentStreamingState = useMemo((): StreamingProposedChanges | undefined => {
+    if (!currentStreamingChanges || currentStreamingChangesCount === 0) {
+      return undefined
+    }
+    return {
+      updates: currentStreamingChanges,
+      count: currentStreamingChangesCount,
+    }
+  }, [selectedChatId, currentStreamingChanges, currentStreamingChangesCount])
+
+  const hasVisibleProvisionalContent = !!currentProvisionalState && (
+    currentProvisionalState.text !== ''
+    || currentProvisionalState.reasoning !== ''
+    || visibleProvisionalToolCalls.length > 0
+  )
 
   const isAgentActive = !!currentChatMetadata?.activeAgent
   const activeAgent = currentChatMetadata?.activeAgent
@@ -948,7 +1066,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     if (isScrolledToBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [currentMessages])
+  }, [currentMessages, hasVisibleProvisionalContent, currentStreamingChangesCount])
 
   // Always scroll to bottom when switching chats
   useEffect(() => {
@@ -1054,6 +1172,10 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
     onProposedChangesChange?.(mergedUpdate)
   }, [currentChatMetadata?.hasProposedChanges, proposedChangesVersion, selectedChatId, onProposedChangesChange])
 
+  useEffect(() => {
+    onStreamingProposedChangesChange?.(currentStreamingState)
+  }, [currentStreamingState, onStreamingProposedChangesChange])
+
   // Proper class implementation of AiChatSubscriber
   // This is necessary so the server receives a single stub for the object,
   // not separate stubs for each method
@@ -1067,6 +1189,7 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
       // Remove from cache
       cacheRef.current.chats.delete(chatId)
       cacheRef.current.messages.delete(chatId)
+      provisionalRef.current.delete(chatId)
 
       // If currently viewing this chat, go back to list
       // Use replace to prevent browser-back returning to the deleted chat
@@ -1105,7 +1228,80 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
         setProposedChangesVersion(prev => prev + 1)
       }
 
+      const provisional = provisionalRef.current.get(msg.chatId)
+      if (provisional) {
+        if (msg.type === 'message') {
+          clearProvisionalTextState(provisional)
+        } else if (msg.type === 'changes') {
+          clearProvisionalCodeState(provisional)
+        } else if (msg.type === 'error') {
+          clearProvisionalTextState(provisional)
+          clearProvisionalCodeState(provisional)
+        }
+
+        if (isProvisionalChatStateEmpty(provisional)) {
+          provisionalRef.current.delete(msg.chatId)
+        }
+      }
+
       forceUpdate()
+    }
+
+    stream(chatId: number, event: AiChatStreamEvent) {
+      let provisional = provisionalRef.current.get(chatId)
+
+      if (!provisional) {
+        provisional = createProvisionalChatState()
+        provisionalRef.current.set(chatId, provisional)
+      }
+
+      switch (event.type) {
+        case 'textDelta':
+          provisional.text += event.delta
+          break
+        case 'reasoningDelta':
+          provisional.reasoning += event.delta
+          break
+        case 'toolCallStarted': {
+          getOrCreateProvisionalToolCall(provisional, event.toolCallId, event.toolName)
+          if (event.toolName === 'executeCode') {
+            setExpandedToolCalls(prev => new Set(prev).add(event.toolCallId))
+          }
+          break
+        }
+        case 'toolCodeDelta': {
+          const toolCall = getOrCreateProvisionalToolCall(provisional, event.toolCallId, null)
+          toolCall.code += event.delta
+          break
+        }
+        case 'toolOutputDelta': {
+          const toolCall = getOrCreateProvisionalToolCall(provisional, event.toolCallId, null)
+          toolCall.output += event.delta
+          break
+        }
+        case 'toolCallFinished': {
+          const toolCall = getOrCreateProvisionalToolCall(provisional, event.toolCallId, null)
+          toolCall.finished = true
+          toolCall.error = event.error
+          break
+        }
+        case 'codeReset':
+          provisional.codeUpdates = []
+          break
+        case 'codeUpdate':
+          provisional.codeUpdates.push(event.update)
+          break
+        case 'clear':
+          clearProvisionalTextState(provisional)
+          clearProvisionalCodeState(provisional)
+          break
+      }
+
+      if (isProvisionalChatStateEmpty(provisional)) {
+        provisionalRef.current.delete(chatId)
+      }
+
+      scheduleUpdate()
     }
   }
 
@@ -2312,9 +2508,180 @@ function ChatInterface({ overseer, selectedChatId, onNavigateToChat, onProposedC
                             Stop
                           </Button>
                         </div>
-                        <Space>
-                          <Spin size="small" />
-                        </Space>
+                        {hasVisibleProvisionalContent && currentProvisionalState ? (
+                          <div>
+                            {currentProvisionalState.reasoning && (() => {
+                              const messageKey = `stream-${selectedChatId ?? 'none'}`
+                              const isExpanded = expandedReasoning.has(messageKey)
+                              return (
+                                <div style={{ marginBottom: currentProvisionalState.text || currentProvisionalState.toolCalls.length > 0 ? '12px' : 0 }}>
+                                  <div
+                                    onClick={() => toggleReasoningExpansion(messageKey)}
+                                    style={{
+                                      fontSize: '12px',
+                                      color: 'rgba(0, 0, 0, 0.45)',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '8px',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    <span style={{ fontFamily: 'monospace' }}>{isExpanded ? '▼' : '▶'}</span>
+                                    <span style={{ fontWeight: 'bold', fontStyle: 'italic' }}>Reasoning</span>
+                                  </div>
+                                  {isExpanded && (
+                                    <div style={{
+                                      marginTop: '4px',
+                                      fontSize: '14px',
+                                      color: 'rgba(0, 0, 0, 0.65)',
+                                      whiteSpace: 'pre-wrap',
+                                    }}>
+                                      {currentProvisionalState.reasoning}
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })()}
+
+                            {currentProvisionalState.text && (
+                              <div style={{ fontSize: '14px' }} className={styles.markdownContent}>
+                                <ReactMarkdown skipHtml={true}>
+                                  {currentProvisionalState.text}
+                                </ReactMarkdown>
+                              </div>
+                            )}
+
+                            {visibleProvisionalToolCalls.length > 0 && (
+                              <div style={{ marginTop: currentProvisionalState.text ? '8px' : 0 }}>
+                                {visibleProvisionalToolCalls.map(toolCall => {
+                                  const isExpanded = expandedToolCalls.has(toolCall.toolCallId)
+                                  return (
+                                    <div
+                                      key={`stream-tool-${toolCall.toolCallId}`}
+                                      style={{
+                                        fontSize: '12px',
+                                        padding: '8px 12px',
+                                        backgroundColor: toolCall.error ? '#fff2f0' : '#f9f9f9',
+                                        border: toolCall.error ? '1px solid #ffccc7' : '1px solid #e8e8e8',
+                                        borderRadius: '4px',
+                                        marginTop: '6px',
+                                        fontFamily: 'monospace',
+                                      }}
+                                    >
+                                      <div
+                                        onClick={() => toggleToolCallExpansion(toolCall.toolCallId)}
+                                        style={{
+                                          color: 'rgba(0, 0, 0, 0.65)',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '8px',
+                                          cursor: 'pointer',
+                                          userSelect: 'none',
+                                        }}
+                                      >
+                                        <span style={{ fontSize: '10px' }}>{isExpanded ? '▼' : '▶'}</span>
+                                        <span style={{ fontWeight: 'bold' }}>{toolCall.toolName ?? 'tool'}</span>
+                                        {toolCall.finished && !toolCall.error && (
+                                          <span style={{ marginLeft: 'auto', color: '#389e0d', fontWeight: 'bold' }}>
+                                            done
+                                          </span>
+                                        )}
+                                        {toolCall.error && (
+                                          <span style={{ marginLeft: 'auto', color: '#cf1322', fontWeight: 'bold' }}>
+                                            error
+                                          </span>
+                                        )}
+                                      </div>
+                                      {isExpanded && (
+                                        <>
+                                          {toolCall.code && (
+                                            <>
+                                              <div style={{
+                                                marginTop: '8px',
+                                                fontSize: '11px',
+                                                color: 'rgba(0, 0, 0, 0.45)',
+                                                fontWeight: 'bold',
+                                              }}>
+                                                Code:
+                                              </div>
+                                              <pre style={{
+                                                marginTop: '4px',
+                                                marginBottom: 0,
+                                                padding: '8px',
+                                                backgroundColor: '#ffffff',
+                                                border: '1px solid #e8e8e8',
+                                                borderRadius: '2px',
+                                                fontSize: '11px',
+                                                overflow: 'auto',
+                                                maxHeight: '300px',
+                                                whiteSpace: 'pre-wrap',
+                                                wordBreak: 'break-word',
+                                              }}>
+                                                {toolCall.code}
+                                              </pre>
+                                            </>
+                                          )}
+                                          {toolCall.output && (
+                                            <>
+                                              <div style={{
+                                                marginTop: '8px',
+                                                fontSize: '11px',
+                                                color: 'rgba(0, 0, 0, 0.45)',
+                                                fontWeight: 'bold',
+                                              }}>
+                                                Output:
+                                              </div>
+                                              <pre style={{
+                                                marginTop: '4px',
+                                                marginBottom: 0,
+                                                padding: '8px',
+                                                backgroundColor: '#f5f5f5',
+                                                border: '1px solid #d9d9d9',
+                                                borderRadius: '2px',
+                                                fontSize: '11px',
+                                                overflow: 'auto',
+                                                maxHeight: '300px',
+                                                whiteSpace: 'pre-wrap',
+                                                wordBreak: 'break-word',
+                                              }}>
+                                                {toolCall.output}
+                                              </pre>
+                                            </>
+                                          )}
+                                          {toolCall.error && (
+                                            <div style={{
+                                              marginTop: '8px',
+                                              padding: '8px',
+                                              backgroundColor: '#fff1f0',
+                                              border: '1px solid #ffa39e',
+                                              borderRadius: '2px',
+                                              color: '#cf1322',
+                                              fontSize: '11px',
+                                              whiteSpace: 'pre-wrap',
+                                            }}>
+                                              {toolCall.error}
+                                            </div>
+                                          )}
+                                        </>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+
+                            <Space style={{ marginTop: '8px' }}>
+                              <Spin size="small" />
+                              <Text type="secondary" style={{ fontSize: '12px' }}>
+                                Streaming…
+                              </Text>
+                            </Space>
+                          </div>
+                        ) : (
+                          <Space>
+                            <Spin size="small" />
+                          </Space>
+                        )}
                       </Space>
                     </div>
                   </div>

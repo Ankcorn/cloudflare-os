@@ -905,6 +905,46 @@ export type CapsuleSpecifier = {
   description: ResourceDescription;
 };
 
+// One provisional streaming event emitted while an agent step is still in progress.
+//
+// At most one provisional stream is active per chat at a time. The client should not persist
+// these events. Instead, it should display them temporarily and discard them as soon as the
+// corresponding durable `message()` and/or `changes` message arrives, or when a `clear` event is
+// delivered.
+export type AiChatStreamEvent = {
+  type: "textDelta";
+  delta: string;
+} | {
+  type: "reasoningDelta";
+  delta: string;
+} | {
+  type: "toolCallStarted";
+  toolCallId: string;
+  toolName: AiToolCall["toolName"];
+} | {
+  // For the executeCode tool specifically, we stream the code as the AI writes it. (For all other
+  // tool calls, the tool inputs are not streamed -- though writeFile and editFile separately
+  // stream codeUpdate messages.)
+  type: "toolCodeDelta";
+  toolCallId: string;
+  delta: string;
+} | {
+  type: "toolCallFinished";
+  toolCallId: string;
+  error?: string;
+} | {
+  type: "toolOutputDelta";
+  toolCallId: string;
+  delta: string;
+} | {
+  type: "codeReset";
+} | {
+  type: "codeUpdate";
+  update: Uint8Array;
+} | {
+  type: "clear";
+};
+
 // Interface implemented by the client to receive callback notifications whenever there is new
 // chat activity. Use Overseer.subscribeToChat() to register a subscriber.
 export interface AiChatSubscriber {
@@ -915,8 +955,10 @@ export interface AiChatSubscriber {
   deleted(chatId: number): void;
 
   // Adds a message to the chat.
-  // TODO: Support streaming tokens into individual messages.
   message(msg: AiChatMessage): void;
+
+  // Delivers one provisional streaming event. Clients may ignore event types they don't support.
+  stream(chatId: number, event: AiChatStreamEvent): void;
 }
 
 // Interface implemented by the client to receive callback notifications about console logs written

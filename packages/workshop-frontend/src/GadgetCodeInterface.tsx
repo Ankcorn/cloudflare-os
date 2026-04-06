@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { message } from 'antd'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -6,6 +6,7 @@ import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
 import CodeEditor from './CodeEditor'
 import CodeDiffEditor from './CodeDiffEditor'
+import type { StreamingProposedChanges } from './ChatInterface'
 
 // RpcTarget implementation for receiving code updates from the server
 class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
@@ -14,6 +15,7 @@ class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
   constructor(
     private ydoc: Y.Doc,
     private modifiedYdocRef: React.MutableRefObject<Y.Doc | null>,
+    private streamingYdocRef: React.MutableRefObject<Y.Doc | null>,
     private onReady: () => void,
     private onVersionUpdate: (version: number) => void
   ) {
@@ -31,6 +33,10 @@ class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
     // This ensures concurrent changes are reflected in both views
     if (this.modifiedYdocRef.current) {
       Y.applyUpdateV2(this.modifiedYdocRef.current, up.update, 'server')
+    }
+
+    if (this.streamingYdocRef.current) {
+      Y.applyUpdateV2(this.streamingYdocRef.current, up.update, 'server')
     }
 
     // Update version and pass the update to be applied to server shadow doc
@@ -55,11 +61,64 @@ interface GadgetCodeInterfaceProps {
   height?: string | number
   onCodeChange?: () => void
   proposedChanges?: Uint8Array
+  streamingProposedChanges?: StreamingProposedChanges
   fileToSelect?: string
   onHasCodeChange?: (hasCode: boolean) => void
 }
 
-export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, fileToSelect, onHasCodeChange }: GadgetCodeInterfaceProps) {
+function didFileChange(originalMap: Y.Map<Y.Text>, previewMap: Y.Map<Y.Text>, filename: string) {
+  const originalText = originalMap.get(filename)?.toString() || ''
+  const previewText = previewMap.get(filename)?.toString() || ''
+  return originalText !== previewText
+}
+
+function computeChangedFiles(originalMap: Y.Map<Y.Text>, previewMap: Y.Map<Y.Text>) {
+  const changed = new Set<string>()
+  const allFiles = new Set([
+    ...Array.from(originalMap.keys()),
+    ...Array.from(previewMap.keys()),
+  ])
+
+  for (const filename of allFiles) {
+    if (didFileChange(originalMap, previewMap, filename)) {
+      changed.add(filename)
+    }
+  }
+
+  return changed
+}
+
+function areSetsEqual(left: Set<string>, right: Set<string>) {
+  if (left.size !== right.size) return false
+  for (const value of left) {
+    if (!right.has(value)) return false
+  }
+  return true
+}
+
+function getTouchedFilesFromEvents(events: Y.YEvent<any>[], rootMap: Y.Map<Y.Text>) {
+  const filenames = new Set<string>()
+
+  for (const event of events) {
+    if (event.target === rootMap && 'keysChanged' in event) {
+      for (const key of (event as Y.YMapEvent<Y.Text>).keysChanged) {
+        if (typeof key === 'string') {
+          filenames.add(key)
+        }
+      }
+      continue
+    }
+
+    const filename = event.path[0]
+    if (typeof filename === 'string') {
+      filenames.add(filename)
+    }
+  }
+
+  return filenames
+}
+
+export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, streamingProposedChanges, fileToSelect, onHasCodeChange }: GadgetCodeInterfaceProps) {
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))
@@ -83,6 +142,9 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   // Diff mode state - modified Yjs document with proposed changes applied
   const modifiedYdocRef = useRef<Y.Doc | null>(null)
   const modifiedFilesMapRef = useRef<Y.Map<Y.Text> | null>(null)
+  const streamingYdocRef = useRef<Y.Doc | null>(null)
+  const streamingFilesMapRef = useRef<Y.Map<Y.Text> | null>(null)
+  const previewObserverCleanupRef = useRef<(() => void) | null>(null)
   const [changedFiles, setChangedFiles] = useState<Set<string>>(new Set())
 
   // Keep a ref to the current overseer so operations always use the latest stub
@@ -127,9 +189,9 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   useEffect(() => {
     if (activeFile !== null) return
 
-    const modifiedMap = modifiedFilesMapRef.current
-    const displayed = modifiedMap
-      ? Array.from(new Set([...fileNames, ...Array.from(modifiedMap.keys())])).sort()
+    const previewMap = streamingFilesMapRef.current ?? modifiedFilesMapRef.current
+    const displayed = previewMap
+      ? Array.from(new Set([...fileNames, ...Array.from(previewMap.keys())])).sort()
       : fileNames
 
     if (displayed.length > 0) {
@@ -146,18 +208,104 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
   // Select file when requested from outside
   useEffect(() => {
-    if (fileToSelect && filesMapRef.current.has(fileToSelect)) {
+    const previewMap = streamingFilesMapRef.current ?? modifiedFilesMapRef.current
+    if (fileToSelect && (filesMapRef.current.has(fileToSelect) || previewMap?.has(fileToSelect))) {
       setActiveFile(fileToSelect)
     }
-  }, [fileToSelect])
+  }, [fileToSelect, proposedChanges, streamingProposedChanges?.count, streamingProposedChanges?.updates])
 
-  // Build modified Yjs document when proposedChanges is present
+  const replaceChangedFiles = useCallback((previewMap: Y.Map<Y.Text> | null) => {
+    setChangedFiles(prev => {
+      const next = previewMap ? computeChangedFiles(filesMapRef.current, previewMap) : new Set<string>()
+      return areSetsEqual(prev, next) ? prev : next
+    })
+  }, [])
+
+  const updateChangedFilesForNames = useCallback((previewMap: Y.Map<Y.Text> | null, filenames: Iterable<string>) => {
+    setChangedFiles(prev => {
+      if (!previewMap) {
+        return prev.size === 0 ? prev : new Set<string>()
+      }
+
+      let next = prev
+      for (const filename of filenames) {
+        const changed = didFileChange(filesMapRef.current, previewMap, filename)
+        const alreadyChanged = next.has(filename)
+        if (changed === alreadyChanged) continue
+
+        if (next === prev) {
+          next = new Set(prev)
+        }
+
+        if (changed) {
+          next.add(filename)
+        } else {
+          next.delete(filename)
+        }
+      }
+
+      return next
+    })
+  }, [])
+
+  const observePreviewMap = useCallback((previewMap: Y.Map<Y.Text> | null) => {
+    previewObserverCleanupRef.current?.()
+    previewObserverCleanupRef.current = null
+
+    if (!previewMap) {
+      return
+    }
+
+    const observer = (events: Y.YEvent<any>[]) => {
+      const touchedFiles = getTouchedFilesFromEvents(events, previewMap)
+      if (touchedFiles.size > 0) {
+        updateChangedFilesForNames(previewMap, touchedFiles)
+      }
+    }
+
+    previewMap.observeDeep(observer)
+    previewObserverCleanupRef.current = () => {
+      previewMap.unobserveDeep(observer)
+    }
+  }, [updateChangedFilesForNames])
+
+  useEffect(() => {
+    return () => {
+      previewObserverCleanupRef.current?.()
+      previewObserverCleanupRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const originalMap = filesMapRef.current
+    const observer = (events: Y.YEvent<any>[]) => {
+      const previewMap = streamingFilesMapRef.current ?? modifiedFilesMapRef.current
+      if (!previewMap) {
+        return
+      }
+
+      const touchedFiles = getTouchedFilesFromEvents(events, originalMap)
+      if (touchedFiles.size > 0) {
+        updateChangedFilesForNames(previewMap, touchedFiles)
+      }
+    }
+
+    originalMap.observeDeep(observer)
+    return () => {
+      originalMap.unobserveDeep(observer)
+    }
+  }, [updateChangedFilesForNames])
+
+  // Build modified Yjs document when durable proposed changes are present
   useEffect(() => {
     if (!proposedChanges) {
       // No proposed changes - clear diff mode
       modifiedYdocRef.current = null
       modifiedFilesMapRef.current = null
-      setChangedFiles(new Set())
+      if (!streamingYdocRef.current) {
+        observePreviewMap(null)
+        replaceChangedFiles(null)
+      }
       return
     }
 
@@ -175,29 +323,65 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
     modifiedYdocRef.current = modifiedDoc
     modifiedFilesMapRef.current = modifiedDoc.getMap<Y.Text>('')
-
-    // Compute which files have changed
-    const originalMap = filesMapRef.current
-    const modifiedMap = modifiedFilesMapRef.current
-    const changed = new Set<string>()
-
-    // Check all files in both original and modified
-    const allFiles = new Set([
-      ...Array.from(originalMap.keys()),
-      ...Array.from(modifiedMap.keys())
-    ])
-
-    for (const filename of allFiles) {
-      const originalText = originalMap.get(filename)?.toString() || ''
-      const modifiedText = modifiedMap.get(filename)?.toString() || ''
-
-      if (originalText !== modifiedText) {
-        changed.add(filename)
-      }
+    if (!streamingYdocRef.current) {
+      observePreviewMap(modifiedFilesMapRef.current)
+      replaceChangedFiles(modifiedFilesMapRef.current)
     }
 
-    setChangedFiles(changed)
-  }, [proposedChanges])
+  }, [observePreviewMap, proposedChanges, replaceChangedFiles])
+
+  // Incrementally apply streaming updates to a persistent streaming Y.Doc.
+  // Only new updates (beyond the cursor) are applied each frame.
+  const streamingCursorRef = useRef(0)
+  const streamingBaseProposedRef = useRef<Uint8Array | undefined>(undefined)
+  const streamingUpdatesRef = useRef<Uint8Array[] | undefined>(undefined)
+
+  useEffect(() => {
+    const streamingUpdates = streamingProposedChanges?.updates
+    const streamingUpdateCount = streamingProposedChanges?.count ?? 0
+
+    if (!streamingUpdates || streamingUpdateCount === 0) {
+      streamingYdocRef.current = null
+      streamingFilesMapRef.current = null
+      streamingCursorRef.current = 0
+      streamingBaseProposedRef.current = undefined
+      streamingUpdatesRef.current = undefined
+      observePreviewMap(modifiedFilesMapRef.current)
+      replaceChangedFiles(modifiedFilesMapRef.current)
+      return
+    }
+
+    let rebuiltStreamingDoc = false
+
+    // Rebuild streaming doc if not yet initialized, if the durable base changed,
+    // or if the stream history was replaced (chat switch or codeReset).
+    if (!streamingYdocRef.current
+        || streamingBaseProposedRef.current !== proposedChanges
+        || streamingUpdatesRef.current !== streamingUpdates
+        || streamingCursorRef.current > streamingUpdateCount) {
+      const streamingDoc = new Y.Doc()
+      const baseState = modifiedYdocRef.current
+        ? Y.encodeStateAsUpdateV2(modifiedYdocRef.current)
+        : Y.encodeStateAsUpdateV2(ydocRef.current)
+      Y.applyUpdateV2(streamingDoc, baseState)
+      streamingYdocRef.current = streamingDoc
+      streamingFilesMapRef.current = streamingDoc.getMap<Y.Text>('')
+      streamingBaseProposedRef.current = proposedChanges
+      streamingUpdatesRef.current = streamingUpdates
+      streamingCursorRef.current = 0
+      rebuiltStreamingDoc = true
+    }
+
+    // Apply only the new incremental updates.
+    for (let i = streamingCursorRef.current; i < streamingUpdateCount; i++) {
+      Y.applyUpdateV2(streamingYdocRef.current!, streamingUpdates[i])
+    }
+    streamingCursorRef.current = streamingUpdateCount
+    if (rebuiltStreamingDoc) {
+      observePreviewMap(streamingFilesMapRef.current)
+      replaceChangedFiles(streamingFilesMapRef.current)
+    }
+  }, [observePreviewMap, proposedChanges, replaceChangedFiles, streamingProposedChanges?.count, streamingProposedChanges?.updates])
 
   // Helper to send updates to server based on what it's missing
   // Uses a loop to ensure all changes get sent, with only one send in flight at a time
@@ -254,6 +438,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     const subscriberImpl = new CodeSubscriberImpl(
       ydoc,
       modifiedYdocRef,
+      streamingYdocRef,
       () => {
         setIsReady(true)
         isReadyRef.current = true
@@ -409,12 +594,14 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   const activeFileYText = activeFile ? filesMapRef.current.get(activeFile) || null : null
 
   // Get the modified Y.Text when in diff mode
-  const activeFileModifiedYText = activeFile && modifiedFilesMapRef.current
-    ? modifiedFilesMapRef.current.get(activeFile) || null
+  const previewFilesMap = streamingFilesMapRef.current ?? modifiedFilesMapRef.current
+  const activeFileModifiedYText = activeFile && previewFilesMap
+    ? previewFilesMap.get(activeFile) || null
     : null
 
   // Determine if we're in diff mode
-  const isDiffMode = proposedChanges !== undefined && modifiedYdocRef.current !== null
+  const isDiffMode = (streamingProposedChanges !== undefined && streamingYdocRef.current !== null)
+    || (proposedChanges !== undefined && modifiedYdocRef.current !== null)
 
   if (loading) {
     return (
@@ -433,8 +620,8 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   }
 
   // In diff mode, include files from both original and modified documents
-  const displayedFiles = isDiffMode && modifiedFilesMapRef.current
-    ? Array.from(new Set([...fileNames, ...Array.from(modifiedFilesMapRef.current.keys())])).sort()
+  const displayedFiles = isDiffMode && previewFilesMap
+    ? Array.from(new Set([...fileNames, ...Array.from(previewFilesMap.keys())])).sort()
     : fileNames
 
   return (

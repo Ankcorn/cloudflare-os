@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
 import * as Y from "yjs";
 import { streamText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
@@ -35,13 +35,14 @@ export interface AgentHooks {
   saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
   setBindingHook(bindingName: string, entrypoint: string | null): Promise<void>;
   executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
-                  initiator: AiChatAuthorInfo, initiatorModelId: string,
-                  capsules?: CapsuleEntry[]): Promise<string>;
+                   initiator: AiChatAuthorInfo, initiatorModelId: string,
+                   capsules?: CapsuleEntry[], onOutputText?: (delta: string) => void): Promise<string>;
   activeAgentCallbackCount(chatId: number): number;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
+  emitChatStreamEvent(chatId: number, event: AiChatStreamEvent): void;
 }
 
 let SYSTEM_PROMPT = `
@@ -129,6 +130,226 @@ You were started programmatically by the Gadget to perform a task. The specific 
 
 Typically (but not always), you will need to use the \`executeCode\` tool to complete the task, invoking the available bindings (members of the env object) and other APIs available to you.
 `.trim();
+
+import { StreamingToolInputParser } from './streaming-json-parser.js';
+
+type CodePreviewEntry = {
+  toolName: "writeFile" | "editFile";
+  parser: StreamingToolInputParser;
+  cursor?: {
+    ytext: Y.Text;       // the Y.Text entry in #previewDoc being modified
+    insertPos: number;    // current cursor position for the next insert
+    fieldLength: number;  // how much of the streaming field has been applied
+  };
+};
+
+// Manages live code previews for writeFile and editFile tool calls while the LLM is still
+// streaming.  As tool-call input tokens arrive, the streaming JSON parser extracts the
+// filename and content/replacement incrementally.  Once enough is known, a cursor is
+// activated on a shadow Y.Doc (cloned from the current project state) and new characters
+// are inserted at the cursor position.  Each Y.Doc mutation is captured and emitted to the
+// client as a "codeUpdate" stream event so the UI can show a real-time diff preview.
+class CodePreviewManager {
+  #previewDoc?: Y.Doc;
+  #previews = new Map<string, CodePreviewEntry>();
+  #broken = false;
+
+  constructor(private getBaseDoc: () => Y.Doc,
+              private emit: (event: AiChatStreamEvent) => void) {}
+
+  startToolCall(toolCallId: string, toolName: AiToolCall["toolName"]) {
+    if (toolName !== "writeFile" && toolName !== "editFile") {
+      return;
+    }
+
+    this.#ensureSession();
+    let streamingField = toolName === "writeFile" ? "content" : "replacement";
+    this.#previews.set(toolCallId, {
+      toolName,
+      parser: new StreamingToolInputParser(streamingField),
+    });
+  }
+
+  appendInput(toolCallId: string, delta: string) {
+    let entry = this.#previews.get(toolCallId);
+    if (!entry || this.#broken) return;
+
+    try {
+      entry.parser.append(delta);
+      if (entry.parser.hasError) throw new Error("Invalid JSON in tool input");
+
+      if (entry.cursor) {
+        this.#appendAtCursor(entry);
+      } else {
+        this.#tryActivateCursor(entry);
+      }
+    } catch (err) {
+      this.#broken = true;
+      console.error("failed to parse provisional tool input:", err);
+      this.emit({type: "codeReset"});
+    }
+  }
+
+  finishToolCall(toolCallId: string, success: boolean) {
+    if (!this.#previews.has(toolCallId)) return;
+
+    if (!success) {
+      this.#previews.delete(toolCallId);
+    }
+  }
+
+  clear() {
+    this.#previewDoc = undefined;
+    this.#previews.clear();
+    this.#broken = false;
+  }
+
+  #ensureSession() {
+    if (this.#previewDoc) return;
+
+    let baseUpdate = Y.encodeStateAsUpdateV2(this.getBaseDoc());
+    this.#previewDoc = new Y.Doc();
+    Y.applyUpdateV2(this.#previewDoc, baseUpdate);
+    this.emit({type: "codeReset"});
+  }
+
+  // Try to activate direct cursor-based insertion for a preview. For writeFile, this
+  // requires a complete filename and at least the start of content. For editFile, this
+  // requires complete filename and textToReplace, a unique match in the file, and at
+  // least the start of replacement.  In both cases, prefixFields being non-null means
+  // all preceding fields are complete and the streaming field has begun.
+  #tryActivateCursor(entry: CodePreviewEntry) {
+    let prefix = entry.parser.prefixFields;
+    if (!prefix) return;
+
+    let previewFiles = this.#previewDoc!.getMap<Y.Text>();
+    let filename = prefix.filename as string;
+    let streamValue = entry.parser.streamingValue;
+
+    if (entry.toolName === "writeFile") {
+      // Replace or create the file entry in previewDoc.
+      let ytext = new Y.Text();
+      if (streamValue !== "") {
+        ytext.insert(0, streamValue);
+      }
+      this.#mutateAndEmit(() => previewFiles.set(filename, ytext));
+
+      entry.cursor = { ytext, insertPos: streamValue.length,
+                       fieldLength: streamValue.length };
+      return;
+    }
+
+    // editFile
+    let textToReplace = prefix.textToReplace as string;
+
+    let ytext = previewFiles.get(filename);
+    if (!ytext) return;
+
+    let content = ytext.toString();
+    let pos = content.indexOf(textToReplace);
+    if (pos < 0) return;
+    if (content.indexOf(textToReplace, pos + 1) >= 0) return;
+
+    // Delete the matched text and insert replacement so far.
+    this.#mutateAndEmit(() => {
+      ytext!.delete(pos, textToReplace.length);
+      if (streamValue !== "") {
+        ytext!.insert(pos, streamValue);
+      }
+    });
+
+    entry.cursor = { ytext, insertPos: pos + streamValue.length,
+                     fieldLength: streamValue.length };
+  }
+
+  // Fast path: insert new content directly at the cursor position.
+  #appendAtCursor(entry: CodePreviewEntry) {
+    let streamValue = entry.parser.streamingValue;
+    let newChars = streamValue.slice(entry.cursor!.fieldLength);
+    if (newChars === "") return;
+
+    this.#mutateAndEmit(() => {
+      entry.cursor!.ytext.insert(entry.cursor!.insertPos, newChars);
+    });
+    entry.cursor!.insertPos += newChars.length;
+    entry.cursor!.fieldLength = streamValue.length;
+  }
+
+  // Apply a mutation to #previewDoc, capture the resulting Y.Doc update, and emit it.
+  #mutateAndEmit(fn: () => void) {
+    let updates: Uint8Array[] = [];
+    let handler = (update: Uint8Array) => updates.push(update);
+    this.#previewDoc!.on("updateV2", handler);
+    try {
+      fn();
+    } finally {
+      this.#previewDoc!.off("updateV2", handler);
+    }
+    if (updates.length > 0) {
+      this.emit({type: "codeUpdate", update: updates.length === 1
+          ? updates[0] : Y.mergeUpdatesV2(updates)});
+    }
+  }
+}
+
+// Streams the `code` field of executeCode tool calls to the client as it arrives, so the
+// UI can display the code the agent is about to run before the tool call is actually
+// invoked.  Emits incremental "toolCodeDelta" stream events containing only the new
+// characters decoded since the last event.
+class ExecuteCodeStreamManager {
+  #streams = new Map<string, {parser: StreamingToolInputParser, emittedLength: number}>();
+
+  constructor(private emit: (event: AiChatStreamEvent) => void) {}
+
+  startToolCall(toolCallId: string, toolName: AiToolCall["toolName"]) {
+    if (toolName !== "executeCode") {
+      return;
+    }
+
+    this.#streams.set(toolCallId, {
+      parser: new StreamingToolInputParser("code"),
+      emittedLength: 0,
+    });
+  }
+
+  appendInput(toolCallId: string, delta: string) {
+    let stream = this.#streams.get(toolCallId);
+    if (!stream) return;
+
+    try {
+      stream.parser.append(delta);
+      if (stream.parser.hasError) {
+        this.#streams.delete(toolCallId);
+        console.error("failed to parse provisional executeCode input");
+        return;
+      }
+
+      if (!stream.parser.prefixFields) return;
+
+      let code = stream.parser.streamingValue;
+      let newDelta = code.slice(stream.emittedLength);
+      if (newDelta !== "") {
+        stream.emittedLength = code.length;
+        this.emit({
+          type: "toolCodeDelta",
+          toolCallId,
+          delta: newDelta,
+        });
+      }
+    } catch (err) {
+      this.#streams.delete(toolCallId);
+      console.error("failed to parse provisional executeCode input:", err);
+    }
+  }
+
+  finishToolCall(toolCallId: string) {
+    this.#streams.delete(toolCallId);
+  }
+
+  clear() {
+    this.#streams.clear();
+  }
+}
 
 export async function runAgent(
     hooks: AgentHooks,
@@ -240,7 +461,7 @@ export async function runAgent(
           content = parts.join("");
         }
 
-        if (msg.message === "") {
+        if (msg.message === "" && !msg.reasoning && !msg.toolCalls) {
           // Anthropic's API will throw an error if you try to send it an empty message.
           // Annoyingly, though, Claude will sometimes produce empty messages. Anyway, let's just
           // drop the message from the log...
@@ -520,6 +741,11 @@ export async function runAgent(
   capturedYdocChanges = [];
 
   let agentContext = hooks.getChatAgentContext(chatId);
+  let emitStreamEvent = (event: AiChatStreamEvent) => {
+    hooks.emitChatStreamEvent(chatId, event);
+  };
+  let codePreviewManager = new CodePreviewManager(getSessionYDoc, emitStreamEvent);
+  let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt.
@@ -937,7 +1163,13 @@ export async function runAgent(
       }),
       execute: async ({code}, {toolCallId}) => {
         try {
-          let output = await hooks.executeCodeMode(chatId, code, agentContext, initiator, author.id, capsules);
+          let output = await hooks.executeCodeMode(
+              chatId, code, agentContext, initiator, author.id, capsules,
+              delta => emitStreamEvent({
+                type: "toolOutputDelta",
+                toolCallId,
+                delta,
+              }));
           toolCallNotes.set(toolCallId, {
             output: `${output}`
           });
@@ -1058,6 +1290,30 @@ export async function runAgent(
     // propagate to the catch block in startAgent().
     onError: ({ error }) => { throw error; },
 
+    onChunk: ({chunk}) => {
+      switch (chunk.type) {
+        case "text-delta":
+          emitStreamEvent({type: "textDelta", delta: chunk.text});
+          break;
+        case "reasoning-delta":
+          emitStreamEvent({type: "reasoningDelta", delta: chunk.text});
+          break;
+        case "tool-input-start":
+          emitStreamEvent({
+            type: "toolCallStarted",
+            toolCallId: chunk.id,
+            toolName: chunk.toolName as AiToolCall["toolName"],
+          });
+          codePreviewManager.startToolCall(chunk.id, chunk.toolName as AiToolCall["toolName"]);
+          executeCodeStreamManager.startToolCall(chunk.id, chunk.toolName as AiToolCall["toolName"]);
+          break;
+        case "tool-input-delta":
+          codePreviewManager.appendInput(chunk.id, chunk.delta);
+          executeCodeStreamManager.appendInput(chunk.id, chunk.delta);
+          break;
+      }
+    },
+
     // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
     //   you want to support multiple steps at all? What if you don't want to set a limit?
     // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
@@ -1071,6 +1327,22 @@ export async function runAgent(
     tools,
 
     prepareStep,
+
+    experimental_onToolCallFinish: ({toolCall, success, error}) => {
+      if (success) {
+        emitStreamEvent({type: "toolCallFinished", toolCallId: toolCall.toolCallId});
+        codePreviewManager.finishToolCall(toolCall.toolCallId, true);
+        executeCodeStreamManager.finishToolCall(toolCall.toolCallId);
+      } else {
+        emitStreamEvent({
+          type: "toolCallFinished",
+          toolCallId: toolCall.toolCallId,
+          error: `${error}`,
+        });
+        codePreviewManager.finishToolCall(toolCall.toolCallId, false);
+        executeCodeStreamManager.finishToolCall(toolCall.toolCallId);
+      }
+    },
 
     onStepFinish: ({ text, reasoningText, toolCalls, usage, response }) => {
       let msgs: AiChatMessageBody[] = [];
@@ -1126,6 +1398,10 @@ export async function runAgent(
       // TODO: Figure out where to get cf-aig-log-id when using the Workers AI binding.
       hooks.addChatMessages(chatId, author, msgs,
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
+
+      codePreviewManager.clear();
+      executeCodeStreamManager.clear();
+      emitStreamEvent({type: "clear"});
     },
   });
 

@@ -10,7 +10,7 @@ import { Overseer, GadgetMetadata, AiChatAuthorInfo, ConsoleLogSubscriber, Conso
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
-import ChatInterface from './ChatInterface'
+import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
 import type { MenuProps } from 'antd'
 
@@ -73,6 +73,7 @@ export default function GadgetEditor() {
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
   const [activeTab, setActiveTab] = useState('code')
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
+  const [streamingProposedChanges, setStreamingProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
   const [shareModalOpen, setShareModalOpen] = useState(false)
@@ -89,7 +90,9 @@ export default function GadgetEditor() {
   // the back button to go home even when proposed changes temporarily force complex mode.
   const simpleChatBase = !hasCode && !hasBindings
       && (chatCount === null || (chatCount === 1 && hasChatZero))
-  const simpleChatMode = simpleChatBase && proposedChanges === undefined
+  const simpleChatMode = simpleChatBase
+      && proposedChanges === undefined
+      && streamingProposedChanges === undefined
 
   // When the gadget would be in simple mode (ignoring proposed changes), always
   // show chat 0 regardless of URL. We use simpleChatBase rather than simpleChatMode
@@ -573,6 +576,7 @@ export default function GadgetEditor() {
               selectedChatId={selectedChatId}
               onNavigateToChat={navigateToChat}
               onProposedChangesChange={setProposedChanges}
+              onStreamingProposedChangesChange={updates => setStreamingProposedChanges(updates)}
               onFileEdited={handleFileEdited}
               pendingConsoleLogCount={consoleLogCount}
               consoleLogPreview={consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''}
@@ -652,6 +656,7 @@ export default function GadgetEditor() {
                     height="calc(100vh - 64px - 46px)"
                     onCodeChange={handleCodeChange}
                     proposedChanges={proposedChanges}
+                    streamingProposedChanges={streamingProposedChanges}
                     fileToSelect={fileToSelect}
                     onHasCodeChange={setHasCode}
                   />
