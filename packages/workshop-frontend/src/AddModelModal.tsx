@@ -1,12 +1,8 @@
-import React from 'react'
-import { Modal, Form, Select, Input, Collapse, message } from 'antd'
 import { useState, useEffect } from 'react'
+import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
 import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-
-const { Option, OptGroup } = Select
-const { Panel } = Collapse
 
 interface AddModelModalProps {
   visible: boolean
@@ -28,243 +24,330 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   ollama: 'Ollama',
 }
 
+// Encode a selection into a string value for the Select component.
+function encodeSelection(provider: AiModelProvider, modelId?: string): string {
+  return modelId ? `${provider}:${modelId}` : `other-${provider}`
+}
+
+// Decode a Select value back into a SelectionType.
+function decodeSelection(value: string): SelectionType {
+  if (value.startsWith('other-')) {
+    return { type: 'custom', provider: value.substring(6) as AiModelProvider }
+  }
+  const colonIndex = value.indexOf(':')
+  const provider = value.substring(0, colonIndex) as AiModelProvider
+  const modelId = value.substring(colonIndex + 1)
+  const displayName = SUGGESTED_MODELS[provider][modelId]
+  return { type: 'suggested', provider, modelId, displayName }
+}
+
+// Build the flat list of options for the Select dropdown.
+function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null) {
+  const options: { value: string; label: string; provider: string }[] = []
+  const providerOrder = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
+
+  for (const provider of providerOrder) {
+    if (enabledProviders && !enabledProviders.has(provider)) continue
+
+    // In gateway mode, suggested models are already built-in, so don't list them.
+    if (!gatewayMode) {
+      for (const [modelId, displayName] of Object.entries(SUGGESTED_MODELS[provider])) {
+        options.push({
+          value: encodeSelection(provider, modelId),
+          label: displayName,
+          provider,
+        })
+      }
+    }
+
+    options.push({
+      value: encodeSelection(provider),
+      label: `Other ${PROVIDER_LABELS[provider] || provider}...`,
+      provider,
+    })
+  }
+
+  return options
+}
+
 export default function AddModelModal({ visible, onCancel, onSuccess, authenticatedApi, aiConfig }: AddModelModalProps) {
-  const [form] = Form.useForm()
+  const toasts = useKumoToastManager()
+
   const [loading, setLoading] = useState(false)
   const [selection, setSelection] = useState<SelectionType | null>(null)
+  const [selectValue, setSelectValue] = useState<string | undefined>(undefined)
+
+  // Form fields (used for custom models)
+  const [modelId, setModelId] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [uniqueId, setUniqueId] = useState('')
+  const [apiToken, setApiToken] = useState('')
+  const [apiUrl, setApiUrl] = useState('')
+
+  // Validation errors
+  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  // Advanced settings collapsible state
+  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const gatewayMode = aiConfig?.enabled === true
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
     : null
 
-  // Reset form when modal closes
+  // Reset all state when dialog closes
   useEffect(() => {
     if (!visible) {
-      form.resetFields()
       setSelection(null)
+      setSelectValue(undefined)
+      setModelId('')
+      setDisplayName('')
+      setUniqueId('')
+      setApiToken('')
+      setApiUrl('')
+      setErrors({})
+      setAdvancedOpen(false)
     }
-  }, [visible, form])
+  }, [visible])
 
   const handleModelSelect = (value: string) => {
-    // Parse the selection value
-    if (value.startsWith('other-')) {
-      const provider = value.substring(6) as AiModelProvider
-      setSelection({ type: 'custom', provider })
-      // Reset dependent fields
-      form.setFieldsValue({
-        modelId: undefined,
-        displayName: undefined,
-        uniqueId: undefined,
-        apiToken: undefined,
-        apiUrl: provider === 'ollama' ? 'http://localhost:11434/api' : undefined,
-      })
+    setSelectValue(value)
+    setErrors({})
+    const sel = decodeSelection(value)
+    setSelection(sel)
+
+    if (sel.type === 'custom') {
+      setModelId('')
+      setDisplayName('')
+      setUniqueId('')
+      setApiToken('')
+      setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434/api' : '')
     } else {
-      // It's a suggested model: format is "provider:modelId"
-      // Only split on first colon since model IDs can contain colons (e.g., ollama's "qwen3-coder:30b")
-      const colonIndex = value.indexOf(':')
-      const provider = value.substring(0, colonIndex) as AiModelProvider
-      const modelId = value.substring(colonIndex + 1)
-      const displayName = SUGGESTED_MODELS[provider][modelId]
-      setSelection({ type: 'suggested', provider, modelId, displayName })
-      // Pre-fill fields for suggested models
-      form.setFieldsValue({
-        modelId,
-        displayName,
-        uniqueId: modelId,
-        apiToken: undefined,
-        apiUrl: provider === 'ollama' ? 'http://localhost:11434/api' : undefined,
-      })
+      setModelId(sel.modelId)
+      setDisplayName(sel.displayName)
+      setUniqueId(sel.modelId)
+      setApiToken('')
+      setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434/api' : '')
     }
   }
 
-  const handleOk = async () => {
-    try {
-      const values = await form.validateFields()
-      setLoading(true)
+  const validate = (): boolean => {
+    const newErrors: Record<string, string> = {}
 
-      // For suggested models, get modelId/displayName from selection state (not form)
-      // since those Form.Items don't exist for suggested models
+    if (!selection) {
+      newErrors.selection = gatewayMode ? 'Please select a provider' : 'Please select a model'
+    }
+
+    if (selection?.type === 'custom') {
+      if (!modelId.trim()) newErrors.modelId = 'Please enter the model ID'
+      if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
+      if (!uniqueId.trim()) newErrors.uniqueId = 'Please enter a unique ID'
+    }
+
+    const isOllama = selection?.provider === 'ollama'
+    const isCloudflare = selection?.provider === 'cloudflare'
+    const showCredentials = !gatewayMode
+
+    if (showCredentials && selection && !isCloudflare && !isOllama && !apiToken.trim()) {
+      newErrors.apiToken = 'Please enter your API token'
+    }
+
+    if (showCredentials && isOllama && !apiUrl.trim()) {
+      newErrors.apiUrl = 'Please enter the Ollama API URL'
+    }
+
+    setErrors(newErrors)
+    return Object.keys(newErrors).length === 0
+  }
+
+  const handleSubmit = async () => {
+    if (!validate()) return
+
+    setLoading(true)
+    try {
       const isSuggested = selection!.type === 'suggested'
-      const modelId = isSuggested ? selection!.modelId : values.modelId
-      const displayName = isSuggested ? selection!.displayName : values.displayName
+      const finalModelId = isSuggested ? selection!.modelId : modelId.trim()
+      const finalDisplayName = isSuggested ? selection!.displayName : displayName.trim()
 
       const profile: AiChatAuthorInfo = {
         type: 'agent',
-        id: isSuggested ? modelId : values.uniqueId,
-        name: displayName,
+        id: isSuggested ? finalModelId : uniqueId.trim(),
+        name: finalDisplayName,
       }
 
       const config: AiModelConfig = {
         provider: selection!.provider,
-        model: modelId,
-        // In gateway mode, the server provides credentials; send empty token.
-        apiToken: gatewayMode ? '' : (values.apiToken || ''),
-        ...(!gatewayMode && values.apiUrl && { apiUrl: values.apiUrl }),
+        model: finalModelId,
+        apiToken: gatewayMode ? '' : (apiToken || ''),
+        ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
       }
 
       await authenticatedApi.addModel(profile, config)
-      message.success('AI model added successfully')
+      toasts.add({ title: 'AI model added successfully', variant: 'success' })
       onSuccess()
     } catch (error: any) {
-      if (error?.errorFields) {
-        // Form validation error - log for debugging
-        console.error('Form validation failed:', error.errorFields)
-        message.error('Please fill in all required fields')
-        return
-      }
       console.error('Failed to add model:', error)
-      message.error('Failed to add model')
+      toasts.add({ title: 'Failed to add model', variant: 'error' })
     } finally {
       setLoading(false)
     }
   }
 
-  // Build dropdown options
-  const dropdownOptions: React.JSX.Element[] = []
-
-  const providerOrder: AiModelProvider[] = Object.keys(SUGGESTED_MODELS) as AiModelProvider[];
-
-  for (const provider of providerOrder) {
-    // In gateway mode, skip providers that aren't enabled.
-    if (enabledProviders && !enabledProviders.has(provider)) continue
-
-    const models = SUGGESTED_MODELS[provider]
-    const suggestedOptions: React.JSX.Element[] = []
-
-    // In gateway mode, suggested models are already built-in, so don't list them.
-    // In BYOK mode, show them as selectable options.
-    if (!gatewayMode) {
-      for (const [modelId, displayName] of Object.entries(models)) {
-        suggestedOptions.push(
-          <Option key={`${provider}:${modelId}`} value={`${provider}:${modelId}`}>
-            {displayName}
-          </Option>
-        )
-      }
-    }
-
-    // Add "Other X..." option for adding custom models from this provider
-    suggestedOptions.push(
-      <Option key={`other-${provider}`} value={`other-${provider}`}>
-        Other {PROVIDER_LABELS[provider] || provider}...
-      </Option>
-    )
-
-    dropdownOptions.push(
-      <OptGroup key={provider} label={PROVIDER_LABELS[provider] || provider}>
-        {suggestedOptions}
-      </OptGroup>
-    )
-  }
-
+  const options = buildOptions(gatewayMode, enabledProviders)
   const showCustomFields = selection?.type === 'custom'
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-
-  // In gateway mode, all credential fields are hidden since the server manages them.
   const showCredentials = !gatewayMode
 
+  // Group options by provider for rendering with visual separators.
+  const groupedOptions: { provider: string; items: typeof options }[] = []
+  for (const opt of options) {
+    const last = groupedOptions[groupedOptions.length - 1]
+    if (last && last.provider === opt.provider) {
+      last.items.push(opt)
+    } else {
+      groupedOptions.push({ provider: opt.provider, items: [opt] })
+    }
+  }
+
   return (
-    <Modal
-      title="Add AI Model"
-      open={visible}
-      onOk={handleOk}
-      onCancel={onCancel}
-      confirmLoading={loading}
-      okText="Add Model"
-      width={600}
-    >
-      <Form
-        form={form}
-        layout="vertical"
-        style={{ marginTop: 24 }}
-      >
-        <Form.Item
-          label={gatewayMode ? "Select Provider" : "Select Model"}
-          name="modelSelection"
-          rules={[{ required: true, message: gatewayMode ? 'Please select a provider' : 'Please select a model' }]}
-        >
+    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
+      <Dialog className="p-6" size="lg">
+        <Dialog.Title className="text-lg font-semibold mb-4">
+          Add AI Model
+        </Dialog.Title>
+
+        <div className="space-y-4">
+          {/* Model / Provider selection */}
           <Select
-            placeholder={gatewayMode ? "Choose a provider..." : "Choose an AI model..."}
-            onChange={handleModelSelect}
-            showSearch
-            optionFilterProp="children"
+            label={gatewayMode ? 'Select Provider' : 'Select Model'}
+            className="w-full text-sm"
+            placeholder={gatewayMode ? 'Choose a provider...' : 'Choose an AI model...'}
+            value={selectValue}
+            onValueChange={(v) => handleModelSelect(v as string)}
+            error={errors.selection}
+            renderValue={(v) => {
+              const opt = options.find(o => o.value === v)
+              return opt?.label ?? String(v)
+            }}
           >
-            {dropdownOptions}
+            {groupedOptions.map((group, groupIndex) => (
+              <div key={group.provider}>
+                {groupIndex > 0 && (
+                  <div className="h-px bg-kumo-line my-1 mx-2" />
+                )}
+                <div className="px-3 py-1.5 text-xs font-medium text-kumo-subtle select-none">
+                  {PROVIDER_LABELS[group.provider as AiModelProvider] || group.provider}
+                </div>
+                {group.items.map(opt => (
+                  <Select.Option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </Select.Option>
+                ))}
+              </div>
+            ))}
           </Select>
-        </Form.Item>
 
-        {showCustomFields && (
-          <>
-            <Form.Item
-              label="Model ID"
-              name="modelId"
-              rules={[{ required: true, message: 'Please enter the model ID' }]}
-              extra="The model identifier as specified by the provider (e.g., 'gpt-5.1-codex', 'claude-sonnet-4-5')"
+          {/* Custom model fields */}
+          {showCustomFields && (
+            <>
+              <Input
+                label="Model ID"
+                placeholder="e.g., gpt-5.1-codex"
+                description="The model identifier as specified by the provider (e.g., 'gpt-5.1-codex', 'claude-sonnet-4-5')"
+                value={modelId}
+                onChange={(e) => { setModelId(e.target.value); setErrors(prev => ({ ...prev, modelId: '' })) }}
+                error={errors.modelId}
+                variant={errors.modelId ? 'error' : 'default'}
+              />
+
+              <Input
+                label="Display Name"
+                placeholder="e.g., ChatGPT 5.1 Codex"
+                description="Human-readable name shown in the UI"
+                value={displayName}
+                onChange={(e) => { setDisplayName(e.target.value); setErrors(prev => ({ ...prev, displayName: '' })) }}
+                error={errors.displayName}
+                variant={errors.displayName ? 'error' : 'default'}
+              />
+
+              <Input
+                label="Unique ID"
+                placeholder="e.g., gpt-5.1-codex or gpt-5.1-work"
+                description="Unique identifier for this model configuration. Defaults to the model ID."
+                value={uniqueId}
+                onChange={(e) => { setUniqueId(e.target.value); setErrors(prev => ({ ...prev, uniqueId: '' })) }}
+                error={errors.uniqueId}
+                variant={errors.uniqueId ? 'error' : 'default'}
+              />
+            </>
+          )}
+
+          {/* API Token */}
+          {showCredentials && selection && !isCloudflare && (
+            <SensitiveInput
+              label="API Token"
+              placeholder={isOllama ? '(optional)' : 'sk-...'}
+              description={
+                isOllama
+                  ? 'Optional for local Ollama access'
+                  : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
+              }
+              value={apiToken}
+              onValueChange={(v) => { setApiToken(v); setErrors(prev => ({ ...prev, apiToken: '' })) }}
+              error={errors.apiToken}
+              variant={errors.apiToken ? 'error' : 'default'}
+            />
+          )}
+
+          {/* Ollama API URL (always visible for Ollama) */}
+          {showCredentials && isOllama && (
+            <Input
+              label="API URL"
+              placeholder="http://localhost:11434/api"
+              description="URL of your Ollama server"
+              value={apiUrl}
+              onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
+              error={errors.apiUrl}
+              variant={errors.apiUrl ? 'error' : 'default'}
+            />
+          )}
+
+          {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
+          {showCredentials && selection && !isOllama && !isCloudflare && (
+            <Collapsible
+              label="Advanced Settings"
+              open={advancedOpen}
+              onOpenChange={setAdvancedOpen}
             >
-              <Input placeholder="e.g., gpt-5.1-codex" />
-            </Form.Item>
-
-            <Form.Item
-              label="Display Name"
-              name="displayName"
-              rules={[{ required: true, message: 'Please enter a display name' }]}
-              extra="Human-readable name shown in the UI"
-            >
-              <Input placeholder="e.g., ChatGPT 5.1 Codex" />
-            </Form.Item>
-
-            <Form.Item
-              label="Unique ID"
-              name="uniqueId"
-              rules={[{ required: true, message: 'Please enter a unique ID' }]}
-              extra="Unique identifier for this model configuration. Defaults to the model ID."
-            >
-              <Input placeholder="e.g., gpt-5.1-codex or gpt-5.1-work" />
-            </Form.Item>
-          </>
-        )}
-
-        {showCredentials && selection && !isCloudflare && (
-          <Form.Item
-            label="API Token"
-            name="apiToken"
-            rules={[{ required: !isOllama, message: 'Please enter your API token' }]}
-            extra={isOllama ?
-              'Optional for local Ollama access' :
-              `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
-            }
-          >
-            <Input placeholder={isOllama ? '(optional)' : 'sk-...'} />
-          </Form.Item>
-        )}
-
-        {showCredentials && isOllama && (
-          <Form.Item
-            label="API URL"
-            name="apiUrl"
-            rules={[{ required: true, message: 'Please enter the Ollama API URL' }]}
-            extra="URL of your Ollama server"
-          >
-            <Input placeholder="http://localhost:11434/api" />
-          </Form.Item>
-        )}
-
-        {showCredentials && selection && !isOllama && !isCloudflare && (
-          <Collapse ghost>
-            <Panel header="Advanced Settings" key="advanced">
-              <Form.Item
+              <Input
                 label="API URL"
-                name="apiUrl"
-                extra="Override the default API endpoint (useful for proxies like Cloudflare AI Gateway)"
-              >
-                <Input placeholder="https://..." />
-              </Form.Item>
-            </Panel>
-          </Collapse>
-        )}
-      </Form>
-    </Modal>
+                placeholder="https://..."
+                description="Override the default API endpoint (useful for proxies like Cloudflare AI Gateway)"
+                value={apiUrl}
+                onChange={(e) => setApiUrl(e.target.value)}
+              />
+            </Collapsible>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="mt-6 flex justify-end gap-2">
+          <Dialog.Close render={(props) => (
+            <Button variant="secondary" {...props} disabled={loading}>
+              Cancel
+            </Button>
+          )} />
+          <Button
+            variant="primary"
+            onClick={handleSubmit}
+            loading={loading}
+            disabled={!selection}
+          >
+            Add Model
+          </Button>
+        </div>
+      </Dialog>
+    </Dialog.Root>
   )
 }

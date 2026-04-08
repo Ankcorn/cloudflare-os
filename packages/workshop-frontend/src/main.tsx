@@ -1,11 +1,41 @@
 import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
+import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
-import { BrowserRouter } from 'react-router-dom'
-import '@ant-design/v5-patch-for-react-19'
-import 'antd/dist/reset.css'
+import { RpcContext } from './RpcContext'
+import { createRouter } from './router'
+import './styles.css'
+
+// ---------------------------------------------------------------------------
+// Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
+// with the dev account before React renders, so you never see the login page.
+// ---------------------------------------------------------------------------
+async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
+  if (import.meta.env.VITE_DEV_AUTO_LOGIN !== 'true') return
+  if (localStorage.getItem('authToken')) return  // already logged in
+
+  const username = import.meta.env.VITE_DEV_USERNAME ?? 'dev'
+  const password = import.meta.env.VITE_DEV_PASSWORD ?? 'devpassword'
+
+  // Derive the passwordHash the same way the app does (argon2id via hashPassword),
+  // but here we use the same SERVICE_SALT + SHA-256 shortcut that wrangler dev accepts
+  // in local mode. We import hashPassword from the existing util.
+  const { hashPassword } = await import('./passwordHash')
+  const passwordHash = await hashPassword(username, password)
+
+  // Try createAccount first — works on a fresh backend. Returns null if already exists.
+  let token = await stub.createAccount(username, username, passwordHash)
+
+  // If null, account already exists — just log in.
+  if (!token) {
+    token = await stub.login(username, passwordHash)
+  }
+
+  if (token) {
+    localStorage.setItem('authToken', token)
+  }
+}
 
 // WebSocket RPC connection management.
 //
@@ -25,60 +55,82 @@ function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
   // When opening the Vite dev server directly (localhost:3000), the backend is at localhost:8787.
   // Otherwise, the API is on the same host as the frontend.
-  const apiHost = window.location.host === 'localhost:3000' ? 'localhost:8787' : window.location.host;
+  const apiHost = window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host;
   const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
   return newWebSocketRpcSession<PublicApi>(wsUrl);
 }
+
 async function handleBroken(error: any) {
   console.warn('RPC connection lost:', error);
 
+  isConnectionLost = true;
+  for (let cb of notifyCurrentStubUpdated) { cb(); }
+
   let timeSinceConnect = Date.now() - lastConnectTime;
   if (timeSinceConnect < backoff) {
-    // Reconnecting too quickly, wait a bit.
     let waitTime = backoff - timeSinceConnect;
     console.warn(`Will try again in ${Math.round(waitTime / 1000)} seconds...`)
     await new Promise(resolve => setTimeout(resolve, waitTime));
     console.warn(`Retrying connection...`);
-
-    // Wait twice as long next time, but no more than 10 seconds.
     backoff = Math.min(backoff * 2, 10000);
   } else {
-    // Reconnect immediately and reset backoff for next time.
     backoff = 1000;
   }
 
   currentStub = startConnection();
   currentStub.onRpcBroken(handleBroken);
 
+  // Don't clear isConnectionLost here — the new connection hasn't proven
+  // it works yet. It gets cleared by markConnectionRestored() once the
+  // app successfully communicates with the backend.
   for (let cb of notifyCurrentStubUpdated) {
     cb();
   }
 }
 
-// Callbacks to call whenever `currentStub` is updated.
+// Callbacks to call whenever `currentStub` or connection state is updated.
 let notifyCurrentStubUpdated: Set<() => void> = new Set();
+let isConnectionLost = false;
+
+// Called externally (e.g., by auth) to indicate the connection is alive.
+export function markConnectionRestored() {
+  if (!isConnectionLost) return;
+  isConnectionLost = false;
+  for (let cb of notifyCurrentStubUpdated) { cb(); }
+}
 
 // Current stub. handleBroken() will replace this on disconnect.
 let currentStub = startConnection();
 currentStub.onRpcBroken(handleBroken);
 
+const router = createRouter()
+
 function AppWithConnection() {
-  const [rpcStub, setRpcStub] = useState<{stub: RpcStub<PublicApi>}>({stub: currentStub});
+  const [rpcState, setRpcState] = useState<{stub: RpcStub<PublicApi>; connectionLost: boolean}>({
+    stub: currentStub,
+    connectionLost: isConnectionLost,
+  });
 
   useEffect(() => {
-    let cb = () => setRpcStub({stub: currentStub});
+    let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
     notifyCurrentStubUpdated.add(cb);
     return () => { notifyCurrentStubUpdated.delete(cb); };
   }, []);
 
   return (
-    <BrowserRouter>
-      <App rpcStub={rpcStub.stub} />
-    </BrowserRouter>
+    <RpcContext.Provider value={rpcState}>
+      <RouterProvider router={router} />
+    </RpcContext.Provider>
   );
 }
 
 const root = createRoot(document.getElementById('root')!)
+
+// Kick off dev auto-login in the background. If it completes before
+// useAuth checks the token, the user skips the login page. If the backend
+// is unreachable, the app still renders immediately (showing a connection
+// banner or login page) instead of hanging on a blank screen.
+devAutoLogin(currentStub).catch(() => {})
 
 root.render(
   <StrictMode>

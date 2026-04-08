@@ -2670,6 +2670,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.owner.updateTitle(this.impl.ctx.id.toString(), title);
   }
 
+  async setPinned(pinned: boolean): Promise<void> {
+    await this.clientUser.updatePinned(this.impl.ctx.id.toString(), pinned);
+  }
+
   async deleteSelf(): Promise<void> {
     if (!this.isOwner) {
       throw new Error("Only the gadget owner can delete it.");

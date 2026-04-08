@@ -17,17 +17,19 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
   const bindingRef = useRef<MonacoBinding | null>(null)
   const [editorReady, setEditorReady] = useState(false)
 
-  // Set up Monaco binding when editor and ytext are available
+  // Set up Monaco binding when editor and ytext are available.
+  // When ytext is transiently null (e.g., streaming doc rebuild), the binding
+  // is detached but the Monaco editor stays mounted — no blank flash.
   useEffect(() => {
-    const editor = editorRef.current
+    const ed = editorRef.current
     const monaco = monacoRef.current
 
-    if (!editor || !monaco || !ytext || !editorReady) {
+    if (!ed || !monaco || !ytext || !editorReady) {
       return
     }
 
     // Get or create a model for this file
-    const model = editor.getModel()
+    const model = ed.getModel()
     if (!model) {
       return
     }
@@ -37,7 +39,7 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
     const binding = new MonacoBinding(
       ytext,
       model,
-      new Set([editor])
+      new Set([ed])
     )
     bindingRef.current = binding
 
@@ -79,14 +81,29 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
         return 'rust'
       case 'go':
         return 'go'
-      case 'java':
-        return 'java'
+      case 'sh':
+      case 'bash':
+        return 'shell'
+      case 'yaml':
+      case 'yml':
+        return 'yaml'
+      case 'toml':
+        return 'toml'
+      case 'xml':
+        return 'xml'
+      case 'svg':
+        return 'xml'
+      case 'sql':
+        return 'sql'
+      case 'graphql':
+      case 'gql':
+        return 'graphql'
       case 'c':
-      case 'h':
         return 'c'
       case 'cpp':
-      case 'cxx':
       case 'cc':
+      case 'cxx':
+      case 'h':
       case 'hpp':
         return 'cpp'
       default:
@@ -94,19 +111,13 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
     }
   }
 
-  if (!filename || !ytext) {
+  if (!filename) {
     return (
       <div
-        style={{
-          height,
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          backgroundColor: '#f8f9fa',
-          color: '#6c757d'
-        }}
+        className="flex justify-center items-center bg-kumo-base text-kumo-subtle"
+        style={{ height }}
       >
-        {!filename ? 'Select a file to start editing' : 'Loading file...'}
+        Select a file to start editing
       </div>
     )
   }

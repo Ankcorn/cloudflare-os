@@ -430,6 +430,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put(record);
   }
 
+  async updatePinned(gadgetId: string, pinned: boolean) {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!record) {
+      throw new Error("No such gadget belonging to user.");
+    }
+    record.pinned = pinned;
+    this.storage.gadgets.put(record);
+  }
+
   async getGadget(id: string): Promise<GadgetMetadata | null> {
     return this.storage.gadgets.get(id) || null;
   }

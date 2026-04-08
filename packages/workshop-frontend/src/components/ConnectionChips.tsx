@@ -1,0 +1,97 @@
+import { Plus } from '@phosphor-icons/react'
+import { Link } from '@tanstack/react-router'
+import { useAuthenticatedApi } from '../AuthContext'
+import { useState, useEffect } from 'react'
+import { logoComponents } from './ConnectionLogos'
+import { ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { AccountDescription, VendorDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper'
+import { RpcTarget } from 'capnweb'
+
+interface ConnectedAccount {
+  id: number
+  name: string
+  logo: string
+  bgColor: string
+}
+
+export default function ConnectionChips() {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [accounts, setAccounts] = useState<ConnectedAccount[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    let subscriptionStub: { [Symbol.dispose](): void } | null = null
+
+    const accountMap = new Map<number, ConnectedAccount>()
+
+    class ChipsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+      add(id: number, description: AccountDescription, vendor: VendorDescription, _supportedResources: SupportedResource[] = [], _credentialsValid: boolean = true) {
+        if (cancelled) return
+        const logoKey = vendor.displayName.toLowerCase().split(' ')[0]
+        accountMap.set(id, {
+          id,
+          name: description.displayName ?? description.uniqueName ?? vendor.displayName,
+          logo: logoKey,
+          bgColor: '#f4ecf5',
+        })
+        if (!cancelled) setAccounts(Array.from(accountMap.values()))
+      }
+      remove(id: number) {
+        accountMap.delete(id)
+        if (!cancelled) setAccounts(Array.from(accountMap.values()))
+      }
+      ready() {}
+    }
+
+    const subscriber = new ChipsSubscriber()
+    const subPromise = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    subPromise.then((stub) => {
+      if (cancelled) {
+        stub[Symbol.dispose]()
+      } else {
+        subscriptionStub = stub
+      }
+    }).catch(() => {})
+
+    return () => {
+      cancelled = true
+      subscriptionStub?.[Symbol.dispose]()
+    }
+  }, [authenticatedApi])
+
+  return (
+    <div className="flex items-center justify-center gap-2 flex-wrap max-w-2xl mx-auto">
+      {accounts.slice(0, 5).map((account) => {
+        const LogoComponent = logoComponents[account.logo]
+        return (
+          <button
+            key={account.id}
+            className="connection-chip flex items-center gap-1.5 pl-1.5 pr-3 py-1 rounded-full border text-left"
+          >
+            <div
+              className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
+              style={{ backgroundColor: account.bgColor }}
+            >
+              {LogoComponent ? (
+                <LogoComponent size={12} />
+              ) : (
+                <span className="text-[9px] font-bold text-kumo-strong">
+                  {account.name[0]}
+                </span>
+              )}
+            </div>
+            <span className="text-sm text-kumo-default">
+              {account.name}
+            </span>
+          </button>
+        )
+      })}
+      <Link
+        to="/connections"
+        className="flex items-center gap-1 pl-2 pr-2.5 py-1 rounded-full border border-kumo-line text-sm text-kumo-subtle hover:text-kumo-brand hover:border-kumo-brand transition-colors"
+      >
+        <Plus size={14} />
+      </Link>
+    </div>
+  )
+}

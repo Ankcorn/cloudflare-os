@@ -294,6 +294,9 @@ export type GadgetMetadata = {
   // Total cost of AI inference in dollars, if known.
   totalCost?: number;
 
+  // Whether the user has pinned this gadget to the top of their list.
+  pinned?: boolean;
+
   // Set when the gadget is not owned by the current user. Presence of this field indicates the
   // user is a collaborator, not the owner.
   owner?: AiChatAuthorInfo;
@@ -435,6 +438,9 @@ export interface Overseer extends RpcTarget {
 
   // Change the title.
   setTitle(title: string): Promise<void>;
+
+  // Pin or unpin this gadget in the user's list.
+  setPinned(pinned: boolean): Promise<void>;
 
   // Instruct Gadget to delete itself, removing it from the User's gadget list and deleting all
   // data. Further method calls will fail.

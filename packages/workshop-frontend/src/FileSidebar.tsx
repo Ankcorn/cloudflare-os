@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Menu, Button, Input, Modal, message } from 'antd'
-import { FileOutlined, PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
+import { Dialog, Button, Input, useKumoToastManager } from '@cloudflare/kumo'
+import { FileText, Plus, Trash, Pencil } from '@phosphor-icons/react'
 
 interface FileSidebarProps {
   files: string[]
@@ -27,17 +27,21 @@ export default function FileSidebar({
 }: FileSidebarProps) {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [isRenameModalOpen, setIsRenameModalOpen] = useState(false)
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
+  const [deletingFile, setDeletingFile] = useState<string | null>(null)
   const [newFileName, setNewFileName] = useState('')
   const [renamingFile, setRenamingFile] = useState<string | null>(null)
 
+  const toasts = useKumoToastManager()
+
   const handleCreateFile = () => {
     if (!newFileName.trim()) {
-      message.error('Filename cannot be empty')
+      toasts.add({ title: 'Filename cannot be empty', variant: 'error' })
       return
     }
 
     if (files.includes(newFileName.trim())) {
-      message.error('A file with this name already exists')
+      toasts.add({ title: 'A file with this name already exists', variant: 'error' })
       return
     }
 
@@ -48,12 +52,12 @@ export default function FileSidebar({
 
   const handleRenameFile = () => {
     if (!newFileName.trim() || !renamingFile) {
-      message.error('Filename cannot be empty')
+      toasts.add({ title: 'Filename cannot be empty', variant: 'error' })
       return
     }
 
     if (files.includes(newFileName.trim()) && newFileName.trim() !== renamingFile) {
-      message.error('A file with this name already exists')
+      toasts.add({ title: 'A file with this name already exists', variant: 'error' })
       return
     }
 
@@ -69,172 +73,208 @@ export default function FileSidebar({
     setIsRenameModalOpen(true)
   }
 
-  const menuItems = files.map(filename => {
-    const isDirty = dirtyFiles.has(filename)
-    const hasChanges = changedFiles?.has(filename) || false
-    const isUnchanged = isDiffMode && !hasChanges
-
-    return {
-      key: filename,
-      icon: <FileOutlined />,
-      label: (
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            width: '100%',
-            backgroundColor: isDirty
-              ? 'rgba(255, 77, 79, 0.1)'
-              : hasChanges
-                ? 'rgba(24, 144, 255, 0.1)'
-                : 'transparent',
-            borderRadius: '4px',
-            padding: (isDirty || hasChanges) ? '2px 4px' : '0',
-            opacity: isUnchanged ? 0.4 : 1
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault()
-            e.stopPropagation()
-          }}
-        >
-          <span
-            style={{
-              flex: 1,
-              cursor: 'pointer',
-              color: isDirty
-                ? '#ff4d4f'
-                : hasChanges
-                  ? '#1890ff'
-                  : 'inherit'
-            }}
-            onClick={() => onFileSelect(filename)}
-            title={isDirty
-              ? 'File has unsaved changes'
-              : hasChanges
-                ? 'File has proposed changes'
-                : ''}
-          >
-            {filename}
-          </span>
-        <div
-          style={{
-            display: 'flex',
-            gap: 4,
-            opacity: 0.6
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <Button
-            type="text"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={(e) => {
-              e.stopPropagation()
-              startRename(filename)
-            }}
-            style={{
-              width: 20,
-              height: 20,
-              minWidth: 'unset',
-              fontSize: '10px'
-            }}
-          />
-          <Button
-            type="text"
-            size="small"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={(e) => {
-              e.stopPropagation()
-              if (files.length <= 1) {
-                message.error('Cannot delete the last remaining file')
-                return
-              }
-              Modal.confirm({
-                title: 'Delete File',
-                content: `Are you sure you want to delete "${filename}"?`,
-                okText: 'Delete',
-                okType: 'danger',
-                onOk: () => onFileDelete(filename)
-              })
-            }}
-            style={{
-              width: 20,
-              height: 20,
-              minWidth: 'unset',
-              fontSize: '10px'
-            }}
-          />
-        </div>
-      </div>
-    )
+  const startDelete = (filename: string) => {
+    if (files.length <= 1) {
+      toasts.add({ title: 'Cannot delete the last remaining file', variant: 'error' })
+      return
+    }
+    setDeletingFile(filename)
+    setIsDeleteModalOpen(true)
   }
-  })
+
+  const confirmDelete = () => {
+    if (deletingFile) {
+      onFileDelete(deletingFile)
+    }
+    setDeletingFile(null)
+    setIsDeleteModalOpen(false)
+  }
 
   return (
-    <div style={{ width: 250, borderRight: '1px solid #f0f0f0', height: '100%' }}>
-      <div style={{ padding: '8px', borderBottom: '1px solid #f0f0f0' }}>
+    <div className="w-[250px] border-r border-kumo-line h-full flex flex-col">
+      {/* New File button */}
+      <div className="p-2 border-b border-kumo-line">
         <Button
-          type="primary"
-          icon={<PlusOutlined />}
+          variant="primary"
+          size="sm"
+          className="w-full"
           onClick={() => setIsCreateModalOpen(true)}
-          size="small"
-          style={{ width: '100%' }}
         >
+          <Plus size={14} />
           New File
         </Button>
       </div>
-      
-      <Menu
-        mode="inline"
-        selectedKeys={activeFile ? [activeFile] : []}
-        items={menuItems}
-        style={{ 
-          border: 'none',
-          height: 'calc(100% - 48px)',
-          overflow: 'auto'
-        }}
-      />
 
-      <Modal
-        title="Create New File"
+      {/* File list */}
+      <div className="flex-1 overflow-auto">
+        {files.map(filename => {
+          const isDirty = dirtyFiles.has(filename)
+          const hasChanges = changedFiles?.has(filename) || false
+          const isUnchanged = isDiffMode && !hasChanges
+          const isActive = activeFile === filename
+
+          return (
+            <div
+              key={filename}
+              className={[
+                'group flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm',
+                isActive
+                  ? 'bg-kumo-tint text-kumo-brand'
+                  : 'text-kumo-default hover:bg-kumo-tint/50',
+                isUnchanged ? 'opacity-40' : '',
+              ].join(' ')}
+              onClick={() => onFileSelect(filename)}
+            >
+              <FileText
+                size={14}
+                className={[
+                  'shrink-0',
+                  isDirty
+                    ? 'text-kumo-danger'
+                    : hasChanges
+                      ? 'text-kumo-brand'
+                      : 'text-kumo-subtle',
+                ].join(' ')}
+              />
+
+              <span
+                className={[
+                  'flex-1 truncate',
+                  isDirty
+                    ? 'text-kumo-danger'
+                    : hasChanges
+                      ? 'text-kumo-brand'
+                      : '',
+                ].join(' ')}
+                title={
+                  isDirty
+                    ? 'File has unsaved changes'
+                    : hasChanges
+                      ? 'File has proposed changes'
+                      : filename
+                }
+              >
+                {filename}
+              </span>
+
+              {/* Action buttons — visible on hover */}
+              <div
+                className="hidden group-hover:flex items-center gap-0.5"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  className="p-0.5 rounded text-kumo-subtle hover:text-kumo-default hover:bg-kumo-tint"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    startRename(filename)
+                  }}
+                  aria-label={`Rename ${filename}`}
+                >
+                  <Pencil size={12} />
+                </button>
+                <button
+                  className="p-0.5 rounded text-kumo-subtle hover:text-kumo-danger hover:bg-kumo-tint"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    startDelete(filename)
+                  }}
+                  aria-label={`Delete ${filename}`}
+                >
+                  <Trash size={12} />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Create File Dialog */}
+      <Dialog.Root
         open={isCreateModalOpen}
-        onOk={handleCreateFile}
-        onCancel={() => {
-          setIsCreateModalOpen(false)
-          setNewFileName('')
+        onOpenChange={(o) => {
+          if (!o) {
+            setIsCreateModalOpen(false)
+            setNewFileName('')
+          }
         }}
-        okText="Create"
       >
-        <Input
-          placeholder="Enter filename (e.g., main.ts, utils.js)"
-          value={newFileName}
-          onChange={(e) => setNewFileName(e.target.value)}
-          onPressEnter={handleCreateFile}
-          autoFocus
-        />
-      </Modal>
+        <Dialog className="p-6" size="sm">
+          <Dialog.Title className="text-lg font-semibold mb-4">Create New File</Dialog.Title>
+          <Input
+            placeholder="Enter filename (e.g., main.ts, utils.js)"
+            value={newFileName}
+            onChange={(e) => setNewFileName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleCreateFile() }}
+            autoFocus
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <Dialog.Close
+              render={(props) => (
+                <Button variant="secondary" {...props}>Cancel</Button>
+              )}
+            />
+            <Button variant="primary" onClick={handleCreateFile}>Create</Button>
+          </div>
+        </Dialog>
+      </Dialog.Root>
 
-      <Modal
-        title="Rename File"
+      {/* Rename File Dialog */}
+      <Dialog.Root
         open={isRenameModalOpen}
-        onOk={handleRenameFile}
-        onCancel={() => {
-          setIsRenameModalOpen(false)
-          setNewFileName('')
-          setRenamingFile(null)
+        onOpenChange={(o) => {
+          if (!o) {
+            setIsRenameModalOpen(false)
+            setNewFileName('')
+            setRenamingFile(null)
+          }
         }}
-        okText="Rename"
       >
-        <Input
-          placeholder="Enter new filename"
-          value={newFileName}
-          onChange={(e) => setNewFileName(e.target.value)}
-          onPressEnter={handleRenameFile}
-          autoFocus
-        />
-      </Modal>
+        <Dialog className="p-6" size="sm">
+          <Dialog.Title className="text-lg font-semibold mb-4">Rename File</Dialog.Title>
+          <Input
+            placeholder="Enter new filename"
+            value={newFileName}
+            onChange={(e) => setNewFileName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleRenameFile() }}
+            autoFocus
+          />
+          <div className="mt-4 flex justify-end gap-2">
+            <Dialog.Close
+              render={(props) => (
+                <Button variant="secondary" {...props}>Cancel</Button>
+              )}
+            />
+            <Button variant="primary" onClick={handleRenameFile}>Rename</Button>
+          </div>
+        </Dialog>
+      </Dialog.Root>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog.Root
+        role="alertdialog"
+        open={isDeleteModalOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setIsDeleteModalOpen(false)
+            setDeletingFile(null)
+          }
+        }}
+      >
+        <Dialog className="p-6" size="sm">
+          <Dialog.Title className="text-lg font-semibold mb-2">Delete File</Dialog.Title>
+          <Dialog.Description className="text-sm text-kumo-subtle">
+            Are you sure you want to delete "{deletingFile}"?
+          </Dialog.Description>
+          <div className="mt-4 flex justify-end gap-2">
+            <Dialog.Close
+              render={(props) => (
+                <Button variant="secondary" {...props}>Cancel</Button>
+              )}
+            />
+            <Button variant="destructive" onClick={confirmDelete}>Delete</Button>
+          </div>
+        </Dialog>
+      </Dialog.Root>
     </div>
   )
 }

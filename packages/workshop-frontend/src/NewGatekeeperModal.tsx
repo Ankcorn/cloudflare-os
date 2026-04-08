@@ -1,15 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { Input, Modal, Select, Tabs, Typography, Checkbox, message } from 'antd'
-import type { InputRef } from 'antd'
-import { SearchOutlined } from '@ant-design/icons'
+import { Dialog, Button, Input, Select, Tabs, Checkbox, useKumoToastManager } from '@cloudflare/kumo'
+import { MagnifyingGlass } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperClient, AiChatAuthorInfo, AgentSpawnerConfig } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
 import { getPlaceholderRanges } from './resourceMatching'
 import ResourcePicker, { type SelectableItem } from './ResourcePicker'
 import { handlePickerKeyDown } from './pickerNavigation'
-
-const { Text } = Typography
 
 export interface NewGatekeeperModalProps {
   open: boolean
@@ -29,9 +26,10 @@ export default function NewGatekeeperModal({
   open, onClose, getOverseer, onCreated, existingBindings = [],
 }: NewGatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const toasts = useKumoToastManager()
 
   // Tab state
-  const [tabKey, setTabKey] = useState<'resource' | 'ai-model' | 'agent-spawner'>('resource')
+  const [tabKey, setTabKey] = useState<string>('resource')
 
   // Shared loading flag
   const [creating, setCreating] = useState(false)
@@ -43,7 +41,7 @@ export default function NewGatekeeperModal({
   const [overlayIndex, setOverlayIndex] = useState(0)
   const overlayItemsRef = useRef<SelectableItem[]>([])
   const overlayActivateRef = useRef<((index: number) => void) | null>(null)
-  const inputRef = useRef<InputRef>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   // AI Model tab state
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
@@ -79,6 +77,7 @@ export default function NewGatekeeperModal({
         }
       }).catch(err => {
         console.error('Failed to load models:', err)
+        toasts.add({ title: "Couldn't load AI models", variant: 'error' })
       })
     }
   }, [open, authenticatedApi])
@@ -100,11 +99,11 @@ export default function NewGatekeeperModal({
         await onCreated(gatekeeper)
         onClose()
       } else {
-        message.error('Failed to create connection - unsupported URL or invalid resource')
+        toasts.add({ title: 'Failed to create connection', description: 'Unsupported URL or invalid resource', variant: 'error' })
       }
     } catch (err) {
       console.error('Failed to create gatekeeper:', err)
-      message.error('Failed to create connection')
+      toasts.add({ title: 'Failed to create connection', variant: 'error' })
     } finally {
       setCreating(false)
     }
@@ -112,7 +111,7 @@ export default function NewGatekeeperModal({
 
   const handleCreateAiModel = async () => {
     if (!selectedModelId) {
-      message.error('Please select an AI model')
+      toasts.add({ title: 'Please select an AI model', variant: 'warning' })
       return
     }
     setCreating(true)
@@ -123,11 +122,11 @@ export default function NewGatekeeperModal({
         await onCreated(gatekeeper)
         onClose()
       } else {
-        message.error('Failed to create AI model connection')
+        toasts.add({ title: 'Failed to create AI model connection', variant: 'error' })
       }
     } catch (err) {
       console.error('Failed to create AI model gatekeeper:', err)
-      message.error('Failed to create AI model connection')
+      toasts.add({ title: 'Failed to create AI model connection', variant: 'error' })
     } finally {
       setCreating(false)
     }
@@ -135,7 +134,7 @@ export default function NewGatekeeperModal({
 
   const handleCreateAgentSpawner = async () => {
     if (!spawnerDisplayName.trim()) {
-      message.error('Please enter a display name')
+      toasts.add({ title: 'Please enter a display name', variant: 'warning' })
       return
     }
     const config: AgentSpawnerConfig = {
@@ -152,11 +151,11 @@ export default function NewGatekeeperModal({
         await onCreated(gatekeeper)
         onClose()
       } else {
-        message.error('Failed to create agent spawner connection')
+        toasts.add({ title: 'Failed to create agent spawner connection', variant: 'error' })
       }
     } catch (err) {
       console.error('Failed to create agent spawner gatekeeper:', err)
-      message.error('Failed to create agent spawner connection')
+      toasts.add({ title: 'Failed to create agent spawner connection', variant: 'error' })
     } finally {
       setCreating(false)
     }
@@ -169,7 +168,7 @@ export default function NewGatekeeperModal({
     setSearchText(newUrl)
     setOverlayIndex(0)
     requestAnimationFrame(() => {
-      const input = inputRef.current?.input
+      const input = inputRef.current
       if (input) {
         input.setSelectionRange(placeholderStart, placeholderEnd)
         input.focus()
@@ -177,187 +176,200 @@ export default function NewGatekeeperModal({
     })
   }
 
-  // --- Rendering ---
-
-  const renderResourceTabContent = () => {
-    return (
-      <div>
-        <Input
-          ref={inputRef}
-          placeholder="Paste a URL or search..."
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          autoFocus
-          allowClear
-          prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
-          style={{ borderRadius: 8 }}
-          onKeyDown={(e) => {
-            handlePickerKeyDown(
-              e, searchText, 0,
-              overlayIndex, setOverlayIndex,
-              overlayItemsRef, overlayActivateRef,
-            )
-          }}
-        />
-        <ResourcePicker
-          authenticatedApi={authenticatedApi}
-          searchText={searchText}
-          onSelectAccount={(accountId, _vendorId, _resource, _accountDescription, _vendorDescription) => {
-            // The URL has no placeholders (ResourcePicker enforces this), so create directly.
-            const url = searchText.trim()
-            if (url && getPlaceholderRanges(url).length === 0) {
-              handleCreateResource(accountId, url)
-            }
-          }}
-          onRefine={handleRefine}
-          activeIndex={overlayIndex}
-          onItems={(items) => { overlayItemsRef.current = items }}
-          activateRef={overlayActivateRef}
-          style={{ marginTop: 8 }}
-        />
-      </div>
-    )
+  // --- Footer action for non-resource tabs ---
+  const handleOk = () => {
+    if (tabKey === 'ai-model') {
+      handleCreateAiModel()
+    } else if (tabKey === 'agent-spawner') {
+      handleCreateAgentSpawner()
+    }
   }
 
+  const isOkDisabled = tabKey === 'ai-model'
+    ? !selectedModelId
+    : !spawnerDisplayName.trim()
+
   return (
-    <Modal
-      title="Create New Connection"
-      open={open}
-      onCancel={onClose}
-      okText="Create Connection"
-      cancelText="Cancel"
-      confirmLoading={creating}
-      focusTriggerAfterClose={false}
-      okButtonProps={{
-        disabled: tabKey === 'ai-model'
-          ? !selectedModelId
-          : !spawnerDisplayName.trim(),
-      }}
-      footer={tabKey === 'resource' ? null : undefined}
-      onOk={() => {
-        if (tabKey === 'ai-model') {
-          handleCreateAiModel()
-        } else if (tabKey === 'agent-spawner') {
-          handleCreateAgentSpawner()
-        }
-      }}
-    >
-      <Tabs
-        activeKey={tabKey}
-        onChange={(key) => {
-          setTabKey(key as 'resource' | 'ai-model' | 'agent-spawner')
-          if (key === 'resource') {
-            setSearchText('')
-            setOverlayIndex(0)
-          }
-        }}
-        items={[
-          {
-            key: 'resource',
-            label: 'Resource',
-            children: renderResourceTabContent()
-          },
-          {
-            key: 'ai-model',
-            label: 'AI Model',
-            children: (
-              <>
-                <div style={{ marginBottom: '16px' }}>
-                  <Text>
-                    Select an AI model to create a connection. This allows your gadget to interact
-                    with AI capabilities as a binding.
-                  </Text>
-                </div>
-                <Select
-                  style={{ width: '100%' }}
-                  placeholder="Select an AI model"
-                  value={selectedModelId}
-                  onChange={setSelectedModelId}
-                  options={availableModels.map(model => ({
-                    label: model.name,
-                    value: model.id
-                  }))}
+    <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <Dialog className="p-6 !w-[560px] !top-[15%] !-translate-y-0" size="lg">
+        <Dialog.Title className="text-lg font-semibold mb-4">
+          Create New Connection
+        </Dialog.Title>
+
+        <Tabs
+          variant="segmented"
+          tabs={[
+            { value: 'resource', label: 'Resource' },
+            { value: 'ai-model', label: 'AI Model' },
+            { value: 'agent-spawner', label: 'Agent Spawner' },
+          ]}
+          value={tabKey}
+          onValueChange={(key) => {
+            setTabKey(key)
+            if (key === 'resource') {
+              setSearchText('')
+              setOverlayIndex(0)
+            }
+          }}
+        />
+
+        <div className="mt-4">
+          {/* ── Resource tab ──────────────────────────────────────────────── */}
+          {tabKey === 'resource' && (
+            <div>
+              <div className="relative">
+                <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive pointer-events-none" />
+                <input
+                  ref={inputRef}
+                  placeholder="Paste a URL or search..."
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  autoFocus
+                  className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-2 focus:ring-kumo-brand/40"
+                  onKeyDown={(e) => {
+                    handlePickerKeyDown(
+                      e, searchText, 0,
+                      overlayIndex, setOverlayIndex,
+                      overlayItemsRef, overlayActivateRef,
+                    )
+                  }}
                 />
-              </>
-            )
-          },
-          {
-            key: 'agent-spawner',
-            label: 'Agent Spawner',
-            children: (
-              <>
-                <div style={{ marginBottom: '16px' }}>
-                  <Text>
-                    Create an agent spawner binding. This allows your gadget to programmatically
-                    start new AI agent conversations to perform tasks on given resources.
-                  </Text>
-                </div>
+              </div>
+              <ResourcePicker
+                authenticatedApi={authenticatedApi}
+                searchText={searchText}
+                onSelectAccount={(accountId, _vendorId, _resource, _accountDescription, _vendorDescription) => {
+                  const url = searchText.trim()
+                  if (url && getPlaceholderRanges(url).length === 0) {
+                    handleCreateResource(accountId, url)
+                  }
+                }}
+                onRefine={handleRefine}
+                activeIndex={overlayIndex}
+                onItems={(items) => { overlayItemsRef.current = items }}
+                activateRef={overlayActivateRef}
+                style={{ marginTop: 8 }}
+              />
+            </div>
+          )}
 
-                <div style={{ marginBottom: '12px' }}>
-                  <Text strong style={{ display: 'block', marginBottom: 4 }}>Display Name</Text>
-                  <Input
-                    placeholder="e.g. Email Responder"
-                    value={spawnerDisplayName}
-                    onChange={(e) => setSpawnerDisplayName(e.target.value)}
-                  />
-                </div>
+          {/* ── AI Model tab ─────────────────────────────────────────────── */}
+          {tabKey === 'ai-model' && (
+            <div className="space-y-4">
+              <p className="text-sm text-kumo-subtle">
+                Select an AI model to create a connection. This allows your gadget to interact
+                with AI capabilities as a binding.
+              </p>
+              <Select
+                aria-label="Select an AI model"
+                className="w-full text-sm"
+                placeholder="Select an AI model"
+                value={selectedModelId}
+                onValueChange={(v) => setSelectedModelId(v as string | undefined)}
+                renderValue={(id) => availableModels.find((m) => m.id === id)?.name ?? id}
+              >
+                {availableModels.map(model => (
+                  <Select.Option key={model.id} value={model.id}>
+                    {model.name}
+                  </Select.Option>
+                ))}
+              </Select>
+            </div>
+          )}
 
-                <div style={{ marginBottom: '12px' }}>
-                  <Text strong style={{ display: 'block', marginBottom: 4 }}>Model</Text>
-                  <Text type="secondary" style={{ display: 'block', marginBottom: 4, fontSize: 12 }}>
-                    The AI model spawned agents will use. Choose "None" to create
-                    conversations without an agent (requires manual attention).
-                  </Text>
+          {/* ── Agent Spawner tab ────────────────────────────────────────── */}
+          {tabKey === 'agent-spawner' && (
+            <div className="space-y-4">
+              <p className="text-sm text-kumo-subtle">
+                Create an agent spawner binding. This allows your gadget to programmatically
+                start new AI agent conversations to perform tasks on given resources.
+              </p>
+
+              <Input
+                label="Display Name"
+                placeholder="e.g. Email Responder"
+                value={spawnerDisplayName}
+                onChange={(e) => setSpawnerDisplayName(e.target.value)}
+              />
+
+              <div>
+                <Select
+                  label="Model"
+                  className="w-full text-sm"
+                  placeholder="Select a model"
+                  value={spawnerModelId}
+                  onValueChange={(v) => setSpawnerModelId(v as string | null)}
+                  renderValue={(id) => {
+                    if (id === null) return 'None (no agent)'
+                    return availableModels.find((m) => m.id === id)?.name ?? String(id)
+                  }}
+                >
+                  <Select.Option value={null as any}>
+                    None (no agent)
+                  </Select.Option>
+                  {availableModels.map(model => (
+                    <Select.Option key={model.id} value={model.id}>
+                      {model.name}
+                    </Select.Option>
+                  ))}
+                </Select>
+                <p className="text-xs text-kumo-subtle mt-1">
+                  The AI model spawned agents will use. Choose "None" to create
+                  conversations without an agent (requires manual attention).
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Checkbox
+                  label="Limit inherited bindings"
+                  checked={spawnerLimitEnv}
+                  onCheckedChange={(checked) => {
+                    setSpawnerLimitEnv(checked)
+                    if (!checked) setSpawnerEnv([])
+                  }}
+                />
+                <p className="text-xs text-kumo-subtle">
+                  By default, spawned agents inherit all of the gadget's bindings. Check this
+                  to restrict agents to only specific bindings.
+                </p>
+                {spawnerLimitEnv && (
                   <Select
-                    style={{ width: '100%' }}
-                    placeholder="Select a model"
-                    value={spawnerModelId}
-                    onChange={setSpawnerModelId}
-                    options={[
-                      { label: 'None (no agent)', value: null as any },
-                      ...availableModels.map(model => ({
-                        label: model.name,
-                        value: model.id
-                      }))
-                    ]}
-                  />
-                </div>
-
-                <div style={{ marginBottom: '12px' }}>
-                  <Checkbox
-                    checked={spawnerLimitEnv}
-                    onChange={(e) => {
-                      setSpawnerLimitEnv(e.target.checked)
-                      if (!e.target.checked) {
-                        setSpawnerEnv([])
-                      }
-                    }}
+                    aria-label="Select bindings to inherit"
+                    className="w-full text-sm"
+                    placeholder="Select bindings to inherit"
+                    multiple
+                    value={spawnerEnv}
+                    onValueChange={(v) => setSpawnerEnv(v as string[])}
                   >
-                    Limit inherited bindings
-                  </Checkbox>
-                  <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
-                    By default, spawned agents inherit all of the gadget's bindings. Check this
-                    to restrict agents to only specific bindings.
-                  </Text>
-                  {spawnerLimitEnv && (
-                    <Select
-                      mode="multiple"
-                      style={{ width: '100%', marginTop: 8 }}
-                      placeholder="Select bindings to inherit"
-                      value={spawnerEnv}
-                      onChange={setSpawnerEnv}
-                      options={existingBindings.map(name => ({
-                        label: name,
-                        value: name
-                      }))}
-                    />
-                  )}
-                </div>
-              </>
-            )
-          }
-        ]}
-      />
-    </Modal>
+                    {existingBindings.map(name => (
+                      <Select.Option key={name} value={name}>
+                        {name}
+                      </Select.Option>
+                    ))}
+                  </Select>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer: only show action buttons for non-resource tabs */}
+        {tabKey !== 'resource' && (
+          <div className="mt-6 flex justify-end gap-2">
+            <Button variant="secondary" onClick={onClose} disabled={creating}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleOk}
+              disabled={isOkDisabled}
+              loading={creating}
+            >
+              Create Connection
+            </Button>
+          </div>
+        )}
+      </Dialog>
+    </Dialog.Root>
   )
 }

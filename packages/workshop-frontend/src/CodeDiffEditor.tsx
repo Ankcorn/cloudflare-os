@@ -153,14 +153,8 @@ export default function CodeDiffEditor({
   if (!filename || !modifiedYText) {
     return (
       <div
-        style={{
-          height,
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          backgroundColor: '#f8f9fa',
-          color: '#6c757d'
-        }}
+        className="flex justify-center items-center bg-kumo-base text-kumo-subtle"
+        style={{ height }}
       >
         {!filename ? 'Select a file to view changes' : 'Loading diff...'}
       </div>

@@ -11,7 +11,7 @@ The project structure is:
 * packages/workshop-frontend: The Gadgets Workshop UI.
     * This is a pure single-page app, running entirely client-side.
     * It speaks to the backend using an RPC API over a persistent WebSocket connection.
-    * Uses React, Ant Design, and Vite.
+    * Uses React, Kumo UI (https://kumo-ui.com/api/component-registry), Phosphor icons, and Vite.
 * packages/workshop-backend: The Gadgets Workshop server.
     * Runs on Cloudflare Workers.
 * packages/workshop-shared: Shared API definitions between client and server.

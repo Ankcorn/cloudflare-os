@@ -1,11 +1,9 @@
-import { Modal, message, Typography, Spin } from 'antd'
 import { useState, useEffect } from 'react'
+import { Dialog, Text, Loader, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
 import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import VendorCard from './VendorCard'
-
-const { Text } = Typography
 
 interface ConnectAccountModalProps {
   visible: boolean
@@ -28,6 +26,7 @@ export default function ConnectAccountModal({
   authenticatedApi,
   filter,
 }: ConnectAccountModalProps) {
+  const toasts = useKumoToastManager()
   const [connecting, setConnecting] = useState<string | null>(null)
   const [vendors, setVendors] = useState<VendorOption[]>([])
   const [vendorsLoading, setVendorsLoading] = useState(true)
@@ -46,7 +45,7 @@ export default function ConnectAccountModal({
         setVendors(vendorList.map(v => ({ id: v.id, description: v.description })))
       } catch (error) {
         console.error('Failed to fetch vendors:', error)
-        message.error('Failed to load available services')
+        toasts.add({ title: 'Failed to load available services', variant: 'error' })
       } finally {
         setVendorsLoading(false)
       }
@@ -59,44 +58,41 @@ export default function ConnectAccountModal({
     setConnecting(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank')
+      window.open(result.url, '_blank', 'noopener,noreferrer')
       onInitiated()
     } catch (error) {
       console.error('Failed to initiate connection:', error)
-      message.error('Failed to start connection flow')
+      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
       setConnecting(null)
     }
   }
 
   return (
-    <Modal
-      title="Connect Account"
-      open={visible}
-      onCancel={onCancel}
-      footer={null}
-      width={500}
-    >
-      {vendorsLoading ? (
-        <div style={{ textAlign: 'center', padding: '32px 0' }}>
-          <Spin />
-        </div>
-      ) : vendors.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '32px 0' }}>
-          <Text type="secondary">No services available to connect.</Text>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 8 }}>
-          {vendors.map(vendor => (
-            <VendorCard
-              key={vendor.id}
-              vendor={vendor.description}
-              onClick={() => handleConnect(vendor.id)}
-              loading={connecting === vendor.id}
-              disabled={connecting !== null && connecting !== vendor.id}
-            />
-          ))}
-        </div>
-      )}
-    </Modal>
+    <Dialog.Root open={visible} onOpenChange={(open) => { if (!open) onCancel() }}>
+      <Dialog className="p-6" size="base">
+        <Dialog.Title className="text-lg font-semibold mb-4">Connect Account</Dialog.Title>
+        {vendorsLoading ? (
+          <div className="text-center py-8">
+            <Loader />
+          </div>
+        ) : vendors.length === 0 ? (
+          <div className="text-center py-8">
+            <Text variant="secondary">No services available to connect.</Text>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3 mt-2">
+            {vendors.map(vendor => (
+              <VendorCard
+                key={vendor.id}
+                vendor={vendor.description}
+                onClick={() => handleConnect(vendor.id)}
+                loading={connecting === vendor.id}
+                disabled={connecting !== null && connecting !== vendor.id}
+              />
+            ))}
+          </div>
+        )}
+      </Dialog>
+    </Dialog.Root>
   )
 }

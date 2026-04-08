@@ -1,16 +1,14 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { Button, Select } from '@cloudflare/kumo'
+import { Rocket, Robot, Plugs, Lightning, ArrowLeft, MagnifyingGlass } from '@phosphor-icons/react'
 
 import { useAuth } from './useAuth'
 import LoginPage from './LoginPage'
 import ResourcePicker from './ResourcePicker'
 import { extractBaseUrl } from './resourceMatching'
-import { Card, Typography, Button, Spin, Alert, Form, Input, Select, Space, Divider, Tag, Empty } from 'antd'
-import { RocketOutlined, RobotOutlined, ApiOutlined, ThunderboltOutlined, ArrowLeftOutlined, SearchOutlined } from '@ant-design/icons'
-
-const { Title, Text, Paragraph } = Typography
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -20,8 +18,8 @@ interface Props {
 type BindingFormState = Record<string, any>
 
 export default function BlueprintLandingPage({ rpcStub }: Props) {
-  const { id } = useParams<{ id: string }>()
-  const navigate = useNavigate()
+  const params = useParams({ strict: false }) as { id?: string }
+  const id = params.id!
   const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
@@ -153,7 +151,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
       using overseer = await authenticatedApi.newGadgetFromBlueprint(id, assignments)
       let metadata = await overseer.getMetadata()
-      navigate(`/gadget/${metadata.id}`)
+      window.location.href = `/gadget/${metadata.id}`
     } catch (err: any) {
       setError(err.message || 'Failed to create gadget from blueprint.')
     } finally {
@@ -167,24 +165,26 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   if (loading || authLoading) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Spin size="large" />
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="w-8 h-8 border-3 border-kumo-brand border-t-transparent rounded-full animate-spin" />
       </div>
     )
   }
 
   if (notFound) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Empty description="Blueprint not found" />
+      <div className="min-h-screen flex items-center justify-center">
+        <p className="text-kumo-subtle text-lg">Blueprint not found</p>
       </div>
     )
   }
 
   if (!blueprint) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Alert type="error" message={error || 'Failed to load blueprint.'} />
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="px-4 py-3 rounded-lg bg-kumo-danger-tint border border-kumo-danger/30 text-kumo-danger text-sm">
+          {error || 'Failed to load blueprint.'}
+        </div>
       </div>
     )
   }
@@ -193,69 +193,64 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let bindingEntries = Object.entries(meta.bindings)
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: '#f5f5f5',
-      display: 'flex',
-      justifyContent: 'center',
-      padding: '48px 16px',
-    }}>
-      <Card style={{ maxWidth: 640, width: '100%', height: 'fit-content' }}>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+    <div className="min-h-screen bg-kumo-elevated flex justify-center px-4 py-12">
+      <div className="max-w-[640px] w-full h-fit bg-kumo-base border border-kumo-line rounded-xl p-6 shadow-sm">
+        <div className="space-y-6">
           {/* Header */}
           <div>
-            <Title level={3} style={{ marginBottom: 4 }}>{meta.title}</Title>
+            <h3 className="text-xl font-semibold text-kumo-default mb-1">{meta.title}</h3>
             {meta.description && (
-              <Paragraph type="secondary">{meta.description}</Paragraph>
+              <p className="text-kumo-subtle text-sm mb-3">{meta.description}</p>
             )}
-            <Space size="small" wrap>
-              <Text type="secondary">By {meta.author.name}</Text>
-              <Text type="secondary">v{meta.version}</Text>
-              <Text type="secondary">
-                Updated {new Date(meta.lastUpdated).toLocaleDateString()}
-              </Text>
-            </Space>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-kumo-subtle">
+              <span>By {meta.author.name}</span>
+              <span>v{meta.version}</span>
+              <span>Updated {new Date(meta.lastUpdated).toLocaleDateString()}</span>
+            </div>
           </div>
 
           {/* Bindings summary */}
           {bindingEntries.length > 0 && (
             <div>
-              <Text strong>Required connections ({bindingEntries.length})</Text>
-              <div style={{ marginTop: 8 }}>
+              <p className="text-sm font-semibold text-kumo-default mb-2">
+                Required connections ({bindingEntries.length})
+              </p>
+              <div className="space-y-1">
                 {bindingEntries.map(([name, binding]) => (
-                  <div key={name} style={{
-                    padding: '8px 12px',
-                    background: '#fafafa',
-                    borderRadius: 4,
-                    marginBottom: 4,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                  }}>
-                    {binding.type === 'gatekeeper' && <ApiOutlined />}
-                    {binding.type === 'aiModel' && <RobotOutlined />}
-                    {binding.type === 'agentSpawner' && <ThunderboltOutlined />}
-                    <div>
-                      <Text code>{name}</Text>{' '}
-                      <Text>{binding.title}</Text>
+                  <div key={name} className="flex items-center gap-2 px-3 py-2 bg-kumo-elevated rounded-md">
+                    {binding.type === 'gatekeeper' && <Plugs size={14} className="text-kumo-subtle flex-shrink-0" />}
+                    {binding.type === 'aiModel' && <Robot size={14} className="text-kumo-subtle flex-shrink-0" />}
+                    {binding.type === 'agentSpawner' && <Lightning size={14} className="text-kumo-subtle flex-shrink-0" />}
+                    <div className="flex-1 min-w-0">
+                      <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded text-kumo-default">{name}</span>
+                      {' '}
+                      <span className="text-sm text-kumo-default">{binding.title}</span>
                       <br />
-                      <Text type="secondary" style={{ fontSize: 12 }}>{binding.description}</Text>
+                      <span className="text-xs text-kumo-subtle">{binding.description}</span>
                     </div>
-                    <Tag style={{ marginLeft: 'auto' }}>{binding.type}</Tag>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-kumo-tint text-kumo-subtle border border-kumo-line flex-shrink-0">
+                      {binding.type}
+                    </span>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {error && <Alert type="error" message={error} closable onClose={() => setError(null)} />}
+          {/* Error */}
+          {error && (
+            <div className="flex items-center justify-between px-4 py-3 rounded-lg bg-kumo-danger-tint border border-kumo-danger/30 text-kumo-danger text-sm">
+              <span>{error}</span>
+              <button onClick={() => setError(null)} className="text-kumo-danger hover:text-kumo-default ml-2">&times;</button>
+            </div>
+          )}
 
           {/* Configure bindings */}
           {showConfigure && isAuthenticated ? (
             <div>
-              <Divider />
-              <Title level={5}>Configure bindings</Title>
-              <Form layout="vertical">
+              <hr className="border-kumo-line mb-4" />
+              <h5 className="text-base font-semibold text-kumo-default mb-4">Configure bindings</h5>
+              <div className="space-y-5">
                 {bindingEntries.map(([name, binding]) => (
                   <BindingField
                     key={name}
@@ -267,34 +262,32 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                     onChange={(updates) => updateBinding(name, updates)}
                   />
                 ))}
-              </Form>
+              </div>
               <Button
-                type="primary"
-                icon={<RocketOutlined />}
-                size="large"
-                block
+                className="w-full mt-4"
+                variant="primary"
                 onClick={handleCreate}
                 loading={creating}
                 disabled={!canCreate()}
+                icon={Rocket}
               >
                 Create Gadget
               </Button>
             </div>
           ) : (
             <Button
-              type="primary"
-              icon={<RocketOutlined />}
-              size="large"
-              block
+              className="w-full"
+              variant="primary"
               onClick={handleStartConfigure}
+              icon={Rocket}
             >
               {isAuthenticated
                 ? (bindingEntries.length > 0 ? 'Configure & Create Gadget' : 'Create Gadget')
                 : 'Log in to create a gadget'}
             </Button>
           )}
-        </Space>
-      </Card>
+        </div>
+      </div>
     </div>
   )
 }
@@ -329,45 +322,45 @@ function BindingField({
     const pickerSearchText = resourceUrlInput || binding.typeUrlPattern
 
     return (
-      <Form.Item label={<><Text code>{name}</Text> - {binding.title}</>}>
+      <div>
+        <label className="block text-sm font-medium text-kumo-default mb-1">
+          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
+          {' '}- {binding.title}
+        </label>
         {binding.description && (
-          <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
-            {binding.description}
-          </Text>
+          <p className="text-xs text-kumo-subtle mb-2">{binding.description}</p>
         )}
-        <Input
-          placeholder="Search resources or paste a URL..."
-          value={resourceUrlInput}
-          onChange={(e) => {
-            setResourceUrlInput(e.target.value)
-            onChange({ resourceUrl: e.target.value } as any)
-          }}
-          allowClear
-          prefix={<SearchOutlined style={{ color: '#bfbfbf' }} />}
-          style={{ borderRadius: 8 }}
-        />
+        <div className="relative">
+          <MagnifyingGlass size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
+          <input
+            type="text"
+            placeholder="Search resources or paste a URL..."
+            value={resourceUrlInput}
+            onChange={(e) => {
+              setResourceUrlInput(e.target.value)
+              onChange({ resourceUrl: e.target.value } as any)
+            }}
+            className="w-full pl-9 pr-3 py-2 text-sm border border-kumo-line rounded-lg bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
+          />
+        </div>
 
         {selectedAccountId !== null ? (
           // Account selected — show summary with option to change.
-          <div style={{
-            marginTop: 8, padding: '6px 8px',
-            display: 'flex', alignItems: 'center', gap: 8,
-            background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6,
-          }}>
-            <Button
-              type="text"
-              icon={<ArrowLeftOutlined />}
-              size="small"
+          <div className="mt-2 px-2 py-1.5 flex items-center gap-2 bg-green-50 border border-green-200 rounded-md">
+            <button
               onClick={() => {
                 setSelectedAccountId(null)
                 setSelectedAccountName('')
                 setSelectedVendorName('')
                 onChange({ accountId: undefined } as any)
               }}
-            />
-            <Text type="secondary" style={{ fontSize: 13 }}>
-              {selectedVendorName} · <Text strong>{selectedAccountName}</Text>
-            </Text>
+              className="p-1 rounded hover:bg-green-100 text-kumo-subtle transition-colors"
+            >
+              <ArrowLeft size={14} />
+            </button>
+            <span className="text-[13px] text-kumo-subtle">
+              {selectedVendorName} · <span className="font-semibold text-kumo-default">{selectedAccountName}</span>
+            </span>
           </div>
         ) : (
           // No account selected — show ResourcePicker filtered by the URL input.
@@ -393,49 +386,77 @@ function BindingField({
             style={{ marginTop: 4 }}
           />
         )}
-      </Form.Item>
+      </div>
     )
   }
 
   if (binding.type === 'aiModel') {
     return (
-      <Form.Item label={<><Text code>{name}</Text> - {binding.title}</>}
-        help={binding.description}>
+      <div>
+        <label className="block text-sm font-medium text-kumo-default mb-1">
+          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
+          {' '}- {binding.title}
+        </label>
+        {binding.description && (
+          <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
+        )}
         <Select
+          aria-label="Choose an AI model"
+          className="w-full text-sm"
           placeholder="Choose an AI model"
           value={(value as any).modelId || undefined}
-          onChange={(modelId) => onChange({ modelId } as any)}
-          options={models.map(m => ({ label: m.name, value: m.id }))}
-        />
+          onValueChange={(modelId) => onChange({ modelId } as any)}
+          renderValue={(id) => models.find(m => m.id === id)?.name ?? String(id)}
+        >
+          {models.map(m => (
+            <Select.Option key={m.id} value={m.id}>
+              {m.name}
+            </Select.Option>
+          ))}
+        </Select>
         {binding.suggestedModel && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <p className="text-xs text-kumo-subtle mt-1">
             Suggested: {binding.suggestedModel.provider} / {binding.suggestedModel.modelName}
-          </Text>
+          </p>
         )}
-      </Form.Item>
+      </div>
     )
   }
 
   if (binding.type === 'agentSpawner') {
     return (
-      <Form.Item label={<><Text code>{name}</Text> - {binding.title}</>}
-        help={binding.description}>
+      <div>
+        <label className="block text-sm font-medium text-kumo-default mb-1">
+          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
+          {' '}- {binding.title}
+        </label>
+        {binding.description && (
+          <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
+        )}
         <Select
+          aria-label="Choose a model for the agent spawner"
+          className="w-full text-sm"
           placeholder="Choose a model for the agent spawner"
           value={(value as any).modelId ?? undefined}
-          onChange={(modelId) => onChange({ modelId } as any)}
-          allowClear
-          options={[
-            { label: '(No agent)', value: null },
-            ...models.map(m => ({ label: m.name, value: m.id })),
-          ]}
-        />
+          onValueChange={(modelId) => onChange({ modelId } as any)}
+          renderValue={(id) => {
+            if (id === null) return '(No agent)'
+            return models.find(m => m.id === id)?.name ?? String(id)
+          }}
+        >
+          <Select.Option value={null as any}>(No agent)</Select.Option>
+          {models.map(m => (
+            <Select.Option key={m.id} value={m.id}>
+              {m.name}
+            </Select.Option>
+          ))}
+        </Select>
         {binding.suggestedModel !== undefined && binding.suggestedModel !== null && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <p className="text-xs text-kumo-subtle mt-1">
             Suggested: {binding.suggestedModel.provider} / {binding.suggestedModel.modelName}
-          </Text>
+          </p>
         )}
-      </Form.Item>
+      </div>
     )
   }
 

@@ -1,6 +1,6 @@
 # Gadgets Workshop Frontend
 
-Single-page app for the Gadgets Workshop UI. Built with React, Ant Design, and Vite.
+Single-page app for the Gadgets Workshop UI. Built with React, Kumo, and Vite.
 
 ## Development
 

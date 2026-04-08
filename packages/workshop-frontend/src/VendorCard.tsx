@@ -1,8 +1,7 @@
-import { Avatar, Typography, Spin } from 'antd'
-import { LinkOutlined } from '@ant-design/icons'
+import { Text, Loader } from '@cloudflare/kumo'
+import { LinkSimple } from '@phosphor-icons/react'
 import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
-
-const { Text } = Typography
+import Avatar from './components/Avatar'
 
 export interface VendorCardProps {
   vendor: VendorDescription
@@ -22,44 +21,26 @@ export default function VendorCard({
   return (
     <div
       onClick={disabled ? undefined : onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 16,
-        padding: 16,
-        border: '1px solid #d9d9d9',
-        borderRadius: 8,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled && !loading ? 0.5 : 1,
-        transition: 'all 0.2s',
-      }}
-      onMouseEnter={(e) => {
-        if (!disabled) {
-          e.currentTarget.style.borderColor = '#1890ff'
-          e.currentTarget.style.backgroundColor = '#f0f5ff'
-        }
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = '#d9d9d9'
-        e.currentTarget.style.backgroundColor = 'transparent'
-      }}
+      className={`flex items-center gap-4 p-4 border border-kumo-line rounded-lg transition-all ${
+        disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:border-kumo-brand hover:bg-kumo-tint'
+      } ${disabled && !loading ? 'opacity-50' : ''}`}
     >
-      {vendor.logo ? (
-        <Avatar src={vendor.logo.url} size={48} />
-      ) : (
-        <Avatar size={48} icon={<LinkOutlined />} />
-      )}
-      <div style={{ flex: 1 }}>
-        <Text strong style={{ display: 'block', fontSize: 16 }}>
+      <Avatar
+        src={vendor.logo?.url}
+        size={48}
+        fallback={<LinkSimple size={22} />}
+      />
+      <div className="flex-1">
+        <Text variant="body" bold as="span" DANGEROUS_className="block text-base">
           {vendor.displayName}
         </Text>
         {vendor.url && (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text variant="secondary" size="xs" as="span">
             {vendor.url}
           </Text>
         )}
       </div>
-      {loading && <Spin size="small" />}
+      {loading && <Loader size="sm" />}
     </div>
   )
 }

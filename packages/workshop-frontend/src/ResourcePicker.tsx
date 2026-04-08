@@ -1,12 +1,10 @@
 import { useState, useEffect, useRef, useMemo, useCallback, type MutableRefObject } from 'react'
-import { Typography, Spin, Tooltip, message } from 'antd'
-import { PlusOutlined, RightOutlined, WarningOutlined } from '@ant-design/icons'
+import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
+import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, matchesResource, classifyMatch, getPlaceholderRanges } from './resourceMatching'
-
-const { Text } = Typography
 
 export interface VendorOption {
   id: string
@@ -54,6 +52,8 @@ export default function ResourcePicker({
   authenticatedApi, searchText, onSelectAccount, onRefine, compact, style,
   activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
+  const toasts = useKumoToastManager()
+
   const [allAccounts, setAllAccounts] = useState<
     Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[], credentialsValid: boolean }>
   >(new Map())
@@ -141,7 +141,7 @@ export default function ResourcePicker({
         })))
       } catch (error) {
         console.error('Failed to load vendors:', error)
-        message.error('Failed to load available services')
+        toasts.add({ title: 'Failed to load available services', variant: 'error' })
       } finally {
         setVendorsLoading(false)
       }
@@ -322,10 +322,10 @@ export default function ResourcePicker({
     setConnectingVendor(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank')
+      window.open(result.url, '_blank', 'noopener,noreferrer')
     } catch (error) {
       console.error('Failed to initiate connection:', error)
-      message.error('Failed to start connection flow')
+      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
     } finally {
       setConnectingVendor(null)
     }
@@ -337,12 +337,12 @@ export default function ResourcePicker({
     setReconnectingAccount(accountId)
     try {
       const result = await authenticatedApi.reconnectAccount(accountId)
-      window.open(result.url, '_blank')
+      window.open(result.url, '_blank', 'noopener,noreferrer')
       // The subscription will fire add() with credentialsValid: true when reconnect completes.
       // The reconnectingAccount state is cleared at that point.
     } catch (error) {
       console.error('Failed to initiate reconnection:', error)
-      message.error('Failed to start re-authentication flow')
+      toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
       setReconnectingAccount(null)
     }
   }, [authenticatedApi])
@@ -353,20 +353,14 @@ export default function ResourcePicker({
 
   return (
     <div style={style}>
-      <div style={{
-        border: '1px solid #e8e8e8',
-        borderRadius: 8,
-        overflow: 'hidden',
-        maxHeight,
-        overflowY: 'auto',
-      }}>
+      <div className="border border-kumo-line rounded-lg overflow-hidden overflow-y-auto" style={{ maxHeight }}>
         {vendorsLoading ? (
-          <div style={{ textAlign: 'center', padding: '16px 0' }}>
-            <Spin size="small" />
+          <div className="text-center py-4">
+            <div className="inline-block w-4 h-4 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
           </div>
         ) : matchedResources.length === 0 ? (
-          <div style={{ padding: '12px 16px' }}>
-            <Text type="secondary">No matching resources.</Text>
+          <div className="px-4 py-3">
+            <span className="text-kumo-subtle text-sm">No matching resources.</span>
           </div>
         ) : (() => {
           let itemIdx = 0
@@ -387,23 +381,16 @@ export default function ResourcePicker({
                       onRefine(newUrl, newUrl.length, newUrl.length)
                     }
                   }}
-                  style={{
-                    padding: '6px 16px',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    borderTop: i > 0 ? '1px solid #e8e8e8' : undefined,
-                    backgroundColor: isActive ? '#e6f4ff' : undefined,
-                  }}
-                  onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
+                  className={`px-4 py-1.5 cursor-pointer flex items-center ${i > 0 ? 'border-t border-kumo-line' : ''} ${isActive ? 'bg-kumo-tint' : ''}`}
+                  onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
                   onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
                 >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <Text style={{ fontSize: 13, fontWeight: 500 }}>{resource.title}</Text>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[13px] font-medium text-kumo-default">{resource.title}</span>
                   </div>
-                  <Text type="secondary" style={{ fontSize: 12, fontFamily: 'monospace', flexShrink: 0 }}>
+                  <span className="text-xs font-mono text-kumo-subtle flex-shrink-0">
                     {resource.urlPattern.replace(/^https?:\/\//, '')}
-                  </Text>
+                  </span>
                 </div>
               )
             }
@@ -428,14 +415,11 @@ export default function ResourcePicker({
             const hostname = extractHostname(resource.urlPattern)
 
             return (
-              <div key={`${vendor.id}-${resource.urlPattern}`} style={{ borderTop: i > 0 ? '1px solid #e8e8e8' : undefined }}>
+              <div key={`${vendor.id}-${resource.urlPattern}`} className={i > 0 ? 'border-t border-kumo-line' : ''}>
                 {/* Resource header */}
-                <div style={{
-                  padding: '8px 16px',
-                  backgroundColor: '#fafafa',
-                }}>
-                  <span style={{ fontWeight: 500, fontSize: 13 }}>{resource.title}</span>
-                  <span style={{ color: '#8c8c8c', fontSize: 12, marginLeft: 6 }}>{resource.description}</span>
+                <div className="px-4 py-2 bg-kumo-elevated">
+                  <span className="font-medium text-[13px] text-kumo-default">{resource.title}</span>
+                  <span className="text-xs text-kumo-subtle ml-1.5">{resource.description}</span>
                 </div>
 
                 {/* Existing account rows */}
@@ -444,55 +428,56 @@ export default function ResourcePicker({
                   const currentIdx = itemIdx++
                   const isExpired = !account.credentialsValid
                   const isReconnecting = reconnectingAccount === account.id
-                  return (
-                    <Tooltip
-                      key={account.id}
-                      title={searchHasPlaceholders ? 'Replace all placeholders in the URL before selecting an account' : undefined}
+                  const accountRow = (
+                    <div
+                      onClick={() => {
+                        if (searchHasPlaceholders) return
+                        if (isExpired || isReconnecting) {
+                          if (!isReconnecting) handleReconnect(account.id)
+                        } else {
+                          onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
+                        }
+                      }}
+                      className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''} ${
+                        (isExpired && !isReconnecting) || searchHasPlaceholders ? 'opacity-70' : ''
+                      }`}
+                      style={{
+                        cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
+                      }}
+                      onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
+                      onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
                     >
-                      <div
-                        onClick={() => {
-                          if (searchHasPlaceholders) return
-                          if (isExpired || isReconnecting) {
-                            if (!isReconnecting) handleReconnect(account.id)
-                          } else {
-                            onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
-                          }
-                        }}
-                        style={{
-                          padding: '6px 16px 6px 32px',
-                          cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          borderTop: '1px solid #f5f5f5',
-                          backgroundColor: isActive ? '#e6f4ff' : undefined,
-                          opacity: (isExpired && !isReconnecting) || searchHasPlaceholders ? 0.7 : undefined,
-                        }}
-                        onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#f0f0f0' }}
-                        onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
-                      >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <Text style={{ fontSize: 13 }}>
-                            {account.description.uniqueName || account.description.displayName}
-                          </Text>
-                          {hostname && hostname !== '*' && (
-                            <Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
-                              {hostname}
-                            </Text>
-                          )}
-                        </div>
-                        {isReconnecting ? (
-                          <Spin size="small" style={{ flexShrink: 0 }} />
-                        ) : isExpired ? (
-                          <span style={{ display: 'flex', alignItems: 'center', flexShrink: 0, gap: 4 }}>
-                            <WarningOutlined style={{ color: '#faad14', fontSize: 12 }} />
-                            <Text type="warning" style={{ fontSize: 11 }}>Expired — click to re-authenticate</Text>
+                      <div className="flex-1 min-w-0">
+                        <span className="text-[13px] text-kumo-default">
+                          {account.description.uniqueName || account.description.displayName}
+                        </span>
+                        {hostname && hostname !== '*' && (
+                          <span className="text-xs text-kumo-subtle ml-1.5">
+                            {hostname}
                           </span>
-                        ) : (
-                          <RightOutlined style={{ color: '#bfbfbf', fontSize: 10, flexShrink: 0 }} />
                         )}
                       </div>
-                    </Tooltip>
+                      {isReconnecting ? (
+                        <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                      ) : isExpired ? (
+                        <span className="flex items-center flex-shrink-0 gap-1">
+                          <Warning size={12} className="text-kumo-warning" />
+                          <span className="text-[11px] text-kumo-warning">Expired — click to re-authenticate</span>
+                        </span>
+                      ) : (
+                        <CaretRight size={10} className="text-kumo-inactive flex-shrink-0" />
+                      )}
+                    </div>
                   )
+
+                  if (searchHasPlaceholders) {
+                    return (
+                      <Tooltip key={account.id} content="Replace all placeholders in the URL before selecting an account" asChild>
+                        {accountRow}
+                      </Tooltip>
+                    )
+                  }
+                  return <div key={account.id}>{accountRow}</div>
                 })}
 
                 {/* Connect new account */}
@@ -503,25 +488,21 @@ export default function ResourcePicker({
                   return (
                   <div
                     onClick={() => !connectingVendor && handleConnectNew(vendor.id)}
+                    className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''}`}
                     style={{
-                      padding: '6px 16px 6px 32px',
                       cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      borderTop: '1px solid #f5f5f5',
-                      backgroundColor: isActive ? '#e6f4ff' : undefined,
                     }}
-                    onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '#fafafa' }}
+                    onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
                     onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
                   >
                     {connectingVendor === vendor.id ? (
-                      <Spin size="small" style={{ marginRight: 8 }} />
+                      <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin mr-2" />
                     ) : (
-                      <PlusOutlined style={{ marginRight: 8, color: '#8c8c8c', fontSize: 11 }} />
+                      <Plus size={11} className="mr-2 text-kumo-subtle" />
                     )}
-                    <Text type="secondary" style={{ fontSize: 12 }}>
+                    <span className="text-xs text-kumo-subtle">
                       {connectingVendor === vendor.id ? 'Opening...' : 'Connect new account'}
-                    </Text>
+                    </span>
                   </div>
                   )
                 })()}
