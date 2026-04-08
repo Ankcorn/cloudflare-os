@@ -4,7 +4,7 @@ import { PublicApi } from '@gadgets/workshop-shared/api'
 import { useAuth, CF_ACCESS_MODE } from './useAuth'
 import { AuthProvider } from './AuthContext'
 import LoginPage from './LoginPage'
-import { Spin, Alert, Button } from 'antd'
+import { Loader, Banner, Button } from '@cloudflare/kumo'
 
 interface ProtectedRouteProps {
   children: ReactNode
@@ -34,7 +34,7 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
           gap: 16,
         }}
       >
-        <Spin size="large" />
+        <Loader size="lg" />
         <div style={{ textAlign: 'center' }}>
           Loading...
         </div>
@@ -55,12 +55,12 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
           padding: 24,
         }}
       >
-        <Alert
-          type="error"
-          message={`Authentication error: ${error}`}
-          style={{ marginBottom: 16 }}
+        <Banner
+          variant="error"
+          title={`Authentication error: ${error}`}
+          className="mb-4"
         />
-        <Button type="primary" onClick={() => window.location.reload()}>
+        <Button variant="primary" onClick={() => window.location.reload()}>
           Retry
         </Button>
       </div>
@@ -83,7 +83,7 @@ export default function ProtectedRoute({ children, rpcStub }: ProtectedRouteProp
             gap: 16,
           }}
         >
-          <Spin size="large" />
+          <Loader size="lg" />
           <div style={{ textAlign: 'center' }}>
             Authenticating...
           </div>

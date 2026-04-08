@@ -1,9 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { Typography, Spin, Alert } from 'antd'
+import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
 import { Overseer, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
-
-const { Text } = Typography
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -212,6 +210,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
           rpcSessionRef.current = rpcSession
         } catch (error) {
           console.error('Failed to establish RPC connection:', error)
+          setError('Failed to connect gadget to server')
         }
       } else if (event.data?.type === 'console' && onConsoleLog) {
         onConsoleLog({
@@ -247,7 +246,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         alignItems: 'center',
         color: '#999'
       }}>
-        <Text type="secondary">
+        <Text variant="secondary">
           Switch to this tab to load the Gadget UI
         </Text>
       </div>
@@ -262,7 +261,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         justifyContent: 'center',
         alignItems: 'center'
       }}>
-        <Spin size="large" />
+        <Loader size="lg" />
       </div>
     )
   }
@@ -276,11 +275,10 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         alignItems: 'center',
         padding: '20px'
       }}>
-        <Alert
-          message="Error"
+        <Banner
+          variant="error"
+          title="Error"
           description={error}
-          type="error"
-          showIcon
         />
       </div>
     )
@@ -288,14 +286,17 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
 
   if (!sandboxedHtml) {
     return (
-      <div style={{
-        height,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        color: '#999'
-      }}>
-        <Text type="secondary">
+      <div
+        className="dotted-bg"
+        style={{
+          height,
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          color: '#999',
+        }}
+      >
+        <Text variant="secondary">
           This Gadget doesn't have a custom UI yet. The UI will appear here when the Gadget implements one.
         </Text>
       </div>

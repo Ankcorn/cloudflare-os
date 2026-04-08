@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { message } from 'antd'
+import { useKumoToastManager } from '@cloudflare/kumo'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
 import { RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
@@ -119,6 +119,8 @@ function getTouchedFilesFromEvents(events: Y.YEvent<any>[], rootMap: Y.Map<Y.Tex
 }
 
 export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, proposedChanges, streamingProposedChanges, fileToSelect, onHasCodeChange }: GadgetCodeInterfaceProps) {
+  const toasts = useKumoToastManager()
+
   // Yjs document and files map - persistent across reconnections
   const ydocRef = useRef<Y.Doc>(new Y.Doc())
   const filesMapRef = useRef<Y.Map<Y.Text>>(ydocRef.current.getMap(''))
@@ -199,12 +201,16 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     }
   }, [fileNames, activeFile, changedFiles])
 
-  // Notify parent when code file existence changes
+  // Notify parent when code file existence is known. We avoid reporting the
+  // initial empty state before the first code subscription has reached ready,
+  // which would otherwise make the editor briefly think every gadget has no code.
   const onHasCodeChangeRef = useRef(onHasCodeChange)
   onHasCodeChangeRef.current = onHasCodeChange
   useEffect(() => {
-    onHasCodeChangeRef.current?.(fileNames.length > 0)
-  }, [fileNames.length > 0])
+    if (isReady) {
+      onHasCodeChangeRef.current?.(fileNames.length > 0)
+    }
+  }, [isReady, fileNames.length])
 
   // Select file when requested from outside
   useEffect(() => {
@@ -335,6 +341,10 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   const streamingCursorRef = useRef(0)
   const streamingBaseProposedRef = useRef<Uint8Array | undefined>(undefined)
   const streamingUpdatesRef = useRef<Uint8Array[] | undefined>(undefined)
+  // Track the initial set of files when streaming starts, and allow one
+  // auto-switch when a genuinely new file (with content) appears.
+  const streamingInitialFilesRef = useRef<Set<string> | null>(null)
+  const hasAutoSwitchedFileRef = useRef(false)
 
   useEffect(() => {
     const streamingUpdates = streamingProposedChanges?.updates
@@ -346,6 +356,8 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       streamingCursorRef.current = 0
       streamingBaseProposedRef.current = undefined
       streamingUpdatesRef.current = undefined
+      streamingInitialFilesRef.current = null
+      hasAutoSwitchedFileRef.current = false
       observePreviewMap(modifiedFilesMapRef.current)
       replaceChangedFiles(modifiedFilesMapRef.current)
       return
@@ -380,6 +392,21 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     if (rebuiltStreamingDoc) {
       observePreviewMap(streamingFilesMapRef.current)
       replaceChangedFiles(streamingFilesMapRef.current)
+      // Capture the initial set of files so we can detect new ones later.
+      streamingInitialFilesRef.current = new Set(streamingFilesMapRef.current!.keys())
+      hasAutoSwitchedFileRef.current = false
+    } else if (streamingFilesMapRef.current && streamingInitialFilesRef.current && !hasAutoSwitchedFileRef.current) {
+      // One-shot: auto-select the first genuinely new file with content.
+      for (const key of streamingFilesMapRef.current.keys()) {
+        if (!streamingInitialFilesRef.current.has(key)) {
+          const text = streamingFilesMapRef.current.get(key)
+          if (text && text.toString().length > 0) {
+            hasAutoSwitchedFileRef.current = true
+            setActiveFile(key)
+            break
+          }
+        }
+      }
     }
   }, [observePreviewMap, proposedChanges, replaceChangedFiles, streamingProposedChanges?.count, streamingProposedChanges?.updates])
 
@@ -475,7 +502,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
         console.error('Failed to subscribe to code updates:', error)
         // Only show error if we've never successfully loaded (never reached ready state)
         if (!isReadyRef.current) {
-          message.error('Failed to load code files')
+          toasts.add({ title: 'Failed to load code files', variant: 'error' })
           setLoading(false)
         }
         // For reconnection failures after we've loaded, don't show toast - user can keep editing
@@ -528,14 +555,14 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
     // Check if file already exists
     if (filesMap.has(filename)) {
-      message.error(`File already exists: ${filename}`)
+      toasts.add({ title: `File already exists: ${filename}`, variant: 'error' })
       return
     }
 
     // Create new Y.Text for the file
     filesMap.set(filename, new Y.Text())
     setActiveFile(filename)
-    message.success(`Created file: ${filename}`)
+    toasts.add({ title: `Created file: ${filename}`, variant: 'success' })
   }
 
   // Handle file deletion
@@ -543,7 +570,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     const filesMap = filesMapRef.current
 
     if (!filesMap.has(filename)) {
-      message.error('File not found')
+      toasts.add({ title: 'File not found', variant: 'error' })
       return
     }
 
@@ -556,7 +583,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       setActiveFile(remainingFiles.length > 0 ? remainingFiles[0] : null)
     }
 
-    message.success(`Deleted file: ${filename}`)
+    toasts.add({ title: `Deleted file: ${filename}`, variant: 'success' })
   }
 
   // Handle file renaming
@@ -566,13 +593,13 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     // Check if old file exists
     const ytext = filesMap.get(oldName)
     if (!ytext) {
-      message.error('File not found')
+      toasts.add({ title: 'File not found', variant: 'error' })
       return
     }
 
     // Check if new name already exists
     if (filesMap.has(newName)) {
-      message.error(`File already exists: ${newName}`)
+      toasts.add({ title: `File already exists: ${newName}`, variant: 'error' })
       return
     }
 
@@ -587,7 +614,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       setActiveFile(newName)
     }
 
-    message.success(`Renamed file: ${oldName} → ${newName}`)
+    toasts.add({ title: `Renamed file: ${oldName} \u2192 ${newName}`, variant: 'success' })
   }
 
   // Get the Y.Text for the active file (original version)
@@ -606,13 +633,8 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   if (loading) {
     return (
       <div
-        style={{
-          height,
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          color: '#6c757d'
-        }}
+        className="flex justify-center items-center text-kumo-subtle"
+        style={{ height }}
       >
         Loading code files...
       </div>
@@ -627,19 +649,8 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
       {hasUnsavedChanges && (
-        <div
-          style={{
-            backgroundColor: '#fff7e6',
-            borderBottom: '1px solid #ffd666',
-            padding: '8px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            fontSize: '14px',
-            color: '#d46b08'
-          }}
-        >
-          <span style={{ fontSize: '16px' }}>⚠️</span>
+        <div className="bg-kumo-tint border-b border-kumo-line px-4 py-2 flex items-center gap-2 text-sm text-kumo-warning">
+          <span className="text-base">&#9888;&#65039;</span>
           <span>Connection issue - changes will be saved when connection is restored</span>
         </div>
       )}
@@ -656,7 +667,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
           onFileRename={handleFileRename}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          {isDiffMode ? (
+          {isDiffMode && activeFileYText != null ? (
             <CodeDiffEditor
               filename={activeFile}
               originalYText={activeFileYText}
@@ -666,7 +677,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
           ) : (
             <CodeEditor
               filename={activeFile}
-              ytext={activeFileYText}
+              ytext={isDiffMode ? activeFileModifiedYText : activeFileYText}
               isReady={isReady}
               height="100%"
             />

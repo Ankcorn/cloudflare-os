@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import { Typography, Button } from 'antd'
-import { CloseOutlined } from '@ant-design/icons'
-
-const { Text } = Typography
+import { Text, Button } from '@cloudflare/kumo'
+import { X } from '@phosphor-icons/react'
 
 const WARNING_TEXT = 'This is an alpha test. All data may be deleted without warning.'
 
@@ -14,17 +12,18 @@ export default function AlphaWarning() {
   if (!visible) return null
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      <Text style={{ color: '#d40006', fontSize: 17, fontWeight: 'bold' }}>
+    <span className="inline-flex items-center gap-1.5">
+      <Text variant="error" bold as="span" DANGEROUS_className="text-[17px]">
         {WARNING_TEXT}
       </Text>
       <Button
-        type="text"
-        size="small"
-        icon={<CloseOutlined />}
+        variant="ghost"
+        size="xs"
         onClick={() => { dismissed = true; setVisible(false) }}
-        style={{ color: '#d40006', fontSize: 12 }}
-      />
+        aria-label="Dismiss warning"
+      >
+        <X size={12} className="text-kumo-danger" />
+      </Button>
     </span>
   )
 }

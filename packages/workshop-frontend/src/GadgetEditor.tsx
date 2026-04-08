@@ -1,21 +1,32 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Layout, Typography, Button, Input, Space, message, Tabs, Modal, Dropdown, Avatar } from 'antd'
-import { ArrowLeftOutlined, EditOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, UserOutlined, SettingOutlined, LogoutOutlined, ShareAltOutlined } from '@ant-design/icons'
+import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
+import { Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
+import {
+  ShareNetwork,
+  Pencil,
+  Check,
+  X,
+  Hexagon,
+  Trash,
+} from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
-import { CF_ACCESS_MODE } from './useAuth'
-import AlphaWarning from './AlphaWarning'
-import { Overseer, GadgetMetadata, AiChatAuthorInfo, ConsoleLogSubscriber, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
+import UserMenu from './components/UserMenu'
+
+import {
+  Overseer,
+  GadgetMetadata,
+  AiChatAuthorInfo,
+  ConsoleLogSubscriber,
+  ConsoleLogEvent,
+} from '@gadgets/workshop-shared/api'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
 import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
-import type { MenuProps } from 'antd'
 
-const { Header, Content } = Layout
-const { Title, Text } = Typography
+// ─── console log subscriber ───────────────────────────────────────────────────
 
 type BufferedLogEntry = ConsoleLogEvent & { source: 'server' | 'client' }
 
@@ -25,13 +36,10 @@ class ConsoleLogSubscriberImpl extends RpcTarget implements ConsoleLogSubscriber
   onBufferUpdated: () => void = () => {}
 
   async event(chatId: number | null, logs: ConsoleLogEvent[]) {
-    // Always write to the browser console.
     for (const log of logs) {
-      const method = console[log.level] ?? console.log
-      method("server:", ...log.message)
+      const method = (console as any)[log.level] ?? console.log
+      method('server:', ...log.message)
     }
-
-    // Buffer logs that match the currently-displayed chat.
     if (chatId !== null && chatId === this.selectedChatIdRef.current) {
       this.logBufferRef.current.push(...logs.map(l => ({ ...l, source: 'server' as const })))
       this.onBufferUpdated()
@@ -41,237 +49,105 @@ class ConsoleLogSubscriberImpl extends RpcTarget implements ConsoleLogSubscriber
 
 function formatConsoleLogs(logs: BufferedLogEntry[]): string {
   const lines = logs.map(log => {
-    const parts = log.message.map(part =>
-      typeof part === 'string' ? part : JSON.stringify(part)
-    )
+    const parts = log.message.map(p => (typeof p === 'string' ? p : JSON.stringify(p)))
     return `[${log.source} ${log.level}] ${parts.join(' ')}`
   })
   return 'Console logs:\n' + lines.join('\n')
 }
 
+// ─── right-panel tabs ─────────────────────────────────────────────────────────
+
+type RightTab = 'app' | 'code' | 'connections'
+
+const RIGHT_TABS: { value: RightTab; label: string }[] = [
+  { value: 'app', label: 'Gadget' },
+  { value: 'connections', label: 'Connections' },
+  { value: 'code', label: 'Code' },
+]
+
+// ─── component ────────────────────────────────────────────────────────────────
+
 export default function GadgetEditor() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams({ strict: false }) as { id?: string }
+  const id = params.id
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
-  const { authenticatedApi, logout } = useAuthenticatedApi()
+  const { authenticatedApi } = useAuthenticatedApi()
 
-  // Derive selectedChatId from URL search params
-  const chatParam = searchParams.get('chat')
-  const urlChatId = chatParam ? Number(chatParam) : null
+  const { chat: chatParam } = useSearch({ strict: false }) as { chat?: number }
+  const urlChatId = chatParam !== undefined ? chatParam : null
 
+  // ── toasts ─────────────────────────────────────────────────────────────────────
+  const toasts = useKumoToastManager()
+
+  // ── core state ──────────────────────────────────────────────────────────────
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)
+  const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+  // ── title editing ────────────────────────────────────────────────────────────
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const isEditingTitleRef = useRef(false)
   isEditingTitleRef.current = isEditingTitle
   const [titleInput, setTitleInput] = useState('')
-  const [siderWidth, setSiderWidth] = useState(() => Math.floor(window.innerWidth / 3))
+
+  // ── layout ───────────────────────────────────────────────────────────────────
+  const [chatWidth, setChatWidth] = useState(() => Math.min(420, Math.floor(window.innerWidth * 0.38)))
   const [isResizing, setIsResizing] = useState(false)
+  const [activeTab, setActiveTab] = useState<RightTab>('app')
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  // Always start in edit mode so the chat sidebar is visible — users interact
+  // with the AI even when they are only using the gadget, not editing it.
+  const [previewMode, _setPreviewMode] = useState(false)
+
+  // ── code / chat state ────────────────────────────────────────────────────────
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
-  const [activeTab, setActiveTab] = useState('code')
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [streamingProposedChanges, setStreamingProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
   const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
-  const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
-  const [shareModalOpen, setShareModalOpen] = useState(false)
-
-  // Simple chat mode: full-width chat UI when no code, no bindings, and the only chat
-  // is chat 0. chatCount starts null (unknown) and is treated as compatible with simple
-  // mode so that the UI defaults to simple layout and avoids a flash when opening a new
-  // gadget.
-  const [hasCode, setHasCode] = useState(false)
+  const [hasCode, setHasCode] = useState<boolean | null>(null)
   const [chatCount, setChatCount] = useState<number | null>(null)
   const [hasChatZero, setHasChatZero] = useState(false)
-  const [hasBindings, setHasBindings] = useState(false)
-  // True when the gadget would be in simple mode ignoring proposed changes. Used by
-  // the back button to go home even when proposed changes temporarily force complex mode.
-  const simpleChatBase = !hasCode && !hasBindings
-      && (chatCount === null || (chatCount === 1 && hasChatZero))
-  const simpleChatMode = simpleChatBase
-      && proposedChanges === undefined
-      && streamingProposedChanges === undefined
+  const [_hasBindings, setHasBindings] = useState(false)
+  const [isAgentActive, setIsAgentActive] = useState(false)
+  const [hasAnyProposedChanges, setHasAnyProposedChanges] = useState(false)
+  const selectedChatId = urlChatId
+  const chatListReady = chatCount !== null
+  const codeStateReady = hasCode !== null
+  const hasCodeRelatedState = hasCode === true
+    || hasAnyProposedChanges
+    || streamingProposedChanges !== undefined
+  const singleInitialChat = chatCount === 1 && hasChatZero
+  const layoutModeReady = chatListReady && (codeStateReady || hasCodeRelatedState)
 
-  // When the gadget would be in simple mode (ignoring proposed changes), always
-  // show chat 0 regardless of URL. We use simpleChatBase rather than simpleChatMode
-  // so that proposed changes affect only the layout, not the chat selection —
-  // otherwise we'd get an infinite loop (proposedChanges toggles simpleChatMode,
-  // which toggles selectedChatId, which clears proposedChanges, repeat).
-  const selectedChatId = simpleChatBase ? 0 : urlChatId
+  // Simple mode: full-width chat layout for a brand-new gadget whose only
+  // conversation is chat 0 and which still has no merged or proposed code.
+  // We only choose this layout after the initial chat/code subscriptions are
+  // ready, so existing gadgets do not briefly flash the wrong UI while loading.
+  const simpleMode = layoutModeReady && !hasCodeRelatedState && singleInitialChat
+  const showFullEditor = layoutModeReady && !simpleMode
 
-  const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
-    setChatCount(count)
-    setHasChatZero(chatZeroExists)
-  }, [])
+  // When the gadget has only the initial chat, treat chat 0 as selected even if
+  // the URL has not caught up yet. This avoids a transient deselect/reselect
+  // loop when we transition between simple mode and the full editor.
+  const effectiveSelectedChatId = selectedChatId ?? (singleInitialChat ? 0 : null)
 
-  // Auto-switch to Gadget UI tab when the agent first generates code on chat 0.
-  // Only fires once per gadget to avoid disrupting the user.
-  const hasAutoSwitchedToUiRef = useRef(false)
-  const hadProposedChangesAtAgentStartRef = useRef(false)
-  const proposedChangesRef = useRef(proposedChanges)
-  proposedChangesRef.current = proposedChanges
-  const handleAgentActiveChange = useCallback((chatId: number, isActive: boolean) => {
-    if (chatId !== 0) return
-    if (isActive) {
-      // Agent just started — record whether proposed changes already exist.
-      hadProposedChangesAtAgentStartRef.current = proposedChangesRef.current !== undefined
-    } else {
-      // Agent just finished — switch to UI tab if this is the first code generation.
-      if (
-        !hasAutoSwitchedToUiRef.current
-        && !hadProposedChangesAtAgentStartRef.current
-        && proposedChangesRef.current !== undefined
-      ) {
-        hasAutoSwitchedToUiRef.current = true
-        setActiveTab('ui')
-      }
-    }
-  }, [])
-
-  const navigateToChat = useCallback((chatId: number | null, options?: { replace?: boolean }) => {
-    if (chatId !== null) {
-      navigate(`/gadget/${id}?chat=${chatId}`, { replace: options?.replace })
-    } else {
-      navigate(`/gadget/${id}`, { replace: options?.replace })
-    }
-  }, [navigate, id])
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (isResizing) {
-        e.preventDefault()
-        const newWidth = Math.max(200, Math.min(window.innerWidth - 200, e.clientX))
-        setSiderWidth(newWidth)
-      }
-    }
-
-    const handleMouseUp = () => {
-      setIsResizing(false)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-    }
-
-    if (isResizing) {
-      document.body.style.userSelect = 'none'
-      document.body.style.cursor = 'col-resize'
-      document.addEventListener('mousemove', handleMouseMove)
-      document.addEventListener('mouseup', handleMouseUp)
-    }
-
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-    }
-  }, [isResizing])
-
-  useEffect(() => {
-    let overseerStub: RpcStub<Overseer> | null = null
-    let metadataSubscription: RpcStub<{}> | null = null
-    let cancelled = false
-
-    const loadGadget = async () => {
-      if (!id) {
-        setError('No gadget ID provided')
-        return
-      }
-
-      // Clear error on initial load
-      if (isInitialLoad) {
-        setError(null)
-      }
-
-      try {
-        // Check for a share key in the URL fragment and redeem it as part of opening.
-        // The key is placed in the fragment (not a query parameter) so that it is never
-        // sent to the server in the HTTP request for the page, never appears in Referer
-        // headers, and never ends up in CDN or access logs.
-        const hash = window.location.hash // e.g. "#share=abc123"
-        const shareKey = hash.startsWith('#share=') ? hash.slice('#share='.length) : undefined
-        if (shareKey) {
-          // Strip the share key from the URL immediately so it's not visible or re-used.
-          window.history.replaceState({}, '', `/gadget/${id}`)
-        }
-
-        // Use promise pipelining - use the promise itself as the stub
-        overseerStub = authenticatedApi.openGadget(id, shareKey)
-        setOverseer({ stub: overseerStub })
-
-        // Subscribe to metadata updates. The callback fires immediately with
-        // the current metadata, then again whenever it changes.
-        metadataSubscription = await overseerStub.subscribeToMetadata((metadata: GadgetMetadata) => {
-          if (cancelled) return
-          setMetadata(metadata)
-          if (!isEditingTitleRef.current) {
-            setTitleInput(metadata.title)
-          }
-        })
-
-        if (cancelled) return
-
-        // Clear any error on successful load
-        setError(null)
-        setIsInitialLoad(false)
-
-        // Clear connection lost flag on successful reconnection
-        if (connectionLost) {
-          setConnectionLost(false)
-        }
-      } catch (err: any) {
-        if (cancelled) return
-        console.error('Failed to load gadget:', err)
-        const errMsg = err?.message || ''
-        if (errMsg.includes('Invalid or expired share key')) {
-          message.error('Invalid or expired share link.')
-        }
-        // Only set error on initial load - for reconnection attempts, keep the UI visible
-        if (isInitialLoad) {
-          setError('Failed to load gadget')
-        } else if (!connectionLost) {
-          // Track connection lost state but don't show toast
-          setConnectionLost(true)
-        }
-      }
-    }
-
-    loadGadget()
-
-    // Cleanup function to dispose the subscription and overseer stub.
-    // The cancelled flag ensures the async loadGadget does not update state
-    // after cleanup (important in React Strict Mode, which re-runs effects).
-    return () => {
-      cancelled = true
-      if (metadataSubscription) {
-        metadataSubscription[Symbol.dispose]()
-      }
-      if (overseerStub) {
-        overseerStub[Symbol.dispose]()
-      }
-    }
-  }, [id, authenticatedApi])
-
-  // Console log subscription and buffering.
+  // ── console log buffering ────────────────────────────────────────────────────
   const consoleLogSubscriberRef = useRef(new ConsoleLogSubscriberImpl())
   const consoleLogBufferRef = useRef<BufferedLogEntry[]>([])
   const [consoleLogCount, setConsoleLogCount] = useState(0)
-
-  // Keep the subscriber wired to the current selectedChatId and buffer.
-  const selectedChatIdRef = useRef(selectedChatId)
-  selectedChatIdRef.current = selectedChatId
+  const selectedChatIdRef = useRef(effectiveSelectedChatId)
+  selectedChatIdRef.current = effectiveSelectedChatId
   consoleLogSubscriberRef.current.selectedChatIdRef = selectedChatIdRef
   consoleLogSubscriberRef.current.logBufferRef = consoleLogBufferRef
-  consoleLogSubscriberRef.current.onBufferUpdated = () => {
+  consoleLogSubscriberRef.current.onBufferUpdated = () =>
     setConsoleLogCount(consoleLogBufferRef.current.length)
-  }
 
-  // Clear the buffer when the selected chat changes.
   useEffect(() => {
     consoleLogBufferRef.current = []
     setConsoleLogCount(0)
-  }, [selectedChatId])
+  }, [effectiveSelectedChatId])
 
   const consumeConsoleLogs = useCallback((): string => {
     const logs = consoleLogBufferRef.current
@@ -286,415 +162,538 @@ export default function GadgetEditor() {
   }, [])
 
   const handleClientConsoleLog = useCallback((log: ConsoleLogEvent) => {
-    // Echo to browser console.
-    const method = console[log.level] ?? console.log
-    method("client:", ...log.message)
-
-    // Buffer if a chat is selected (client logs always belong to the current chat).
+    const method = (console as any)[log.level] ?? console.log
+    method('client:', ...log.message)
     if (selectedChatIdRef.current !== null) {
       consoleLogBufferRef.current.push({ ...log, source: 'client' as const })
       setConsoleLogCount(consoleLogBufferRef.current.length)
     }
   }, [])
 
-  useEffect(() => {
-    if (!overseer) return
+  // ── chat count / auto-switch ─────────────────────────────────────────────────
+  const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
+    setChatCount(count)
+    setHasChatZero(chatZeroExists)
+  }, [])
 
-    let subscription: RpcStub<{}> | null = null
+  const hasAutoSwitchedToCodeRef = useRef(false)
+  const hasAutoSwitchedToUiRef = useRef(false)
+  const hadProposedChangesAtAgentStartRef = useRef(false)
+  const proposedChangesRef = useRef(proposedChanges)
+  proposedChangesRef.current = proposedChanges
 
-    const subscribe = async () => {
-      try {
-        subscription = await overseer.stub.subscribeToConsoleLogs(
-          consoleLogSubscriberRef.current
-        )
-      } catch (err) {
-        console.error('Failed to subscribe to console logs:', err)
+  const handleAgentActiveChange = useCallback((chatId: number, isActive: boolean) => {
+    setIsAgentActive(isActive)
+    if (chatId !== 0) return
+    if (isActive) {
+      hadProposedChangesAtAgentStartRef.current = proposedChangesRef.current !== undefined
+    } else {
+      if (
+        !hasAutoSwitchedToUiRef.current &&
+        !hadProposedChangesAtAgentStartRef.current &&
+        proposedChangesRef.current !== undefined
+      ) {
+        hasAutoSwitchedToUiRef.current = true
+        setActiveTab('app')
       }
     }
+  }, [])
 
-    subscribe()
+  // Auto-switch to the Code tab when the AI starts streaming code for the first
+  // time on a fresh gadget. This lets the user watch code being written in
+  // real-time. The existing handleAgentActiveChange logic above switches to the
+  // Gadget tab once the agent finishes.
+  useEffect(() => {
+    if (
+      streamingProposedChanges !== undefined &&
+      !hasAutoSwitchedToCodeRef.current &&
+      !hasCode
+    ) {
+      hasAutoSwitchedToCodeRef.current = true
+      setActiveTab('code')
+    }
+  }, [streamingProposedChanges, hasCode])
 
-    return () => {
-      if (subscription) {
-        subscription[Symbol.dispose]()
+  // Track whether the user has explicitly navigated back to the list view.
+  // This prevents the auto-select effect from immediately re-redirecting them.
+  const userNavigatedToListRef = useRef(false)
+
+  useEffect(() => {
+    setProposedChanges(undefined)
+    setStreamingProposedChanges(undefined)
+    setFileToSelect(undefined)
+    setHasCode(null)
+    setChatCount(null)
+    setHasChatZero(false)
+    setHasAnyProposedChanges(false)
+    hasAutoSwitchedToCodeRef.current = false
+    hasAutoSwitchedToUiRef.current = false
+    hadProposedChangesAtAgentStartRef.current = false
+    userNavigatedToListRef.current = false
+  }, [id])
+
+  // ── navigation helper ────────────────────────────────────────────────────────
+  const navigateToChat = useCallback(
+    (chatId: number | null, options?: { replace?: boolean }) => {
+      if (chatId === null) userNavigatedToListRef.current = true
+      else userNavigatedToListRef.current = false
+      navigate({
+        to: '/gadget/$id',
+        params: { id: id! },
+        search: chatId !== null ? { chat: chatId } : {},
+        replace: options?.replace,
+      })
+    },
+    [id, navigate]
+  )
+
+  // ── keep single-chat simple mode URLs clean ─────────────────────────────────
+  // When the gadget is in simple mode, chat 0 is implied and we omit it from
+  // the URL. In full editor mode, auto-select the only chat on initial load.
+  useEffect(() => {
+    if (!chatListReady) return
+
+    if (simpleMode) {
+      if (urlChatId === 0) {
+        navigate({ to: '/gadget/$id', params: { id: id! }, search: {}, replace: true })
       }
-    }
-  }, [overseer])
-
-  // Invalidate Gadget UI when the selected chat changes or proposed changes update
-  useEffect(() => {
-    setUiReloadTrigger(prev => prev + 1)
-  }, [selectedChatId, proposedChanges])
-
-  // When the gadget permanently leaves simple mode (e.g. because the AI wrote code
-  // and the user merged it), navigate to ?chat=0 so the user stays on the same
-  // conversation. We track simpleChatBase (not simpleChatMode) so that proposed
-  // changes alone don't trigger navigation — only permanent changes like code,
-  // bindings, or additional chats.
-  const prevSimpleChatBaseRef = useRef<boolean | null>(null)
-  useEffect(() => {
-    if (chatCount === null) return
-    const prev = prevSimpleChatBaseRef.current
-    prevSimpleChatBaseRef.current = simpleChatBase
-    if (prev === true && !simpleChatBase && urlChatId === null) {
-      navigateToChat(0, { replace: true })
-    }
-  }, [simpleChatBase, chatCount, urlChatId, navigateToChat])
-
-  useEffect(() => {
-    const fetchUserInfo = async () => {
-      try {
-        const info = await authenticatedApi.whoami()
-        setUserInfo(info)
-      } catch (error) {
-        console.error('Failed to fetch user info:', error)
-      }
-    }
-
-    fetchUserInfo()
-  }, [authenticatedApi])
-
-  const handleSaveTitle = async () => {
-    if (!overseer || !titleInput.trim()) {
       return
     }
 
+    if (urlChatId === null && chatCount === 1 && hasChatZero && !userNavigatedToListRef.current) {
+      navigateToChat(0, { replace: true })
+    }
+  }, [chatListReady, simpleMode, urlChatId, chatCount, hasChatZero, navigateToChat, navigate, id])
+
+  // ── resize handle ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!isResizing) return
+      e.preventDefault()
+      setChatWidth(Math.max(280, Math.min(window.innerWidth - 400, e.clientX)))
+    }
+    const onUp = () => {
+      setIsResizing(false)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+    if (isResizing) {
+      document.body.style.userSelect = 'none'
+      document.body.style.cursor = 'col-resize'
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    }
+    return () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+    }
+  }, [isResizing])
+
+  // ── load gadget ───────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let overseerStub: RpcStub<Overseer> | null = null
+    let metaSub: RpcStub<{}> | null = null
+    let cancelled = false
+
+    const load = async () => {
+      if (!id) { setError('No gadget ID provided'); return }
+      if (isInitialLoad) setError(null)
+
+      try {
+        const hash = window.location.hash
+        const shareKey = hash.startsWith('#share=') ? hash.slice('#share='.length) : undefined
+        if (shareKey) navigate({ to: '/gadget/$id', params: { id: id! }, search: {}, replace: true })
+
+        overseerStub = authenticatedApi.openGadget(id, shareKey)
+        setOverseer({ stub: overseerStub })
+
+        metaSub = await overseerStub.subscribeToMetadata((meta: GadgetMetadata) => {
+          if (cancelled) return
+          setMetadata(meta)
+          if (!isEditingTitleRef.current) setTitleInput(meta.title)
+        })
+
+        if (cancelled) return
+        setError(null)
+        setIsInitialLoad(false)
+        if (connectionLost) setConnectionLost(false)
+      } catch (err: any) {
+        if (cancelled) return
+        console.error('Failed to load gadget:', err)
+        if (err?.message?.includes('Invalid or expired share key')) {
+          toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
+        }
+        if (isInitialLoad) setError('Failed to load gadget')
+        else if (!connectionLost) setConnectionLost(true)
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+      metaSub?.[Symbol.dispose]()
+      overseerStub?.[Symbol.dispose]()
+    }
+  }, [id, authenticatedApi])
+
+  // ── console log subscription ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!overseer) return
+    let sub: RpcStub<{}> | null = null
+    let cancelled = false
+    overseer.stub
+      .subscribeToConsoleLogs(consoleLogSubscriberRef.current)
+      .then(s => {
+        if (cancelled) { s[Symbol.dispose](); return }
+        sub = s
+      })
+      .catch(err => console.error('Failed to subscribe to console logs:', err))
+    return () => { cancelled = true; sub?.[Symbol.dispose]() }
+  }, [overseer])
+
+  // ── reload UI on chat/proposed changes ────────────────────────────────────────
+  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [selectedChatId, proposedChanges])
+
+  // ── user info ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    authenticatedApi.whoami().then(setUserInfo).catch(() => {})
+  }, [authenticatedApi])
+
+  // ── title save/cancel ─────────────────────────────────────────────────────────
+  const handleSaveTitle = async () => {
+    if (!overseer || !titleInput.trim()) return
     try {
       await overseer.stub.setTitle(titleInput.trim())
       setMetadata(prev => prev ? { ...prev, title: titleInput.trim() } : null)
       setIsEditingTitle(false)
-      message.success('Title updated successfully')
-    } catch (err) {
-      console.error('Failed to update title:', err)
-      message.error('Failed to update title')
-    }
+    } catch { toasts.add({ title: 'Failed to update title', variant: 'error' }) }
   }
-
   const handleCancelEdit = () => {
     setTitleInput(metadata?.title || '')
     setIsEditingTitle(false)
   }
 
+  // ── back ──────────────────────────────────────────────────────────────────────
   const handleBack = () => {
-    if (simpleChatBase) {
-      // In simple chat mode (or complex only due to proposed changes), go home.
-      navigate('/')
-    } else if (selectedChatId !== null) {
-      // Push to history so browser back returns to this chat
-      navigate(`/gadget/${id}`)
-    } else {
-      navigate('/')
+    navigate({ to: '/' })
+  }
+
+  // ── delete ────────────────────────────────────────────────────────────────────
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+
+  const handleDeleteConfirm = async () => {
+    if (!overseer) return
+    setIsDeleting(true)
+    try {
+      await overseer.stub.deleteSelf()
+      navigate({ to: '/' })
+    } catch {
+      toasts.add({ title: 'Failed to delete gadget', variant: 'error' })
+      setIsDeleting(false)
+      setDeleteDialogOpen(false)
     }
   }
 
-  const handleCodeChange = () => {
-    setUiReloadTrigger(prev => prev + 1)
-  }
+  // ── shared height tokens ──────────────────────────────────────────────────────
+  const TOPBAR_H = 48   // h-12
+  const TABBAR_H = 48   // h-12
+  const RIGHT_CONTENT_H = `calc(100vh - ${TOPBAR_H}px - ${TABBAR_H}px)`
 
-  const handleFileEdited = (filename: string) => {
-    // Set the file to select (user can manually switch to code tab if needed)
-    setFileToSelect(filename)
-  }
-
-  const handleDelete = () => {
-    Modal.confirm({
-      title: 'Delete Gadget',
-      content: `Are you sure you want to delete "${metadata?.title}"? This action cannot be undone.`,
-      okText: 'Delete',
-      okType: 'danger',
-      cancelText: 'Cancel',
-      onOk: async () => {
-        if (!overseer) return
-
-        try {
-          await overseer.stub.deleteSelf()
-          message.success('Gadget deleted successfully')
-          navigate('/')
-        } catch (err) {
-          console.error('Failed to delete gadget:', err)
-          message.error('Failed to delete gadget')
-        }
-      }
-    })
-  }
-
-  const handleLogout = () => {
-    logout()
-  }
-
-  const accountMenuItems: MenuProps['items'] = [
-    {
-      key: 'settings',
-      label: 'Settings',
-      icon: <SettingOutlined />,
-      onClick: () => navigate('/settings'),
-    },
-    ...(!CF_ACCESS_MODE ? [
-      { type: 'divider' as const },
-      {
-        key: 'logout',
-        label: 'Logout',
-        icon: <LogoutOutlined />,
-        onClick: handleLogout,
-      },
-    ] : []),
-  ]
-
+  // ── error / loading states ────────────────────────────────────────────────────
   if (error) {
     return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column' }}>
-          <Text type="danger" style={{ fontSize: '18px', marginBottom: 16 }}>
-            {error}
-          </Text>
-          <Button onClick={handleBack}>
-            Back to Home
-          </Button>
-        </Content>
-      </Layout>
+      <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
+        <p className="text-sm text-kumo-danger">{error}</p>
+        <button
+          onClick={handleBack}
+          className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
+        >
+          Back to home
+        </button>
+      </div>
     )
   }
 
   if (!metadata) {
     return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <Text>Loading gadget...</Text>
-        </Content>
-      </Layout>
+      <div className="min-h-screen flex items-center justify-center bg-kumo-base">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-kumo-subtle">Loading gadget…</p>
+        </div>
+      </div>
     )
   }
 
+  // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Header
-        style={{
-          backgroundColor: 'white',
-          borderBottom: '1px solid #f0f0f0',
-          padding: '0 24px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 16
-        }}
+    <div className="flex flex-col h-screen overflow-hidden bg-kumo-base relative">
+      {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
+      <div
+        className="flex items-center justify-between px-4 border-b border-kumo-line flex-shrink-0 gap-3"
+        style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 90%, transparent)' }}
       >
-        <Button
-          icon={<ArrowLeftOutlined />}
-          onClick={handleBack}
-          type="text"
-          size="large"
-        />
+        {/* Left: logo / title */}
+        <div className="flex items-center gap-2 min-w-0">
+          <Link
+            to="/"
+            className="flex-shrink-0 hover:opacity-80 transition-opacity"
+          >
+            <Hexagon size={20} className="text-kumo-brand" weight="bold" />
+          </Link>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span className="text-kumo-inactive flex-shrink-0">/</span>
+
           {isEditingTitle ? (
-            <Space.Compact>
-              <Input
-                value={titleInput}
-                onChange={(e) => setTitleInput(e.target.value)}
-                onPressEnter={handleSaveTitle}
-                placeholder="Enter gadget title"
-                style={{ width: 300 }}
-                autoFocus
-              />
-              <Button
-                icon={<CheckOutlined />}
-                onClick={handleSaveTitle}
-                type="primary"
-                disabled={!titleInput.trim()}
-              />
-              <Button
-                icon={<CloseOutlined />}
-                onClick={handleCancelEdit}
-              />
-            </Space.Compact>
-          ) : (
-            <>
-              <Title level={4} style={{ margin: 0 }}>
-                {metadata.title}
-              </Title>
-              <Button
-                icon={<EditOutlined />}
-                onClick={() => setIsEditingTitle(true)}
+            <div className="flex items-center gap-1">
+              <input
                 type="text"
-                size="small"
+                value={titleInput}
+                onChange={e => setTitleInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') handleSaveTitle()
+                  if (e.key === 'Escape') handleCancelEdit()
+                }}
+                autoFocus
+                className="text-sm font-semibold text-kumo-default bg-kumo-tint border border-kumo-brand rounded-md px-2 py-0.5 focus:outline-none w-56"
               />
-            </>
+              <button
+                onClick={handleSaveTitle}
+                disabled={!titleInput.trim()}
+                className="p-1 rounded-md text-kumo-subtle hover:text-kumo-brand hover:bg-kumo-tint transition-colors disabled:opacity-30"
+              >
+                <Check size={14} />
+              </button>
+              <button
+                onClick={handleCancelEdit}
+                className="p-1 rounded-md text-kumo-subtle hover:text-kumo-default hover:bg-kumo-tint transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1 min-w-0">
+              <span className="text-sm font-semibold text-kumo-default truncate">
+                {metadata.title}
+              </span>
+              <button
+                onClick={() => setIsEditingTitle(true)}
+                className="p-1.5 text-kumo-subtle hover:text-kumo-default rounded-md hover:bg-kumo-tint transition-colors flex-shrink-0"
+                title="Rename gadget"
+              >
+                <Pencil size={16} />
+              </button>
+            </div>
+          )}
+
+          {metadata.owner && (
+            <span className="text-xs text-kumo-inactive flex-shrink-0">
+              by {metadata.owner.name}
+            </span>
           )}
         </div>
 
-        <div style={{ flex: 1, textAlign: 'center' }}>
-          <AlphaWarning />
-        </div>
-
-        <Space>
+        {/* Right: cost, share, delete */}
+        <div className="flex items-center gap-2 flex-shrink-0">
           {metadata.totalCost != null && (
-            <Text style={{ fontSize: '13px', color: '#595959' }}>
+            <span className="text-xs font-mono text-kumo-subtle">
               ${metadata.totalCost.toFixed(4)}
-            </Text>
+            </span>
           )}
-          <Button
-            icon={<ShareAltOutlined />}
+
+          {connectionLost && (
+            <span className="text-xs text-kumo-warning px-2 py-0.5 rounded-full bg-kumo-warning-tint border border-kumo-warning/20">
+              Reconnecting…
+            </span>
+          )}
+
+          <button
             onClick={() => setShareModalOpen(true)}
-            type="primary"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-kumo-line rounded-lg text-kumo-default hover:bg-kumo-tint transition-colors"
           >
+            <ShareNetwork size={13} />
             Share
-          </Button>
+          </button>
+
+          {/* Delete gadget */}
           {!metadata.owner && (
-            <Button
-              icon={<DeleteOutlined />}
-              onClick={handleDelete}
-              danger
-              type="text"
-              size="large"
-              title="Delete Gadget"
-            />
+            <button
+              onClick={() => setDeleteDialogOpen(true)}
+              className="p-1.5 text-kumo-subtle hover:text-kumo-danger rounded-md hover:bg-kumo-danger-tint transition-colors"
+              title="Delete gadget"
+            >
+              <Trash size={16} />
+            </button>
           )}
-          <Dropdown menu={{ items: accountMenuItems }} placement="bottomRight" trigger={['click']}>
-            <Button type="text" style={{ height: 'auto', padding: '4px 12px' }}>
-              <Space>
-                <Avatar size="small" icon={<UserOutlined />} />
-                <span>{userInfo?.name || 'Account'}</span>
-              </Space>
-            </Button>
-          </Dropdown>
-        </Space>
-      </Header>
 
-      <div style={{ height: 'calc(100vh - 64px)', display: 'flex' }}>
-        {/* Chat - full width in simple mode, sidebar in full mode */}
-        <div
-          style={{
-            ...(simpleChatMode
-              ? { flex: 1 }
-              : { width: siderWidth, borderRight: '1px solid #f0f0f0' }),
-            backgroundColor: 'white',
-            height: '100%'
-          }}
-        >
-          {overseer ? (
-            <ChatInterface
-              overseer={overseer.stub}
-              selectedChatId={selectedChatId}
-              onNavigateToChat={navigateToChat}
-              onProposedChangesChange={setProposedChanges}
-              onStreamingProposedChangesChange={updates => setStreamingProposedChanges(updates)}
-              onFileEdited={handleFileEdited}
-              pendingConsoleLogCount={consoleLogCount}
-              consoleLogPreview={consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''}
-              consoleLogSeverity={
-                consoleLogBufferRef.current.some(l => l.level === 'error') ? 'error'
-                : consoleLogBufferRef.current.some(l => l.level === 'warn') ? 'warn'
-                : 'info'
-              }
-              onConsumeConsoleLogs={consumeConsoleLogs}
-              onDiscardConsoleLogs={discardConsoleLogs}
-              hideTitleBar={simpleChatMode}
-              onChatCountChange={handleChatCountChange}
-              onAgentActiveChange={handleAgentActiveChange}
-            />
-          ) : null}
-        </div>
-
-        {/* Resize Handle - hidden in simple chat mode */}
-        <div
-          style={{
-            width: '4px',
-            backgroundColor: '#f0f0f0',
-            cursor: 'col-resize',
-            position: 'relative',
-            zIndex: 1,
-            ...(simpleChatMode ? { display: 'none' } : {})
-          }}
-          onMouseDown={() => setIsResizing(true)}
-        >
-          <div
-            style={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              width: '16px',
-              height: '40px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: '#f0f0f0',
-              borderRadius: '4px',
-              opacity: 0.7
-            }}
-          >
-            <div style={{
-              width: '2px',
-              height: '16px',
-              backgroundColor: '#999',
-              borderRadius: '1px',
-              marginRight: '2px'
-            }} />
-            <div style={{
-              width: '2px',
-              height: '16px',
-              backgroundColor: '#999',
-              borderRadius: '1px'
-            }} />
+          {/* User menu */}
+          <div className="ml-1">
+            <UserMenu />
           </div>
-        </div>
-
-        {/* Main Content with Tabs - hidden in simple chat mode (kept mounted for subscriptions) */}
-        <div style={{ backgroundColor: 'white', flex: 1, minWidth: 0, ...(simpleChatMode ? { display: 'none' } : {}) }}>
-          <Tabs
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            style={{ height: '100%' }}
-            tabBarStyle={{ paddingLeft: '16px', marginBottom: 0 }}
-            items={[
-              {
-                key: 'code',
-                label: 'Code Editor',
-                forceRender: true,
-                children: overseer ? (
-                  <GadgetCodeInterface
-                    overseer={overseer.stub}
-                    height="calc(100vh - 64px - 46px)"
-                    onCodeChange={handleCodeChange}
-                    proposedChanges={proposedChanges}
-                    streamingProposedChanges={streamingProposedChanges}
-                    fileToSelect={fileToSelect}
-                    onHasCodeChange={setHasCode}
-                  />
-                ) : null
-              },
-              {
-                key: 'connections',
-                label: 'Connections',
-                forceRender: true,
-                children: overseer ? (
-                  <Connections
-                    overseer={overseer.stub}
-                    authenticatedApi={authenticatedApi}
-                    onConnectionsChange={handleCodeChange}
-                    isVisible={activeTab === 'connections'}
-                    onHasGatekeepersChange={setHasBindings}
-                  />
-                ) : null
-              },
-              {
-                key: 'ui',
-                label: 'Gadget UI',
-                children: overseer ? (
-                  <GadgetUI
-                    overseer={overseer.stub}
-                    height="calc(100vh - 64px - 46px)"
-                    reloadTrigger={uiReloadTrigger}
-                    isVisible={activeTab === 'ui'}
-                    chatId={selectedChatId ?? undefined}
-                    onConsoleLog={handleClientConsoleLog}
-                  />
-                ) : null
-              }
-            ]}
-          />
         </div>
       </div>
 
+      {/* ═══ BODY: always two-pane — chat left, tabs right ════════════════════ */}
+      <div className="flex flex-1 min-h-0 relative">
+
+        {/* Full-width thinking progress bar. In simple mode it aligns with the
+            top bar border; otherwise it aligns with the tab bar border. */}
+        {isAgentActive && (
+          <div className="absolute left-0 right-0 h-0 z-10" style={{ top: simpleMode ? 0 : TABBAR_H }}>
+            <div className="absolute left-0 right-0 h-0.5 bg-kumo-fill overflow-hidden">
+              <div className="absolute inset-y-0 w-1/3 bg-kumo-brand animate-[thinking_1.5s_ease-in-out_infinite]" />
+            </div>
+          </div>
+        )}
+
+        {/* ── LEFT: Chat pane ──────────────────────────────────────────────────── */}
+        <div
+          className={`flex flex-col ${showFullEditor ? 'border-r border-kumo-line flex-shrink-0' : 'flex-1'}`}
+          style={showFullEditor ? { width: chatWidth } : undefined}
+        >
+          {overseer ? (
+            <div className="flex-1 min-h-0 relative">
+              <div className={layoutModeReady ? 'h-full' : 'h-full invisible'}>
+                <ChatInterface
+                  overseer={overseer.stub}
+                  selectedChatId={effectiveSelectedChatId}
+                  onNavigateToChat={navigateToChat}
+                  onProposedChangesChange={setProposedChanges}
+                  onStreamingProposedChangesChange={updates => setStreamingProposedChanges(updates)}
+                  onFileEdited={setFileToSelect}
+                  pendingConsoleLogCount={consoleLogCount}
+                  consoleLogPreview={
+                    consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''
+                  }
+                  consoleLogSeverity={
+                    consoleLogBufferRef.current.some(l => l.level === 'error')
+                      ? 'error'
+                      : consoleLogBufferRef.current.some(l => l.level === 'warn')
+                      ? 'warn'
+                      : 'info'
+                  }
+                  onConsumeConsoleLogs={consumeConsoleLogs}
+                  onDiscardConsoleLogs={discardConsoleLogs}
+                  hideTitleBar={simpleMode}
+                  constrainChatWidth={simpleMode}
+                  onChatCountChange={handleChatCountChange}
+                  onAgentActiveChange={handleAgentActiveChange}
+                  onHasAnyCodeChange={setHasAnyProposedChanges}
+                />
+              </div>
+
+              {!layoutModeReady && (
+                <div className="absolute inset-0 flex items-center justify-center bg-kumo-base">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-6 h-6 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+                    <p className="text-sm text-kumo-subtle">Loading conversation…</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="w-6 h-6 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+            </div>
+          )}
+        </div>
+
+        {/* ── Resize handle ───────────────────────────────────────────────────── */}
+        {showFullEditor && (
+          <div
+            className="w-1 flex-shrink-0 bg-kumo-line hover:bg-kumo-brand cursor-col-resize transition-colors relative"
+            onMouseDown={() => setIsResizing(true)}
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+          </div>
+        )}
+
+        {/* ── RIGHT: App / Code / Connections tabs ───────────────────────────── */}
+        <div className={`flex-1 flex flex-col min-w-0 bg-kumo-base ${showFullEditor ? '' : 'hidden'}`}>
+          {/* Tab bar */}
+          <div
+            className="flex items-center px-4 border-b border-kumo-line flex-shrink-0 gap-1"
+            style={{ height: TABBAR_H }}
+          >
+            {RIGHT_TABS.map(tab => (
+              <button
+                key={tab.value}
+                onClick={() => setActiveTab(tab.value)}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors font-medium ${
+                  activeTab === tab.value
+                    ? 'bg-kumo-tint text-kumo-default'
+                    : 'text-kumo-subtle hover:text-kumo-default hover:bg-kumo-elevated'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content — all kept mounted to preserve state */}
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <div className={activeTab === 'app' && !previewMode ? 'h-full' : 'hidden'}>
+              {overseer && !previewMode && (
+                <GadgetUI
+                  overseer={overseer.stub}
+                  height={RIGHT_CONTENT_H}
+                  reloadTrigger={uiReloadTrigger}
+                  isVisible={activeTab === 'app' && !previewMode}
+                  chatId={selectedChatId ?? undefined}
+                  onConsoleLog={handleClientConsoleLog}
+                />
+              )}
+            </div>
+
+            <div className={activeTab === 'code' ? 'h-full' : 'hidden'}>
+              {overseer && (
+                <GadgetCodeInterface
+                  overseer={overseer.stub}
+                  height={RIGHT_CONTENT_H}
+                  onCodeChange={() => setUiReloadTrigger(t => t + 1)}
+                  proposedChanges={proposedChanges}
+                  streamingProposedChanges={streamingProposedChanges}
+                  fileToSelect={fileToSelect}
+                  onHasCodeChange={setHasCode}
+                />
+              )}
+            </div>
+
+            <div className={activeTab === 'connections' ? 'h-full overflow-auto' : 'hidden'}>
+              {overseer && (
+                <Connections
+                  overseer={overseer.stub}
+                  authenticatedApi={authenticatedApi}
+                  onConnectionsChange={() => setUiReloadTrigger(t => t + 1)}
+                  isVisible={activeTab === 'connections'}
+                  onHasGatekeepersChange={setHasBindings}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ═══ PREVIEW OVERLAY — covers only the body below the shared top bar ══ */}
+      {previewMode && (
+        <div className="absolute inset-x-0 bottom-0 bg-kumo-base z-10" style={{ top: TOPBAR_H }}>
+          {overseer && (
+            <GadgetUI
+              overseer={overseer.stub}
+              height="100%"
+              reloadTrigger={uiReloadTrigger}
+              isVisible={true}
+              chatId={selectedChatId ?? undefined}
+              onConsoleLog={handleClientConsoleLog}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Share modal */}
       {overseer && metadata && (
         <ShareModal
           open={shareModalOpen}
@@ -704,6 +703,38 @@ export default function GadgetEditor() {
           currentUser={userInfo}
         />
       )}
-    </Layout>
+
+      {/* Delete confirmation dialog */}
+      <Dialog.Root
+        role="alertdialog"
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+      >
+        <Dialog className="p-8" size="sm">
+          <Dialog.Title className="text-lg font-semibold">
+            Delete gadget
+          </Dialog.Title>
+          <Dialog.Description className="mt-2 text-kumo-subtle">
+            Delete "{metadata?.title}"? This cannot be undone.
+          </Dialog.Description>
+          <div className="mt-6 flex justify-end gap-2">
+            <Dialog.Close
+              render={(props) => (
+                <Button variant="secondary" {...props} disabled={isDeleting}>
+                  Cancel
+                </Button>
+              )}
+            />
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              loading={isDeleting}
+            >
+              Delete
+            </Button>
+          </div>
+        </Dialog>
+      </Dialog.Root>
+    </div>
   )
 }

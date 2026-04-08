@@ -1,172 +1,166 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { RpcStub } from 'capnweb'
-import { PublicApi } from '@gadgets/workshop-shared/api'
-import { Card, Form, Input, Button, Typography, Alert } from 'antd'
-import { hashPassword } from './passwordHash'
-
-const { Title, Text } = Typography
+import { useState, FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
+import { RpcStub } from "capnweb";
+import { PublicApi } from "@gadgets/workshop-shared/api";
+import { Hexagon } from "@phosphor-icons/react";
+import { Input, Button, Banner } from "@cloudflare/kumo";
+import { hashPassword } from "./passwordHash";
 
 interface SignupPageProps {
-  rpcStub: RpcStub<PublicApi>
+  rpcStub: RpcStub<PublicApi>;
 }
 
 export default function SignupPage({ rpcStub }: SignupPageProps) {
-  const navigate = useNavigate()
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (values: {
-    username: string
-    displayName: string
-    password: string
-  }) => {
-    setLoading(true)
-    setError(null)
+  const usernameError =
+    username && !/^[a-z0-9_-]+$/i.test(username)
+      ? "Letters, numbers, underscores, and hyphens only"
+      : undefined;
+
+  const passwordError =
+    password && password.length < 8
+      ? "Must be at least 8 characters"
+      : undefined;
+
+  const confirmError =
+    confirmPassword && confirmPassword !== password
+      ? "Passwords do not match"
+      : undefined;
+
+  const canSubmit =
+    username &&
+    displayName &&
+    password &&
+    confirmPassword &&
+    !usernameError &&
+    !passwordError &&
+    !confirmError &&
+    !loading;
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setLoading(true);
+    setError(null);
 
     try {
-      const passwordHash = await hashPassword(values.username, values.password)
+      const passwordHash = await hashPassword(username, password);
       const token = await rpcStub.createAccount(
-        values.username,
-        values.displayName,
-        passwordHash
-      )
+        username,
+        displayName,
+        passwordHash,
+      );
       if (token) {
-        localStorage.setItem('authToken', token)
-        navigate('/')
-        window.location.reload()
+        localStorage.setItem("authToken", token);
+        window.location.href = "/";
       } else {
-        setError('Username already exists')
+        setError("Username already exists");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Account creation failed')
+      setError(err instanceof Error ? err.message : "Account creation failed");
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: '#f5f5f5',
-        padding: '0 16px',
-      }}
-    >
-      <Card
+    <div className="min-h-screen flex items-center justify-center bg-kumo-base px-4 relative overflow-hidden">
+      {/* Dot grid — fades from top to bottom */}
+      <div
+        className="absolute inset-0 pointer-events-none"
         style={{
-          maxWidth: 400,
-          width: '100%',
+          backgroundImage:
+            "radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+          maskImage:
+            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 70%)",
+          WebkitMaskImage:
+            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 70%)",
         }}
-      >
-        <div style={{ textAlign: 'center', marginBottom: 32 }}>
-          <Title level={1} style={{ marginBottom: 8 }}>
+      />
+
+      <div className="w-full max-w-sm relative">
+        {/* Logo */}
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-brand mb-3">
+            <Hexagon size={20} className="text-white" weight="bold" />
+          </div>
+          <h1 className="text-xl font-semibold text-kumo-default">
             Gadgets Workshop
-          </Title>
-          <Text type="secondary">
-            Create your account
-          </Text>
+          </h1>
+          <p className="text-sm text-kumo-subtle mt-1">Create your account</p>
         </div>
 
-        <Form
-          onFinish={handleSubmit}
-          layout="vertical"
-          size="large"
-        >
-          <Form.Item
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Input
             label="Username"
-            name="username"
-            rules={[
-              { required: true, message: 'Please choose a username' },
-              { pattern: /^[a-z0-9_-]+$/i, message: 'Username can only contain letters, numbers, underscores, and hyphens' },
-            ]}
-          >
-            <Input
-              disabled={loading}
-              autoFocus
-              autoComplete="username"
-            />
-          </Form.Item>
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+            autoComplete="username"
+            disabled={loading}
+            placeholder="your-username"
+            error={usernameError}
+          />
 
-          <Form.Item
+          <Input
             label="Display Name"
-            name="displayName"
-            rules={[{ required: true, message: 'Please enter your display name' }]}
-          >
-            <Input
-              disabled={loading}
-              autoComplete="name"
-            />
-          </Form.Item>
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            autoComplete="name"
+            disabled={loading}
+            placeholder="Your Name"
+          />
 
-          <Form.Item
+          <Input
+            type="password"
             label="Password"
-            name="password"
-            rules={[
-              { required: true, message: 'Please choose a password' },
-              { min: 8, message: 'Password must be at least 8 characters' },
-            ]}
-          >
-            <Input.Password
-              disabled={loading}
-              autoComplete="new-password"
-            />
-          </Form.Item>
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+            disabled={loading}
+            placeholder="••••••••"
+            error={passwordError}
+          />
 
-          <Form.Item
+          <Input
+            type="password"
             label="Confirm Password"
-            name="confirmPassword"
-            dependencies={['password']}
-            rules={[
-              { required: true, message: 'Please confirm your password' },
-              ({ getFieldValue }) => ({
-                validator(_, value) {
-                  if (!value || getFieldValue('password') === value) {
-                    return Promise.resolve()
-                  }
-                  return Promise.reject(new Error('Passwords do not match'))
-                },
-              }),
-            ]}
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            autoComplete="new-password"
+            disabled={loading}
+            placeholder="••••••••"
+            error={confirmError}
+          />
+
+          {error && <Banner variant="error" title={error} />}
+
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={!canSubmit}
+            loading={loading}
+            className="w-full justify-center"
           >
-            <Input.Password
-              disabled={loading}
-              autoComplete="new-password"
-            />
-          </Form.Item>
+            Create account
+          </Button>
+        </form>
 
-          {error && (
-            <Alert
-              message={error}
-              type="error"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-          )}
-
-          <Form.Item>
-            <Button
-              type="primary"
-              htmlType="submit"
-              loading={loading}
-              size="large"
-              block
-            >
-              Create Account
-            </Button>
-          </Form.Item>
-        </Form>
-
-        <div style={{ textAlign: 'center', marginTop: 16 }}>
-          <Text type="secondary">
-            Already have an account?{' '}
-            <Link to="/login">Sign in</Link>
-          </Text>
-        </div>
-      </Card>
+        <p className="text-center text-sm text-kumo-subtle mt-6">
+          Already have an account?{" "}
+          <Link to="/" className="text-kumo-brand hover:underline font-medium">
+            Sign in
+          </Link>
+        </p>
+      </div>
     </div>
-  )
+  );
 }

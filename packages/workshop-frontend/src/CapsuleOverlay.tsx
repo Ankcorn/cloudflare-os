@@ -1,11 +1,9 @@
 import { useEffect, useRef, type MutableRefObject } from 'react'
-import { Typography } from 'antd'
+import { Text } from '@cloudflare/kumo'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import ResourcePicker, { type SelectableItem } from './ResourcePicker'
 import styles from './CapsuleOverlay.module.css'
-
-const { Text } = Typography
 
 export interface CapsuleOverlayProps {
   url: string
@@ -49,7 +47,7 @@ export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismi
 
   return (
     <div ref={overlayRef} className={below ? styles.capsuleOverlayBelow : styles.capsuleOverlay}>
-      <Text type="secondary" className={styles.capsuleOverlayHeader}>
+      <Text variant="secondary" as="span" DANGEROUS_className={styles.capsuleOverlayHeader}>
         Grant agent access to this resource
       </Text>
       <ResourcePicker

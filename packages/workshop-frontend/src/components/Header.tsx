@@ -1,0 +1,148 @@
+import { Link } from '@tanstack/react-router'
+import { Hexagon, List, X } from '@phosphor-icons/react'
+import { useAuthenticatedApi } from '../AuthContext'
+import { useState, useEffect, useRef } from 'react'
+import UserMenu from './UserMenu'
+
+export default function Header() {
+  const { logout } = useAuthenticatedApi()
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  const headerRef = useRef<HTMLElement>(null)
+
+  // Click-outside handler to close mobile menu
+  useEffect(() => {
+    if (!mobileMenuOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (headerRef.current && !headerRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [mobileMenuOpen])
+
+  const closeMobileMenu = () => setMobileMenuOpen(false)
+
+  const navLinkClass = "text-sm px-3 py-1.5 rounded-md transition-colors text-kumo-subtle"
+  const navLinkActiveClass = "text-sm font-medium px-3 py-1.5 rounded-md transition-colors text-kumo-default bg-kumo-tint"
+
+  return (
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-50 backdrop-blur-md border-b border-kumo-line"
+      style={{
+        backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)',
+      }}
+    >
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
+        {/* Logo */}
+        <div className="flex items-center gap-6">
+          <Link to="/" className="flex items-center gap-2">
+            <Hexagon
+              size={22}
+              className="text-kumo-brand"
+              weight="bold"
+            />
+            <span className="text-base font-semibold tracking-tight text-kumo-default">
+              gadgets
+            </span>
+          </Link>
+
+          {/* Desktop nav links */}
+          <nav className="hidden sm:flex items-center gap-1">
+            <Link
+              to="/"
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+              activeOptions={{ exact: true }}
+            >
+              Home
+            </Link>
+            <Link
+              to="/connections"
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+            >
+              Connections
+            </Link>
+            <span className="text-sm px-3 py-1.5 rounded-md text-kumo-inactive cursor-default">
+              Featured
+            </span>
+          </nav>
+        </div>
+
+        {/* Right side */}
+        <div className="flex items-center gap-2">
+          {/* Desktop avatar dropdown */}
+          <div className="hidden sm:block">
+            <UserMenu />
+          </div>
+
+          {/* Mobile hamburger button */}
+          <div className="sm:hidden">
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="w-8 h-8 rounded-md flex items-center justify-center hover:bg-kumo-tint transition-colors text-kumo-default"
+            >
+              {mobileMenuOpen ? <X size={20} /> : <List size={20} />}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile dropdown menu */}
+      {mobileMenuOpen && (
+        <div className="sm:hidden border-t border-kumo-line bg-kumo-base">
+          <nav className="flex flex-col px-4 py-3 gap-1">
+            <Link
+              to="/"
+              onClick={closeMobileMenu}
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+              activeOptions={{ exact: true }}
+            >
+              Home
+            </Link>
+            <Link
+              to="/connections"
+              onClick={closeMobileMenu}
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+            >
+              Connections
+            </Link>
+            <span className="text-sm px-3 py-1.5 rounded-md text-kumo-inactive cursor-default">
+              Featured
+            </span>
+
+            <hr className="my-2 border-kumo-line" />
+
+            <Link
+              to="/profile"
+              onClick={closeMobileMenu}
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+            >
+              Profile
+            </Link>
+            <Link
+              to="/providers"
+              onClick={closeMobileMenu}
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+            >
+              Providers
+            </Link>
+            <button
+              onClick={() => { closeMobileMenu(); logout() }}
+              className="text-left text-sm px-3 py-1.5 rounded-md text-kumo-danger hover:bg-kumo-tint transition-colors"
+            >
+              Sign out
+            </button>
+          </nav>
+        </div>
+      )}
+    </header>
+  )
+}

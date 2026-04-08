@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
+      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"],
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"],

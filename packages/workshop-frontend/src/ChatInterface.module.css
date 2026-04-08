@@ -1,138 +1,111 @@
-/* Markdown content styling */
+/* ── Markdown content ─────────────────────────────────────────────────────── */
 .markdownContent {
   line-height: 1.6;
 }
-
-.markdownContent p {
-  margin: 0.5em 0;
-}
-
-.markdownContent p:first-child {
-  margin-top: 0;
-}
-
-.markdownContent p:last-child {
-  margin-bottom: 0;
-}
+.markdownContent p { margin: 0.4em 0; }
+.markdownContent p:first-child { margin-top: 0; }
+.markdownContent p:last-child  { margin-bottom: 0; }
 
 .markdownContent h1,
 .markdownContent h2,
 .markdownContent h3,
-.markdownContent h4,
-.markdownContent h5,
-.markdownContent h6 {
-  margin: 1em 0 0.5em 0;
+.markdownContent h4 {
+  margin: 0.9em 0 0.4em;
   font-weight: 600;
+  color: var(--text-color-kumo-default);
 }
-
 .markdownContent h1:first-child,
 .markdownContent h2:first-child,
-.markdownContent h3:first-child,
-.markdownContent h4:first-child,
-.markdownContent h5:first-child,
-.markdownContent h6:first-child {
-  margin-top: 0;
-}
+.markdownContent h3:first-child { margin-top: 0; }
 
 .markdownContent code {
-  background-color: rgba(0, 0, 0, 0.06);
-  padding: 0.2em 0.4em;
-  border-radius: 3px;
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 0.9em;
+  background-color: var(--color-kumo-tint);
+  color: var(--color-kumo-brand);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
 }
 
 .markdownContent pre {
-  background-color: #f6f8fa;
-  border-radius: 6px;
-  padding: 12px;
+  background-color: var(--color-kumo-elevated);
+  border: 1px solid var(--color-kumo-line);
+  border-radius: 8px;
+  padding: 10px 12px;
   overflow-x: auto;
   margin: 0.5em 0;
 }
-
 .markdownContent pre code {
-  background-color: transparent;
+  background: none;
+  color: var(--text-color-kumo-default);
   padding: 0;
-  font-size: 0.875em;
+  font-size: 0.8em;
 }
 
 .markdownContent ul,
 .markdownContent ol {
-  margin: 0.5em 0;
-  padding-left: 2em;
+  margin: 0.4em 0;
+  padding-left: 1.5em;
 }
-
-.markdownContent li {
-  margin: 0.25em 0;
-}
+.markdownContent li { margin: 0.2em 0; }
 
 .markdownContent blockquote {
   margin: 0.5em 0;
-  padding-left: 1em;
-  border-left: 3px solid #d1d5db;
-  color: #6b7280;
+  padding-left: 0.75em;
+  border-left: 2px solid var(--color-kumo-line);
+  color: var(--text-color-kumo-subtle);
 }
 
 .markdownContent a {
-  color: #1890ff;
+  color: var(--color-kumo-brand);
   text-decoration: none;
 }
-
-.markdownContent a:hover {
-  text-decoration: underline;
-}
+.markdownContent a:hover { text-decoration: underline; }
 
 .markdownContent hr {
   border: none;
-  border-top: 1px solid #e5e7eb;
-  margin: 1em 0;
+  border-top: 1px solid var(--color-kumo-line);
+  margin: 0.8em 0;
 }
 
 .markdownContent table {
   border-collapse: collapse;
   width: 100%;
   margin: 0.5em 0;
+  font-size: 0.85em;
 }
-
 .markdownContent th,
 .markdownContent td {
-  border: 1px solid #e5e7eb;
-  padding: 0.5em;
+  border: 1px solid var(--color-kumo-line);
+  padding: 0.4em 0.6em;
   text-align: left;
 }
-
 .markdownContent th {
-  background-color: #f9fafb;
+  background-color: var(--color-kumo-elevated);
   font-weight: 600;
 }
+.markdownContent img { max-width: 100%; height: auto; }
 
-.markdownContent img {
-  max-width: 100%;
-  height: auto;
+/* ── Observation markdown (inline, compact) ───────────────────────────────── */
+.observationMarkdown { line-height: 1.5; }
+.observationMarkdown p { margin: 0.2em 0; display: inline; }
+.observationMarkdown code {
+  background-color: var(--color-kumo-tint);
+  color: var(--color-kumo-brand);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
 }
 
-/* Observation message markdown styling */
-.observationMarkdown {
-  line-height: 1.6;
-}
-
-.observationMarkdown p {
-  margin: 0.25em 0;
-  display: inline;
-}
-
-/* Capsule highlight mirror (sits behind the textarea) */
+/* ── Capsule input mirror ─────────────────────────────────────────────────── */
 .capsuleInputWrapper {
   position: relative;
   flex: 1;
 }
-
 .capsuleMirror {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  top: 0; left: 0; right: 0; bottom: 0;
   pointer-events: none;
   overflow: hidden;
   white-space: pre-wrap;
@@ -142,34 +115,25 @@
   color: transparent;
   z-index: 0;
 }
-
 .capsuleHighlight {
-  background-color: #e6f7ff;
-  border: 1px solid #91d5ff;
+  background-color: var(--color-selection-bg);
+  border: 1px solid var(--color-kumo-brand);
   border-radius: 10px;
   padding: 0 2px;
   margin: 0 -3px;
   color: transparent;
 }
 
-/* Capsule pill displayed in sent/received messages */
+/* ── Capsule pill in messages ─────────────────────────────────────────────── */
 .capsulePill {
   display: inline-block;
-  background-color: #e6f7ff;
-  border: 1px solid #91d5ff;
+  background-color: var(--color-selection-bg);
+  border: 1px solid var(--color-kumo-brand);
   border-radius: 10px;
   padding: 1px 8px;
-  font-size: 13px;
-  color: #1890ff;
+  font-size: 12px;
+  color: var(--color-kumo-brand);
   cursor: default;
   vertical-align: baseline;
   line-height: 1.4;
-}
-
-.observationMarkdown code {
-  background-color: rgba(0, 0, 0, 0.08);
-  padding: 0.1em 0.3em;
-  border-radius: 2px;
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 0.9em;
 }
