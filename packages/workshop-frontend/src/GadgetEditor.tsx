@@ -120,6 +120,7 @@ export default function GadgetEditor() {
     || streamingProposedChanges !== undefined
   const singleInitialChat = chatCount === 1 && hasChatZero
   const layoutModeReady = chatListReady && (codeStateReady || hasCodeRelatedState)
+  const pinInitialChatSelection = singleInitialChat && hasCode !== true
 
   // Simple mode: full-width chat layout for a brand-new gadget whose only
   // conversation is chat 0 and which still has no merged or proposed code.
@@ -128,10 +129,11 @@ export default function GadgetEditor() {
   const simpleMode = layoutModeReady && !hasCodeRelatedState && singleInitialChat
   const showFullEditor = layoutModeReady && !simpleMode
 
-  // When the gadget has only the initial chat, treat chat 0 as selected even if
-  // the URL has not caught up yet. This avoids a transient deselect/reselect
-  // loop when we transition between simple mode and the full editor.
-  const effectiveSelectedChatId = selectedChatId ?? (singleInitialChat ? 0 : null)
+  // Before any code has been merged, a single-thread gadget conceptually only
+  // has one useful conversation, so keep chat 0 selected even if the URL has
+  // not caught up yet. As soon as merged code exists, dropping back to the chat
+  // list should become possible.
+  const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
 
   // ── console log buffering ────────────────────────────────────────────────────
   const consoleLogSubscriberRef = useRef(new ConsoleLogSubscriberImpl())
@@ -247,11 +249,12 @@ export default function GadgetEditor() {
     [id, navigate]
   )
 
-  // ── keep single-chat simple mode URLs clean ─────────────────────────────────
-  // When the gadget is in simple mode, chat 0 is implied and we omit it from
-  // the URL. In full editor mode, auto-select the only chat on initial load.
+  // ── keep single-chat routing aligned with the current mode ──────────────────
+  // In simple mode, chat 0 is implied and omitted from the URL. Before any code
+  // has been merged, the full editor still pins the user to chat 0. As soon as
+  // merged code exists, we stop auto-selecting so the conversation list can be shown.
   useEffect(() => {
-    if (!chatListReady) return
+    if (!layoutModeReady) return
 
     if (simpleMode) {
       if (urlChatId === 0) {
@@ -260,10 +263,10 @@ export default function GadgetEditor() {
       return
     }
 
-    if (urlChatId === null && chatCount === 1 && hasChatZero && !userNavigatedToListRef.current) {
+    if (pinInitialChatSelection && urlChatId === null && !userNavigatedToListRef.current) {
       navigateToChat(0, { replace: true })
     }
-  }, [chatListReady, simpleMode, urlChatId, chatCount, hasChatZero, navigateToChat, navigate, id])
+  }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigate, id])
 
   // ── resize handle ─────────────────────────────────────────────────────────────
   useEffect(() => {
