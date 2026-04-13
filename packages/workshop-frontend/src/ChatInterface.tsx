@@ -1,10 +1,11 @@
 import {
+  memo,
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   useMemo,
   useCallback,
-  Fragment,
   type ReactNode,
 } from "react";
 import {
@@ -26,9 +27,21 @@ import {
   Paperclip,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import * as Y from "yjs";
 import styles from "./ChatInterface.module.css";
+import {
+  fromModelSelectValue,
+  getStoredSelectedModel,
+  NO_AGENT_OPTION_VALUE,
+  persistSelectedModel,
+  toModelSelectValue,
+} from "./modelSelection";
+import {
+  getStoredReasoningExpandedByDefault,
+  persistReasoningExpandedByDefault,
+} from "./reasoningPreference";
 import {
   Overseer,
   GatekeeperClient,
@@ -49,6 +62,65 @@ import { handlePickerKeyDown } from "./pickerNavigation";
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
   count: number;
+}
+
+type DraftUpdateEntry = {
+  timestamp: Date;
+  author: AiChatAuthorInfo;
+  update: Uint8Array;
+};
+
+type DraftChatState = {
+  entries: DraftUpdateEntry[];
+  latestAuthor: AiChatAuthorInfo | null;
+};
+
+function refreshDraftLatestAuthor(state: DraftChatState) {
+  state.latestAuthor =
+    state.entries.length > 0 ? state.entries[state.entries.length - 1].author : null;
+}
+
+function pruneDraftEntriesBefore(
+  drafts: Map<number, DraftChatState>,
+  chatId: number,
+  cutoff: Date,
+) {
+  let state = drafts.get(chatId);
+  if (!state) {
+    return false;
+  }
+
+  const cutoffTime = cutoff.getTime();
+  const nextEntries = state.entries.filter(
+    (entry) => entry.timestamp.getTime() > cutoffTime,
+  );
+  if (nextEntries.length === state.entries.length) {
+    return false;
+  }
+
+  if (nextEntries.length === 0) {
+    drafts.delete(chatId);
+    return true;
+  }
+
+  state.entries = nextEntries;
+  refreshDraftLatestAuthor(state);
+  return true;
+}
+
+function getOrCreateDraftChatState(
+  drafts: Map<number, DraftChatState>,
+  chatId: number,
+): DraftChatState {
+  let state = drafts.get(chatId);
+  if (!state) {
+    state = {
+      entries: [],
+      latestAuthor: null,
+    };
+    drafts.set(chatId, state);
+  }
+  return state;
 }
 
 // Auto-resize a textarea element between min and max row heights.
@@ -74,6 +146,272 @@ interface InputCapsule {
 
 // Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
 const URL_REGEX = /https?:\/\/[^\s)>\]]*/g;
+const CAPSULE_LINK_PREFIX = "/__gadgets_capsule__/";
+const CAPSULE_TOKEN_PREFIX = "GADGETS_CAPSULE_";
+const CAPSULE_TOKEN_SUFFIX = "_TOKEN";
+
+type MarkdownAstNode = {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MarkdownAstNode[];
+};
+
+type TokenizedCapsuleMessage = {
+  markdown: string;
+  capsulesByToken: Map<string, CapsuleSpecifier>;
+};
+
+function generateCapsuleToken(
+  message: string,
+  index: number,
+  usedTokens: Set<string>,
+) {
+  let attempt = 0;
+  while (true) {
+    const suffix = attempt === 0 ? "" : `_${attempt}`;
+    const token = `${CAPSULE_TOKEN_PREFIX}${index}${suffix}${CAPSULE_TOKEN_SUFFIX}`;
+    if (!message.includes(token) && !usedTokens.has(token)) {
+      return token;
+    }
+    attempt++;
+  }
+}
+
+function buildTokenizedCapsuleMessage(
+  message: string,
+  capsules: CapsuleSpecifier[],
+): TokenizedCapsuleMessage {
+  const sorted = [...capsules].sort((a, b) => a.position - b.position);
+  const usedTokens = new Set<string>();
+  const capsulesByToken = new Map<string, CapsuleSpecifier>();
+  let markdown = "";
+  let pos = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    const capsule = sorted[i];
+    const token = generateCapsuleToken(message, i, usedTokens);
+    usedTokens.add(token);
+    capsulesByToken.set(token, capsule);
+    markdown += message.slice(pos, capsule.position);
+    markdown += token;
+    pos = capsule.position + capsule.length;
+  }
+
+  markdown += message.slice(pos);
+  return { markdown, capsulesByToken };
+}
+
+function splitTextOnCapsuleTokens(
+  value: string,
+  capsulesByToken: Map<string, CapsuleSpecifier>,
+): MarkdownAstNode[] | null {
+  const tokens = [...capsulesByToken.keys()];
+  const parts: MarkdownAstNode[] = [];
+  let cursor = 0;
+  let foundToken = false;
+
+  while (cursor < value.length) {
+    let nextIndex = -1;
+    let nextToken: string | null = null;
+
+    for (const token of tokens) {
+      const index = value.indexOf(token, cursor);
+      if (index !== -1 && (nextIndex === -1 || index < nextIndex)) {
+        nextIndex = index;
+        nextToken = token;
+      }
+    }
+
+    if (nextToken === null) {
+      break;
+    }
+
+    foundToken = true;
+    if (nextIndex > cursor) {
+      parts.push({
+        type: "text",
+        value: value.slice(cursor, nextIndex),
+      });
+    }
+
+    parts.push({
+      type: "link",
+      url: `${CAPSULE_LINK_PREFIX}${encodeURIComponent(nextToken)}`,
+      children: [
+        {
+          type: "text",
+          value: capsulesByToken.get(nextToken)?.description.title ?? nextToken,
+        },
+      ],
+    });
+
+    cursor = nextIndex + nextToken.length;
+  }
+
+  if (!foundToken) {
+    return null;
+  }
+
+  if (cursor < value.length) {
+    parts.push({
+      type: "text",
+      value: value.slice(cursor),
+    });
+  }
+
+  return parts;
+}
+
+function replaceCapsuleTokensInTree(
+  node: MarkdownAstNode,
+  capsulesByToken: Map<string, CapsuleSpecifier>,
+) {
+  if (!node.children || node.children.length === 0) {
+    return;
+  }
+
+  const nextChildren: MarkdownAstNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "text" && typeof child.value === "string") {
+      const replacementNodes = splitTextOnCapsuleTokens(
+        child.value,
+        capsulesByToken,
+      );
+      if (replacementNodes) {
+        nextChildren.push(...replacementNodes);
+        continue;
+      }
+    }
+
+    if (child.type !== "code" && child.type !== "inlineCode") {
+      replaceCapsuleTokensInTree(child, capsulesByToken);
+    }
+    nextChildren.push(child);
+  }
+
+  node.children = nextChildren;
+}
+
+function createCapsuleRemarkPlugin(capsulesByToken: Map<string, CapsuleSpecifier>) {
+  return function capsuleRemarkPlugin() {
+    return (tree: MarkdownAstNode) => {
+      replaceCapsuleTokensInTree(tree, capsulesByToken);
+    };
+  };
+}
+
+function getSafeExternalUrl(url: string | undefined): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function renderCapsulePill(capsule: CapsuleSpecifier) {
+  const safeUrl = getSafeExternalUrl(capsule.description.url);
+  return (
+    <Tooltip
+      content={
+        safeUrl
+          ? (
+            <a
+              href={safeUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "inherit" }}
+            >
+              {capsule.description.url}
+            </a>
+          )
+          : capsule.description.url
+      }
+    >
+      <span className={styles.capsulePill}>{capsule.description.title}</span>
+    </Tooltip>
+  );
+}
+
+function getMarkdownComponents(
+  capsulesByToken?: Map<string, CapsuleSpecifier>,
+): Components {
+  return {
+    table: ({ node: _node, children, ...props }) => (
+      <div className={styles.markdownTableWrapper}>
+        <table {...props}>{children}</table>
+      </div>
+    ),
+    a: ({ node: _node, href, children, ...props }) => {
+      if (href?.startsWith(CAPSULE_LINK_PREFIX) && capsulesByToken) {
+        const token = decodeURIComponent(href.slice(CAPSULE_LINK_PREFIX.length));
+        const capsule = capsulesByToken.get(token);
+        if (capsule) {
+          return renderCapsulePill(capsule);
+        }
+      }
+
+      const safeHref = getSafeExternalUrl(href);
+      if (!safeHref) {
+        return <>{children}</>;
+      }
+
+      return (
+        <a
+          {...props}
+          href={safeHref}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {children}
+        </a>
+      );
+    },
+  };
+}
+
+const REMARK_PLUGINS_NO_CAPSULES = [remarkGfm];
+const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
+
+const MarkdownMessage = memo(function MarkdownMessage(
+  { message, capsules }: { message: string; capsules?: CapsuleSpecifier[] },
+): ReactNode {
+  const tokenizedMessage = useMemo(
+    () => capsules && capsules.length > 0
+      ? buildTokenizedCapsuleMessage(message, capsules)
+      : null,
+    [capsules, message],
+  );
+  const components = useMemo(
+    () => tokenizedMessage
+      ? getMarkdownComponents(tokenizedMessage.capsulesByToken)
+      : MARKDOWN_COMPONENTS_NO_CAPSULES,
+    [tokenizedMessage],
+  );
+  const remarkPlugins = useMemo(
+    () => tokenizedMessage
+      ? [remarkGfm, createCapsuleRemarkPlugin(tokenizedMessage.capsulesByToken)]
+      : REMARK_PLUGINS_NO_CAPSULES,
+    [tokenizedMessage],
+  );
+
+  return (
+    <ReactMarkdown
+      skipHtml={true}
+      remarkPlugins={remarkPlugins}
+      components={components}
+    >
+      {tokenizedMessage?.markdown ?? message}
+    </ReactMarkdown>
+  );
+});
 
 export const ChatInput = ({
   createCapsuleGatekeeper,
@@ -795,9 +1133,12 @@ export const ChatInput = ({
             <Select
               aria-label="Select model"
               className="w-full text-sm"
-              value={selectedModel ?? models[0]?.id ?? ""}
-              onValueChange={(v) => onModelChange(v as string)}
+              value={toModelSelectValue(selectedModel)}
+              onValueChange={(value) =>
+                onModelChange(fromModelSelectValue(value as string))
+              }
               renderValue={(v) => {
+                if (v === NO_AGENT_OPTION_VALUE) return "No agent";
                 return models.find(m => m.id === v)?.name ?? String(v)
               }}
             >
@@ -806,6 +1147,9 @@ export const ChatInput = ({
                   {m.name}
                 </Select.Option>
               ))}
+              <Select.Option value={NO_AGENT_OPTION_VALUE}>
+                No agent
+              </Select.Option>
             </Select>
           </div>
 
@@ -878,6 +1222,74 @@ interface MessageState {
   activeChanges: Uint8Array[];
 }
 
+type ActionChatMessage = Extract<AiChatMessage, { type: "action" }>;
+type ObservationChatMessage = ActionChatMessage & {
+  actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
+};
+
+type ChatDisplayEntry =
+  | {
+      type: "message";
+      key: string;
+      message: AiChatMessage;
+    }
+  | {
+      type: "observationGroup";
+      key: string;
+      messages: ObservationChatMessage[];
+    };
+
+function isObservationActionMessage(msg: AiChatMessage): msg is ObservationChatMessage {
+  return msg.type === "action" && msg.actionLog?.type === "observation";
+}
+
+function groupObservationEntries(messages: AiChatMessage[]): ChatDisplayEntry[] {
+  const result: ChatDisplayEntry[] = [];
+
+  for (let i = 0; i < messages.length; ) {
+    const msg = messages[i];
+
+    if (!isObservationActionMessage(msg)) {
+      result.push({
+        type: "message",
+        key: `msg-${msg.chatId}-${msg.sequence}`,
+        message: msg,
+      });
+      i++;
+      continue;
+    }
+
+    const observations = [msg];
+    let j = i + 1;
+    while (j < messages.length) {
+      const nextMessage = messages[j];
+      if (!isObservationActionMessage(nextMessage)) {
+        break;
+      }
+      observations.push(nextMessage);
+      j++;
+    }
+
+    if (observations.length === 1) {
+      result.push({
+        type: "message",
+        key: `msg-${msg.chatId}-${msg.sequence}`,
+        message: msg,
+      });
+    } else {
+      result.push({
+        type: "observationGroup",
+        key: `obs-${msg.chatId}-${msg.sequence}`,
+        messages: observations,
+      });
+    }
+
+    i = j;
+  }
+
+  return result;
+}
+
 function computeMessageStates(messages: AiChatMessage[]): MessageState {
   const changeStatus = new Map<number, "pending" | "merged" | "reverted">();
   const mergeTimestamps = new Map<number, Date>();
@@ -926,6 +1338,25 @@ function computeMessageStates(messages: AiChatMessage[]): MessageState {
   };
 }
 
+function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+
+    if (msg.type === "error") {
+      if (msg.author.type === "agent") {
+        return msg.author.id;
+      }
+      continue;
+    }
+
+    if (msg.type === "message") {
+      return msg.author.type === "agent" ? msg.author.id : null;
+    }
+  }
+
+  return null;
+}
+
 interface ChatInterfaceProps {
   overseer: RpcStub<Overseer>;
   selectedChatId: number | null;
@@ -934,10 +1365,13 @@ interface ChatInterfaceProps {
     options?: { replace?: boolean },
   ) => void;
   onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void;
+  onDraftProposedChangesChange?: (
+    updates: StreamingProposedChanges | undefined,
+  ) => void;
   onStreamingProposedChangesChange?: (
     updates: StreamingProposedChanges | undefined,
   ) => void;
-  onFileEdited?: (filename: string) => void;
+  onStreamingActiveFileChange?: (filename: string | null | undefined) => void;
   pendingConsoleLogCount: number;
   consoleLogPreview: string;
   consoleLogSeverity: "error" | "warn" | "info";
@@ -966,7 +1400,6 @@ type ProvisionalToolCallState = {
   toolName: AiToolCall["toolName"] | null;
   code: string;
   output: string;
-  error?: string;
   finished: boolean;
 };
 
@@ -976,6 +1409,7 @@ type ProvisionalChatState = {
   toolCalls: ProvisionalToolCallState[];
   toolCallsById: Map<string, ProvisionalToolCallState>;
   codeUpdates: Uint8Array[];
+  activeEditingFile: string | null | undefined;
 };
 
 function createProvisionalChatState(): ProvisionalChatState {
@@ -985,6 +1419,7 @@ function createProvisionalChatState(): ProvisionalChatState {
     toolCalls: [],
     toolCallsById: new Map(),
     codeUpdates: [],
+    activeEditingFile: undefined,
   };
 }
 
@@ -993,10 +1428,12 @@ function clearProvisionalTextState(state: ProvisionalChatState) {
   state.reasoning = "";
   state.toolCalls = [];
   state.toolCallsById.clear();
+  state.activeEditingFile = undefined;
 }
 
 function clearProvisionalCodeState(state: ProvisionalChatState) {
   state.codeUpdates = [];
+  state.activeEditingFile = undefined;
 }
 
 function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
@@ -1004,7 +1441,8 @@ function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
     state.text === "" &&
     state.reasoning === "" &&
     state.toolCalls.length === 0 &&
-    state.codeUpdates.length === 0
+    state.codeUpdates.length === 0 &&
+    state.activeEditingFile === undefined
   );
 }
 
@@ -1033,86 +1471,14 @@ function getOrCreateProvisionalToolCall(
   return toolCall;
 }
 
-// Render a text segment as inline markdown, preserving leading/trailing whitespace
-// that CommonMark paragraph parsing would otherwise strip.
-function renderInlineMarkdown(text: string, key: string): ReactNode {
-  const leading = text.length - text.trimStart().length;
-  const trailing = text.length - text.trimEnd().length;
-  if (leading >= text.length) {
-    // All whitespace — render directly.
-    return <Fragment key={key}>{text}</Fragment>;
-  }
-  return (
-    <Fragment key={key}>
-      {leading > 0 && text.slice(0, leading)}
-      <ReactMarkdown
-        skipHtml={true}
-        components={{ p: ({ children }) => <>{children}</> }}
-      >
-        {text.slice(leading, trailing > 0 ? text.length - trailing : undefined)}
-      </ReactMarkdown>
-      {trailing > 0 && text.slice(text.length - trailing)}
-    </Fragment>
-  );
-}
-
-// Render a message that may contain capsule placeholders. Splits the message at
-// capsule positions and interleaves ReactMarkdown text segments with capsule pills.
-function renderMessageWithCapsules(
-  message: string,
-  capsules: CapsuleSpecifier[],
-) {
-  const sorted = [...capsules].sort((a, b) => a.position - b.position);
-  const segments: React.ReactNode[] = [];
-  let pos = 0;
-
-  for (let i = 0; i < sorted.length; i++) {
-    const capsule = sorted[i];
-
-    // Text before this capsule.
-    if (capsule.position > pos) {
-      segments.push(
-        renderInlineMarkdown(message.slice(pos, capsule.position), `t${i}`),
-      );
-    }
-
-    // Capsule pill.
-    segments.push(
-      <Tooltip
-        key={`c${i}`}
-        content={
-          <a
-            href={capsule.description.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "inherit" }}
-          >
-            {capsule.description.url}
-          </a>
-        }
-      >
-        <span className={styles.capsulePill}>{capsule.description.title}</span>
-      </Tooltip>,
-    );
-
-    pos = capsule.position + capsule.length;
-  }
-
-  // Remaining text after last capsule.
-  if (pos < message.length) {
-    segments.push(renderInlineMarkdown(message.slice(pos), "tail"));
-  }
-
-  return <>{segments}</>;
-}
-
 function ChatInterface({
   overseer,
   selectedChatId,
   onNavigateToChat,
   onProposedChangesChange,
+  onDraftProposedChangesChange,
   onStreamingProposedChangesChange,
-  onFileEdited,
+  onStreamingActiveFileChange,
   pendingConsoleLogCount,
   consoleLogPreview,
   consoleLogSeverity,
@@ -1137,6 +1503,7 @@ function ChatInterface({
     lastMessageTimestamp: null,
   });
   const provisionalRef = useRef<Map<number, ProvisionalChatState>>(new Map());
+  const draftRef = useRef<Map<number, DraftChatState>>(new Map());
 
   // UI state
   const [_isSubscribed, setIsSubscribed] = useState(false);
@@ -1144,6 +1511,7 @@ function ChatInterface({
   const [isLoading, setIsLoading] = useState(false);
   const [updateCounter, setUpdateCounter] = useState(0); // Force re-render when cache updates
   const [proposedChangesVersion, setProposedChangesVersion] = useState(0); // Incremented only for change-affecting messages
+  const [draftChangesVersion, setDraftChangesVersion] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState("");
   const [renamingChatId, setRenamingChatId] = useState<number | null>(null);
@@ -1156,10 +1524,15 @@ function ChatInterface({
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
   );
-  const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(
+  const [expandedReasoning, setExpandedReasoning] = useState<Map<string, boolean>>(
+    new Map(),
+  );
+  const [reasoningExpandedByDefault, setReasoningExpandedByDefault] =
+    useState(() => getStoredReasoningExpandedByDefault());
+  const [expandedActions, setExpandedActions] = useState<Set<number>>(
     new Set(),
   );
-  const [expandedActions, setExpandedActions] = useState<Set<number>>(
+  const [expandedObservationGroups, setExpandedObservationGroups] = useState<Set<string>>(
     new Set(),
   );
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
@@ -1195,9 +1568,6 @@ function ChatInterface({
     };
   }, [isSidebarResizing, onSidebarResize]);
 
-  // Track which tool calls we've already processed for file selection
-  const processedToolCallsRef = useRef<Set<string>>(new Set());
-
   // Refs for accessing current values in subscriber callbacks
   const selectedChatIdRef = useRef<number | null>(null);
   const onNavigateToChatRef = useRef(onNavigateToChat);
@@ -1207,9 +1577,14 @@ function ChatInterface({
   const subscriptionRef = useRef<RpcStub<{}> | null>(null);
 
   // Ref for auto-scrolling messages
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isScrolledToBottomRef = useRef(true);
+
+  const scrollMessagesToBottom = useCallback(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, []);
 
   // Force a re-render when cache is updated
   const forceUpdate = () => setUpdateCounter((prev) => prev + 1);
@@ -1273,6 +1648,11 @@ function ChatInterface({
       (msg) => msg !== undefined,
     );
   }, [selectedChatId, updateCounter]);
+  const displayEntries = useMemo(
+    () => groupObservationEntries(currentMessages),
+    [currentMessages],
+  );
+  const lastMessageSequence = currentMessages[currentMessages.length - 1]?.sequence;
 
   // Get metadata for selected chat
   const currentChatMetadata =
@@ -1283,15 +1663,31 @@ function ChatInterface({
       ? (provisionalRef.current.get(selectedChatId) ?? null)
       : null;
 
-  const visibleProvisionalToolCalls =
-    currentProvisionalState?.toolCalls.filter((toolCall) => {
-      return toolCall.toolName === "executeCode";
-    }) ?? [];
+  const currentDraftState =
+    selectedChatId !== null ? (draftRef.current.get(selectedChatId) ?? null) : null;
+  const currentDraftChangesCount = currentDraftState?.entries.length ?? 0;
+
+  const provisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
+  const hasRunningProvisionalToolCall = provisionalToolCalls.some(
+    (toolCall) => !toolCall.finished,
+  );
 
   const useConstrainedChatWidth = sidebarMode || constrainChatWidth;
 
   const currentStreamingChanges = currentProvisionalState?.codeUpdates;
   const currentStreamingChangesCount = currentStreamingChanges?.length ?? 0;
+  const currentStreamingActiveFile = currentProvisionalState?.activeEditingFile;
+  const currentDraftChangesState = useMemo(():
+    | StreamingProposedChanges
+    | undefined => {
+    if (!currentDraftState || currentDraftChangesCount === 0) {
+      return undefined;
+    }
+    return {
+      updates: currentDraftState.entries.map((entry) => entry.update),
+      count: currentDraftChangesCount,
+    };
+  }, [currentDraftChangesCount, currentDraftState, draftChangesVersion, selectedChatId]);
   const currentStreamingState = useMemo(():
     | StreamingProposedChanges
     | undefined => {
@@ -1308,7 +1704,7 @@ function ChatInterface({
     !!currentProvisionalState &&
     (currentProvisionalState.text !== "" ||
       currentProvisionalState.reasoning !== "" ||
-      visibleProvisionalToolCalls.length > 0);
+      provisionalToolCalls.length > 0);
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
   const activeAgent = currentChatMetadata?.activeAgent;
@@ -1327,32 +1723,32 @@ function ChatInterface({
     }
   }, [isAgentActive, selectedChatId]);
 
-  // Auto-merge proposed changes when the agent finishes on a single-thread gadget.
-  // Track whether user is scrolled to the bottom of the messages area
+  // Track whether user is scrolled to the bottom of the messages area.
   const handleMessagesScroll = useCallback(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
-    // Consider "at bottom" if within 30px of the end
+    // Allow a small tolerance for fractional scroll positions and layout rounding.
     isScrolledToBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+      el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
   }, []);
 
   // Auto-scroll to bottom when messages change, but only if already at bottom
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isScrolledToBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      scrollMessagesToBottom();
     }
   }, [
     currentMessages,
     hasVisibleProvisionalContent,
     currentStreamingChangesCount,
+    scrollMessagesToBottom,
   ]);
 
   // Always scroll to bottom when switching chats
-  useEffect(() => {
+  useLayoutEffect(() => {
     isScrolledToBottomRef.current = true;
-    messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-  }, [selectedChatId]);
+    scrollMessagesToBottom();
+  }, [selectedChatId, scrollMessagesToBottom]);
 
   // Initialize title input when selecting a chat
   useEffect(() => {
@@ -1364,39 +1760,15 @@ function ChatInterface({
   // Update selected model when switching chats
   useEffect(() => {
     if (selectedChatId === null) {
-      // For new chats, use localStorage or first model
-      const lastSelectedModel = localStorage.getItem("lastSelectedModel");
-      if (
-        lastSelectedModel &&
-        availableModels.some((m) => m.id === lastSelectedModel)
-      ) {
-        setSelectedModel(lastSelectedModel);
-      } else if (availableModels.length > 0) {
-        setSelectedModel(availableModels[0].id);
-      }
+      setSelectedModel(getStoredSelectedModel(availableModels));
     } else {
       // For existing threads:
       // 1. If an AI agent is currently active, use that agent's model
       if (activeAgent) {
         setSelectedModel(activeAgent.id);
       } else {
-        // 2. Otherwise, check the last message in the thread
-        const messageMessages = currentMessages.filter(
-          (msg) => msg.type === "message",
-        );
-        if (messageMessages.length > 0) {
-          const lastMessage = messageMessages[messageMessages.length - 1];
-          if (lastMessage.author.type === "agent") {
-            // Last message was from AI, use that model
-            setSelectedModel(lastMessage.author.id);
-          } else {
-            // Last message was from human with no AI responding, so it must have been sent with null model
-            setSelectedModel(null);
-          }
-        } else {
-          // No messages yet, set to null
-          setSelectedModel(null);
-        }
+        // 2. Otherwise, derive the model from the most recent agent message or agent error.
+        setSelectedModel(inferSelectedModelFromMessages(currentMessages));
       }
     }
   }, [selectedChatId, availableModels, currentMessages, activeAgent]);
@@ -1405,29 +1777,6 @@ function ChatInterface({
   useEffect(() => {
     selectedChatIdRef.current = selectedChatId;
   }, [selectedChatId]);
-
-  // Detect when files are edited via tool calls and notify parent
-  useEffect(() => {
-    if (!onFileEdited || selectedChatId === null) return;
-
-    // Look through all messages for editFile tool calls
-    currentMessages.forEach((msg) => {
-      if (msg.type === "message" && msg.toolCalls) {
-        msg.toolCalls.forEach((toolCall) => {
-          // If we haven't processed this tool call yet and it's an editFile
-          if (
-            !processedToolCallsRef.current.has(toolCall.toolCallId) &&
-            toolCall.toolName === "editFile"
-          ) {
-            // Mark as processed
-            processedToolCallsRef.current.add(toolCall.toolCallId);
-            // Notify parent
-            onFileEdited(toolCall.input.filename);
-          }
-        });
-      }
-    });
-  }, [currentMessages, selectedChatId, onFileEdited]);
 
   // Notify parent when proposed changes change for the selected chat.
   // Only recomputes when proposedChangesVersion changes (i.e. a "changes", "merge",
@@ -1470,6 +1819,14 @@ function ChatInterface({
     onStreamingProposedChangesChange?.(currentStreamingState);
   }, [currentStreamingState, onStreamingProposedChangesChange]);
 
+  useEffect(() => {
+    onDraftProposedChangesChange?.(currentDraftChangesState);
+  }, [currentDraftChangesState, onDraftProposedChangesChange]);
+
+  useEffect(() => {
+    onStreamingActiveFileChange?.(currentStreamingActiveFile);
+  }, [currentStreamingActiveFile, onStreamingActiveFileChange]);
+
   // Proper class implementation of AiChatSubscriber
   // This is necessary so the server receives a single stub for the object,
   // not separate stubs for each method
@@ -1484,6 +1841,7 @@ function ChatInterface({
       cacheRef.current.chats.delete(chatId);
       cacheRef.current.messages.delete(chatId);
       provisionalRef.current.delete(chatId);
+      draftRef.current.delete(chatId);
 
       // If currently viewing this chat, go back to list
       // Use replace to prevent browser-back returning to the deleted chat
@@ -1492,6 +1850,39 @@ function ChatInterface({
       }
 
       forceUpdate();
+    }
+
+    draftUpdate(
+      chatId: number,
+      timestamp: Date,
+      author: AiChatAuthorInfo,
+      update: Uint8Array,
+    ) {
+      let draft = getOrCreateDraftChatState(draftRef.current, chatId);
+      let existingIndex = draft.entries.findIndex(
+        (entry) => entry.timestamp.getTime() === timestamp.getTime(),
+      );
+
+      if (existingIndex >= 0) {
+        draft.entries[existingIndex] = { timestamp, author, update };
+      } else {
+        draft.entries.push({ timestamp, author, update });
+        draft.entries.sort(
+          (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
+        );
+      }
+
+      refreshDraftLatestAuthor(draft);
+      if (existingIndex >= 0) {
+        setDraftChangesVersion((prev) => prev + 1);
+      }
+      scheduleUpdate();
+    }
+
+    draftCleared(chatId: number) {
+      if (draftRef.current.delete(chatId)) {
+        scheduleUpdate();
+      }
     }
 
     message(msg: AiChatMessage) {
@@ -1522,6 +1913,10 @@ function ChatInterface({
       // dependency handles the transition when all changes are merged.
       if (msg.type === "changes" || msg.type === "revert") {
         setProposedChangesVersion((prev) => prev + 1);
+      }
+
+      if (msg.type === "changes" && msg.author.type === "user") {
+        pruneDraftEntriesBefore(draftRef.current, msg.chatId, msg.timestamp);
       }
 
       const provisional = provisionalRef.current.get(msg.chatId);
@@ -1594,9 +1989,11 @@ function ChatInterface({
             null,
           );
           toolCall.finished = true;
-          toolCall.error = event.error;
           break;
         }
+        case "setActiveFile":
+          provisional.activeEditingFile = event.filename;
+          break;
         case "codeReset":
           provisional.codeUpdates = [];
           break;
@@ -1656,16 +2053,7 @@ function ChatInterface({
 
           setAvailableModels(models);
 
-          // Set default model: first try localStorage, then fall back to first model
-          const lastSelectedModel = localStorage.getItem("lastSelectedModel");
-          if (
-            lastSelectedModel &&
-            models.some((m) => m.id === lastSelectedModel)
-          ) {
-            setSelectedModel(lastSelectedModel);
-          } else if (models.length > 0) {
-            setSelectedModel(models[0].id);
-          }
+          setSelectedModel(getStoredSelectedModel(models));
 
           forceUpdate();
         }
@@ -1696,13 +2084,57 @@ function ChatInterface({
   // Reset per-chat UI state when selectedChatId changes
   useEffect(() => {
     setExpandedToolCalls(new Set());
-    setExpandedReasoning(new Set());
+    setExpandedReasoning(new Map());
     setExpandedActions(new Set());
+    setExpandedObservationGroups(new Set());
     setExpandedErrors(new Set());
-    processedToolCallsRef.current = new Set();
     setIsEditingTitle(false);
     setSidebarActiveTab("chat");
   }, [selectedChatId]);
+
+  const initializedReasoningCountRef = useRef(0);
+  useEffect(() => {
+    initializedReasoningCountRef.current = 0;
+  }, [selectedChatId]);
+
+  useEffect(() => {
+    if (initializedReasoningCountRef.current > currentMessages.length) {
+      initializedReasoningCountRef.current = 0;
+    }
+
+    setExpandedReasoning((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+
+      for (let i = initializedReasoningCountRef.current; i < currentMessages.length; i++) {
+        const msg = currentMessages[i];
+        if (msg.type !== "message" || !msg.reasoning) continue;
+
+        const key = `${msg.chatId}-${msg.sequence}`;
+        if (!next.has(key)) {
+          next.set(key, reasoningExpandedByDefault);
+          changed = true;
+        }
+      }
+
+      initializedReasoningCountRef.current = currentMessages.length;
+
+      if (selectedChatId !== null && currentProvisionalState?.reasoning) {
+        const key = `stream-${selectedChatId}`;
+        if (!next.has(key)) {
+          next.set(key, reasoningExpandedByDefault);
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [
+    currentMessages,
+    currentProvisionalState?.reasoning,
+    reasoningExpandedByDefault,
+    selectedChatId,
+  ]);
 
   // Load chat history when selectedChatId changes to a non-null value
   useEffect(() => {
@@ -1821,9 +2253,7 @@ function ChatInterface({
   // Handle model change
   const handleModelChange = (modelId: string | null) => {
     setSelectedModel(modelId);
-    if (modelId !== null) {
-      localStorage.setItem("lastSelectedModel", modelId);
-    }
+    persistSelectedModel(modelId);
   };
 
   // Handle stopping the agent
@@ -1919,15 +2349,44 @@ function ChatInterface({
   };
 
   // Handle merging changes up to a specific sequence number
-  const handleMergeChanges = async (mergeThrough: number) => {
+  const handleMergeChanges = async (
+    mergeThrough: number | null,
+    options?: { includeDraft?: boolean },
+  ) => {
     if (selectedChatId === null) return;
 
     try {
-      await overseer.mergeChanges(selectedChatId, mergeThrough);
+      await overseer.mergeChanges(selectedChatId, mergeThrough, options);
       toasts.add({ title: "Changes merged successfully", variant: "success" });
     } catch (err) {
       console.error("Failed to merge changes:", err);
       toasts.add({ title: "Failed to merge changes", variant: "error" });
+    }
+  };
+
+  const handleFinalizeDraftChanges = async () => {
+    if (selectedChatId === null) return;
+
+    try {
+      await overseer.finalizeChatDraft(selectedChatId);
+      toasts.add({ title: "Draft committed successfully", variant: "success" });
+    } catch (err) {
+      console.error("Failed to commit draft changes:", err);
+      toasts.add({ title: "Failed to commit draft changes", variant: "error" });
+    }
+  };
+
+  const handleDiscardDraftChanges = async () => {
+    if (selectedChatId === null) return;
+
+    try {
+      await overseer.discardChatDraftChanges(selectedChatId);
+      draftRef.current.delete(selectedChatId);
+      forceUpdate();
+      toasts.add({ title: "Draft discarded successfully", variant: "success" });
+    } catch (err) {
+      console.error("Failed to discard draft changes:", err);
+      toasts.add({ title: "Failed to discard draft changes", variant: "error" });
     }
   };
 
@@ -2041,17 +2500,31 @@ function ChatInterface({
     });
   };
 
-  // Toggle reasoning expansion
-  const toggleReasoningExpansion = (messageKey: string) => {
-    setExpandedReasoning((prev) => {
+  const toggleObservationGroupExpansion = (groupKey: string) => {
+    setExpandedObservationGroups((prev) => {
       const next = new Set(prev);
-      if (next.has(messageKey)) {
-        next.delete(messageKey);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
       } else {
-        next.add(messageKey);
+        next.add(groupKey);
       }
       return next;
     });
+  };
+
+  // Toggle reasoning expansion
+  const toggleReasoningExpansion = (messageKey: string) => {
+    const nextExpanded =
+      !(expandedReasoning.get(messageKey) ?? reasoningExpandedByDefault);
+
+    setExpandedReasoning((prev) => {
+      const next = new Map(prev);
+      next.set(messageKey, nextExpanded);
+      return next;
+    });
+
+    persistReasoningExpandedByDefault(nextExpanded);
+    setReasoningExpandedByDefault(nextExpanded);
   };
 
   // Toggle error message expansion
@@ -2084,6 +2557,132 @@ function ChatInterface({
     () => computeMessageStates(currentMessages),
     [currentMessages],
   );
+  const lastDurablePendingChange = useMemo(
+    () => {
+      for (let i = currentMessages.length - 1; i >= 0; i--) {
+        const msg = currentMessages[i];
+        if (
+          msg.type === "changes" &&
+          messageStates.changeStatus.get(msg.sequence) === "pending"
+        ) {
+          return msg;
+        }
+      }
+
+      return null;
+    },
+    [currentMessages, messageStates],
+  );
+
+  const renderActionCard = (
+    msg: ActionChatMessage,
+    options?: { nested?: boolean },
+  ) => {
+    const log = msg.actionLog;
+    if (!log) return null;
+
+    const isAct = log.type === "action";
+    const state = log.state;
+    const open = expandedActions.has(msg.actionId);
+    const isProc = processingActions.has(msg.actionId);
+    const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
+    const observationSurface = options?.nested
+      ? "border-kumo-line bg-kumo-base"
+      : "border-kumo-line bg-kumo-elevated";
+    const borderCls = !isAct
+      ? observationSurface
+      : state === "approved"
+        ? "border-kumo-success/30 bg-kumo-success-tint"
+        : state === "rejected"
+          ? "border-kumo-danger/30 bg-kumo-danger-tint"
+          : "border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)]";
+    const accentCls = !isAct
+      ? "text-kumo-subtle"
+      : state === "approved"
+        ? "text-kumo-success"
+        : state === "rejected"
+          ? "text-kumo-danger"
+          : "text-[var(--color-compute-100)]";
+
+    return (
+      <div className={`rounded-lg border px-3 py-2 text-xs ${borderCls}`}>
+        <div className="flex items-center gap-2">
+          <button onClick={() => toggleActionExpansion(msg.actionId)} className="flex-shrink-0">
+            <svg
+              width="8"
+              height="8"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              className={`transition-transform ${open ? "rotate-90" : ""} text-kumo-subtle`}
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+          <span className={`font-bold ${accentCls}`}>{isAct ? "Action" : "Observation"}</span>
+          <span className="flex-1 min-w-0 truncate text-kumo-subtle">
+            {log.bindingName && (
+              <code className="font-mono bg-kumo-fill px-1 rounded mr-1">{log.bindingName}</code>
+            )}
+            {safeResourceUrl ? (
+              <a
+                href={safeResourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:underline"
+              >
+                {log.resourceTitle}
+              </a>
+            ) : (
+              log.resourceTitle
+            )}
+          </span>
+          {isAct && state === "approved" && (
+            <span className="font-bold text-kumo-success flex-shrink-0">✓</span>
+          )}
+          {isAct && state === "rejected" && (
+            <span className="font-bold text-kumo-danger flex-shrink-0">✗</span>
+          )}
+          <span className="font-mono opacity-60 flex-shrink-0">
+            {msg.timestamp.toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
+        </div>
+        <button
+          onClick={() => toggleActionExpansion(msg.actionId)}
+          className="mt-1 pl-4 text-left text-kumo-default w-full"
+        >
+          {log.description.title}
+        </button>
+        {open && (
+          <div className="mt-2 pl-4 text-kumo-subtle whitespace-pre-wrap border-t border-kumo-line pt-2">
+            {log.description.description}
+          </div>
+        )}
+        {isAct && state === "pending" && (
+          <div className="flex gap-2 justify-end mt-2">
+            <button
+              onClick={() => handleApproveAction(msg.actionId)}
+              disabled={isProc}
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-kumo-brand text-kumo-inverse hover:bg-kumo-brand-hover disabled:opacity-40 transition-colors"
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => handleRejectAction(msg.actionId)}
+              disabled={isProc}
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md border border-kumo-danger/40 text-kumo-danger hover:bg-kumo-danger-tint disabled:opacity-40 transition-colors"
+            >
+              Reject
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // ─── avatars ────────────────────────────────────────────────────────────────
   const AssistantAvatar = () => (
@@ -2419,8 +3018,56 @@ function ChatInterface({
                   <div
                     className={`px-4 py-4 space-y-5 ${useConstrainedChatWidth ? "max-w-3xl mx-auto w-full" : ""}`}
                   >
-                    {currentMessages.map((msg, idx) => (
-                      <div key={`${msg.chatId}-${msg.sequence}`}>
+                    {displayEntries.map((entry) => {
+                      if (entry.type === "observationGroup") {
+                        const open = expandedObservationGroups.has(entry.key);
+                        const lastObservation = entry.messages[entry.messages.length - 1];
+
+                        return (
+                          <div key={entry.key} className="rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2 text-xs">
+                            <button
+                              onClick={() => toggleObservationGroupExpansion(entry.key)}
+                              className="flex w-full items-center gap-2 text-left"
+                            >
+                              <svg
+                                width="8"
+                                height="8"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                className={`flex-shrink-0 transition-transform ${open ? "rotate-90" : ""} text-kumo-subtle`}
+                              >
+                                <polyline points="9 18 15 12 9 6" />
+                              </svg>
+                              <span className="font-bold text-kumo-subtle">Observations</span>
+                              <span className="flex-1 min-w-0 truncate text-kumo-subtle">
+                                {entry.messages.length} observations
+                              </span>
+                              <span className="font-mono opacity-60 flex-shrink-0">
+                                {lastObservation.timestamp.toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </span>
+                            </button>
+                            {open && (
+                              <div className="mt-2 space-y-2 border-t border-kumo-line pt-2">
+                                {entry.messages.map((observation) => (
+                                  <div key={`${observation.chatId}-${observation.sequence}`}>
+                                    {renderActionCard(observation, { nested: true })}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      const msg = entry.message;
+
+                      return (
+                        <div key={entry.key}>
                         {/* ── user / AI text message ── */}
                         {msg.type === "message" && (
                           <div className="flex gap-3 items-start">
@@ -2446,7 +3093,9 @@ function ChatInterface({
                               {msg.reasoning &&
                                 (() => {
                                   const key = `${msg.chatId}-${msg.sequence}`;
-                                  const open = expandedReasoning.has(key);
+                                  const open =
+                                    expandedReasoning.get(key) ??
+                                    reasoningExpandedByDefault;
                                   return (
                                     <div className="mb-1.5">
                                       <button
@@ -2471,8 +3120,10 @@ function ChatInterface({
                                         </span>
                                       </button>
                                       {open && (
-                                        <div className="mt-1 text-xs text-kumo-subtle whitespace-pre-wrap leading-relaxed pl-3 border-l-2 border-kumo-fill">
-                                          {msg.reasoning}
+                                        <div
+                                          className={`mt-1 text-xs leading-relaxed pl-3 border-l-2 border-kumo-fill ${styles.markdownContent} ${styles.reasoningMarkdown}`}
+                                        >
+                                          <MarkdownMessage message={msg.reasoning} />
                                         </div>
                                       )}
                                     </div>
@@ -2483,16 +3134,10 @@ function ChatInterface({
                               <div
                                 className={`text-sm leading-relaxed text-kumo-default ${styles.markdownContent}`}
                               >
-                                {msg.capsules && msg.capsules.length > 0 ? (
-                                  renderMessageWithCapsules(
-                                    msg.message,
-                                    msg.capsules,
-                                  )
-                                ) : (
-                                  <ReactMarkdown skipHtml={true}>
-                                    {msg.message}
-                                  </ReactMarkdown>
-                                )}
+                                <MarkdownMessage
+                                  message={msg.message}
+                                  capsules={msg.capsules}
+                                />
                               </div>
 
                               {/* Tool calls */}
@@ -2688,128 +3333,7 @@ function ChatInterface({
                           })()}
 
                         {/* ── action / observation ── */}
-                        {msg.type === "action" &&
-                          (() => {
-                            const log = msg.actionLog;
-                            if (!log) return null;
-                            const isAct = log.type === "action";
-                            const state = log.state;
-                            const open = expandedActions.has(msg.actionId);
-                            const isProc = processingActions.has(msg.actionId);
-                            const borderCls = !isAct
-                              ? "border-kumo-line bg-kumo-elevated"
-                              : state === "approved"
-                                ? "border-kumo-success/30 bg-kumo-success-tint"
-                                : state === "rejected"
-                                  ? "border-kumo-danger/30 bg-kumo-danger-tint"
-                                  : "border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)]";
-                            const accentCls = !isAct
-                              ? "text-kumo-subtle"
-                              : state === "approved"
-                                ? "text-kumo-success"
-                                : state === "rejected"
-                                  ? "text-kumo-danger"
-                                  : "text-[var(--color-compute-100)]";
-                            return (
-                              <div
-                                className={`rounded-lg border px-3 py-2 text-xs ${borderCls}`}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <button
-                                    onClick={() =>
-                                      toggleActionExpansion(msg.actionId)
-                                    }
-                                    className="flex-shrink-0"
-                                  >
-                                    <svg
-                                      width="8"
-                                      height="8"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="2.5"
-                                      className={`transition-transform ${open ? "rotate-90" : ""} text-kumo-subtle`}
-                                    >
-                                      <polyline points="9 18 15 12 9 6" />
-                                    </svg>
-                                  </button>
-                                  <span className={`font-bold ${accentCls}`}>
-                                    {isAct ? "Action" : "Observation"}
-                                  </span>
-                                  <span className="flex-1 min-w-0 truncate text-kumo-subtle">
-                                    {log.bindingName && (
-                                      <code className="font-mono bg-kumo-fill px-1 rounded mr-1">
-                                        {log.bindingName}
-                                      </code>
-                                    )}
-                                    {log.resourceUrl ? (
-                                      <a
-                                        href={log.resourceUrl}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="hover:underline"
-                                      >
-                                        {log.resourceTitle}
-                                      </a>
-                                    ) : (
-                                      log.resourceTitle
-                                    )}
-                                  </span>
-                                  {isAct && state === "approved" && (
-                                    <span className="font-bold text-kumo-success flex-shrink-0">
-                                      ✓
-                                    </span>
-                                  )}
-                                  {isAct && state === "rejected" && (
-                                    <span className="font-bold text-kumo-danger flex-shrink-0">
-                                      ✗
-                                    </span>
-                                  )}
-                                  <span className="font-mono opacity-60 flex-shrink-0">
-                                    {msg.timestamp.toLocaleTimeString([], {
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    })}
-                                  </span>
-                                </div>
-                                <button
-                                  onClick={() =>
-                                    toggleActionExpansion(msg.actionId)
-                                  }
-                                  className="mt-1 pl-4 text-left text-kumo-default w-full"
-                                >
-                                  {log.description.title}
-                                </button>
-                                {open && (
-                                  <div className="mt-2 pl-4 text-kumo-subtle whitespace-pre-wrap border-t border-kumo-line pt-2">
-                                    {log.description.description}
-                                  </div>
-                                )}
-                                {isAct && state === "pending" && (
-                                  <div className="flex gap-2 justify-end mt-2">
-                                    <button
-                                      onClick={() =>
-                                        handleApproveAction(msg.actionId)
-                                      }
-                                      disabled={isProc}
-                                      className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-kumo-brand text-kumo-inverse hover:bg-kumo-brand-hover disabled:opacity-40 transition-colors"
-                                    >
-                                      Approve
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        handleRejectAction(msg.actionId)
-                                      }
-                                      disabled={isProc}
-                                      className="px-2.5 py-1 text-[11px] font-medium rounded-md border border-kumo-danger/40 text-kumo-danger hover:bg-kumo-danger-tint disabled:opacity-40 transition-colors"
-                                    >
-                                      Reject
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
+                        {msg.type === "action" && renderActionCard(msg)}
 
                         {/* ── useGadget ── */}
                         {msg.type === "useGadget" && (
@@ -2830,7 +3354,7 @@ function ChatInterface({
                           (() => {
                             const key = `${msg.chatId}-${msg.sequence}`;
                             const isLast =
-                              idx === currentMessages.length - 1 &&
+                              msg.sequence === lastMessageSequence &&
                               !isAgentActive;
                             const open = isLast || expandedErrors.has(key);
                             return (
@@ -2924,8 +3448,61 @@ function ChatInterface({
                             </pre>
                           </div>
                         )}
+                        </div>
+                      );
+                    })}
+
+                    {currentDraftState && currentDraftState.entries.length > 0 && (
+                      <div className="rounded-lg border px-3 py-2 text-xs border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)] text-[var(--color-compute-100)]">
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="flex items-center gap-1.5 font-medium italic flex-1 min-w-0 truncate">
+                            <span>📝</span>
+                            {(currentDraftState.latestAuthor?.name ?? "User")} is editing draft changes
+                          </span>
+                          <span className="font-mono text-[11px] opacity-70 flex-shrink-0">
+                            {currentDraftState.entries[
+                              currentDraftState.entries.length - 1
+                            ]?.timestamp.toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                        </div>
+                        <div className="flex gap-2 justify-end mt-2">
+                          <Tooltip content="Materialize the draft and merge it into the mainline code." asChild>
+                            <button
+                              disabled={isAgentActive}
+                              onClick={() =>
+                                handleMergeChanges(lastDurablePendingChange?.sequence ?? null, {
+                                  includeDraft: true,
+                                })
+                              }
+                              className="px-2.5 py-1.5 text-[11px] font-medium rounded-md bg-kumo-brand text-kumo-inverse hover:bg-kumo-brand-hover disabled:opacity-40 transition-colors"
+                            >
+                              Merge
+                            </button>
+                          </Tooltip>
+                          <Tooltip content="Discard only the live draft changes." asChild>
+                            <button
+                              disabled={isAgentActive}
+                              onClick={handleDiscardDraftChanges}
+                              className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-kumo-danger/40 text-kumo-danger hover:bg-kumo-danger-tint disabled:opacity-40 transition-colors"
+                            >
+                              Revert
+                            </button>
+                          </Tooltip>
+                          <Tooltip content="Turn the live draft into one durable proposed change without merging it." asChild>
+                            <button
+                              disabled={isAgentActive}
+                              onClick={handleFinalizeDraftChanges}
+                              className="px-2.5 py-1.5 text-[11px] font-medium rounded-md border border-[var(--color-compute-100)]/40 text-[var(--color-compute-100)] hover:bg-[var(--color-compute-100)]/10 disabled:opacity-40 transition-colors"
+                            >
+                              Commit
+                            </button>
+                          </Tooltip>
+                        </div>
                       </div>
-                    ))}
+                    )}
 
                     {/* Agent typing indicator */}
                     {isAgentActive && activeAgent && (
@@ -2962,9 +3539,10 @@ function ChatInterface({
                             <div className="space-y-2">
                               {currentProvisionalState.reasoning &&
                                 (() => {
-                                  const messageKey = `stream-${selectedChatId ?? "none"}`;
+                                  const messageKey = `stream-${selectedChatId}`;
                                   const isExpanded =
-                                    expandedReasoning.has(messageKey);
+                                    expandedReasoning.get(messageKey) ??
+                                    reasoningExpandedByDefault;
                                   return (
                                     <div
                                       className={
@@ -2989,8 +3567,12 @@ function ChatInterface({
                                         </span>
                                       </div>
                                       {isExpanded && (
-                                        <div className="mt-1 text-sm text-kumo-subtle whitespace-pre-wrap">
-                                          {currentProvisionalState.reasoning}
+                                        <div
+                                          className={`mt-1 text-sm ${styles.markdownContent} ${styles.reasoningMarkdown}`}
+                                        >
+                                          <MarkdownMessage
+                                            message={currentProvisionalState.reasoning}
+                                          />
                                         </div>
                                       )}
                                     </div>
@@ -3001,19 +3583,17 @@ function ChatInterface({
                                 <div
                                   className={`text-sm leading-relaxed text-kumo-default ${styles.markdownContent}`}
                                 >
-                                  <ReactMarkdown skipHtml={true}>
-                                    {currentProvisionalState.text}
-                                  </ReactMarkdown>
+                                  <MarkdownMessage message={currentProvisionalState.text} />
                                 </div>
                               )}
 
-                              {visibleProvisionalToolCalls.length > 0 && (
+                              {provisionalToolCalls.length > 0 && (
                                 <div
                                   className={
                                     currentProvisionalState.text ? "mt-2" : ""
                                   }
                                 >
-                                  {visibleProvisionalToolCalls.map(
+                                  {provisionalToolCalls.map(
                                     (toolCall) => {
                                       const isExpanded = expandedToolCalls.has(
                                         toolCall.toolCallId,
@@ -3021,11 +3601,7 @@ function ChatInterface({
                                       return (
                                         <div
                                           key={`stream-tool-${toolCall.toolCallId}`}
-                                          className={`text-xs p-2 px-3 rounded mt-1.5 font-mono border ${
-                                            toolCall.error
-                                              ? "bg-kumo-danger-tint border-kumo-danger/30"
-                                              : "bg-kumo-elevated border-kumo-line"
-                                          }`}
+                                          className="text-xs p-2 px-3 rounded mt-1.5 font-mono border bg-kumo-elevated border-kumo-line"
                                         >
                                           <div
                                             onClick={() =>
@@ -3041,15 +3617,9 @@ function ChatInterface({
                                             <span className="font-bold">
                                               {toolCall.toolName ?? "tool"}
                                             </span>
-                                            {toolCall.finished &&
-                                              !toolCall.error && (
-                                                <span className="ml-auto text-kumo-success font-bold">
-                                                  done
-                                                </span>
-                                              )}
-                                            {toolCall.error && (
-                                              <span className="ml-auto text-kumo-danger font-bold">
-                                                error
+                                            {!toolCall.finished && (
+                                              <span className="ml-auto flex items-center text-kumo-brand">
+                                                <span className="w-3 h-3 border border-kumo-brand border-t-transparent rounded-full animate-spin" />
                                               </span>
                                             )}
                                           </div>
@@ -3075,11 +3645,6 @@ function ChatInterface({
                                                   </pre>
                                                 </>
                                               )}
-                                              {toolCall.error && (
-                                                <div className="mt-2 p-2 bg-kumo-danger-tint border border-kumo-danger/30 rounded-sm text-kumo-danger text-[11px] whitespace-pre-wrap">
-                                                  {toolCall.error}
-                                                </div>
-                                              )}
                                             </>
                                           )}
                                         </div>
@@ -3089,12 +3654,11 @@ function ChatInterface({
                                 </div>
                               )}
 
-                              <div className="flex items-center gap-2 mt-2">
-                                <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-                                <span className="text-xs text-kumo-subtle">
-                                  Streaming…
-                                </span>
-                              </div>
+                              {!hasRunningProvisionalToolCall && (
+                                <div className="flex items-center gap-2 mt-2">
+                                  <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+                                </div>
+                              )}
                             </div>
                           ) : (
                             <div className="flex items-center gap-1">
@@ -3106,8 +3670,6 @@ function ChatInterface({
                         </div>
                       </div>
                     )}
-
-                    <div ref={messagesEndRef} />
                   </div>
                 )}
               </div>
@@ -3127,24 +3689,19 @@ function ChatInterface({
 
                     const { activeChanges } = messageStates;
                     if (activeChanges.length === 0) return null;
-                    const lastActiveChange = [...currentMessages]
-                      .reverse()
-                      .find(
-                        (m) =>
-                          m.type === "changes" &&
-                          messageStates.changeStatus.get(m.sequence) ===
-                            "pending",
-                      );
+                    const lastActiveChange = lastDurablePendingChange;
                     if (!lastActiveChange) return null;
                     return (
                       <div className="flex items-center gap-3 px-4 py-2.5 bg-[var(--color-compute-200)] border-b border-[var(--color-compute-100)]/20">
                         <span className="flex-1 text-xs text-[var(--color-compute-100)]">
-                          Agent proposed changes
+                          Proposed changes
                         </span>
-                        <Tooltip content="Merge all proposed changes into the mainline code." asChild>
+                        <Tooltip content="Merge all proposed changes, including the live draft, into the mainline code." asChild>
                           <button
                             onClick={() =>
-                              handleMergeChanges(lastActiveChange.sequence)
+                              handleMergeChanges(lastActiveChange.sequence, {
+                                includeDraft: true,
+                              })
                             }
                             className="px-2.5 py-1.5 text-[11px] font-medium rounded-md bg-kumo-brand text-kumo-inverse hover:bg-kumo-brand-hover transition-colors flex items-center gap-1"
                           >

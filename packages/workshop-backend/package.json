@@ -20,6 +20,7 @@
     "ai": "^6.0.141",
     "ai-gateway-provider": "^3.1.2",
     "capnweb": "^0.6.1",
+    "diff": "^8.0.3",
     "jose": "^6.2.2",
     "ollama-ai-provider-v2": "^3.5.0",
     "workers-ai-provider": "^3.1.8",

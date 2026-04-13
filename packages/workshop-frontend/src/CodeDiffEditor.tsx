@@ -8,6 +8,7 @@ interface CodeDiffEditorProps {
   filename: string | null
   originalYText: Y.Text | null
   modifiedYText: Y.Text | null
+  readOnly?: boolean
   height?: string | number
 }
 
@@ -15,6 +16,7 @@ export default function CodeDiffEditor({
   filename,
   originalYText,
   modifiedYText,
+  readOnly = false,
   height = '100%'
 }: CodeDiffEditorProps) {
   const editorRef = useRef<editor.IStandaloneDiffEditor | null>(null)
@@ -58,8 +60,7 @@ export default function CodeDiffEditor({
     const editor = editorRef.current
     const monaco = monacoRef.current
 
-    // modifiedYText is required, but originalYText can be null (for new files)
-    if (!editor || !monaco || !modifiedYText || !editorReady) {
+    if (!editor || !monaco || !editorReady) {
       return
     }
 
@@ -70,7 +71,16 @@ export default function CodeDiffEditor({
       return
     }
 
-    // For new files, originalYText is null - set original to empty string
+    if (originalBindingRef.current) {
+      originalBindingRef.current.destroy()
+      originalBindingRef.current = null
+    }
+    if (modifiedBindingRef.current) {
+      modifiedBindingRef.current.destroy()
+      modifiedBindingRef.current = null
+    }
+
+    // For new files, originalYText is null - show an empty original pane.
     if (originalYText) {
       const originalBinding = new MonacoBinding(
         originalYText,
@@ -79,26 +89,41 @@ export default function CodeDiffEditor({
       )
       originalBindingRef.current = originalBinding
     } else {
-      // New file: original doesn't exist, show empty
       originalModel.setValue('')
     }
 
-    const modifiedBinding = new MonacoBinding(
-      modifiedYText,
-      modifiedModel,
-      new Set([editor.getModifiedEditor()])
-    )
-    modifiedBindingRef.current = modifiedBinding
+    if (modifiedYText) {
+      const modifiedBinding = new MonacoBinding(
+        modifiedYText,
+        modifiedModel,
+        new Set([editor.getModifiedEditor()])
+      )
+      modifiedBindingRef.current = modifiedBinding
+    } else {
+      // Deleted file: render an empty modified side. Recreate the file from the sidebar.
+      modifiedModel.setValue('')
+    }
 
     return () => {
       if (originalBindingRef.current) {
         originalBindingRef.current.destroy()
         originalBindingRef.current = null
       }
-      modifiedBinding.destroy()
-      modifiedBindingRef.current = null
+      if (modifiedBindingRef.current) {
+        modifiedBindingRef.current.destroy()
+        modifiedBindingRef.current = null
+      }
     }
   }, [originalYText, modifiedYText, editorReady])
+
+  useEffect(() => {
+    if (!editorRef.current) return
+
+    editorRef.current.updateOptions({
+      readOnly: readOnly || !modifiedYText,
+      originalEditable: false,
+    })
+  }, [modifiedYText, readOnly])
 
   // Handle editor mount
   const handleEditorDidMount = (
@@ -149,8 +174,7 @@ export default function CodeDiffEditor({
     }
   }
 
-  // modifiedYText is required; originalYText can be null for new files
-  if (!filename || !modifiedYText) {
+  if (!filename || (!originalYText && !modifiedYText)) {
     return (
       <div
         className="flex justify-center items-center bg-kumo-base text-kumo-subtle"
@@ -183,7 +207,8 @@ export default function CodeDiffEditor({
           renderLineHighlight: 'all',
           selectOnLineNumbers: true,
           roundedSelection: false,
-          readOnly: true,
+          readOnly: readOnly || !modifiedYText,
+          originalEditable: false,
           cursorStyle: 'line',
           renderSideBySide,
           contextmenu: true,

@@ -104,8 +104,9 @@ export default function GadgetEditor() {
   // ── code / chat state ────────────────────────────────────────────────────────
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
+  const [draftProposedChanges, setDraftProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
   const [streamingProposedChanges, setStreamingProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
-  const [fileToSelect, setFileToSelect] = useState<string | undefined>(undefined)
+  const [streamingActiveFile, setStreamingActiveFile] = useState<string | null | undefined>(undefined)
   const [hasCode, setHasCode] = useState<boolean | null>(null)
   const [chatCount, setChatCount] = useState<number | null>(null)
   const [hasChatZero, setHasChatZero] = useState(false)
@@ -222,8 +223,9 @@ export default function GadgetEditor() {
 
   useEffect(() => {
     setProposedChanges(undefined)
+    setDraftProposedChanges(undefined)
     setStreamingProposedChanges(undefined)
-    setFileToSelect(undefined)
+    setStreamingActiveFile(undefined)
     setHasCode(null)
     setChatCount(null)
     setHasChatZero(false)
@@ -357,7 +359,7 @@ export default function GadgetEditor() {
   }, [overseer])
 
   // ── reload UI on chat/proposed changes ────────────────────────────────────────
-  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [selectedChatId, proposedChanges])
+  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [effectiveSelectedChatId, proposedChanges])
 
   // ── user info ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -565,8 +567,9 @@ export default function GadgetEditor() {
                   selectedChatId={effectiveSelectedChatId}
                   onNavigateToChat={navigateToChat}
                   onProposedChangesChange={setProposedChanges}
+                  onDraftProposedChangesChange={setDraftProposedChanges}
                   onStreamingProposedChangesChange={updates => setStreamingProposedChanges(updates)}
-                  onFileEdited={setFileToSelect}
+                  onStreamingActiveFileChange={setStreamingActiveFile}
                   pendingConsoleLogCount={consoleLogCount}
                   consoleLogPreview={
                     consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''
@@ -645,7 +648,7 @@ export default function GadgetEditor() {
                   height={RIGHT_CONTENT_H}
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
-                  chatId={selectedChatId ?? undefined}
+                  chatId={effectiveSelectedChatId ?? undefined}
                   onConsoleLog={handleClientConsoleLog}
                 />
               )}
@@ -657,9 +660,12 @@ export default function GadgetEditor() {
                   overseer={overseer.stub}
                   height={RIGHT_CONTENT_H}
                   onCodeChange={() => setUiReloadTrigger(t => t + 1)}
+                  selectedChatId={effectiveSelectedChatId}
                   proposedChanges={proposedChanges}
+                  draftProposedChanges={draftProposedChanges}
                   streamingProposedChanges={streamingProposedChanges}
-                  fileToSelect={fileToSelect}
+                  streamingActiveFile={streamingActiveFile}
+                  isAgentActive={isAgentActive}
                   onHasCodeChange={setHasCode}
                 />
               )}
@@ -689,7 +695,7 @@ export default function GadgetEditor() {
               height="100%"
               reloadTrigger={uiReloadTrigger}
               isVisible={true}
-              chatId={selectedChatId ?? undefined}
+              chatId={effectiveSelectedChatId ?? undefined}
               onConsoleLog={handleClientConsoleLog}
             />
           )}

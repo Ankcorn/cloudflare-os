@@ -11,6 +11,10 @@ import {
   AiChatAuthorInfo,
   CapsuleSpecifier,
 } from "@gadgets/workshop-shared/api";
+import {
+  getStoredSelectedModel,
+  persistSelectedModel,
+} from "../modelSelection";
 
 export const Route = createFileRoute("/")({ component: HomePage });
 
@@ -30,12 +34,7 @@ function HomePage() {
       .then((list) => {
         if (cancelled) return;
         setModels(list);
-        const lastSelected = localStorage.getItem("lastSelectedModel");
-        if (lastSelected && list.some((m) => m.id === lastSelected)) {
-          setSelectedModel(lastSelected);
-        } else if (list.length > 0) {
-          setSelectedModel(list[0].id);
-        }
+        setSelectedModel(getStoredSelectedModel(list));
       })
       .catch((err) => {
         console.error("Failed to fetch models:", err);
@@ -48,9 +47,7 @@ function HomePage() {
 
   const handleModelChange = useCallback((value: string | null) => {
     setSelectedModel(value);
-    if (value) {
-      localStorage.setItem("lastSelectedModel", value);
-    }
+    persistSelectedModel(value);
   }, []);
 
   // ── provisional gadget ──────────────────────────────────────────────────────

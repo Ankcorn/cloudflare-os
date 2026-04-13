@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import { streamText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -114,6 +115,10 @@ class Callbacks extends RpcTarget {
 gadget.subscribe(new Callbacks());
 \`\`\`
 
+DO NOT import \`RpcTarget\` in client.js. It is already imported.
+
+If you need \`RpcTarget\` in server.js, you can import it from "cloudflare:workers".
+
 Some general app design tips:
 * ALWAYS store server state in Durable Object storage, not just in memory. Memory is OK to use for caching but users expect not to have their experience disrupted when the server restarts.
 * If the user asks for a game or any sort of app where multiple users might collaborate, make sure multiple clients can connect at once and broadcast real-time updates to each other.
@@ -153,6 +158,7 @@ class CodePreviewManager {
   #previewDoc?: Y.Doc;
   #previews = new Map<string, CodePreviewEntry>();
   #broken = false;
+  #activeFile: string | null = null;
 
   constructor(private getBaseDoc: () => Y.Doc,
               private emit: (event: AiChatStreamEvent) => void) {}
@@ -178,6 +184,8 @@ class CodePreviewManager {
       entry.parser.append(delta);
       if (entry.parser.hasError) throw new Error("Invalid JSON in tool input");
 
+      this.#maybeEmitActiveFile(entry);
+
       if (entry.cursor) {
         this.#appendAtCursor(entry);
       } else {
@@ -202,6 +210,14 @@ class CodePreviewManager {
     this.#previewDoc = undefined;
     this.#previews.clear();
     this.#broken = false;
+    this.#activeFile = null;
+  }
+
+  clearActiveFile() {
+    if (this.#activeFile === null) return;
+
+    this.#activeFile = null;
+    this.emit({type: "setActiveFile", filename: null});
   }
 
   #ensureSession() {
@@ -211,6 +227,16 @@ class CodePreviewManager {
     this.#previewDoc = new Y.Doc();
     Y.applyUpdateV2(this.#previewDoc, baseUpdate);
     this.emit({type: "codeReset"});
+  }
+
+  #maybeEmitActiveFile(entry: CodePreviewEntry) {
+    let filename = entry.parser.prefixFields?.filename;
+    if (typeof filename !== "string" || filename === this.#activeFile) {
+      return;
+    }
+
+    this.#activeFile = filename;
+    this.emit({type: "setActiveFile", filename});
   }
 
   // Try to activate direct cursor-based insertion for a preview. For writeFile, this
@@ -366,6 +392,7 @@ export async function runAgent(
   let versionLock: number | undefined;
   let capturedYdocChanges: Uint8Array[] = [];
   let startingFiles: string[] = [];  // files that existed at session start, for system prompt
+  let rollingFileContents: Map<string, string> | undefined;
   let getSessionYDoc = () => {
     if (!ydoc) {
       let build = hooks.buildYDoc(versionLock === undefined ? "current" : versionLock);
@@ -378,6 +405,70 @@ export async function runAgent(
       });
     }
     return ydoc;
+  };
+  let getRollingFileContents = () => {
+    if (!rollingFileContents) {
+      rollingFileContents = new Map();
+      for (let [filename, text] of getSessionYDoc().getMap<Y.Text>()) {
+        rollingFileContents.set(filename, text.toString());
+      }
+    }
+    return rollingFileContents;
+  };
+  let applyReplayedChanges = (update: Uint8Array, includeDiff: boolean): string | undefined => {
+    let ydoc = getSessionYDoc();
+    let files = ydoc.getMap<Y.Text>();
+    let currentContents = getRollingFileContents();
+    let touchedFiles = new Set<string>();
+
+    let observer = (events: Y.YEvent<any>[]) => {
+      for (let event of events) {
+        if (event.target === files) {
+          for (let filename of event.changes.keys.keys()) {
+            touchedFiles.add(filename);
+          }
+        } else if (typeof event.path[0] === "string") {
+          touchedFiles.add(event.path[0]);
+        }
+      }
+    };
+
+    files.observeDeep(observer);
+    try {
+      Y.applyUpdateV2(ydoc, update);
+    } finally {
+      files.unobserveDeep(observer);
+    }
+
+    let diffParts: string[] = [];
+    for (let filename of [...touchedFiles].sort()) {
+      let oldContent = currentContents.get(filename) ?? "";
+      let text = files.get(filename);
+      let newContent = text?.toString() ?? "";
+
+      if (includeDiff && oldContent !== newContent) {
+        let diff = formatUnifiedDiff(
+            filename,
+            oldContent,
+            newContent,
+            currentContents.has(filename),
+            text !== undefined);
+        if (diff) {
+          diffParts.push(diff);
+        }
+      }
+
+      // Advance the rolling snapshot so the next replayed change diffs against this state.
+      if (text) {
+        currentContents.set(filename, newContent);
+      } else {
+        currentContents.delete(filename);
+      }
+    }
+
+    if (diffParts.length > 0) {
+      return diffParts.join("\n");
+    }
   };
 
   // Track which files have been read in this session. Edits aren't allowed before reading.
@@ -653,7 +744,31 @@ export async function runAgent(
 
       case "changes":
         if (chatMessageStatus[msg.sequence] !== "reverted") {
-          Y.applyUpdateV2(getSessionYDoc(), msg.update);
+          let diff = applyReplayedChanges(msg.update, msg.author.type === "user");
+          if (msg.author.type === "user" && diff !== undefined) {
+            let toolCallId = `synthetic_${msg.sequence}`;
+            modelMessages.push({
+              role: "assistant",
+              content: [{
+                type: "tool-call",
+                toolCallId,
+                toolName: "observeUserChanges",
+                input: {},
+              }]
+            });
+            modelMessages.push({
+              role: "tool",
+              content: [{
+                type: "tool-result",
+                toolName: "observeUserChanges",
+                toolCallId,
+                output: {
+                  type: "json",
+                  value: {diff},
+                },
+              }]
+            });
+          }
         }
         changeIdMap.set(msg.sequence, nextChangeId);
         ++nextChangeId;
@@ -963,8 +1078,8 @@ export async function runAgent(
           "but the chat history will automatically contain such calls when you need them.",
       inputSchema: z.object({}),
       outputSchema: z.object({
-        revertedFromChangeId: z.optional(z.boolean().describe(
-            "Indicates that all changes starting from the giver changeId to the " +
+        revertedFromChangeId: z.optional(z.number().describe(
+            "Indicates that all changes starting from the given changeId to the " +
             "current point in the chat history were reverted by the user. The file " +
             "contents have returned to the state they were in immediately before the " +
             "given changeId.")),
@@ -1272,6 +1387,8 @@ export async function runAgent(
     };
   }
 
+  let currentStreamingToolCallId: string | undefined;
+
   // The AI SDK sets stream: false on the upstream request if we use
   // generateText, which causes intermittent proxies to time out during
   // extended thinking. streamText avoids this. We consume the stream
@@ -1299,6 +1416,31 @@ export async function runAgent(
           emitStreamEvent({type: "reasoningDelta", delta: chunk.text});
           break;
         case "tool-input-start":
+          // Mark the previous tool call as ended when we see a new one start. In theory we could
+          // instead look for the tool-input-end chunk, but:
+          // * For some reason, it is filtered out by onChunk(); we would have to use `fullStream`
+          //   instead.
+          // * As of this writing, workers-ai-provider has a bug where it delays all
+          //   tool-input-end chunks until the end of the whole stream.
+          if (currentStreamingToolCallId) {
+            codePreviewManager.finishToolCall(currentStreamingToolCallId, true);
+            executeCodeStreamManager.finishToolCall(currentStreamingToolCallId);
+            emitStreamEvent({
+              type: "toolCallFinished",
+              toolCallId: currentStreamingToolCallId,
+            });
+          }
+
+          // Track the tool call ID to mark it ended when the next tool starts. Exclude executeCode
+          // from this because we don't consider it completed until it actually executes (since
+          // it can take non-trivial time to execute and needs to display results).
+          currentStreamingToolCallId =
+              chunk.toolName === "executeCode" ? undefined : chunk.id;
+
+          if (chunk.toolName !== "writeFile" && chunk.toolName !== "editFile") {
+            codePreviewManager.clearActiveFile();
+          }
+
           emitStreamEvent({
             type: "toolCallStarted",
             toolCallId: chunk.id,
@@ -1327,22 +1469,6 @@ export async function runAgent(
     tools,
 
     prepareStep,
-
-    experimental_onToolCallFinish: ({toolCall, success, error}) => {
-      if (success) {
-        emitStreamEvent({type: "toolCallFinished", toolCallId: toolCall.toolCallId});
-        codePreviewManager.finishToolCall(toolCall.toolCallId, true);
-        executeCodeStreamManager.finishToolCall(toolCall.toolCallId);
-      } else {
-        emitStreamEvent({
-          type: "toolCallFinished",
-          toolCallId: toolCall.toolCallId,
-          error: `${error}`,
-        });
-        codePreviewManager.finishToolCall(toolCall.toolCallId, false);
-        executeCodeStreamManager.finishToolCall(toolCall.toolCallId);
-      }
-    },
 
     onStepFinish: ({ text, reasoningText, toolCalls, usage, response }) => {
       let msgs: AiChatMessageBody[] = [];
@@ -1399,6 +1525,7 @@ export async function runAgent(
       hooks.addChatMessages(chatId, author, msgs,
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
 
+      currentStreamingToolCallId = undefined;
       codePreviewManager.clear();
       executeCodeStreamManager.clear();
       emitStreamEvent({type: "clear"});
@@ -1408,6 +1535,25 @@ export async function runAgent(
   // streamText silently swallows stream errors unless onError is provided.
   // Re-throw so errors propagate to the catch block in startAgent().
   await stream.consumeStream({ onError: (e) => { throw e; } });
+}
+
+function formatUnifiedDiff(
+    filename: string,
+    oldContent: string,
+    newContent: string,
+    oldExists: boolean,
+    newExists: boolean): string | undefined {
+  return createTwoFilesPatch(
+      oldExists ? `a/${filename}` : "/dev/null",
+      newExists ? `b/${filename}` : "/dev/null",
+      oldContent,
+      newContent,
+      undefined,
+      undefined,
+      {
+        context: 3,
+        headerOptions: FILE_HEADERS_ONLY,
+      }).trimEnd();
 }
 
 // =======================================================================================

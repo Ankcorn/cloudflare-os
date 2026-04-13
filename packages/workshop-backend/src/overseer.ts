@@ -183,6 +183,16 @@ type ActionRecord = {
   description: ObservationDescription;
 });
 
+type ChatDraftUpdateRecord = {
+  chatId: number;
+  timestamp: Date;
+  author: AiChatAuthorInfo;
+  update: Uint8Array;
+};
+
+const CHAT_DRAFT_AUTHOR_SPLIT_MS = 60_000;
+const CHAT_DRAFT_COMPACT_THRESHOLD = 128;
+
 // Safely convert an unknown thrown value to a human-readable string.
 // Plain objects (e.g. from AI SDK stream error parts) would otherwise render as "[object Object]".
 function stringifyError(err: unknown): string {
@@ -294,6 +304,12 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
         },
         uniqueIndexes: {
           byTimestamp(msg: AiChatMessage) { return msg.timestamp.valueOf(); }
+        }
+      }),
+
+      chatDraftUpdates: collection<ChatDraftUpdateRecord>()({
+        primaryKey(record: ChatDraftUpdateRecord) {
+          return `${keyString(record.chatId)}.${keyString(record.timestamp.valueOf())}`;
         }
       }),
 
@@ -575,6 +591,145 @@ class OverseerImpl implements AgentHooks {
       this.ctx.facets.abort("gadget", new Error(
           "Gadget restarted because the proposed changes changed."));
     }
+  }
+
+  emitChatDraftUpdate(chatId: number, timestamp: Date,
+                      author: AiChatAuthorInfo, update: Uint8Array): void {
+    for (let subscriber of this.#chatSubscribers) {
+      subscriber.draftUpdate(chatId, timestamp, author, update).catch(() => {
+        subscriber[Symbol.dispose]();
+        this.#chatSubscribers.delete(subscriber);
+      });
+    }
+  }
+
+  emitChatDraftCleared(chatId: number): void {
+    for (let subscriber of this.#chatSubscribers) {
+      subscriber.draftCleared(chatId).catch(() => {
+        subscriber[Symbol.dispose]();
+        this.#chatSubscribers.delete(subscriber);
+      });
+    }
+  }
+
+  listChatDraftUpdates(chatId: number): ChatDraftUpdateRecord[] {
+    return [...this.storage.chatDraftUpdates.list({prefix: `${keyString(chatId)}.`})];
+  }
+
+  getLatestChatDraftUpdate(chatId: number): ChatDraftUpdateRecord | undefined {
+    return [...this.storage.chatDraftUpdates.list({
+      prefix: `${keyString(chatId)}.`,
+      reverse: true,
+      limit: 1,
+    })][0];
+  }
+
+  deleteChatDraftUpdates(chatId: number,
+                         entries?: ChatDraftUpdateRecord[]): void {
+    if (!entries) {
+      entries = this.listChatDraftUpdates(chatId);
+    }
+    for (let entry of entries) {
+      this.storage.chatDraftUpdates.delete(
+          `${keyString(entry.chatId)}.${keyString(entry.timestamp.valueOf())}`);
+    }
+  }
+
+  sameChatAuthor(left: AiChatAuthorInfo, right: AiChatAuthorInfo): boolean {
+    return left.type === right.type && left.id === right.id && left.name === right.name;
+  }
+
+  normalizeDraftAuthor(updates: ChatDraftUpdateRecord[]): AiChatAuthorInfo {
+    if (updates.length === 0) {
+      throw new Error("Cannot normalize an empty draft.");
+    }
+
+    let first = updates[0].author;
+    if (updates.every(update => this.sameChatAuthor(update.author, first))) {
+      return first;
+    }
+
+    return {
+      type: "user",
+      id: first.id,
+      name: "Multiple Authors",
+    };
+  }
+
+  recomputeHasProposedChanges(chatId: number,
+                              meta?: AiChatMetadata): AiChatMetadata | undefined {
+    if (!meta) {
+      meta = this.storage.chatMeta.get(chatId);
+      if (!meta) {
+        return;
+      }
+    }
+
+    if (this.getLatestChatDraftUpdate(chatId) || this.getProposedChanges(chatId).length > 0) {
+      meta.hasProposedChanges = true;
+    } else {
+      delete meta.hasProposedChanges;
+    }
+
+    this.storage.chatMeta.put(meta);
+    return meta;
+  }
+
+  compactChatDraftUpdates(chatId: number,
+                          updates?: ChatDraftUpdateRecord[]): void {
+    if (!updates) {
+      updates = this.listChatDraftUpdates(chatId);
+    }
+    if (updates.length < CHAT_DRAFT_COMPACT_THRESHOLD) {
+      return;
+    }
+
+    let compacted: ChatDraftUpdateRecord = {
+      chatId,
+      timestamp: updates[updates.length - 1].timestamp,
+      author: this.normalizeDraftAuthor(updates),
+      update: Y.mergeUpdatesV2(updates.map(update => update.update)),
+    };
+
+    this.deleteChatDraftUpdates(chatId, updates);
+    this.storage.chatDraftUpdates.put(compacted);
+  }
+
+  materializeChatDraft(chatId: number,
+                      meta?: AiChatMetadata):
+                      {sequence: number, meta: AiChatMetadata} | undefined {
+    let updates = this.listChatDraftUpdates(chatId);
+    if (updates.length === 0) {
+      return;
+    }
+
+    if (!meta) {
+      meta = this.storage.chatMeta.get(chatId);
+      if (!meta) {
+        return;
+      }
+    }
+
+    let timestamp = this.getChatTimestamp();
+    let sequence = this.nextChatSequence(chatId);
+    this.storage.chats.put({
+      chatId,
+      sequence,
+      timestamp,
+      author: this.normalizeDraftAuthor(updates),
+      type: "changes",
+      update: Y.mergeUpdatesV2(updates.map(update => update.update)),
+    });
+
+    this.deleteChatDraftUpdates(chatId, updates);
+    this.emitChatDraftCleared(chatId);
+
+    meta.lastActive = timestamp;
+    this.storage.chatMeta.put(meta);
+    this.recomputeHasProposedChanges(chatId, meta);
+    this.proposedChangesChanged(chatId);
+
+    return {sequence, meta};
   }
 
   // Load the dynamic worker representing the gadget as of the current code version. Returns the
@@ -2599,6 +2754,8 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
 }
 
 class OverseerClientInterface extends RpcTarget implements Overseer {
+  #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
+
   constructor(private impl: OverseerImpl,
               private owner: DurableObjectStub<UserDurableObject>,
               private clientUser: DurableObjectStub<UserDurableObject>,
@@ -2611,6 +2768,34 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   [Symbol.dispose]() {
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
+  }
+
+  async #getClientProfile(): Promise<AiChatAuthorInfo> {
+    if (!this.#clientProfilePromise) {
+      this.#clientProfilePromise = this.clientUser.whoami().catch((err: unknown) => {
+        this.#clientProfilePromise = undefined;
+        throw err;
+      });
+    }
+
+    const profilePromise = this.#clientProfilePromise!;
+    return profilePromise;
+  }
+
+  #getChatMetaOrThrow(chatId: number): AiChatMetadata {
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    return meta;
+  }
+
+  #assertChatNotActive(chatId: number): AiChatMetadata {
+    let meta = this.#getChatMetaOrThrow(chatId);
+    if (meta.activeAgent) {
+      throw new Error("Agent is running, wait for it to finish.");
+    }
+    return meta;
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
@@ -2738,12 +2923,52 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async updateCode(update: Uint8Array): Promise<void> {
-    this.impl.updateCode(update);
+  async updateCode(update: Uint8Array, chatId?: number): Promise<void> {
+    if (chatId === undefined) {
+      this.impl.updateCode(update);
+      return;
+    }
+
+    let meta = this.#getChatMetaOrThrow(chatId);
+    let author = await this.#getClientProfile();
+    let existingUpdates = this.impl.listChatDraftUpdates(chatId);
+    if (existingUpdates.length > 0) {
+      let latest = existingUpdates[existingUpdates.length - 1];
+      if (!this.impl.sameChatAuthor(latest.author, author)) {
+        let elapsed = Date.now() - latest.timestamp.getTime();
+        if (elapsed > CHAT_DRAFT_AUTHOR_SPLIT_MS) {
+          let result = this.impl.materializeChatDraft(chatId, meta);
+          if (result) {
+            meta = result.meta;
+          }
+          existingUpdates = [];
+        }
+      }
+    }
+
+    let timestamp = this.impl.getChatTimestamp();
+    let newRecord: ChatDraftUpdateRecord = {chatId, timestamp, author, update};
+    this.impl.storage.chatDraftUpdates.put(newRecord);
+
+    meta.lastActive = timestamp;
+    this.impl.storage.chatMeta.put(meta);
+    this.impl.recomputeHasProposedChanges(chatId, meta);
+
+    let allUpdates = [...existingUpdates, newRecord];
+    let displayAuthor = this.impl.normalizeDraftAuthor(allUpdates);
+    this.impl.emitChatDraftUpdate(chatId, timestamp, displayAuthor, update);
+    this.impl.compactChatDraftUpdates(chatId, allUpdates);
   }
 
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
+    if (chatId !== undefined) {
+      let meta = this.#getChatMetaOrThrow(chatId);
+      if (!meta.activeAgent) {
+        this.impl.materializeChatDraft(chatId, meta);
+      }
+    }
+
     let {ydoc} = this.impl.buildYDoc("current");
 
     if (chatId !== undefined) {
@@ -2933,6 +3158,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
+    let changedChatIds = new Set<number>();
 
     subscriber = subscriber.dup();  // keep stub after return
     this.impl.addChatSubscriber(subscriber);
@@ -2980,8 +3206,61 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (startAfter !== undefined) {
       // Catch up on metadata changes.
       for (let meta of chatMeta.byLastActive.list({startAfter: startAfter.valueOf()})) {
+        changedChatIds.add(meta.id);
         subscriber.metadata(meta).catch(unsubscribe);
       }
+    }
+
+    // Send draft updates needed to catch the client up, computing normalizeDraftAuthor once per
+    // chatId.
+    {
+      let startAfterTimestamp = startAfter?.valueOf();
+      let chatIdsToSend = new Set<number>();
+      let draftsByChat = new Map<number, ChatDraftUpdateRecord[]>();
+      let draftsToSend: ChatDraftUpdateRecord[] = [];
+
+      for (let draft of this.impl.storage.chatDraftUpdates.list()) {
+        let drafts = draftsByChat.get(draft.chatId);
+        if (!drafts) {
+          drafts = [];
+          draftsByChat.set(draft.chatId, drafts);
+        }
+        drafts.push(draft);
+
+        if (startAfterTimestamp !== undefined && draft.timestamp.valueOf() <= startAfterTimestamp) {
+          continue;
+        }
+
+        chatIdsToSend.add(draft.chatId);
+        draftsToSend.push(draft);
+      }
+
+      let authorByChat = new Map<number, AiChatAuthorInfo>();
+      for (let chatId of chatIdsToSend) {
+        let drafts = draftsByChat.get(chatId);
+        if (!drafts) {
+          continue;
+        }
+
+        authorByChat.set(chatId, this.impl.normalizeDraftAuthor(drafts));
+      }
+
+      for (let draft of draftsToSend) {
+        subscriber.draftUpdate(
+            draft.chatId, draft.timestamp, authorByChat.get(draft.chatId)!,
+            draft.update).catch(unsubscribe);
+      }
+
+      if (startAfter !== undefined) {
+        for (let chatId of changedChatIds) {
+          if (!draftsByChat.has(chatId)) {
+            subscriber.draftCleared(chatId).catch(unsubscribe);
+          }
+        }
+      }
+    }
+
+    if (startAfter !== undefined) {
       // Catch up on messages.
       for (let msg of chats.byTimestamp.list({startAfter: startAfter.valueOf()})) {
         subscriber.message(msg).catch(unsubscribe);
@@ -3046,15 +3325,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       capsules?: CapsuleSpecifier[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
 
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
-    }
+    let meta = this.#assertChatNotActive(chatId);
+    let result = this.impl.materializeChatDraft(chatId, meta);
+    if (result) meta = result.meta;
     meta.lastActive = this.impl.getChatTimestamp();
-    if (meta.activeAgent) {
-      // Inhibit starting another agent.
-      delete userMeta.aiModel;
-    }
     if (userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
@@ -3086,21 +3360,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.chatMeta.put(meta);
   }
 
-  async mergeChanges(chatId: number, mergeThrough: number): Promise<void> {
+  async mergeChanges(chatId: number, mergeThrough: number | null,
+                     options?: { includeDraft?: boolean }): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(null);
 
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
+    let meta = this.#assertChatNotActive(chatId);
+    if (options?.includeDraft) {
+      let result = this.impl.materializeChatDraft(chatId, meta);
+      if (result) {
+        mergeThrough = result.sequence;
+        meta = result.meta;
+      }
     }
 
-    if (meta.activeAgent) {
-      throw new Error("Agent is running, wait for it to finish.");
+    if (mergeThrough === null) {
+      return;
     }
-
-    // Unset `hasProposedChanges` assuming we merge everything -- but we'll set it again later if
-    // we find otherwise.
-    delete meta.hasProposedChanges;
 
     // Get unmerged updates for the thread.
     let updates = this.impl.getProposedChanges(chatId);
@@ -3109,9 +3384,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     while (updates.length > 0 && updates[updates.length - 1].sequence > mergeThrough) {
       // We're not merging this one.
       updates.pop();
-
-      // But this implies that there are still proposed changes.
-      meta.hasProposedChanges = true;
     }
 
     if (updates.length === 0) {
@@ -3141,6 +3413,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     meta.lastActive = timestamp;
     this.impl.storage.chatMeta.put(meta);
+    this.impl.recomputeHasProposedChanges(chatId, meta);
 
     // Maybe generate gadget title if this was the first accepted code.
     if (isFirstChange && userMeta.quickModel) {
@@ -3149,16 +3422,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revertChanges(chatId: number, revertFrom: number): Promise<void> {
-    let author = await this.clientUser.whoami();
+    let author = await this.#getClientProfile();
 
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
-    }
-
-    if (meta.activeAgent) {
-      throw new Error("Agent is running, wait for it to finish.");
-    }
+    let meta = this.#assertChatNotActive(chatId);
 
     let unmerged: number[] = [];
     for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
@@ -3192,19 +3458,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       revertFrom,
     });
 
-    if (unmerged[0] < revertFrom) {
-      meta.hasProposedChanges = true;
-    } else {
-      delete meta.hasProposedChanges;
-    }
-
     meta.lastActive = timestamp;
     this.impl.storage.chatMeta.put(meta);
+    this.impl.recomputeHasProposedChanges(chatId, meta);
     this.impl.proposedChangesChanged(chatId);
   }
 
   async deleteChat(chatId: number): Promise<void> {
     this.impl.storage.chatMeta.delete(chatId);
+    this.impl.deleteChatDraftUpdates(chatId);
 
     // Clean up agentCallbackArgs for this chat.
     for (let entry of this.impl.storage.agentCallbackArgs.list(
@@ -3224,23 +3486,39 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async retryAgent(chatId: number, modelId: string): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(modelId);
 
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
-    }
-    if (meta.activeAgent) {
-      // Agent is already running, nothing to do.
-      return;
-    }
+    let meta = this.#assertChatNotActive(chatId);
     if (!userMeta.aiModel) {
       throw new Error("No AI model available.");
     }
+
+    let result = this.impl.materializeChatDraft(chatId, meta);
+    if (result) meta = result.meta;
 
     meta.activeAgent = userMeta.aiModel.profile;
     meta.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(meta);
 
     this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
+  }
+
+  async finalizeChatDraft(chatId: number): Promise<void> {
+    let meta = this.#assertChatNotActive(chatId);
+    this.impl.materializeChatDraft(chatId, meta);
+  }
+
+  async discardChatDraftChanges(chatId: number): Promise<void> {
+    let meta = this.#assertChatNotActive(chatId);
+    let updates = this.impl.listChatDraftUpdates(chatId);
+    if (updates.length === 0) {
+      return;
+    }
+
+    meta.lastActive = this.impl.getChatTimestamp();
+    this.impl.storage.chatMeta.put(meta);
+    this.impl.deleteChatDraftUpdates(chatId, updates);
+    this.impl.emitChatDraftCleared(chatId);
+    this.impl.recomputeHasProposedChanges(chatId, meta);
+    this.impl.proposedChangesChanged(chatId);
   }
 
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {

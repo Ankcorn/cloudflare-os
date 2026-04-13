@@ -302,6 +302,7 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
     "@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8": "Qwen 3 Coder 480B (Workers AI)",
     "@cf/moonshotai/kimi-k2.5": "Kimi K2.5 (Workers AI)",
     "@cf/zai-org/glm-4.7-flash": "GLM 4.7 Flash (Workers AI)",
+    "@cf/zai-org/glm-5.1": "GLM 5.1 (Workers AI)",
   },
   "google": {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
@@ -497,7 +498,10 @@ export interface Overseer extends RpcTarget {
   subscribeToCode(subscriber: RpcStub<CodeSubscriber>, fromVersion?: number): Promise<RpcStub<{}>>;
 
   // Send a Yjs update to the server.
-  updateCode(update: Uint8Array): Promise<void>;
+  //
+  // If `chatId` is omitted, the update applies to the committed mainline code. If `chatId`
+  // is provided, the update is recorded as a live draft edit for that chat's branch.
+  updateCode(update: Uint8Array, chatId?: number): Promise<void>;
 
   // Get the Gadget's deployed UI code, to be run inside an iframe sandbox.
   //
@@ -605,11 +609,23 @@ export interface Overseer extends RpcTarget {
 
   // Indicates that the user has requested that proposed changes through the given sequence number
   // in the chat thread be merged into the mainline.
-  mergeChanges(chatId: number, mergeThrough: number): Promise<void>;
+  //
+  // If `options.includeDraft` is true, any current live draft for the chat is first materialized
+  // into one durable `changes` message and included in the merge.
+  mergeChanges(
+      chatId: number, mergeThrough: number | null,
+      options?: { includeDraft?: boolean }): Promise<void>;
 
   // Indicates that the user has requested that proposed changes starting from the given sequence
   // number in the chat thread be reverted.
   revertChanges(chatId: number, revertFrom: number): Promise<void>;
+
+  // Materialize the current live draft for the chat into one durable `changes` message without
+  // merging it into the mainline.
+  finalizeChatDraft(chatId: number): Promise<void>;
+
+  // Discard the current live draft for the chat without affecting any durable `changes` messages.
+  discardChatDraftChanges(chatId: number): Promise<void>;
 
   // Delete a chat thread.
   deleteChat(chatId: number): Promise<void>;
@@ -737,7 +753,9 @@ export type AiChatMetadata = {
   // chat.
   activeAgent?: AiChatAuthorInfo,
 
-  // If true, this chat thread has proposed changes which have not been accepted yet.
+  // If true, this chat thread has proposed changes which have not been accepted yet,
+  // including any live draft edits that have not yet been materialized into a durable
+  // `changes` message.
   hasProposedChanges?: boolean;
 
   // If this was started from an agent spawner, the spawner's display name.
@@ -971,9 +989,16 @@ export type AiChatStreamEvent = {
   toolCallId: string;
   delta: string;
 } | {
+  // This is a provisional UI lifecycle event. For most tools it means the full tool call input has
+  // been received, so the tool is no longer visually "in progress". executeCode does not emit this
+  // during streaming; its provisional card is cleared when the final durable message arrives.
   type: "toolCallFinished";
   toolCallId: string;
-  error?: string;
+} | {
+  // Indicates which file the agent is currently editing, if any. This is emitted while a
+  // writeFile/editFile call is streaming, and set to null when a non-edit tool becomes active.
+  type: "setActiveFile";
+  filename: string | null;
 } | {
   type: "toolOutputDelta";
   toolCallId: string;
@@ -998,6 +1023,14 @@ export interface AiChatSubscriber {
 
   // Adds a message to the chat.
   message(msg: AiChatMessage): void;
+
+  // Delivers one persisted live-draft update for a chat branch. Subscriptions replay all currently
+  // stored draft updates for a chat so newly-joined clients can reconstruct the editable branch
+  // state without a separate fetch.
+  draftUpdate(chatId: number, timestamp: Date, author: AiChatAuthorInfo, update: Uint8Array): void;
+
+  // Indicates that all persisted live-draft updates for the given chat were cleared.
+  draftCleared(chatId: number): void;
 
   // Delivers one provisional streaming event. Clients may ignore event types they don't support.
   stream(chatId: number, event: AiChatStreamEvent): void;
