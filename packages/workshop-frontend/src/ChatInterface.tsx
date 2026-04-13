@@ -58,6 +58,7 @@ import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import NewGatekeeperModal from "./NewGatekeeperModal";
 import { handlePickerKeyDown } from "./pickerNavigation";
+import { normalizeResourceUrl } from "./resourceMatching";
 
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
@@ -571,7 +572,7 @@ export const ChatInput = ({
 
     try {
       // Create the capsule gatekeeper.
-      const gk = await createCapsuleGatekeeper(accountId, activeUrl.text);
+      const gk = await createCapsuleGatekeeper(accountId, normalizeResourceUrl(activeUrl.text));
       if (!gk) {
         console.error("Failed to create capsule gatekeeper");
         return;

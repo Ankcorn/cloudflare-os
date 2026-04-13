@@ -4,7 +4,7 @@ import { MagnifyingGlass } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperClient, AiChatAuthorInfo, AgentSpawnerConfig } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from './AuthContext'
-import { getPlaceholderRanges } from './resourceMatching'
+import { getPlaceholderRanges, normalizeResourceUrl } from './resourceMatching'
 import ResourcePicker, { type SelectableItem } from './ResourcePicker'
 import { handlePickerKeyDown } from './pickerNavigation'
 
@@ -239,7 +239,7 @@ export default function NewGatekeeperModal({
                 authenticatedApi={authenticatedApi}
                 searchText={searchText}
                 onSelectAccount={(accountId, _vendorId, _resource, _accountDescription, _vendorDescription) => {
-                  const url = searchText.trim()
+                  const url = normalizeResourceUrl(searchText)
                   if (url && getPlaceholderRanges(url).length === 0) {
                     handleCreateResource(accountId, url)
                   }

@@ -8,7 +8,7 @@ import { Rocket, Robot, Plugs, Lightning, ArrowLeft, MagnifyingGlass, DownloadSi
 import { useAuth } from './useAuth'
 import LoginPage from './LoginPage'
 import ResourcePicker from './ResourcePicker'
-import { extractBaseUrl } from './resourceMatching'
+import { extractBaseUrl, normalizeResourceUrl } from './resourceMatching'
 import { makeBlueprintFilename, saveStreamToFile } from './fileTransfers'
 
 interface Props {
@@ -212,7 +212,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           assignments[name] = {
             type: 'gatekeeper',
             accountId: (form as any).accountId,
-            resourceUrl: (form as any).resourceUrl,
+            resourceUrl: normalizeResourceUrl((form as any).resourceUrl || ''),
           }
         } else if (binding.type === 'aiModel') {
           assignments[name] = {

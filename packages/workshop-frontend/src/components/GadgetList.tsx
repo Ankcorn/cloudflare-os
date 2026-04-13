@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Clock, MagnifyingGlass, Hexagon, CurrencyDollar, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil } from '@phosphor-icons/react'
+import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil } from '@phosphor-icons/react'
 import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -114,19 +114,11 @@ function AppRow({
             </h3>
           )}
         </div>
-        <div className="flex items-center gap-3 mt-0.5">
-          {gadget.owner && (
-            <p className="text-xs text-kumo-subtle truncate">
-              Shared by {gadget.owner.name}
-            </p>
-          )}
-          {gadget.totalCost != null && gadget.totalCost > 0 && (
-            <span className="flex items-center gap-1 text-xs text-kumo-inactive flex-shrink-0">
-              <CurrencyDollar size={10} />
-              {formatCost(gadget.totalCost)}
-            </span>
-          )}
-        </div>
+        {gadget.owner && (
+          <p className="text-xs text-kumo-subtle truncate mt-0.5">
+            Shared by {gadget.owner.name}
+          </p>
+        )}
       </div>
 
       {/* Time */}
