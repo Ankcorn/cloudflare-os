@@ -4,7 +4,7 @@ import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
-import { extractHostname, matchesResource, classifyMatch, getPlaceholderRanges } from './resourceMatching'
+import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
 
 export interface VendorOption {
   id: string
@@ -28,6 +28,7 @@ export type SelectableItem = {
   resource: SupportedResource
   vendorDescription: VendorDescription
   suffix: string
+  replaceSearch?: boolean
 }
 
 export interface ResourcePickerProps {
@@ -165,6 +166,9 @@ export default function ResourcePicker({
     vendor: VendorOption
     classification: 'full' | 'prefix' | 'none'
     suffix?: string
+    // When true, the suffix replaces the entire search text (text-only matches)
+    // rather than being appended to it (URL prefix matches).
+    replaceSearch?: boolean
     accountsOnly?: boolean
   }
 
@@ -174,9 +178,28 @@ export default function ResourcePicker({
     for (const { resource, vendor } of allResourceItems) {
       if (!matchesResource(searchText, resource)) continue
       const cls = classifyMatch(searchText.trim(), resource.urlPattern)
-      // When onRefine is provided, only show full and prefix matches — suppress
-      // text-only matches (none) since they have no useful URL suffix.
-      if (cls.type === 'none' && onRefine) continue
+      if (cls.type === 'none') {
+        // Text-only match (name/description matched but URL didn't). In URL-input
+        // mode (onRefine), show as a prefix suggestion so selecting it fills in the
+        // resource's base URL. Without onRefine, show normally.
+        if (onRefine) {
+          // Only treat as prefix if it was actually a text match (not a false positive).
+          if (!matchesResourceText(searchText, resource)) continue
+          const baseUrl = extractBaseUrl(resource.urlPattern)
+          const suffix = baseUrl
+            ? baseUrl.replace(/^https?:\/\//, '')
+            : resource.urlPattern.replace(/^https?:\/\//, '')
+          matchedResources.push({
+            resource, vendor,
+            classification: 'prefix',
+            suffix,
+            replaceSearch: true,
+          })
+        } else {
+          matchedResources.push({ resource, vendor, classification: 'none' })
+        }
+        continue
+      }
       matchedResources.push({
         resource, vendor,
         classification: cls.type,
@@ -231,7 +254,7 @@ export default function ResourcePicker({
 
   const selectableItems = useMemo(() => {
     const items: SelectableItem[] = []
-    for (const { resource, vendor, classification, suffix, accountsOnly } of matchedResources) {
+    for (const { resource, vendor, classification, suffix, replaceSearch, accountsOnly } of matchedResources) {
       // Prefix matches: show a single "refine" row (only when onRefine is provided).
       if (classification === 'prefix' && onRefine && suffix) {
         items.push({
@@ -239,6 +262,7 @@ export default function ResourcePicker({
           resource,
           vendorDescription: vendor.description,
           suffix,
+          replaceSearch,
         })
         continue
       }
@@ -291,7 +315,7 @@ export default function ResourcePicker({
         if (!item) return
         if (item.type === 'refine') {
           if (onRefine) {
-            const newUrl = searchText.trim() + item.suffix
+            const newUrl = item.replaceSearch ? item.suffix : searchText.trim() + item.suffix
             const placeholders = getPlaceholderRanges(newUrl)
             if (placeholders.length > 0) {
               onRefine(newUrl, placeholders[0].start, placeholders[0].end)
@@ -364,7 +388,7 @@ export default function ResourcePicker({
           </div>
         ) : (() => {
           let itemIdx = 0
-          return matchedResources.map(({ resource, vendor, classification, suffix, accountsOnly }, i) => {
+          return matchedResources.map(({ resource, vendor, classification, suffix, replaceSearch, accountsOnly }, i) => {
             // --- Prefix match: render as a single compact "refine" row ---
             if (classification === 'prefix' && onRefine && suffix) {
               const isActive = itemIdx === activeIndex
@@ -373,7 +397,7 @@ export default function ResourcePicker({
                 <div
                   key={`${vendor.id}-${resource.urlPattern}`}
                   onClick={() => {
-                    const newUrl = searchText.trim() + suffix
+                    const newUrl = replaceSearch ? suffix : searchText.trim() + suffix
                     const placeholders = getPlaceholderRanges(newUrl)
                     if (placeholders.length > 0) {
                       onRefine(newUrl, placeholders[0].start, placeholders[0].end)

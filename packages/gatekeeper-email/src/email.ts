@@ -58,7 +58,7 @@ function getBasePath(env: Env) {
 
 function getEmailMailboxResource(env: Env): SupportedResource {
   return {
-    urlPattern: `${getBaseUrl(env)}/mailbox/*`,
+    urlPattern: `${getBaseUrl(env)}/mailbox/:user`,
     title: "Email Mailbox",
     description: "Send and receive emails.",
   };

@@ -172,19 +172,38 @@ export function getPlaceholderRanges(url: string): Array<{ start: number; end: n
     // Include the colon in the range
     ranges.push({ start: match.index, end: match.index + match[0].length })
   }
-  // Standalone * wildcards as complete path segments
-  const starRegex = /(?<=\/)\*(?=\/|$)/g
+  // Standalone * wildcards as complete path segments, but NOT when * is the final
+  // segment (trailing /* is just "everything under here" and shouldn't block selection).
+  const starRegex = /(?<=\/)\*(?=\/)/g
   while ((match = starRegex.exec(url)) !== null) {
     ranges.push({ start: match.index, end: match.index + match[0].length })
   }
   return ranges.sort((a, b) => a.start - b.start)
 }
 
+// Check if search text matches a resource by name/description tokens only.
+export function matchesResourceText(search: string, resource: SupportedResource): boolean {
+  const corpus = `${resource.title} ${resource.description} ${resource.urlPattern}`.toLowerCase()
+  const tokens = search.toLowerCase().split(/\s+/).filter(Boolean)
+  return tokens.length > 0 && tokens.every(t => corpus.includes(t))
+}
+
 // Check if search text matches a resource. Tries URL prefix matching (scheme-optional),
 // then falls back to multi-word token matching against title/description/pattern.
 export function matchesResource(search: string, resource: SupportedResource): boolean {
   if (matchesResourceUrl(search.trim(), resource.urlPattern)) return true
-  const corpus = `${resource.title} ${resource.description} ${resource.urlPattern}`.toLowerCase()
-  const tokens = search.toLowerCase().split(/\s+/).filter(Boolean)
-  return tokens.every(t => corpus.includes(t))
+  return matchesResourceText(search, resource)
+}
+
+// Normalize a resource URL for sending to the backend. Prepends https:// if no protocol
+// is present, and strips a trailing /* wildcard (which is just "everything under here").
+export function normalizeResourceUrl(url: string): string {
+  let normalized = url.trim()
+  // Default to https:// if no protocol specified.
+  if (normalized && !/^https?:\/\//i.test(normalized)) {
+    normalized = 'https://' + normalized
+  }
+  // Strip trailing /* wildcard — it's not meaningful for the backend.
+  normalized = normalized.replace(/\/\*$/, '')
+  return normalized
 }
