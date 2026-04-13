@@ -78,6 +78,8 @@ Once a connection made and permissions are set, the agent can use the connection
 
 The code editor not only shows the current state of the code, but maintains a complete history of all individual changes made to the code, and who made them (human or agent). There is no need for the user to explicitly signal when to commit changes -- the history is recorded continuously, like a Google Docs edit history. Users are not prompted to accept or reject each change proposed by the agent, but can easily review and revert changes via the editor UI. (Also like Google Docs, all changes are saved duably immediately as the keystrokes are made, so nothing is lost if the user's browser crashes.)
 
+When the user is viewing a particular chat thread, direct edits in the code editor are applied to that thread's proposed-changes branch rather than immediately affecting the mainline code. This allows the user and agent to collaborate within a thread on the same pending branch state, and the agent is informed about user-authored edits through synthetic `observeUserChanges` events in the chat history.
+
 All changes made to the code do not immediately go live. The user must "commit" the changes first. This ensures that the user has a chance to review and test changes before they go live, if they want.
 
 The user can execute code that hasn't been saved yet. Such code will be executed in "test mode", where any actions performed through the Gadget's bindings will not be applied, only logged. The user can then review to make sure it did the right things.

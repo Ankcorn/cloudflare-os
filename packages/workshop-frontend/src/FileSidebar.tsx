@@ -5,9 +5,11 @@ import { FileText, Plus, Trash, Pencil } from '@phosphor-icons/react'
 interface FileSidebarProps {
   files: string[]
   activeFile: string | null
+  streamingActiveFile?: string | null
   dirtyFiles: Set<string>
   changedFiles?: Set<string>  // Files with proposed changes (for diff mode)
   isDiffMode?: boolean         // Whether we're in diff mode
+  editLocked?: boolean
   onFileSelect: (filename: string) => void
   onFileCreate: (filename: string) => void
   onFileDelete: (filename: string) => void
@@ -17,9 +19,11 @@ interface FileSidebarProps {
 export default function FileSidebar({
   files,
   activeFile,
+  streamingActiveFile,
   dirtyFiles,
   changedFiles,
   isDiffMode = false,
+  editLocked = false,
   onFileSelect,
   onFileCreate,
   onFileDelete,
@@ -98,6 +102,7 @@ export default function FileSidebar({
           variant="primary"
           size="sm"
           className="w-full"
+          disabled={editLocked}
           onClick={() => setIsCreateModalOpen(true)}
         >
           <Plus size={14} />
@@ -112,6 +117,7 @@ export default function FileSidebar({
           const hasChanges = changedFiles?.has(filename) || false
           const isUnchanged = isDiffMode && !hasChanges
           const isActive = activeFile === filename
+          const isStreamingActive = streamingActiveFile === filename
 
           return (
             <div
@@ -157,12 +163,21 @@ export default function FileSidebar({
                 {filename}
               </span>
 
+              {isStreamingActive && (
+                <div
+                  className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin shrink-0"
+                  aria-label={`${filename} is being edited`}
+                  title="Agent is editing this file"
+                />
+              )}
+
               {/* Action buttons — visible on hover */}
               <div
                 className="hidden group-hover:flex items-center gap-0.5"
                 onClick={(e) => e.stopPropagation()}
               >
                 <button
+                  disabled={editLocked}
                   className="p-0.5 rounded text-kumo-subtle hover:text-kumo-default hover:bg-kumo-tint"
                   onClick={(e) => {
                     e.stopPropagation()
@@ -173,6 +188,7 @@ export default function FileSidebar({
                   <Pencil size={12} />
                 </button>
                 <button
+                  disabled={editLocked}
                   className="p-0.5 rounded text-kumo-subtle hover:text-kumo-danger hover:bg-kumo-tint"
                   onClick={(e) => {
                     e.stopPropagation()
