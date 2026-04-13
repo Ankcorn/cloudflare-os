@@ -55,6 +55,11 @@ export default function ResourcePicker({
 }: ResourcePickerProps) {
   const toasts = useKumoToastManager()
 
+  const buildRefineUrl = useCallback((suffix: string, replaceSearch?: boolean) => {
+    const newUrl = replaceSearch ? suffix : searchText.trim() + suffix
+    return newUrl.replace(/\*$/, '')
+  }, [searchText])
+
   const [allAccounts, setAllAccounts] = useState<
     Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[], credentialsValid: boolean }>
   >(new Map())
@@ -315,7 +320,7 @@ export default function ResourcePicker({
         if (!item) return
         if (item.type === 'refine') {
           if (onRefine) {
-            const newUrl = item.replaceSearch ? item.suffix : searchText.trim() + item.suffix
+            const newUrl = buildRefineUrl(item.suffix, item.replaceSearch)
             const placeholders = getPlaceholderRanges(newUrl)
             if (placeholders.length > 0) {
               onRefine(newUrl, placeholders[0].start, placeholders[0].end)
@@ -397,7 +402,7 @@ export default function ResourcePicker({
                 <div
                   key={`${vendor.id}-${resource.urlPattern}`}
                   onClick={() => {
-                    const newUrl = replaceSearch ? suffix : searchText.trim() + suffix
+                    const newUrl = buildRefineUrl(suffix, replaceSearch)
                     const placeholders = getPlaceholderRanges(newUrl)
                     if (placeholders.length > 0) {
                       onRefine(newUrl, placeholders[0].start, placeholders[0].end)
