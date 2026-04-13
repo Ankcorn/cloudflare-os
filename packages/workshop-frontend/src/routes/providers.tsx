@@ -169,9 +169,9 @@ function ProvidersPage() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
       {/* Page header */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-kumo-default">AI Providers</h1>
           <p className="text-sm text-kumo-subtle mt-1">
@@ -189,7 +189,7 @@ function ProvidersPage() {
 
       {/* Gateway mode notice */}
       {gatewayMode && (
-        <div className="mb-6 px-4 py-3 rounded-xl border border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)] text-sm text-[var(--color-compute-100)]">
+        <div className="px-4 py-3 rounded-xl border border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)] text-sm text-[var(--color-compute-100)]">
           <strong>AI Gateway mode</strong> — built-in models are managed by your deployment.
           You can still add custom models with your own API tokens.
         </div>
@@ -197,7 +197,7 @@ function ProvidersPage() {
 
       {/* Quick model callout */}
       {!gatewayMode && models.length > 0 && (
-        <div className="mb-6 px-4 py-3 rounded-xl border border-kumo-line bg-kumo-elevated flex items-center gap-3">
+        <div className="px-4 py-3 rounded-xl border border-kumo-line bg-kumo-elevated flex items-center gap-3">
           <Lightning size={16} className="text-[var(--color-ai-100)] flex-shrink-0" />
           <div className="flex-1 min-w-0">
             <span className="text-sm text-kumo-default">

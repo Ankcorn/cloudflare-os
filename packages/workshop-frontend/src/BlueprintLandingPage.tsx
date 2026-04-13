@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useParams } from '@tanstack/react-router'
+import { useNavigate, useParams } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
-import { Button, Select } from '@cloudflare/kumo'
-import { Rocket, Robot, Plugs, Lightning, ArrowLeft, MagnifyingGlass } from '@phosphor-icons/react'
+import { Button, Dialog, Select, useKumoToastManager } from '@cloudflare/kumo'
+import { Rocket, Robot, Plugs, Lightning, ArrowLeft, MagnifyingGlass, DownloadSimple, Star, Trash } from '@phosphor-icons/react'
 
 import { useAuth } from './useAuth'
 import LoginPage from './LoginPage'
 import ResourcePicker from './ResourcePicker'
 import { extractBaseUrl } from './resourceMatching'
+import { makeBlueprintFilename, saveStreamToFile } from './fileTransfers'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -20,7 +21,9 @@ type BindingFormState = Record<string, any>
 export default function BlueprintLandingPage({ rpcStub }: Props) {
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id!
+  const navigate = useNavigate()
   const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
+  const toasts = useKumoToastManager()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -31,7 +34,17 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const [bindingForm, setBindingForm] = useState<BindingFormState>({})
   const [models, setModels] = useState<AiChatAuthorInfo[]>([])
   const [creating, setCreating] = useState(false)
+  const [downloading, setDownloading] = useState(false)
   const [showLogin, setShowLogin] = useState(false)
+  const [canManageFeatured, setCanManageFeatured] = useState(false)
+  const [isFeatured, setIsFeatured] = useState(false)
+  const [updatingFeatured, setUpdatingFeatured] = useState(false)
+  const [isInLibrary, setIsInLibrary] = useState(false)
+  const [isUploadedBlueprint, setIsUploadedBlueprint] = useState(false)
+  const [loadingLibraryState, setLoadingLibraryState] = useState(false)
+  const [addingToLibrary, setAddingToLibrary] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [removingFromLibrary, setRemovingFromLibrary] = useState(false)
 
   // Fetch blueprint metadata.
   useEffect(() => {
@@ -59,6 +72,71 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       authenticatedApi.listModels().then(setModels).catch(console.error)
     }
   }, [isAuthenticated, authenticatedApi, showConfigure])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!id || !authenticatedApi) {
+      setCanManageFeatured(false)
+      setIsFeatured(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    authenticatedApi.adminIsBlueprintFeatured(id).then(result => {
+      if (cancelled) return
+
+      if (result === null) {
+        setCanManageFeatured(false)
+        setIsFeatured(false)
+      } else {
+        setCanManageFeatured(true)
+        setIsFeatured(result)
+      }
+    }).catch(err => {
+      if (cancelled) return
+      console.error('Failed to load admin featured state:', err)
+      setCanManageFeatured(false)
+      setIsFeatured(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [id, authenticatedApi])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!id || !authenticatedApi) {
+      setIsInLibrary(false)
+      setLoadingLibraryState(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setLoadingLibraryState(true)
+    authenticatedApi.isBlueprintInLibrary(id).then(result => {
+      if (cancelled) return
+      setIsInLibrary(result !== null)
+      setIsUploadedBlueprint(result?.uploaded ?? false)
+    }).catch(err => {
+      if (cancelled) return
+      console.error('Failed to load library state:', err)
+      setIsInLibrary(false)
+      setIsUploadedBlueprint(false)
+    }).finally(() => {
+      if (!cancelled) {
+        setLoadingLibraryState(false)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [id, authenticatedApi])
 
   const handleStartConfigure = () => {
     if (!isAuthenticated) {
@@ -159,6 +237,94 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     }
   }
 
+  const handleDownload = async () => {
+    if (!id || !blueprint) return
+    setDownloading(true)
+    setError(null)
+
+    try {
+      const archive = await rpcStub.downloadBlueprint(id)
+      await saveStreamToFile(
+        archive,
+        makeBlueprintFilename(blueprint.metadata.title, blueprint.metadata.version),
+      )
+    } catch (err: any) {
+      setError(err.message || 'Failed to download blueprint.')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  const handleToggleFeatured = async () => {
+    if (!authenticatedApi || !id || !canManageFeatured) return
+
+    const nextFeatured = !isFeatured
+    setUpdatingFeatured(true)
+
+    try {
+      await authenticatedApi.adminSetBlueprintFeatured(id, nextFeatured)
+      setIsFeatured(nextFeatured)
+    } catch (err: any) {
+      console.error('Failed to update featured status:', err)
+      toasts.add({
+        title: nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
+        variant: 'error',
+      })
+    } finally {
+      setUpdatingFeatured(false)
+    }
+  }
+
+  const handleAddToLibrary = async () => {
+    if (!id) return
+
+    if (!isAuthenticated || !authenticatedApi) {
+      setShowLogin(true)
+      return
+    }
+
+    if (isInLibrary) {
+      return
+    }
+
+    setAddingToLibrary(true)
+    try {
+      await authenticatedApi.addBlueprintToLibrary(id)
+      setIsInLibrary(true)
+      toasts.add({ title: 'Blueprint added to library', variant: 'success' })
+    } catch (err) {
+      console.error('Failed to add blueprint to library:', err)
+      toasts.add({ title: 'Failed to add blueprint to library', variant: 'error' })
+    } finally {
+      setAddingToLibrary(false)
+    }
+  }
+
+  const handleRemoveFromLibrary = async () => {
+    if (!id || !authenticatedApi) return
+
+    setRemovingFromLibrary(true)
+    try {
+      await authenticatedApi.removeBlueprintFromLibrary(id)
+      if (isUploadedBlueprint) {
+        setShowDeleteConfirm(false)
+        toasts.add({ title: 'Blueprint deleted', variant: 'success' })
+        navigate({ to: '/blueprints' })
+      } else {
+        setIsInLibrary(false)
+        toasts.add({ title: 'Blueprint removed from library', variant: 'success' })
+      }
+    } catch (err) {
+      console.error('Failed to remove blueprint from library:', err)
+      toasts.add({
+        title: isUploadedBlueprint ? 'Failed to delete blueprint' : 'Failed to remove blueprint from library',
+        variant: 'error',
+      })
+    } finally {
+      setRemovingFromLibrary(false)
+    }
+  }
+
   if (showLogin && !isAuthenticated) {
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
@@ -197,15 +363,68 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       <div className="max-w-[640px] w-full h-fit bg-kumo-base border border-kumo-line rounded-xl p-6 shadow-sm">
         <div className="space-y-6">
           {/* Header */}
-          <div>
-            <h3 className="text-xl font-semibold text-kumo-default mb-1">{meta.title}</h3>
-            {meta.description && (
-              <p className="text-kumo-subtle text-sm mb-3">{meta.description}</p>
-            )}
-            <div className="flex flex-wrap items-center gap-2 text-xs text-kumo-subtle">
-              <span>By {meta.author.name}</span>
-              <span>v{meta.version}</span>
-              <span>Updated {new Date(meta.lastUpdated).toLocaleDateString()}</span>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-xl font-semibold text-kumo-default mb-1">{meta.title}</h3>
+              {meta.description && (
+                <p className="text-kumo-subtle text-sm mb-3">{meta.description}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 text-xs text-kumo-subtle">
+                <span>By {meta.author.name}</span>
+                <span>v{meta.version}</span>
+                <span>Updated {new Date(meta.lastUpdated).toLocaleDateString()}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {canManageFeatured && (
+                <Button
+                  variant={isFeatured ? 'primary' : 'secondary'}
+                  size="sm"
+                  onClick={handleToggleFeatured}
+                  loading={updatingFeatured}
+                  icon={Star}
+                >
+                  {isFeatured ? 'Unfeature' : 'Feature'}
+                </Button>
+              )}
+              {isInLibrary && isUploadedBlueprint ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  icon={Trash}
+                >
+                  Delete blueprint
+                </Button>
+              ) : isInLibrary ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleRemoveFromLibrary}
+                  loading={removingFromLibrary}
+                  icon={Trash}
+                >
+                  Remove from Library
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleAddToLibrary}
+                  loading={addingToLibrary || loadingLibraryState}
+                >
+                  {isAuthenticated ? 'Add to Library' : 'Log in to add'}
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleDownload}
+                loading={downloading}
+                icon={DownloadSimple}
+              >
+                Download
+              </Button>
             </div>
           </div>
 
@@ -288,6 +507,38 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           )}
         </div>
       </div>
+
+      {/* Delete uploaded blueprint confirmation dialog */}
+      <Dialog.Root
+        role="alertdialog"
+        open={showDeleteConfirm}
+        onOpenChange={(open) => { if (!open) setShowDeleteConfirm(false) }}
+      >
+        <Dialog className="p-8" size="sm">
+          <Dialog.Title className="text-lg font-semibold">
+            Delete blueprint
+          </Dialog.Title>
+          <Dialog.Description className="mt-2 text-kumo-subtle">
+            Delete "{blueprint?.metadata.title}"? This blueprint was uploaded manually and cannot be recovered.
+          </Dialog.Description>
+          <div className="mt-6 flex justify-end gap-2">
+            <Dialog.Close
+              render={(props) => (
+                <Button variant="secondary" {...props} disabled={removingFromLibrary}>
+                  Cancel
+                </Button>
+              )}
+            />
+            <Button
+              variant="destructive"
+              onClick={handleRemoveFromLibrary}
+              loading={removingFromLibrary}
+            >
+              Delete
+            </Button>
+          </div>
+        </Dialog>
+      </Dialog.Root>
     </div>
   )
 }

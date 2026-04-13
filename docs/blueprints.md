@@ -12,6 +12,7 @@ This is analogous to a template: the blueprint author publishes a reusable gadge
 - Anyone with the link can **view** the blueprint's metadata (title, description, author, required bindings) without authenticating. **Creating a gadget** from a blueprint requires authentication.
 - A blueprint is always owned by the gadget's owner, regardless of which collaborator creates it.
 - The blueprint author can **update** a blueprint to reflect newer code, incrementing its version number. Old code versions are retained in storage to avoid race conditions during concurrent instantiation.
+- Blueprints can be exported to a `.gadget` file and imported into a different Workshop instance.
 
 ## What a Blueprint Captures
 
@@ -61,6 +62,53 @@ Blueprint **code content** is stored separately in an **R2 bucket** (`BLUEPRINT_
 
 The `dirty` flag handles propagation failures gracefully: it is set to `true` before propagation begins and cleared only after all writes succeed. If a failure leaves it set, the UI shows a warning with a "Retry" button.
 
+## Blueprint Library
+
+The Blueprints page shows blueprints in two sections:
+
+- **Blueprints** -- a merged grid of featured picks and the user's saved library entries (deduplicated, featured first). An Upload button lets users import `.gadget` archives.
+- **My Blueprints** -- blueprints you published from gadgets you own. These are backed by a gadget DO, mirrored into your User DO, and published through KV.
+
+Library entries come in two forms:
+
+- **Saved by reference** -- created by `addBlueprintToLibrary()`. The entry stores a cached copy of the blueprint's public metadata for list rendering, but the actual blueprint remains owned by the original publisher. Removing it only deletes your personal library entry.
+- **Uploaded** -- created by `importBlueprint()` from a `.gadget` archive. This creates a new local blueprint ID on the current deployment, stores the snapshot in this deployment's R2/KV, and records it in your library with `uploaded: true`. Removing one of these entries deletes the imported blueprint content as well.
+
+## Export / Import Format
+
+Blueprints can be downloaded from `/blueprint/<id>` as `.gadget` files and uploaded from the home page into another Workshop instance.
+
+The `.gadget` format is a simple internal binary container:
+
+- 8-byte magic number: `0xec2e2d3a2300e317`
+- 4-byte format version (`1`)
+- 4-byte JSON metadata length
+- 8-byte raw content length
+- JSON-encoded `BlueprintMetadata`
+- Raw blueprint content bytes copied from `BLUEPRINT_CONTENT/<blueprintId>/<version>`
+
+Imports are validated before publication. Metadata is capped at 64 KiB and the stored snapshot payload is capped at 32 MiB so a malformed archive cannot force unbounded allocation in the worker.
+
+Only `BlueprintMetadata` is included in the file, not the full KV record. In particular, the archive does not include `ownerId` or `gadgetId`.
+
+The trailing content bytes are the same gzip-compressed Yjs snapshot that is already stored in R2 for the blueprint's current version. Import/export streams these bytes directly to and from R2 using `pipeTo()` rather than buffering the whole archive in memory on the server.
+
+## Admin Features and Featured Blueprints
+
+Deployments can optionally configure a set of admin usernames through the backend worker's `ADMINS` binding as an array of usernames.
+
+Admins get access to two extra RPCs:
+
+- `AuthenticatedApi.adminIsBlueprintFeatured()` returns whether a published blueprint is currently featured.
+- `AuthenticatedApi.adminSetBlueprintFeatured()` marks or unmarks a blueprint as featured.
+
+Only gadget-backed published blueprints are featureable. Uploaded/imported library blueprints are intentionally excluded.
+
+Featured blueprint state is split across two stores:
+
+- The authoritative `featured` bit lives in the owning user's `blueprints` record inside their User DO.
+- The `AdminSettings` durable object is a singleton (`getByName("")`) that mirrors the current public metadata for featured blueprints and writes a KV snapshot consumed by `AuthenticatedApi.listFeaturedBlueprints()`.
+
 ## Creating and Managing Blueprints
 
 Blueprints are managed through the **Share modal's Blueprints tab** in the gadget editor (the same modal used for collaborators). The UI allows:
@@ -93,6 +141,8 @@ When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprin
    - Returns the new Overseer stub, and the UI redirects to the new gadget.
 
 The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. There is currently no mechanism for automatic updates from the blueprint to existing instances (though the Yjs-based storage format could support this in the future).
+
+When a `.gadget` file is uploaded, the target instance creates a new local blueprint ID, stores the uploaded code snapshot in its own R2 bucket, writes the imported metadata to its own KV namespace, and records the blueprint under the importing user's account. The original blueprint author metadata is preserved, but ownership of the imported copy belongs to the importing user on the new instance.
 
 ## Orphaned Blueprints
 

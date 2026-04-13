@@ -81,6 +81,10 @@ export interface PublicApi extends RpcTarget {
   // Fetch blueprint metadata by ID. Returns null if the blueprint doesn't exist. No
   // authentication required (knowing the ID is sufficient, since a blueprint is "just data").
   getBlueprint(id: string): Promise<BlueprintPublicInfo | null>;
+
+  // Download a blueprint as a `.gadget` archive stream. The archive contains only
+  // BlueprintMetadata plus the current blueprint code snapshot, not the full KV record.
+  downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
 // Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
@@ -198,6 +202,34 @@ export interface AuthenticatedApi extends RpcTarget {
   // view in Settings.
   listOwnBlueprints(): Promise<BlueprintUserSummary[]>;
 
+  // List the blueprints currently in the user's library. This includes uploaded `.gadget`
+  // archives (stored locally) and blueprints saved by reference from other publishers.
+  listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]>;
+
+  // List the deployment-wide featured blueprints. This is served from a KV snapshot rather
+  // than directly from the AdminSettings durable object.
+  listFeaturedBlueprints(): Promise<BlueprintPublicInfo[]>;
+
+  // Add a blueprint to the user's library by reference, caching the current public metadata
+  // snapshot for list rendering.
+  addBlueprintToLibrary(blueprintId: string): Promise<void>;
+
+  // Remove a blueprint from the user's library. If the library entry was uploaded by the
+  // current user, this also deletes the backing blueprint content from storage.
+  removeBlueprintFromLibrary(blueprintId: string): Promise<void>;
+
+  // Returns info about whether the blueprint is in the user's library.
+  // Returns null if not in library, or { uploaded } if it is.
+  isBlueprintInLibrary(blueprintId: string): Promise<{ uploaded: boolean } | null>;
+
+  // Returns whether the blueprint is featured in deployment-wide admin settings.
+  // Returns null when the caller is not an admin or the blueprint cannot be featured.
+  adminIsBlueprintFeatured(blueprintId: string): Promise<boolean | null>;
+
+  // Mark or unmark a blueprint as featured in deployment-wide admin settings.
+  // Requires admin rights.
+  adminSetBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void>;
+
   // Create a new gadget from a blueprint. Reads the blueprint from KV, downloads code from
   // R2, creates a new Overseer DO, initializes it with the blueprint's code, and creates
   // gatekeepers from the provided binding assignments.
@@ -214,6 +246,10 @@ export interface AuthenticatedApi extends RpcTarget {
   // Delete a blueprint that the user owns. Works even if the source gadget has been deleted
   // (operates on User DO + KV directly).
   deleteOrphanedBlueprint(blueprintId: string): Promise<void>;
+
+  // Import a `.gadget` archive from another Workshop instance. The imported blueprint is stored
+  // as a local blueprint owned by the current user.
+  importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string>;
 
   // Re-authenticate a connected account whose credentials have expired (or may be about to
   // expire). Returns the URL to open in a new tab. When the OAuth flow completes, the account
@@ -1110,6 +1146,14 @@ export type BlueprintUserSummary = {
   gadgetTitle: string;
   version: number;
   lastUpdated: Date;
+};
+
+// User-side library summary (returned by AuthenticatedApi.listLibraryBlueprints).
+export type BlueprintLibrarySummary = {
+  id: string;
+  metadata: BlueprintMetadata;
+  addedAt: Date;
+  uploaded: boolean;
 };
 
 // Binding assignment (input to newGadgetFromBlueprint).

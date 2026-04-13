@@ -1,9 +1,11 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { getAiGatewayConfig } from "./ai-gateway.js";
+import type { AdminSettings } from "./admin-settings.js";
+import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 
 type ConnectedAccountRecord = {
   id: number;
@@ -41,7 +43,16 @@ type LoginSessionRecord = {
 type BlueprintUserRecord = {
   id: string;
   metadata: BlueprintMetadata;
-  gadgetId: string;
+  gadgetId?: string;
+  // Source of truth for whether the blueprint is featured deployment-wide.
+  featured?: boolean;
+};
+
+type LibraryBlueprintRecord = {
+  id: string;
+  metadata: BlueprintMetadata;
+  addedAt: Date;
+  uploaded: boolean;
 };
 
 type GadgetRecord = GadgetMetadata & {
@@ -84,6 +95,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: "tokenId",
       }),
       blueprints: collection<BlueprintUserRecord>()({
+        primaryKey: "id",
+      }),
+      libraryBlueprints: collection<LibraryBlueprintRecord>()({
         primaryKey: "id",
       }),
     },
@@ -145,6 +159,7 @@ async function checkGatekeeperVendorFilter(
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
+  private adminSettings: DurableObjectNamespace<AdminSettings>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -158,6 +173,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     this.storage = makeUserStorage(ctx.storage);
+    this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = new Map;
 
@@ -465,28 +481,154 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // --- Blueprint methods (called by Overseer during propagation) ---
 
-  async updateBlueprint(id: string, metadata: BlueprintMetadata, gadgetId: string): Promise<void> {
-    this.storage.blueprints.put({id, metadata, gadgetId});
+  async updateBlueprint(id: string, metadata: BlueprintMetadata, gadgetId: string): Promise<boolean> {
+    let existing = this.storage.blueprints.get(id);
+    // Preserve the featured bit across metadata-only/code updates.
+    let featured = existing?.featured === true;
+    this.storage.blueprints.put({id, metadata, gadgetId, featured});
+    return featured;
+  }
+
+  async importBlueprint(id: string, metadata: BlueprintMetadata): Promise<void> {
+    this.storage.libraryBlueprints.put({
+      id,
+      metadata,
+      addedAt: new Date(),
+      uploaded: true,
+    });
   }
 
   async deleteBlueprint(id: string): Promise<void> {
     this.storage.blueprints.delete(id);
   }
 
+  async addBlueprintToLibrary(id: string): Promise<void> {
+    let kvRecord = await readBlueprintKvRecord(this.env, id);
+    if (!kvRecord) {
+      throw new Error("Blueprint not found.");
+    }
+
+    let existing = this.storage.libraryBlueprints.get(id);
+    if (existing) {
+      existing.metadata = kvRecord.metadata;
+      this.storage.libraryBlueprints.put(existing);
+      return;
+    }
+
+    this.storage.libraryBlueprints.put({
+      id,
+      metadata: kvRecord.metadata,
+      addedAt: new Date(),
+      uploaded: false,
+    });
+  }
+
+  async removeBlueprintFromLibrary(id: string): Promise<void> {
+    let record = this.storage.libraryBlueprints.get(id);
+    if (!record) {
+      return;
+    }
+
+    if (record.uploaded) {
+      await this.deleteOwnedBlueprint(id);
+    } else {
+      this.storage.libraryBlueprints.delete(id);
+    }
+  }
+
+  async isBlueprintInLibrary(id: string): Promise<{ uploaded: boolean } | null> {
+    const record = this.storage.libraryBlueprints.get(id);
+    if (!record) return null;
+    return { uploaded: record.uploaded };
+  }
+
+  async deleteOwnedBlueprint(id: string): Promise<void> {
+    if (isReservedBlueprintKey(id)) {
+      throw new Error("Blueprint not found.");
+    }
+
+    let publishedRecord = this.storage.blueprints.get(id);
+    let libraryRecord = this.storage.libraryBlueprints.get(id);
+    let uploadedRecord = libraryRecord?.uploaded ? libraryRecord : undefined;
+    let kvRecord = await readBlueprintKvRecord(this.env, id);
+
+    if (!publishedRecord && !uploadedRecord && !kvRecord) {
+      throw new Error("Blueprint not found.");
+    }
+
+    if (kvRecord) {
+      if (kvRecord.ownerId !== this.ctx.id.toString()) {
+        throw new Error("You don't own this blueprint.");
+      }
+
+      // Delete all R2 objects with the blueprint ID prefix.
+      for (let v = 1; v <= kvRecord.metadata.version; v++) {
+        await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
+      }
+
+      // Delete from KV.
+      await this.env.BLUEPRINTS.delete(id);
+    }
+
+    if (publishedRecord?.featured === true) {
+      await this.adminSettings.getByName("").deleteFeaturedBlueprint(id);
+    }
+
+    if (publishedRecord) {
+      this.storage.blueprints.delete(id);
+    }
+    if (uploadedRecord) {
+      this.storage.libraryBlueprints.delete(id);
+    }
+  }
+
+  async isBlueprintFeatured(id: string): Promise<boolean | null> {
+    let record = this.storage.blueprints.get(id);
+    if (!record) {
+      return null;
+    }
+
+    return record.featured === true;
+  }
+
+  async setBlueprintFeatured(id: string, featured: boolean): Promise<void> {
+    let record = this.storage.blueprints.get(id);
+    if (!record) {
+      throw new Error("No such blueprint.");
+    }
+
+    record.featured = featured;
+    this.storage.blueprints.put(record);
+  }
+
   async listBlueprints(): Promise<BlueprintUserSummary[]> {
     let result: BlueprintUserSummary[] = [];
     for (let record of this.storage.blueprints.list()) {
-      // Try to look up the gadget title; fall back to "Deleted Gadget" if gone.
-      let gadget = this.storage.gadgets.get(record.gadgetId);
+      let gadget = record.gadgetId ? this.storage.gadgets.get(record.gadgetId) : undefined;
       result.push({
         id: record.id,
         title: record.metadata.title,
-        gadgetId: record.gadgetId,
-        gadgetTitle: gadget?.title ?? "Deleted Gadget",
+        gadgetId: record.gadgetId ?? "",
+        gadgetTitle: record.gadgetId ? (gadget?.title ?? "Deleted Gadget") : "Imported Blueprint",
         version: record.metadata.version,
         lastUpdated: record.metadata.lastUpdated,
       });
     }
+    result.sort((a, b) => b.lastUpdated.valueOf() - a.lastUpdated.valueOf());
+    return result;
+  }
+
+  async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
+    let result: BlueprintLibrarySummary[] = [];
+    for (let record of this.storage.libraryBlueprints.list()) {
+      result.push({
+        id: record.id,
+        metadata: record.metadata,
+        addedAt: record.addedAt,
+        uploaded: record.uploaded,
+      });
+    }
+    result.sort((a, b) => b.addedAt.valueOf() - a.addedAt.valueOf());
     return result;
   }
 
