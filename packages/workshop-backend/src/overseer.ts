@@ -1583,9 +1583,16 @@ class OverseerImpl implements AgentHooks {
 
     // Propagate to User DO.
     let owner = this.users.get(this.users.idFromString(this.ownerId));
-    await owner.updateBlueprint(
+    let isFeatured = await owner.updateBlueprint(
       record.id, record.metadata, this.ctx.id.toString()
     );
+
+    if (isFeatured) {
+      await this.ctx.exports.AdminSettings.getByName("").syncFeaturedBlueprint({
+        id: record.id,
+        metadata: record.metadata,
+      });
+    }
 
     // Write to KV.
     let kvRecord: BlueprintKvRecord = {
@@ -1614,6 +1621,7 @@ class OverseerImpl implements AgentHooks {
 
     // Delete from User DO.
     let owner = this.users.get(this.users.idFromString(this.ownerId));
+    await this.ctx.exports.AdminSettings.getByName("").deleteFeaturedBlueprint(record.id);
     await owner.deleteBlueprint(record.id);
 
     // Delete from local collection.

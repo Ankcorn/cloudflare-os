@@ -89,9 +89,11 @@ function RootComponent() {
 
   // For public routes (signup, blueprint) render without auth wrapper
   if (isPublicRoute) {
+    const showHeader = pathname !== '/signup'
     return (
       <TooltipProvider>
         <Toasty>
+          {showHeader && <Header />}
           <Outlet />
         </Toasty>
       </TooltipProvider>

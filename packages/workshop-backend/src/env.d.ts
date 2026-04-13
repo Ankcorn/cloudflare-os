@@ -3,6 +3,9 @@
 
 declare namespace Cloudflare {
   interface Env {
+    // Deployment-wide admin usernames.
+    ADMINS?: string[];
+
     // AI Gateway mode: when CF_AI_GATEWAY is set, all model requests are routed through
     // Cloudflare AI Gateway with server-managed keys. Users don't need to provide their own
     // API keys.

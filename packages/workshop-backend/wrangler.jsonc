@@ -25,6 +25,10 @@
     {
       "tag": "v0",
       "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
+    },
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [ "AdminSettings" ]
     }
   ],
   "kv_namespaces": [

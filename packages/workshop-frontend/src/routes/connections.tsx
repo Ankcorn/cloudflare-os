@@ -344,8 +344,8 @@ function ConnectionsPage() {
     filteredAvailable.length > 0;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 sm:px-6 py-10">
-      <div className="mb-6">
+    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
+      <div>
         <h1 className="text-2xl font-semibold text-kumo-default">
           Connections
         </h1>
@@ -354,7 +354,7 @@ function ConnectionsPage() {
         </p>
       </div>
 
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-6">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
         <div className="relative flex-1">
           <MagnifyingGlass
             size={16}

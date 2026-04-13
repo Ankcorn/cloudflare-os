@@ -1,11 +1,11 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon, List, X } from '@phosphor-icons/react'
-import { useAuthenticatedApi } from '../AuthContext'
+import { useOptionalAuthenticatedApi } from '../AuthContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
 
 export default function Header() {
-  const { logout } = useAuthenticatedApi()
+  const auth = useOptionalAuthenticatedApi()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const headerRef = useRef<HTMLElement>(null)
@@ -34,7 +34,7 @@ export default function Header() {
       style={{
         backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)',
       }}
-    >
+      >
       <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
         {/* Logo */}
         <div className="flex items-center gap-6">
@@ -66,18 +66,24 @@ export default function Header() {
             >
               Connections
             </Link>
-            <span className="text-sm px-3 py-1.5 rounded-md text-kumo-inactive cursor-default">
-              Featured
-            </span>
+            <Link
+              to="/blueprints"
+              className={navLinkClass}
+              activeProps={{ className: navLinkActiveClass }}
+            >
+              Blueprints
+            </Link>
           </nav>
         </div>
 
         {/* Right side */}
         <div className="flex items-center gap-2">
           {/* Desktop avatar dropdown */}
-          <div className="hidden sm:block">
-            <UserMenu />
-          </div>
+          {auth && (
+            <div className="hidden sm:block">
+              <UserMenu />
+            </div>
+          )}
 
           {/* Mobile hamburger button */}
           <div className="sm:hidden">
@@ -112,34 +118,43 @@ export default function Header() {
             >
               Connections
             </Link>
-            <span className="text-sm px-3 py-1.5 rounded-md text-kumo-inactive cursor-default">
-              Featured
-            </span>
-
-            <hr className="my-2 border-kumo-line" />
-
             <Link
-              to="/profile"
+              to="/blueprints"
               onClick={closeMobileMenu}
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Profile
+              Blueprints
             </Link>
-            <Link
-              to="/providers"
-              onClick={closeMobileMenu}
-              className={navLinkClass}
-              activeProps={{ className: navLinkActiveClass }}
-            >
-              Providers
-            </Link>
-            <button
-              onClick={() => { closeMobileMenu(); logout() }}
-              className="text-left text-sm px-3 py-1.5 rounded-md text-kumo-danger hover:bg-kumo-tint transition-colors"
-            >
-              Sign out
-            </button>
+
+            {auth && (
+              <>
+                <hr className="my-2 border-kumo-line" />
+
+                <Link
+                  to="/profile"
+                  onClick={closeMobileMenu}
+                  className={navLinkClass}
+                  activeProps={{ className: navLinkActiveClass }}
+                >
+                  Profile
+                </Link>
+                <Link
+                  to="/providers"
+                  onClick={closeMobileMenu}
+                  className={navLinkClass}
+                  activeProps={{ className: navLinkActiveClass }}
+                >
+                  Providers
+                </Link>
+                <button
+                  onClick={() => { closeMobileMenu(); auth.logout() }}
+                  className="text-left text-sm px-3 py-1.5 rounded-md text-kumo-danger hover:bg-kumo-tint transition-colors"
+                >
+                  Sign out
+                </button>
+              </>
+            )}
           </nav>
         </div>
       )}

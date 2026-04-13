@@ -1,15 +1,20 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, BlueprintMetadata, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
 import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
+import { AdminSettings } from "./admin-settings.js";
+import { BlueprintKvRecord, buildBlueprintArchiveStream, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GatekeeperHookProxy, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 
 // Re-export entrypoint types from ai-models.ts.
 export { LanguageModelGatekeeper };
+
+// Re-export entrypoint types from admin-settings.ts.
+export { AdminSettings };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
@@ -34,9 +39,30 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     super();
 
     this.overseers = this.ctx.exports.OverseerDurableObject;
+    this.adminSettings = this.ctx.exports.AdminSettings;
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
+  private adminSettings: DurableObjectNamespace<AdminSettings>;
+
+  #isAdmin(): boolean {
+    let name = this.user.id.name;
+    let admins = this.env.ADMINS;
+
+    if (!name || !admins) return false;
+
+    if (typeof admins === "string") {
+      // Admins should be a JSON binding of array type, but `.env` doesn't actually let you
+      // specify JSON bindings, so we also support a string that parses as JSON array.
+      admins = JSON.parse(admins);
+    }
+
+    if (!Array.isArray(admins)) {
+      throw new TypeError("ADMINS must be configured as an array of usernames.");
+    }
+
+    return admins.includes(name);
+  }
 
   whoami(): Promise<AiChatAuthorInfo> {
     return this.user.whoami();
@@ -158,23 +184,83 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listBlueprints();
   }
 
+  async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
+    return this.user.listLibraryBlueprints();
+  }
+
+  async listFeaturedBlueprints(): Promise<BlueprintPublicInfo[]> {
+    return listFeaturedBlueprintsFromKv(this.env);
+  }
+
+  async addBlueprintToLibrary(blueprintId: string): Promise<void> {
+    return this.user.addBlueprintToLibrary(blueprintId);
+  }
+
+  async removeBlueprintFromLibrary(blueprintId: string): Promise<void> {
+    return this.user.removeBlueprintFromLibrary(blueprintId);
+  }
+
+  isBlueprintInLibrary(blueprintId: string): Promise<{ uploaded: boolean } | null> {
+    return this.user.isBlueprintInLibrary(blueprintId);
+  }
+
+  adminIsBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
+    // Reject non-admins here so they cannot pile traffic onto the singleton AdminSettings DO.
+    if (!this.#isAdmin()) {
+      return Promise.resolve(null);
+    }
+
+    return this.adminSettings.getByName("").isBlueprintFeatured(blueprintId);
+  }
+
+  adminSetBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
+    // Same pre-filter here: keep unauthorized callers away from the singleton DO entirely.
+    if (!this.#isAdmin()) {
+      return Promise.reject(new Error("Admin access required."));
+    }
+
+    return this.adminSettings.getByName("").setBlueprintFeatured(blueprintId, featured);
+  }
+
+  async importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string> {
+    let { metadata, contentLength, content } = await parseBlueprintArchive(archive);
+    let blueprintId = randomBlueprintId();
+    let r2Key = `${blueprintId}/${metadata.version}`;
+
+    try {
+      let fixedLengthStream = new FixedLengthStream(contentLength);
+
+      await Promise.all([
+        content.pipeTo(fixedLengthStream.writable),
+        this.env.BLUEPRINT_CONTENT.put(r2Key, fixedLengthStream.readable),
+      ]);
+
+      let kvRecord: BlueprintKvRecord = {
+        metadata,
+        ownerId: this.user.id.toString(),
+      };
+
+      await this.env.BLUEPRINTS.put(blueprintId, JSON.stringify(kvRecord));
+
+      await this.user.importBlueprint(blueprintId, metadata);
+
+      return blueprintId;
+    } catch (err) {
+      // Try to delete what we uploaded, but don't wait for results becasue there's nothing we
+      // can do if they fail, and we already have an error to throw.
+      this.env.BLUEPRINTS.delete(blueprintId);
+      this.env.BLUEPRINT_CONTENT.delete(r2Key);
+      throw err;
+    }
+  }
+
   async newGadgetFromBlueprint(
     blueprintId: string,
     bindings: Record<string, BlueprintBindingAssignment>
   ): Promise<RpcStub<Overseer>> {
     // 1. Read blueprint from KV.
-    let raw = await this.env.BLUEPRINTS.get(blueprintId);
-    if (!raw) throw new Error("Blueprint not found.");
-
-    let kvRecord = JSON.parse(raw) as {
-      metadata: BlueprintMetadata;
-      ownerId: string;
-      gadgetId: string;
-    };
-
-    // Revive dates.
-    kvRecord.metadata.created = new Date(kvRecord.metadata.created);
-    kvRecord.metadata.lastUpdated = new Date(kvRecord.metadata.lastUpdated);
+    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+    if (!kvRecord) throw new Error("Blueprint not found.");
 
     // 2. Read gzip-compressed Yjs doc from R2 and decompress.
     let r2Key = `${blueprintId}/${kvRecord.metadata.version}`;
@@ -235,30 +321,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async deleteOrphanedBlueprint(blueprintId: string): Promise<void> {
-    // Read from KV to verify ownership.
-    let raw = await this.env.BLUEPRINTS.get(blueprintId);
-    if (!raw) throw new Error("Blueprint not found.");
-
-    let kvRecord = JSON.parse(raw) as {
-      metadata: BlueprintMetadata;
-      ownerId: string;
-      gadgetId: string;
-    };
-
-    if (kvRecord.ownerId !== this.user.id.toString()) {
-      throw new Error("You don't own this blueprint.");
-    }
-
-    // Delete from KV.
-    await this.env.BLUEPRINTS.delete(blueprintId);
-
-    // Delete all R2 objects with the blueprint ID prefix.
-    for (let v = 1; v <= kvRecord.metadata.version; v++) {
-      await this.env.BLUEPRINT_CONTENT.delete(`${blueprintId}/${v}`);
-    }
-
-    // Delete from User DO.
-    await this.user.deleteBlueprint(blueprintId);
+    return this.user.deleteOwnedBlueprint(blueprintId);
   }
 }
 
@@ -329,23 +392,23 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
-    let raw = await this.env.BLUEPRINTS.get(id);
-    if (!raw) return null;
-
-    let kvRecord = JSON.parse(raw) as {
-      metadata: BlueprintMetadata;
-      ownerId: string;
-      gadgetId: string;
-    };
-
-    // Revive Date objects from JSON serialization.
-    kvRecord.metadata.created = new Date(kvRecord.metadata.created);
-    kvRecord.metadata.lastUpdated = new Date(kvRecord.metadata.lastUpdated);
+    let kvRecord = await readBlueprintKvRecord(this.env, id);
+    if (!kvRecord) return null;
 
     return {
       id,
       metadata: kvRecord.metadata,
     };
+  }
+
+  async downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
+    let kvRecord = await readBlueprintKvRecord(this.env, id);
+    if (!kvRecord) throw new Error("Blueprint not found.");
+
+    let r2Object = await this.env.BLUEPRINT_CONTENT.get(`${id}/${kvRecord.metadata.version}`);
+    if (!r2Object) throw new Error("Blueprint content not found in R2.");
+
+    return buildBlueprintArchiveStream(kvRecord.metadata, r2Object.body, r2Object.size);
   }
 }
 

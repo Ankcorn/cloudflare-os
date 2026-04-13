@@ -30,3 +30,8 @@ export function useAuthenticatedApi() {
   }
   return context
 }
+
+/** Returns the auth context when inside an AuthProvider, or null on public pages. */
+export function useOptionalAuthenticatedApi(): AuthContextType | null {
+  return useContext(AuthContext)
+}
