@@ -128,7 +128,7 @@ const GMAIL_RESOURCE: SupportedResource = {
 };
 
 const GOOGLE_DOC_RESOURCE: SupportedResource = {
-  urlPattern: "https://docs.google.com/document/d/*",
+  urlPattern: "https://docs.google.com/document/d/:docId/*",
   title: "Google Doc",
   description: "Read and edit a Google Doc.",
 };
