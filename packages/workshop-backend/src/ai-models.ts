@@ -60,8 +60,10 @@ function getModelViaGateway(
   } else {
     // We can just use our binding.
     gatewayWrapper = createAiGateway({
-      // @ts-expect-error ai-gateway-provider types are temporarily running ahead of workers-types
-      binding: env.WORKERS_AI.gateway(gwConfig.gateway),
+      // @ts-expect-error The {beta: false} options object is undocumented. We need it for now to
+      // tell the binding not to use the new RPC implementation, which doesn't yet work with
+      // AbortSignal.
+      binding: env.WORKERS_AI.gateway(gwConfig.gateway, {beta: false}),
       options: { metadata },
     });
   }

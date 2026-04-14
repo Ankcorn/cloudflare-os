@@ -1118,6 +1118,12 @@ export async function runAgent(
       }),
       execute: async ({name}, {toolCallId}) => {
         try {
+          // Some models don't get that they should refer to capsules by number, not a string.
+          // Help them out by converting integer strings to numbers.
+          if (typeof name === "string" && /^(?:0|[1-9]\d*)$/.test(name)) {
+            name = +name;
+          }
+
           if (typeof name === "number") {
             let entry = capsules?.[name];
             if (!entry) {
@@ -1203,7 +1209,8 @@ export async function runAgent(
           "\n" +
           "NOTE: You do NOT have to use `saveCapsuleAsBinding` in order to use a capsule with " +
           "the `executeCode` tool. You ONLY need to assign a binding name in order to be able " +
-          "to use it in Gadget code.",
+          "to use it in Gadget code. DO NOT use `saveCapsuleAsBinding` unless you plan to use " +
+          "it from the Gadget's code.",
       inputSchema: z.object({
         capsuleId: z.number().describe(
             "The capsule index number, e.g. if the capsule was introduced as `env[4]`, then " +
@@ -1396,7 +1403,7 @@ export async function runAgent(
   let stream = streamText({
     model: chosenModel,
     messages: modelMessages,
-//    abortSignal,    // temporarily remove until AI gateway supports it
+    abortSignal,
     maxOutputTokens,
     providerOptions: {
       anthropic: { thinking: { type: 'adaptive' } },
