@@ -49,9 +49,8 @@
     }
   ],
 
-  // Having this binding configured forces people to log in when they run `wrangler dev`, so it's
-  // disabled by default, but you should uncomment it if you want Workers AI.
-  //
+  // Comment out this binding if you don't want to log in to Cloudflare and don't care to use
+  // Workers AI.
   "ai": {
     "binding": "WORKERS_AI"
   },

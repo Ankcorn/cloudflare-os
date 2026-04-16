@@ -40,7 +40,10 @@ class ConsoleLogSubscriberImpl extends RpcTarget implements ConsoleLogSubscriber
       const method = (console as any)[log.level] ?? console.log
       method('server:', ...log.message)
     }
-    if (chatId !== null && chatId === this.selectedChatIdRef.current) {
+    // If the logs are not associated with any chat, deliver to the current chat. If they are
+    // associated with a chat, this implies that the logs come from a version of the gadget that
+    // has proposed changes from that chat; only deliver if it matches the current chat.
+    if (chatId === null || chatId === this.selectedChatIdRef.current) {
       this.logBufferRef.current.push(...logs.map(l => ({ ...l, source: 'server' as const })))
       this.onBufferUpdated()
     }
@@ -113,6 +116,7 @@ export default function GadgetEditor() {
   const [_hasBindings, setHasBindings] = useState(false)
   const [isAgentActive, setIsAgentActive] = useState(false)
   const [hasAnyProposedChanges, setHasAnyProposedChanges] = useState(false)
+  const [selectedChatHasProposedChanges, setSelectedChatHasProposedChanges] = useState(false)
   const selectedChatId = urlChatId
   const chatListReady = chatCount !== null
   const codeStateReady = hasCode !== null
@@ -135,6 +139,10 @@ export default function GadgetEditor() {
   // not caught up yet. As soon as merged code exists, dropping back to the chat
   // list should become possible.
   const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
+  const previewChatId =
+    selectedChatHasProposedChanges && effectiveSelectedChatId !== null
+      ? effectiveSelectedChatId
+      : undefined
 
   // ── console log buffering ────────────────────────────────────────────────────
   const consoleLogSubscriberRef = useRef(new ConsoleLogSubscriberImpl())
@@ -230,6 +238,7 @@ export default function GadgetEditor() {
     setChatCount(null)
     setHasChatZero(false)
     setHasAnyProposedChanges(false)
+    setSelectedChatHasProposedChanges(false)
     hasAutoSwitchedToCodeRef.current = false
     hasAutoSwitchedToUiRef.current = false
     hadProposedChangesAtAgentStartRef.current = false
@@ -358,8 +367,8 @@ export default function GadgetEditor() {
     return () => { cancelled = true; sub?.[Symbol.dispose]() }
   }, [overseer])
 
-  // ── reload UI on chat/proposed changes ────────────────────────────────────────
-  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [effectiveSelectedChatId, proposedChanges])
+  // ── reload UI when preview branch/code changes ────────────────────────────────
+  useEffect(() => { setUiReloadTrigger(t => t + 1) }, [previewChatId, proposedChanges])
 
   // ── user info ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -582,13 +591,14 @@ export default function GadgetEditor() {
                       : 'info'
                   }
                   onConsumeConsoleLogs={consumeConsoleLogs}
-                  onDiscardConsoleLogs={discardConsoleLogs}
-                  hideTitleBar={simpleMode}
-                  constrainChatWidth={simpleMode}
-                  onChatCountChange={handleChatCountChange}
-                  onAgentActiveChange={handleAgentActiveChange}
-                  onHasAnyCodeChange={setHasAnyProposedChanges}
-                />
+                   onDiscardConsoleLogs={discardConsoleLogs}
+                   hideTitleBar={simpleMode}
+                   constrainChatWidth={simpleMode}
+                   onChatCountChange={handleChatCountChange}
+                   onAgentActiveChange={handleAgentActiveChange}
+                   onHasAnyCodeChange={setHasAnyProposedChanges}
+                   onSelectedChatHasProposedChangesChange={setSelectedChatHasProposedChanges}
+                 />
               </div>
 
               {!layoutModeReady && (
@@ -648,7 +658,7 @@ export default function GadgetEditor() {
                   height={RIGHT_CONTENT_H}
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
-                  chatId={effectiveSelectedChatId ?? undefined}
+                  chatId={previewChatId}
                   onConsoleLog={handleClientConsoleLog}
                 />
               )}
@@ -695,7 +705,7 @@ export default function GadgetEditor() {
               height="100%"
               reloadTrigger={uiReloadTrigger}
               isVisible={true}
-              chatId={effectiveSelectedChatId ?? undefined}
+              chatId={previewChatId}
               onConsoleLog={handleClientConsoleLog}
             />
           )}
