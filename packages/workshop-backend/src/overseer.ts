@@ -736,14 +736,11 @@ class OverseerImpl implements AgentHooks {
   // dynamic WorkerStub (which can be used to get any entrypoint).
   //
   // If `chatId` is specified, load the worker including changes proposed in the given chat
-  // thread.
+  // thread. (The caller is presumed to have verified the chat exists and has proposed changes.)
   loadGadgetWorker(chatId?: number): WorkerStub {
     let codeVersion = `${this.storage.codeVersion.get()}`;
     let sequence: number | undefined;
     if (chatId !== undefined) {
-      if (!this.storage.chatMeta.get(chatId)) {
-        throw new Error("No such chat");
-      }
       sequence = this.storage.nextChatSequences.get(chatId)?.nextSequence || 0;
       codeVersion += `.${chatId}.${sequence}`;
     }
@@ -797,6 +794,15 @@ class OverseerImpl implements AgentHooks {
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
   async getGadgetFacet(chatId?: number): Promise<RpcStub<any>> {
+    if (chatId !== undefined) {
+      // Check if the requested chat has proposed changes. If not, then we don't want to load the
+      // chat-specific facet, we just want to load the main-branch facet.
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta?.hasProposedChanges) {
+        chatId = undefined;
+      }
+    }
+
     if (chatId !== this.#runningChatId) {
       this.ctx.facets.abort("gadget", new Error(
           chatId === undefined

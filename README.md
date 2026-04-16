@@ -1,3 +1,16 @@
+# WARNING! ALPHA! WARNING!
+
+This is alpha-quality, unreleased software. There's a lot that doesn't yet work the way we want it to. Expect some jank.
+
+# What this is
+
+This is a demonstration of an agent harness and vibe coding environment built entirely on Workers.
+* No containers are involved: All agent-written code is sandboxed using Dynamic Workers.
+* No external storage: All storage is in SQLite databases attached to Durable Objects.
+* Strong isolation: Agents and apps cannot access the internet. They can only access the resources you specifically attach.
+* Works 100% on local workerd.
+* The only external service dependency is the LLM.
+
 # How to run
 
 1. Install pnpm if you haven't already: `npm install -g pnpm`
@@ -7,10 +20,15 @@
 5. Start the client: `pnpm run dev-client`
 6. Visit `localhost:3000`
 7. Create an account and log in.
-8. In the UI, go to your user profile and configure one or more AI models. (At present I recommend Claude, it performs better than any others in this environment.)
+8. Add one or more AI providers.
 9. Make a gadget. Have fun.
 
-Hint: Try "Make me a tic tac toe game."
+# What to try
+
+* "Make a collaborative whiteboard app."
+* "Make a tic tac toe game."
+* "Make an issue dashboard for this GitHub repo." (Attach a repo; requires GitHub integration is configured.)
+* "Fix the typos in this Google Doc." (Attach a doc; requires Google integration is configured.)
 
 # Enabling external APIs
 
@@ -22,12 +40,6 @@ To enable support for external APIs, you must do further configuration to regist
 
 # FAQ
 
-Q: Why are there no AI models available to select?
+Q: Why do I have to log in to Cloudflare to run locally?
 
-A: You skipped step 8.
-
-Q: Workers AI models don't work?
-
-A: Edit packages/workshop-backend/wrangler.jsonc and enable the WORKERS_AI binding. You will be forced to log in when you run `wrangler dev`.
-
-As of this writing, no publicly-available model on Workers AI can really code. However, there are some experimental models that work if you can convince Michelle Chen to give you access. Kimi K2.5 in particular is pretty good.
+A: This is only for Workers AI. If you don't care about using Workers AI models and don't want to log in, edit packages/workshop-backend/wrangler.jsonc and comment out the WORKERS_AI binding.
