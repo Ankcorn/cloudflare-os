@@ -4,23 +4,11 @@
   "main": "src/server.ts",
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
-  "services": [
-    {
-      "binding": "GATEKEEPER_GOOGLE",
-      "service": "gatekeeper-google",
-      "entrypoint": "GatekeeperVendor"
-    },
-    {
-      "binding": "GATEKEEPER_EMAIL",
-      "service": "gatekeeper-email",
-      "entrypoint": "GatekeeperVendor"
-    },
-    {
-      "binding": "GATEKEEPER_GITHUB",
-      "service": "gatekeeper-github",
-      "entrypoint": "GatekeeperVendor"
-    }
-  ],
+
+  // Gatekeeper service bindings and the Workers AI binding are dynamically
+  // added by run-dev-server.js (for dev) and generate-wrangler-prod.js (for
+  // production).
+
   "migrations": [
     {
       "tag": "v0",
@@ -48,12 +36,6 @@
       "binding": "LOADER"
     }
   ],
-
-  // Comment out this binding if you don't want to log in to Cloudflare and don't care to use
-  // Workers AI.
-  "ai": {
-    "binding": "WORKERS_AI"
-  },
 
   // When deploying to prod, you may want to bundle the frontend as assets on the backend, like so.
   // But it's not the only way to do it.
