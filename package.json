@@ -2,14 +2,16 @@
   "name": "gadgets",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "pnpm run --recursive build",
     "test": "pnpm run --recursive --if-present test",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
-    "dev-server": "wrangler dev -c wrangler.jsonc -c packages/workshop-backend/wrangler.jsonc -c packages/gatekeeper-google/wrangler.jsonc -c packages/gatekeeper-github/wrangler.jsonc -c packages/gatekeeper-email/wrangler.jsonc",
+    "dev-server": "node run-dev-server.js",
     "clean": "pnpm run --recursive clean"
   },
   "devDependencies": {
+    "jsonc-parser": "^3.3.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.82.2"
   }

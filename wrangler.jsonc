@@ -3,22 +3,12 @@
   "main": "dev-router.js",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["enable_ctx_exports"],
+
+  // Gatekeeper service bindings are dynamically added by run-dev-server.js.
   "services": [
     {
       "binding": "WORKSHOP_BACKEND",
       "service": "workshop-backend"
-    },
-    {
-      "binding": "GATEKEEPER_GOOGLE",
-      "service": "gatekeeper-google"
-    },
-    {
-      "binding": "GATEKEEPER_GITHUB",
-      "service": "gatekeeper-github"
-    },
-    {
-      "binding": "GATEKEEPER_EMAIL",
-      "service": "gatekeeper-email"
     }
   ]
 }

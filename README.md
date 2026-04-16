@@ -17,6 +17,7 @@ This is a demonstration of an agent harness and vibe coding environment built en
 2. Run `pnpm install`.
 3. Run `pnpm build`.
 4. Start the server: `pnpm run dev-server`
+    * To enable Workers AI models, use `pnpm run dev-server -- --use-workers-ai-binding`, but this will require Cloudflare login.
 5. Start the client: `pnpm run dev-client`
 6. Visit `localhost:3000`
 7. Create an account and log in.
@@ -38,8 +39,3 @@ To enable support for external APIs, you must do further configuration to regist
 * [Google API](packages/gatekeeper-google/README.md)
 * [Email Workers](packages/gatekeeper-email/README.md)
 
-# FAQ
-
-Q: Why do I have to log in to Cloudflare to run locally?
-
-A: This is only for Workers AI. If you don't care about using Workers AI models and don't want to log in, edit packages/workshop-backend/wrangler.jsonc and comment out the WORKERS_AI binding.
