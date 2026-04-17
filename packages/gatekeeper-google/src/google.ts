@@ -468,9 +468,37 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 }
 
+class PendingActionStore<Action> {
+  #kv: DurableObjectStorage["kv"];
+
+  constructor(kv: DurableObjectStorage["kv"]) {
+    this.#kv = kv;
+  }
+
+  #actionKey(id: number): string {
+    return `pending:action:${id}`;
+  }
+
+  submit(action: Action): number {
+    let id = this.#kv.get<number>("pending:nextActionId") ?? 1;
+    this.#kv.put("pending:nextActionId", id + 1);
+    this.#kv.put(this.#actionKey(id), action);
+    return id;
+  }
+
+  get(id: number): Action | undefined {
+    return this.#kv.get<Action>(this.#actionKey(id));
+  }
+
+  remove(id: number): void {
+    this.#kv.delete(this.#actionKey(id));
+  }
+}
+
 class GmailSessionImpl extends RpcTarget implements GmailSession {
   #gmailApi: GmailApi;
-  #approvalQueue: ApprovalQueue<GmailAction>;
+  #approvalQueue: ApprovalQueue<number>;
+  #pendingActions: PendingActionStore<GmailAction>;
   #searchQuery: string | undefined;
 
   // Callback to record/check thread IDs for search-filtered gatekeepers. When a search query is
@@ -482,7 +510,8 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
 
   constructor(
     gmailApi: GmailApi,
-    approvalQueue: ApprovalQueue<GmailAction>,
+    approvalQueue: ApprovalQueue<number>,
+    pendingActions: PendingActionStore<GmailAction>,
     searchQuery: string | undefined,
     recordAllowedThread: (threadId: string) => void,
     isThreadAllowed: (threadId: string) => boolean,
@@ -490,6 +519,7 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
     super();
     this.#gmailApi = gmailApi;
     this.#approvalQueue = approvalQueue;
+    this.#pendingActions = pendingActions;
     this.#searchQuery = searchQuery;
     this.#recordAllowedThread = recordAllowedThread;
     this.#isThreadAllowed = isThreadAllowed;
@@ -541,14 +571,20 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
     }
 
     let action: GmailAction = {type: "applyLabel", threadId, label};
+    let actionId = this.#pendingActions.submit(action);
 
-    await this.#approvalQueue.submitAction(action, {
-      title: `Apply the label ${label} to thread ${threadId}`,
-      description: `Apply the label ${label} to thread ${threadId}`,
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Apply the label ${label} to thread ${threadId}`,
+        description: `Apply the label ${label} to thread ${threadId}`,
 
-      // TODO: Implement revert.
-      implementsRevert: false,
-    });
+        // TODO: Implement revert.
+        implementsRevert: false,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
   }
 }
 
@@ -557,8 +593,6 @@ type GmailAction = {
   threadId: string,
   label: string
 }
-
-type GmailRevertInfo = {}
 
 type GmailGatekeeperImplProps = {
   userObjectId: string;
@@ -573,7 +607,7 @@ type GmailGatekeeperImplProps = {
 const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabel"];
 
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
-    implements Gatekeeper<GmailSession, GmailAction, GmailRevertInfo> {
+    implements Gatekeeper<GmailSession, number, undefined> {
   #accessToken: GoogleAccessToken | undefined;
 
   async #getAccessToken(): Promise<string> {
@@ -630,9 +664,10 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     return TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<GmailAction>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());
+    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
     let searchQuery = this.ctx.props.searchQuery;
 
     // Key prefix for storing allowed thread IDs in DO storage. When a search query is active,
@@ -642,6 +677,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     return new GmailSessionImpl(
       gmailApi,
       approvalQueue.dup(),
+      pendingActions,
       searchQuery,
       (threadId: string) => {
         // Fire-and-forget: store the thread ID in DO storage so it persists across sessions.
@@ -655,11 +691,18 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   }
 
   // ---------------------------------------------------------------------------
-  async applyAction(action: GmailAction): Promise<void | {revertInfo?: GmailRevertInfo}> {
+  async applyAction(actionId: number): Promise<void> {
+    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
+    let action = pendingActions.get(actionId);
+    if (!action) {
+      throw new Error(`Unknown pending Gmail action: ${actionId}`);
+    }
+
     switch (action.type) {
       case "applyLabel": {
         let gmailApi = new GmailApi(() => this.#getAccessToken());
         await gmailApi.applyLabel(action.threadId, action.label);
+        pendingActions.remove(actionId);
         break;
       }
 
@@ -669,11 +712,13 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     }
   }
 
-  async rejectAction(action: GmailAction): Promise<void | {restart?: boolean}> {
+  async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
     // Nothing to do, since we don't maintain a simulation.
+    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
+    pendingActions.remove(actionId);
   }
 
-  revertAction(action: GmailAction, revertInfo: GmailRevertInfo):
+  revertAction(action: number, revertInfo: undefined):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
@@ -694,8 +739,6 @@ type GoogleDocAction = {
   requests: any[];
 }
 
-type GoogleDocRevertInfo = {}
-
 type GoogleDocGatekeeperImplProps = {
   userObjectId: string;
   documentId: string;
@@ -703,7 +746,7 @@ type GoogleDocGatekeeperImplProps = {
 
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
-    implements Gatekeeper<GoogleDocSession, GoogleDocAction, GoogleDocRevertInfo> {
+    implements Gatekeeper<GoogleDocSession, number, undefined> {
   #accessToken: GoogleAccessToken | undefined;
 
   async #getAccessToken(): Promise<string> {
@@ -734,18 +777,26 @@ export class GoogleDocGatekeeperImpl
     return DOCS_TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<GoogleDocAction>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
       : Promise<GoogleDocSession> {
     let api = new GoogleDocsApi(() => this.#getAccessToken());
+    let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
     return new GoogleDocSessionImpl(
-        api, this.ctx.props.documentId, approvalQueue.dup(), this.ctx.storage);
+        api, this.ctx.props.documentId, approvalQueue.dup(), pendingActions, this.ctx.storage);
   }
 
-  async applyAction(action: GoogleDocAction): Promise<void | {revertInfo?: GoogleDocRevertInfo}> {
+  async applyAction(actionId: number): Promise<void> {
+    let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
+    let action = pendingActions.get(actionId);
+    if (!action) {
+      throw new Error(`Unknown pending Google Doc action: ${actionId}`);
+    }
+
     let api = new GoogleDocsApi(() => this.#getAccessToken());
     switch (action.type) {
       case "batchUpdate": {
         await api.batchUpdate(action.documentId, action.requests, action.revisionId);
+        pendingActions.remove(actionId);
         break;
       }
       default:
@@ -753,11 +804,13 @@ export class GoogleDocGatekeeperImpl
     }
   }
 
-  async rejectAction(action: GoogleDocAction): Promise<void | {restart?: boolean}> {
+  async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
     // No simulation state to roll back.
+    let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
+    pendingActions.remove(actionId);
   }
 
-  revertAction(action: GoogleDocAction, revertInfo: GoogleDocRevertInfo):
+  revertAction(action: number, revertInfo: undefined):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
@@ -770,19 +823,22 @@ export class GoogleDocGatekeeperImpl
 class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   #docsApi: GoogleDocsApi;
   #documentId: string;
-  #approvalQueue: ApprovalQueue<GoogleDocAction>;
+  #approvalQueue: ApprovalQueue<number>;
+  #pendingActions: PendingActionStore<GoogleDocAction>;
   #storage: DurableObjectStorage;
 
   constructor(
     docsApi: GoogleDocsApi,
     documentId: string,
-    approvalQueue: ApprovalQueue<GoogleDocAction>,
+    approvalQueue: ApprovalQueue<number>,
+    pendingActions: PendingActionStore<GoogleDocAction>,
     storage: DurableObjectStorage,
   ) {
     super();
     this.#docsApi = docsApi;
     this.#documentId = documentId;
     this.#approvalQueue = approvalQueue;
+    this.#pendingActions = pendingActions;
     this.#storage = storage;
   }
 
@@ -882,15 +938,21 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     let newPreview = result.trimmedNew.length > 80
         ? result.trimmedNew.slice(0, 80) + "..."
         : result.trimmedNew;
+    let actionId = this.#pendingActions.submit(action);
 
-    await this.#approvalQueue.submitAction(action, {
-      title: "Edit Google Doc",
-      description:
-        `Replace text in the document.\n\n` +
-        `**Old:** ${oldPreview}\n\n` +
-        `**New:** ${newPreview}`,
-      implementsRevert: false,
-    });
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: "Edit Google Doc",
+        description:
+          `Replace text in the document.\n\n` +
+          `**Old:** ${oldPreview}\n\n` +
+          `**New:** ${newPreview}`,
+        implementsRevert: false,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
   }
 
   async appendText(markdown: string): Promise<void> {
@@ -914,11 +976,17 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     let preview = markdown.length > 100
         ? markdown.slice(0, 100) + "..."
         : markdown;
+    let actionId = this.#pendingActions.submit(action);
 
-    await this.#approvalQueue.submitAction(action, {
-      title: "Append to Google Doc",
-      description: `Append content to the end of the document:\n\n${preview}`,
-      implementsRevert: false,
-    });
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: "Append to Google Doc",
+        description: `Append content to the end of the document:\n\n${preview}`,
+        implementsRevert: false,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
   }
 }

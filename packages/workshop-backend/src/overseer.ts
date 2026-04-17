@@ -4141,18 +4141,11 @@ type AgentSpawnerBindingProps = {
   creatorUserId?: string,
 };
 
-type AgentSpawnerAction = {
-  // There are no actions yet.
-};
-type AgentSpawnerRevertInfo = {
-  // There are no actions yet.
-};
-
 import AGENT_SPAWNER_BINDING_TYPES from "./agent-spawner-binding.txt";
 
 export class AgentSpawnerGatekeeper
     extends DurableObject<Cloudflare.Env, AgentSpawnerBindingProps>
-    implements Gatekeeper<AgentSpawnerBinding, AgentSpawnerAction, AgentSpawnerRevertInfo> {
+    implements Gatekeeper<AgentSpawnerBinding, number, undefined> {
   async describe(): Promise<ResourceDescription> {
     return {
       // TODO: Decide if we need real URLs or if `url` should stop being part of the description.
@@ -4171,18 +4164,18 @@ export class AgentSpawnerGatekeeper
     return AGENT_SPAWNER_BINDING_TYPES;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<AgentSpawnerAction>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
       : Promise<AgentSpawnerBinding> {
     return new AgentSpawnerBindingImpl(this.ctx);
   }
 
-  applyAction(action: AgentSpawnerAction): Promise<void | {revertInfo?: AgentSpawnerRevertInfo}> {
+  applyAction(action: number): Promise<void> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  rejectAction(action: AgentSpawnerAction): Promise<void | {restart?: boolean}> {
+  rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: AgentSpawnerAction, revertInfo: AgentSpawnerRevertInfo):
+  revertAction(action: number, revertInfo: undefined):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
