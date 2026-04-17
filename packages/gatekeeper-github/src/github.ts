@@ -1231,7 +1231,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 }
 
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
-  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest, number, GitHubRevertInfo> {
+  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest, number, undefined> {
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -3082,7 +3082,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     }
   }
 
-  async applyAction(actionId: number): Promise<void | { revertInfo?: GitHubRevertInfo }> {
+  async applyAction(actionId: number): Promise<void> {
     const record = this.#requireActionRecord(actionId);
     if (record.state !== "pending" && record.state !== "staged") {
       throw new Error(`GitHub action ${actionId} is no longer pending.`);
@@ -3180,9 +3180,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         };
         this.#markActionApproved(action, revertInfo);
         this.#clearCaches();
-        return {
-          revertInfo,
-        };
+        return;
       }
       case "postReview": {
         const realId = action.pullId.startsWith("~") ? this.#resolveProvisionalId(action.pullId) : action.pullId;
@@ -3255,9 +3253,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         };
         this.#markActionApproved(action, revertInfo);
         this.#clearCaches();
-        return {
-          revertInfo,
-        };
+        return;
       }
       case "mergePullRequest": {
         const pullId = action.pullId.startsWith("~") ? this.#resolveProvisionalId(action.pullId) : action.pullId;
@@ -3338,8 +3334,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return;
   }
 
-  async revertAction(actionId: number, revertInfo: GitHubRevertInfo): Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
-    const action = this.#requireActionRecord(actionId).action;
+  async revertAction(actionId: number, _revertInfo: undefined): Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+    const record = this.#requireActionRecord(actionId);
+    const action = record.action;
+    const revertInfo = record.revertInfo;
     switch (action.type) {
       case "setTitle": {
         const realId = action.targetId.startsWith("~") ? this.#resolveProvisionalId(action.targetId) : action.targetId;
@@ -3374,7 +3372,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return;
       }
       case "postComment": {
-        if (revertInfo.type !== "issueComment") {
+        if (revertInfo?.type !== "issueComment") {
           return { message: "Missing issue comment revert information.", canRetry: false };
         }
         await this.#withApi(api => api.deleteIssueComment(action.owner, action.repo, revertInfo.commentId));
@@ -3382,7 +3380,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return;
       }
       case "replyToDiffComment": {
-        if (revertInfo.type !== "reviewComment") {
+        if (revertInfo?.type !== "reviewComment") {
           return { message: "Missing review comment revert information.", canRetry: false };
         }
         await this.#withApi(api => api.deletePullRequestReviewComment(action.owner, action.repo, revertInfo.commentId));

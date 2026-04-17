@@ -123,16 +123,9 @@ export type LanguageModelGatekeeperProps = {
   initiator: AiChatAuthorInfo,
 };
 
-type LanguageModelAction = {
-  // There are no actions yet.
-};
-type LanguageModelRevertInfo = {
-  // There are no actions yet.
-};
-
 export class LanguageModelGatekeeper
     extends DurableObject<Cloudflare.Env, LanguageModelGatekeeperProps>
-    implements Gatekeeper<LanguageModelBinding, LanguageModelAction, LanguageModelRevertInfo> {
+    implements Gatekeeper<LanguageModelBinding, number, undefined> {
   async describe(): Promise<ResourceDescription> {
     let modelConfig = this.ctx.props.config;
     let displayName = this.ctx.props.displayName;
@@ -154,19 +147,19 @@ export class LanguageModelGatekeeper
     return AI_MODEL_BINDING_TYPES;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<LanguageModelAction>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
       : Promise<LanguageModelBinding> {
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator);
     return new LanguageModelBindingImpl(model);
   }
 
-  applyAction(action: LanguageModelAction): Promise<void | {revertInfo?: LanguageModelRevertInfo}> {
+  applyAction(action: number): Promise<void> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  rejectAction(action: LanguageModelAction): Promise<void | {restart?: boolean}> {
+  rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: LanguageModelAction, revertInfo: LanguageModelRevertInfo):
+  revertAction(action: number, revertInfo: undefined):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
