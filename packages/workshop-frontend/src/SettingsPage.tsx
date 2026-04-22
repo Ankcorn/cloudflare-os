@@ -1,10 +1,12 @@
 import { Input, SensitiveInput, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
-import { User, Pencil, Check, X, Lock } from '@phosphor-icons/react'
+import { User, Pencil, Check, X, Lock, Camera } from '@phosphor-icons/react'
+import { useAvatar, invalidateAvatarCache } from './useAvatar'
+import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 
 export default function SettingsPage() {
   const { authenticatedApi } = useAuthenticatedApi()
@@ -14,12 +16,26 @@ export default function SettingsPage() {
   const [isEditingName, setIsEditingName] = useState(false)
   const [nameInput, setNameInput] = useState('')
 
+  // Avatar state
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [avatarUploading, setAvatarUploading] = useState(false)
+  const [localAvatarPreview, setLocalAvatarPreview] = useState<string | null>(null)
+
+  // Revoke preview blob URL on unmount to prevent memory leak
+  useEffect(() => {
+    return () => {
+      if (localAvatarPreview) URL.revokeObjectURL(localAvatarPreview)
+    }
+  }, [localAvatarPreview])
+
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [passwordLoading, setPasswordLoading] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
+
+  const avatarUrl = useAvatar(authenticatedApi, userInfo?.id)
 
   // Fetch user info
   useEffect(() => {
@@ -64,6 +80,31 @@ export default function SettingsPage() {
     setIsEditingName(false)
   }
 
+  const handleAvatarUpload = async (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      toasts.add({ title: 'Please select an image file', variant: 'error' })
+      return
+    }
+    setAvatarUploading(true)
+    try {
+      const compressed = await compressAvatar(file)
+      // Show preview immediately
+      if (localAvatarPreview) URL.revokeObjectURL(localAvatarPreview)
+      setLocalAvatarPreview(avatarBlobUrl(compressed))
+      // Upload
+      await authenticatedApi.setAvatar(compressed)
+      // Invalidate cache so the hook refetches
+      if (userInfo?.id) invalidateAvatarCache(userInfo.id)
+      toasts.add({ title: 'Avatar updated', variant: 'success' })
+    } catch (err) {
+      console.error('Failed to upload avatar:', err)
+      setLocalAvatarPreview(null)
+      toasts.add({ title: 'Failed to upload avatar', variant: 'error' })
+    } finally {
+      setAvatarUploading(false)
+    }
+  }
+
   const handleChangePassword = async () => {
     if (!userInfo) return
     if (!currentPassword || !newPassword || !confirmPassword) return
@@ -95,6 +136,8 @@ export default function SettingsPage() {
     }
   }
 
+  const displayAvatarUrl = localAvatarPreview || avatarUrl
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[60vh]">
@@ -112,10 +155,39 @@ export default function SettingsPage() {
         <div className="space-y-6">
           {/* Avatar */}
           <div className="flex flex-col items-center gap-2">
-            <div className="w-20 h-20 rounded-full bg-kumo-tint flex items-center justify-center">
-              <User size={32} className="text-kumo-subtle" />
-            </div>
-            <p className="text-xs text-kumo-subtle">Avatar customization coming soon</p>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={avatarUploading}
+              className="relative w-20 h-20 rounded-full bg-kumo-tint flex items-center justify-center overflow-hidden group cursor-pointer disabled:cursor-wait"
+            >
+              {displayAvatarUrl ? (
+                <img src={displayAvatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+              ) : (
+                <User size={32} className="text-kumo-subtle" />
+              )}
+              {/* Hover overlay */}
+              <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                <Camera size={20} className="text-white" />
+              </div>
+              {avatarUploading && (
+                <div className="absolute inset-0 bg-kumo-elevated/80 flex items-center justify-center">
+                  <div className="w-5 h-5 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) handleAvatarUpload(file)
+                e.target.value = ''
+              }}
+            />
+            <p className="text-xs text-kumo-subtle">Click to change avatar</p>
           </div>
 
           {/* Display Name */}

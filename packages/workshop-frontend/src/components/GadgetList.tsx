@@ -1,11 +1,12 @@
 import { Link } from '@tanstack/react-router'
-import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil } from '@phosphor-icons/react'
+import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil, ArrowRight } from '@phosphor-icons/react'
 import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
-import { GadgetMetadataWithTimestamps, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import ShareModal from '../ShareModal'
+import { BlueprintCard } from './BlueprintCard'
 
 // Deterministic gradient by gadget ID
 const gradients = [
@@ -332,28 +333,35 @@ export default function GadgetList() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4 px-6 sm:px-10 lg:px-10 pt-10 lg:pt-10">
+      <div className="px-6 sm:px-10 lg:px-10 pt-10 lg:pt-10 mb-4">
         <h2 className="text-lg font-semibold text-kumo-default">
           Your gadgets
         </h2>
+        {!loading && gadgets.length === 0 && !loadError && (
+          <p className="mt-1 text-sm text-kumo-inactive">
+            You haven&apos;t created any gadgets yet
+          </p>
+        )}
       </div>
 
-      {/* Search */}
-      <div className="mb-4 px-6 sm:px-10 lg:px-10">
-        <div className="relative">
-          <MagnifyingGlass
-            size={16}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
-          />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search gadgets..."
-            className="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
-          />
+      {/* Search — hidden when the user has no gadgets */}
+      {!loading && gadgets.length > 0 && (
+        <div className="mb-4 px-6 sm:px-10 lg:px-10">
+          <div className="relative">
+            <MagnifyingGlass
+              size={16}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
+            />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search gadgets..."
+              className="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* List */}
       <div className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pl-6 sm:pl-10 lg:pl-10 pr-2">
@@ -369,9 +377,13 @@ export default function GadgetList() {
             <button onClick={loadGadgets} className="text-kumo-brand mt-1 underline">Try again</button>
           </div>
         ) : filtered.length === 0 ? (
-          <div className="text-center py-12 text-kumo-inactive text-sm">
-            {search ? 'No gadgets found' : 'No gadgets yet. Create your first one!'}
-          </div>
+          search ? (
+            <div className="text-center py-12 text-kumo-inactive text-sm">
+              No gadgets found
+            </div>
+          ) : (
+            <FeaturedBlueprintsGallery />
+          )
         ) : (
           filtered.map((gadget) => (
             <AppRow
@@ -475,6 +487,88 @@ export default function GadgetList() {
           metadata={shareTarget}
           currentUser={userInfo}
         />
+      )}
+    </div>
+  )
+}
+
+// ─── featured blueprints gallery (shown when gadget list is empty) ────────────
+
+const MAX_FEATURED_SHOWN = 6
+
+function FeaturedBlueprintsGallery() {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [blueprints, setBlueprints] = useState<BlueprintPublicInfo[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi
+      .listFeaturedBlueprints()
+      .then((list) => {
+        if (!cancelled) setBlueprints(list)
+      })
+      .catch((err) => {
+        console.error('Failed to load featured blueprints:', err)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [authenticatedApi])
+
+  if (loading) {
+    return (
+      <div className="px-2 py-8">
+        <div className="grid grid-cols-2 gap-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-[108px] rounded-xl bg-kumo-base animate-pulse" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (blueprints.length === 0) {
+    return null
+  }
+
+  const shown = blueprints.slice(0, MAX_FEATURED_SHOWN)
+  const hasMore = blueprints.length > MAX_FEATURED_SHOWN
+
+  return (
+    <div className="px-2 py-4">
+      <div className="mb-5">
+        <h3 className="text-sm font-semibold text-kumo-default">
+          Create your own gadget, or start with a blueprint
+        </h3>
+        <p className="mt-1.5 text-xs text-kumo-subtle leading-relaxed">
+          Blueprints are ready-made gadgets built by the community. Pick one to
+          get a working app instantly, then customize it to make it your own.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {shown.map((bp) => (
+          <BlueprintCard
+            key={bp.id}
+            id={bp.id}
+            metadata={bp.metadata}
+            featured
+          />
+        ))}
+      </div>
+
+      {hasMore && (
+        <div className="mt-4 text-center">
+          <Link
+            to="/blueprints"
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
+          >
+            Browse all blueprints
+            <ArrowRight size={12} weight="bold" />
+          </Link>
+        </div>
       )}
     </div>
   )

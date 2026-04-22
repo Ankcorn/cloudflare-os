@@ -16,7 +16,7 @@ import {
   Tooltip,
   useKumoToastManager,
 } from "@cloudflare/kumo";
-import { useNavigate } from "@tanstack/react-router";
+
 import {
   CaretLeft,
   Check,
@@ -28,15 +28,15 @@ import {
   Paperclip,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
+import { useAuthenticatedApi } from "./AuthContext";
+import { useAvatar } from "./useAvatar";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import * as Y from "yjs";
 import styles from "./ChatInterface.module.css";
 import {
-  ADD_NEW_MODEL_OPTION_VALUE,
   fromModelSelectValue,
   getStoredSelectedModel,
-  isAddNewModelSelection,
   NO_AGENT_OPTION_VALUE,
   persistSelectedModel,
   toModelSelectValue,
@@ -460,7 +460,6 @@ export const ChatInput = ({
   /** When set, the attach button shows this label with a LinkSimple icon instead of the paperclip icon. */
   attachLabel?: string;
 }) => {
-  const navigate = useNavigate();
   const [inputValue, setInputValue] = useState("");
   const [capsules, setCapsules] = useState<InputCapsule[]>([]);
   const [activeUrl, setActiveUrl] = useState<{
@@ -486,8 +485,6 @@ export const ChatInput = ({
   inputValueRef.current = inputValue;
   const capsulesRef = useRef(capsules);
   capsulesRef.current = capsules;
-  const isAddNewModelSelected = isAddNewModelSelection(selectedModel);
-
   // Sync mirror div size with the textarea via ResizeObserver.
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -528,7 +525,7 @@ export const ChatInput = ({
   }, [activeUrl]);
 
   const handleSend = () => {
-    if (!inputValue.trim() || isAddNewModelSelected) return;
+    if (!inputValue.trim()) return;
 
     if (capsules.length === 0) {
       // No capsules — simple send.
@@ -698,8 +695,6 @@ export const ChatInput = ({
 
   // Opens the attach modal, saving the current cursor position so we can insert there later.
   const handleAttachOpen = () => {
-    if (isAddNewModelSelected) return;
-
     const wrapper = wrapperRef.current;
     if (wrapper) {
       const textarea = wrapper.querySelector("textarea");
@@ -1061,21 +1056,7 @@ export const ChatInput = ({
       {/* Prompt card */}
       <div className="prompt-input rounded-2xl border relative">
         {/* Textarea */}
-        <div
-          className={`px-4 pt-3 pb-2 relative ${
-            isAddNewModelSelected ? "bg-kumo-tint rounded-t-2xl" : ""
-          }`}
-        >
-          {isAddNewModelSelected && (
-            <div className="absolute inset-0 z-[2] flex items-center justify-center px-4 pt-3 pb-2">
-              <button
-                onClick={() => navigate({ to: "/providers" })}
-                className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
-              >
-                Add provider
-              </button>
-            </div>
-          )}
+        <div className="px-4 pt-3 pb-2 relative">
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
             {activeUrl && (
               <CapsuleOverlay
@@ -1101,7 +1082,6 @@ export const ChatInput = ({
               {renderMirrorContent()}
             </div>
             <textarea
-              disabled={isAddNewModelSelected}
               value={inputValue}
               onChange={(e) => {
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
@@ -1161,7 +1141,6 @@ export const ChatInput = ({
                 onModelChange(fromModelSelectValue(value as string))
               }
               renderValue={(v) => {
-                if (v === ADD_NEW_MODEL_OPTION_VALUE) return "Add new model...";
                 if (v === NO_AGENT_OPTION_VALUE) return "No agent";
                 return models.find(m => m.id === v)?.name ?? String(v)
               }}
@@ -1174,9 +1153,6 @@ export const ChatInput = ({
               <Select.Option value={NO_AGENT_OPTION_VALUE}>
                 No agent
               </Select.Option>
-              <Select.Option value={ADD_NEW_MODEL_OPTION_VALUE}>
-                Add new model...
-              </Select.Option>
             </Select>
           </div>
 
@@ -1185,8 +1161,7 @@ export const ChatInput = ({
             {attachLabel ? (
               <button
                 onClick={handleAttachOpen}
-                disabled={isAddNewModelSelected}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-kumo-default border border-kumo-line hover:bg-kumo-tint rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-kumo-default border border-kumo-line hover:bg-kumo-tint rounded-lg transition-colors"
               >
                 <LinkSimple size={16} />
                 {attachLabel}
@@ -1195,8 +1170,7 @@ export const ChatInput = ({
               <Tooltip content="Attach resource" asChild>
                 <button
                   onClick={handleAttachOpen}
-                  disabled={isAddNewModelSelected}
-                  className="p-1.5 text-kumo-inactive hover:text-kumo-subtle hover:bg-kumo-tint rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="p-1.5 text-kumo-inactive hover:text-kumo-subtle hover:bg-kumo-tint rounded-lg transition-colors"
                 >
                   <Paperclip size={15} />
                 </button>
@@ -1204,9 +1178,9 @@ export const ChatInput = ({
             )}
               <button
                 onClick={handleSend}
-                disabled={!inputValue.trim() || isAgentActive || isAddNewModelSelected}
+                disabled={!inputValue.trim() || isAgentActive}
                 className={`p-1.5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-kumo-inverse ${
-                  inputValue.trim() && !isAgentActive && !isAddNewModelSelected
+                  inputValue.trim() && !isAgentActive
                     ? "bg-kumo-brand hover:bg-kumo-brand-hover"
                     : "bg-kumo-contrast"
                 }`}
@@ -1538,6 +1512,8 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
+  const { authenticatedApi, currentUser } = useAuthenticatedApi();
+  const currentUserAvatarUrl = useAvatar(authenticatedApi, currentUser?.id);
 
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -2603,8 +2579,7 @@ function ChatInterface({
   const handleRetry = async () => {
     if (
       selectedChatId === null ||
-      selectedModel === null ||
-      isAddNewModelSelection(selectedModel)
+      selectedModel === null
     ) {
       return;
     }
@@ -2765,11 +2740,15 @@ function ChatInterface({
       </svg>
     </div>
   );
-  const UserAvatar = ({ name }: { name: string }) => (
-    <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 bg-kumo-tint">
-      <span className="text-[10px] font-semibold text-kumo-strong">
-        {name[0]?.toUpperCase()}
-      </span>
+  const UserAvatar = ({ name, avatarUrl }: { name: string; avatarUrl?: string | null }) => (
+    <div className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 bg-kumo-tint overflow-hidden">
+      {avatarUrl ? (
+        <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
+      ) : (
+        <span className="text-[10px] font-semibold text-kumo-strong">
+          {name[0]?.toUpperCase()}
+        </span>
+      )}
     </div>
   );
 
@@ -3137,7 +3116,7 @@ function ChatInterface({
                         {msg.type === "message" && (
                           <div className="flex gap-3 items-start">
                             {msg.author.type === "user" ? (
-                              <UserAvatar name={msg.author.name} />
+                              <UserAvatar name={msg.author.name} avatarUrl={currentUserAvatarUrl} />
                             ) : (
                               <AssistantAvatar />
                             )}
@@ -3469,8 +3448,7 @@ function ChatInterface({
                                         <button
                                           onClick={handleRetry}
                                           disabled={
-                                            selectedModel === null ||
-                                            isAddNewModelSelection(selectedModel)
+                                            selectedModel === null
                                           }
                                           className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-kumo-danger text-kumo-inverse hover:opacity-90 disabled:opacity-40 transition-opacity flex items-center gap-1"
                                         >

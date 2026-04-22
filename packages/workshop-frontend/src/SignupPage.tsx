@@ -12,7 +12,6 @@ interface SignupPageProps {
 
 export default function SignupPage({ rpcStub }: SignupPageProps) {
   const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -35,7 +34,6 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
 
   const canSubmit =
     username &&
-    displayName &&
     password &&
     confirmPassword &&
     !usernameError &&
@@ -53,7 +51,7 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
       const passwordHash = await hashPassword(username, password);
       const token = await rpcStub.createAccount(
         username,
-        displayName,
+        username,
         passwordHash,
       );
       if (token) {
@@ -108,15 +106,6 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
             disabled={loading}
             placeholder="your-username"
             error={usernameError}
-          />
-
-          <Input
-            label="Display Name"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            autoComplete="name"
-            disabled={loading}
-            placeholder="Your Name"
           />
 
           <Input

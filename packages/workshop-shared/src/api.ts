@@ -143,6 +143,27 @@ export interface AuthenticatedApi extends RpcTarget {
   // are available. The frontend uses this to adjust the model management UI.
   getAiConfig(): Promise<AiGatewayInfo>;
 
+  // Get the user's preferred model, chosen during onboarding. Returns null if the user has not
+  // set a preference (or explicitly chose "No agent").
+  getPreferredModel(): Promise<string | null>;
+
+  // Set the user's preferred model. Pass null to indicate "No agent".
+  setPreferredModel(id: string | null): Promise<void>;
+
+  // Returns true if the user has completed the onboarding wizard.
+  isOnboardingCompleted(): Promise<boolean>;
+
+  // Mark the onboarding wizard as completed.
+  completeOnboarding(): Promise<void>;
+
+  // Upload a user avatar image. The data should be a compressed image (JPEG/PNG), ideally under
+  // 50 KB. Pass null to remove the avatar.
+  setAvatar(data: Uint8Array | null): Promise<void>;
+
+  // Fetch a user's avatar image by user ID. Returns null if no avatar has been set.
+  // Accepts any user ID so that other users' avatars can be displayed (e.g. in chat).
+  getAvatar(userId: string): Promise<Uint8Array | null>;
+
   // Open an existing gadget.
   //
   // If `shareKey` is provided, the server redeems it before opening, adding the caller as a
@@ -777,8 +798,9 @@ export type AiChatAuthorInfo = {
   // Display name for author, e.g. "Kenton Varda" or "GPT"
   name: string;
 
-  // TODO: URL of author avatar?
-  // avatar: string;
+  // Note: the avatar is intentionally not included here to keep this type lightweight (it's
+  // embedded in every chat message). Fetch user avatars separately via
+  // `AuthenticatedApi.getAvatar(userId)`.
 };
 
 export type AiChatMessage = {

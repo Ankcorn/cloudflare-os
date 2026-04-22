@@ -109,6 +109,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
         id: "user@example.com",
       },
       quickModel: <string | null>null,
+      preferredModel: <string | null>null,
+      onboardingCompleted: false,
       nextAccountId: 0,
 
       // `passwordHash` value as passed to `login()`, but with an extra round of SHA-256 applied.
@@ -391,6 +393,30 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       return null;
     }
+  }
+
+  async getPreferredModel(): Promise<string | null> {
+    return this.storage.preferredModel.get();
+  }
+
+  async setPreferredModel(id: string | null): Promise<void> {
+    if (id !== null) {
+      // Validate that the model exists in the user's configured models or as a gateway model.
+      let gwConfig = getAiGatewayConfig(this.env);
+      let exists = !!this.storage.aiModels.get(id) || !!gwConfig?.resolveModel(id);
+      if (!exists) {
+        throw new Error(`No such model: ${id}`);
+      }
+    }
+    this.storage.preferredModel.put(id);
+  }
+
+  async isOnboardingCompleted(): Promise<boolean> {
+    return this.storage.onboardingCompleted.get();
+  }
+
+  async completeOnboarding(): Promise<void> {
+    this.storage.onboardingCompleted.put(true);
   }
 
   // DO NOT MAKE PUBLIC -- returns API keys.

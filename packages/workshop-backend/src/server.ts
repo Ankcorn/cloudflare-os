@@ -89,6 +89,45 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.getQuickModel();
   }
 
+  getPreferredModel(): Promise<string | null> {
+    return this.user.getPreferredModel();
+  }
+  setPreferredModel(id: string | null): Promise<void> {
+    return this.user.setPreferredModel(id);
+  }
+  isOnboardingCompleted(): Promise<boolean> {
+    return this.user.isOnboardingCompleted();
+  }
+  completeOnboarding(): Promise<void> {
+    return this.user.completeOnboarding();
+  }
+  async setAvatar(data: Uint8Array | null): Promise<void> {
+    if (data) {
+      if (data.byteLength > 100 * 1024) {
+        throw new Error("Avatar too large (max 100 KB)");
+      }
+      // Verify the data starts with a known image magic-byte header.
+      let isJpeg = data[0] === 0xFF && data[1] === 0xD8 && data[2] === 0xFF;
+      let isPng = data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47;
+      if (!isJpeg && !isPng) {
+        throw new Error("Avatar must be a JPEG or PNG image");
+      }
+    }
+    // Avatar data lives in KV (global), not the user's DO storage, so we
+    // read/write it directly here to avoid routing through the DO location.
+    let userId = this.user.id.name!;
+    if (data) {
+      await this.env.AVATARS.put(userId, data);
+    } else {
+      await this.env.AVATARS.delete(userId);
+    }
+  }
+  async getAvatar(userId: string): Promise<Uint8Array | null> {
+    let result = await this.env.AVATARS.get(userId, "arrayBuffer");
+    if (!result) return null;
+    return new Uint8Array(result);
+  }
+
   getAiConfig(): Promise<AiGatewayInfo> {
     let gwConfig = getAiGatewayConfig(this.env);
     if (gwConfig) {
