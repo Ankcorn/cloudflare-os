@@ -132,8 +132,8 @@ export default function OnboardingWizard({
       ])
       setModels(modelList)
       setAiConfig(cfg)
-      // Pre-select the first model if there's exactly one
-      if (modelList.length === 1) {
+      // Default to the first model in the list
+      if (modelList.length > 0) {
         setSelectedModelId((prev) => prev ?? modelList[0].id)
       }
     } catch (err) {
