@@ -263,7 +263,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
               <Input
                 label="Display Name"
-                placeholder="e.g., ChatGPT 5.1 Codex"
+                placeholder="e.g., GPT 5.1 Codex"
                 description="Human-readable name shown in the UI"
                 value={displayName}
                 onChange={(e) => { setDisplayName(e.target.value); setErrors(prev => ({ ...prev, displayName: '' })) }}

@@ -294,27 +294,22 @@ export type AiModelConfig = {
 // This map maps provider name -> model ID -> display name. When the user chooses one of these,
 // the model ID should be used both for `AiModelConfig.model` and `AiChatAuthorInfo.id`.
 export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
-  "anthropic": {
-    "claude-sonnet-4-6": "Claude Sonnet 4.6",
-    "claude-opus-4-7": "Claude Opus 4.7",
-  },
   "cloudflare": {
-    "@cf/qwen/qwen3-coder-480b-a35b-instruct-fp8": "Qwen 3 Coder 480B (Workers AI)",
-    "@cf/moonshotai/kimi-k2.5": "Kimi K2.5 (Workers AI)",
-    "@cf/zai-org/glm-4.7-flash": "GLM 4.7 Flash (Workers AI)",
+    "@cf/moonshotai/kimi-k2.6": "Kimi K2.6 (Workers AI)",
     "@cf/zai-org/glm-5.1": "GLM 5.1 (Workers AI)",
+  },
+  "anthropic": {
+    "claude-opus-4-7": "Claude Opus 4.7",
+    "claude-opus-4-6": "Claude Opus 4.6",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+  },
+  "openai": {
+    "gpt-5.4": "GPT 5.4",
   },
   "google": {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
-    "gemini-3-flash-preview": "Gemini 3 Flash",
   },
   "ollama": {
-    "qwen3-coder:30b": "Qwen 3 Coder 30B (ollama)",
-  },
-  "openai": {
-    "gpt-5.3-codex": "ChatGPT 5.3 Codex",
-    "gpt-5.4": "ChatGPT 5.4",
-//    "gpt-5.4-pro-2026-03-05": "ChatGPT 5.4 Pro",     // doesn't work? just hangs?
   },
 };
 
@@ -776,10 +771,10 @@ export type AiChatAuthorInfo = {
   // and `name` is the gadget title.
   type: "user" | "agent" | "gadget";
 
-  // Unique user identifier, e.g. "kenton@cloudflare.com" or "chatgpt-5.1-pro".
+  // Unique user identifier, e.g. "kenton@cloudflare.com" or "gpt-5.1-pro".
   id: string;
 
-  // Display name for author, e.g. "Kenton Varda" or "ChatGPT"
+  // Display name for author, e.g. "Kenton Varda" or "GPT"
   name: string;
 
   // TODO: URL of author avatar?

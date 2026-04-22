@@ -205,6 +205,16 @@ function stringifyError(err: unknown): string {
   }
 }
 
+// Compute a unique value to use as session affinity for a chat thread. Workers AI in particular
+// wants a session affinity value to enable prompt caching. (But we compute it regardless of
+// provider since other providers might want it too.)
+async function computeSessionAffinity(gadgetId: string, chatId: number): Promise<string> {
+  // Hex prefix for hash personalization.
+  let input = new TextEncoder().encode(`e26339049e055b01:${gadgetId}:${chatId}`);
+  let hash = await crypto.subtle.digest("SHA-256", input);
+  return new Uint8Array(hash).toHex();
+}
+
 function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // TODO: ActionRecord and ActionLogEntry are almost identical. The main differences are:
   // - ActionRecord contains the gatekeeperId, but we could safely share that.
@@ -1305,7 +1315,8 @@ class OverseerImpl implements AgentHooks {
                    callbackInitiated: boolean = false): Promise<void> {
     let liveChat = this.#getLiveChat(chatId);
     try {
-      let chosenModel = getModel(this.env, aiModel.config, initiator);
+      let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
+      let chosenModel = getModel(this.env, aiModel.config, initiator, sessionAffinity);
 
       let controller = new AbortController();
       liveChat.cancelController = controller;
