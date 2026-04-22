@@ -926,13 +926,12 @@ export async function runAgent(
   let maxOutputTokens: number | undefined;
   if (typeof chosenModel === "object" && chosenModel.provider &&
       chosenModel.provider.startsWith("workersai")) {
-    // Workers AI uses a very low defalut max tokens if we don't set it higher. Qwen 3, Kimi K2.5,
-    // and GLM 4.7 all support 131k tokens. These are the only models on Workers AI so far that can
-    // even plausibly write code, so let's just assume we're using one of them.
-    // TODO: Qwen 3 requires that maxOutputTokens PLUS the input tokens do not exceed 131k or it
-    //   throws an exception. We don't know how to count input tokens so for now we use 100k,
-    //   leaving 31k headroom. This is obviously a terrible solution and we need to come up with
-    //   something better here.
+    // The main Workers AI model, Kimi K2.6, supports 262,144 tokens. Unfortunately, Workers AI
+    // adds `maxOuputTokens` to the input tokens and throws an exception if the *total* exceeds
+    // the model's supported context window. And uh, we have no idea how many input tokens we have
+    // because Workers AI runs the tokenizer. For now we'll set maxOutputTokens = 100,000, which
+    // means we'll get an error on the first message after crossing 162,144 tokens in the chat.
+    // Hopefully Workers AI can fix this and give us a way to just request "whatever is supported".
     maxOutputTokens = 100000;
   }
 
@@ -1465,8 +1464,6 @@ export async function runAgent(
 
     // TODO: I don't quite understand `stopWhen`. It seems like you are required to set it if
     //   you want to support multiple steps at all? What if you don't want to set a limit?
-    // Note: I had to increase this to 30 because ChatGPT seems to take LOTS of steps to do
-    //   anything.
     stopWhen: [
       stepCountIs(30),
       // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.

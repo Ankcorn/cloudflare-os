@@ -16,15 +16,16 @@ import { AiGatewayConfig, getAiGatewayConfig } from "./ai-gateway.js";
 import { AiGateway, createAiGateway } from 'ai-gateway-provider';
 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
-                         initiator: AiChatAuthorInfo): LanguageModel {
+                         initiator: AiChatAuthorInfo,
+                         sessionAffinity?: string): LanguageModel {
   // When AI Gateway mode is active, all models are routed through the gateway.
   // The config's apiToken and apiUrl are ignored; we use the gateway URL and CF API token instead.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
-    return getModelViaGateway(env, gwConfig, config, initiator);
+    return getModelViaGateway(env, gwConfig, config, initiator, sessionAffinity);
   }
 
-  return getModelDirect(env, config);
+  return getModelDirect(env, config, sessionAffinity);
 }
 
 function getModelViaGateway(
@@ -32,6 +33,7 @@ function getModelViaGateway(
   gwConfig: AiGatewayConfig,
   config: AiModelConfig,
   initiator: AiChatAuthorInfo,
+  sessionAffinity?: string,
 ): LanguageModel {
   let metadata: any = {
     user: initiator.id,
@@ -44,7 +46,7 @@ function getModelViaGateway(
     return createWorkersAI({
       binding: env.WORKERS_AI,
       gateway: { id: gwConfig.workersAiGateway, metadata },
-    })(config.model as any);
+    })(config.model as any, { sessionAffinity });
   }
 
   let gatewayWrapper: AiGateway;
@@ -83,7 +85,8 @@ function getModelViaGateway(
   }
 }
 
-function getModelDirect(env: Cloudflare.Env, config: AiModelConfig): LanguageModel {
+function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
+                        sessionAffinity?: string): LanguageModel {
   switch (config.provider) {
     case "anthropic":
       return createAnthropic({
@@ -93,7 +96,7 @@ function getModelDirect(env: Cloudflare.Env, config: AiModelConfig): LanguageMod
     case "cloudflare":
       return createWorkersAI({
         binding: env.WORKERS_AI,
-      })(config.model as any);
+      })(config.model as any, { sessionAffinity });
     case "google":
       return createGoogleGenerativeAI({
         apiKey: config.apiToken,
