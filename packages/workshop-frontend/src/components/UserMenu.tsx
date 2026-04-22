@@ -1,32 +1,28 @@
-import { useState, useEffect } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
-import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { useAvatar } from '../useAvatar'
 
 export default function UserMenu() {
-  const { authenticatedApi, logout } = useAuthenticatedApi()
+  const { authenticatedApi, logout, currentUser } = useAuthenticatedApi()
   const navigate = useNavigate()
-  const [user, setUser] = useState<AiChatAuthorInfo | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    authenticatedApi.whoami().then((info) => {
-      if (!cancelled) setUser(info)
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [authenticatedApi])
+  const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
 
-  const initials = user?.name
-    ? user.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
+  const initials = currentUser?.name
+    ? currentUser.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
     : 'U'
 
   return (
     <DropdownMenu>
       <DropdownMenu.Trigger
         render={
-          <button className="w-8 h-8 rounded-full flex items-center justify-center bg-kumo-tint hover:bg-kumo-fill transition-colors">
-            <span className="text-xs font-medium text-kumo-strong">{initials}</span>
+          <button className="w-8 h-8 rounded-full flex items-center justify-center bg-kumo-tint hover:bg-kumo-fill transition-colors overflow-hidden">
+            {avatarUrl ? (
+              <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
+            ) : (
+              <span className="text-xs font-medium text-kumo-strong">{initials}</span>
+            )}
           </button>
         }
       />

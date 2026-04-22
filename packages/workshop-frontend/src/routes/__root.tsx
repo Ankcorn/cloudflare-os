@@ -1,12 +1,15 @@
-import { useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
+import { RpcStub } from 'capnweb'
+import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { markConnectionRestored } from '../main'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
 import Header from '../components/Header'
 import LoginPage from '../LoginPage'
+import OnboardingWizard from '../OnboardingWizard'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -100,7 +103,7 @@ function RootComponent() {
     )
   }
 
-  // Authenticated — render the full shell
+  // Authenticated — render the full shell (with onboarding gate)
   // authenticatedApi is guaranteed non-null here: isLoading, error, and
   // !isAuthenticated branches all return early above.
   if (!authenticatedApi) return null
@@ -108,13 +111,71 @@ function RootComponent() {
     <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
       <TooltipProvider>
         <Toasty>
-          {connectionLost && <ConnectionLostBanner />}
-          {!isChat && !isGadgetEditor && <Header />}
-          <main className={!isChat && !isGadgetEditor ? 'dotted-bg' : ''}>
-            <Outlet />
-          </main>
+          <AuthenticatedShell
+            authenticatedApi={authenticatedApi}
+            connectionLost={connectionLost}
+            isChat={isChat}
+            isGadgetEditor={isGadgetEditor}
+          />
         </Toasty>
       </TooltipProvider>
     </AuthProvider>
+  )
+}
+
+/**
+ * Inner shell that checks onboarding status and either shows the wizard
+ * or the normal app chrome. Lives inside AuthProvider so the wizard can
+ * use useAuthenticatedApi().
+ */
+function AuthenticatedShell({
+  authenticatedApi,
+  connectionLost,
+  isChat,
+  isGadgetEditor,
+}: {
+  authenticatedApi: RpcStub<AuthenticatedApi>
+  connectionLost: boolean
+  isChat: boolean
+  isGadgetEditor: boolean
+}) {
+  // null = still checking, true = needs onboarding, false = onboarding done
+  const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi.isOnboardingCompleted().then((completed) => {
+      if (!cancelled) setOnboardingNeeded(!completed)
+    }).catch((err) => {
+      console.error('Failed to check onboarding status:', err)
+      // If the check fails, skip onboarding to avoid blocking the user
+      if (!cancelled) setOnboardingNeeded(false)
+    })
+    return () => { cancelled = true }
+  }, [authenticatedApi])
+
+  // Still checking onboarding status
+  if (onboardingNeeded === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
+        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  // Show onboarding wizard
+  if (onboardingNeeded) {
+    return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
+  }
+
+  // Normal app shell
+  return (
+    <>
+      {connectionLost && <ConnectionLostBanner />}
+      {!isChat && !isGadgetEditor && <Header />}
+      <main className={!isChat && !isGadgetEditor ? 'dotted-bg' : ''}>
+        <Outlet />
+      </main>
+    </>
   )
 }

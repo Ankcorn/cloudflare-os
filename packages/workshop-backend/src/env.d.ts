@@ -18,5 +18,8 @@ declare namespace Cloudflare {
     // Blueprint storage bindings.
     BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
     BLUEPRINT_CONTENT: R2Bucket;         // R2 bucket for blueprint code snapshots
+
+    // User avatar storage.
+    AVATARS: KVNamespace;                // Workers KV for user avatar images
   }
 }

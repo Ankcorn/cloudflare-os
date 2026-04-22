@@ -23,6 +23,10 @@
     {
       "binding": "BLUEPRINTS",
       "preview_id": "gadgets-blueprint-metadata"
+    },
+    {
+      "binding": "AVATARS",
+      "preview_id": "gadgets-avatars"
     }
   ],
   "r2_buckets": [

@@ -3,10 +3,6 @@ import { Button, useKumoToastManager } from "@cloudflare/kumo";
 import {
   UploadSimple,
   Hexagon,
-  Robot,
-  Lightning,
-  EnvelopeSimple,
-  Star,
 } from "@phosphor-icons/react";
 import {
   useCallback,
@@ -17,68 +13,15 @@ import {
   type ChangeEvent,
 } from "react";
 import {
-  BlueprintBinding,
   BlueprintLibrarySummary,
-  BlueprintMetadata,
   BlueprintPublicInfo,
   BlueprintUserSummary,
 } from "@gadgets/workshop-shared/api";
 import { useAuthenticatedApi } from "./AuthContext";
-import { logoComponents } from "./components/ConnectionLogos";
-
-// Deterministic gradient by blueprint ID (same palette as GadgetList)
-const gradients = [
-  "from-[#4A154B] to-[#7C3085]",
-  "from-[#0052CC] to-[#2684FF]",
-  "from-[#5865F2] to-[#7983F5]",
-  "from-[#34A853] to-[#4285F4]",
-  "from-[#24292e] to-[#555]",
-  "from-[#E01E5A] to-[#ECB22E]",
-  "from-orange-600 to-red-600",
-  "from-emerald-600 to-teal-600",
-];
-
-function getGradient(id: string) {
-  return gradients[id.charCodeAt(0) % gradients.length];
-}
-
-type BindingBadgeInfo = {
-  type: BlueprintBinding["type"];
-  label: string;
-  /** For gatekeeper bindings, the vendor key (e.g. "google", "github"). */
-  vendorKey?: string;
-};
-
-/** Deduplicate binding types for display. Returns one badge per unique gatekeeper vendor
- *  and one per aiModel / agentSpawner type. */
-function uniqueBindingBadges(
-  bindings: Record<string, BlueprintBinding>,
-): BindingBadgeInfo[] {
-  const seen = new Set<string>();
-  const badges: BindingBadgeInfo[] = [];
-  for (const b of Object.values(bindings)) {
-    let key: string;
-    let label: string;
-    let vendorKey: string | undefined;
-    if (b.type === "gatekeeper") {
-      key = `gk:${b.gatekeeperName}`;
-      vendorKey = b.gatekeeperName.toLowerCase();
-      label =
-        b.gatekeeperName.charAt(0).toUpperCase() + b.gatekeeperName.slice(1);
-    } else if (b.type === "aiModel") {
-      key = "aiModel";
-      label = "AI Model";
-    } else {
-      key = "agentSpawner";
-      label = "Agent";
-    }
-    if (!seen.has(key)) {
-      seen.add(key);
-      badges.push({ type: b.type, label, vendorKey });
-    }
-  }
-  return badges;
-}
+import {
+  BlueprintCard,
+  getGradient,
+} from "./components/BlueprintCard";
 
 export default function BlueprintsPage() {
   const { authenticatedApi } = useAuthenticatedApi();
@@ -258,98 +201,6 @@ export default function BlueprintsPage() {
           </section>
         </div>
       )}
-    </div>
-  );
-}
-
-function BindingBadge({ badge }: { badge: BindingBadgeInfo }) {
-  // For gatekeeper bindings, use the vendor's actual logo if available
-  const VendorLogo = badge.vendorKey
-    ? logoComponents[badge.vendorKey]
-    : undefined;
-
-  let icon: React.ReactNode;
-  if (VendorLogo) {
-    icon = <VendorLogo size={12} />;
-  } else if (badge.type === "gatekeeper" && badge.vendorKey === "email") {
-    icon = <EnvelopeSimple size={12} weight="bold" />;
-  } else if (badge.type === "aiModel") {
-    icon = <Robot size={12} weight="bold" />;
-  } else if (badge.type === "agentSpawner") {
-    icon = <Lightning size={12} weight="bold" />;
-  } else {
-    // Fallback: first letter of the label
-    icon = (
-      <span className="text-[10px] font-semibold leading-none">
-        {badge.label[0]}
-      </span>
-    );
-  }
-
-  return (
-    <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
-      {icon}
-      {badge.label}
-    </span>
-  );
-}
-
-function BlueprintCard({
-  id,
-  metadata,
-  featured,
-}: {
-  id: string;
-  metadata: BlueprintMetadata;
-  featured?: boolean;
-}) {
-  const badges = uniqueBindingBadges(metadata.bindings);
-
-  return (
-    <div className="relative isolate group rounded-xl border border-kumo-line bg-kumo-elevated transition-colors hover:border-kumo-brand/40 hover:bg-kumo-base flex flex-col overflow-hidden min-h-[108px]">
-      {/* Featured star watermark */}
-      {featured && (
-        <Star
-          size={64}
-          weight="fill"
-          className="absolute -top-3 -right-3 text-kumo-brand/10 pointer-events-none"
-        />
-      )}
-      <Link
-        to="/blueprint/$id"
-        params={{ id }}
-        aria-label={`Open blueprint ${metadata.title}`}
-        className="absolute inset-0 rounded-xl z-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
-      />
-      <div className="p-4 flex flex-col gap-3 flex-1">
-        {/* Icon + title row */}
-        <div className="flex items-start gap-3">
-          <div
-            className={`w-9 h-9 rounded-lg bg-gradient-to-br ${getGradient(id)} flex items-center justify-center flex-shrink-0`}
-          >
-            <Hexagon size={14} className="text-white/70" weight="bold" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-kumo-default leading-snug line-clamp-2">
-              {metadata.title}
-            </p>
-            {metadata.description && (
-              <p className="mt-1 text-xs text-kumo-subtle line-clamp-2">
-                {metadata.description}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Binding badges */}
-        {badges.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {badges.map((b) => (
-              <BindingBadge key={b.vendorKey ?? b.type} badge={b} />
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
