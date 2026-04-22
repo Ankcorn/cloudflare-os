@@ -25,6 +25,7 @@ import GadgetUI from './GadgetUI'
 import Connections from './Connections'
 import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
+import AlphaWarning from './AlphaWarning'
 
 // ─── console log subscriber ───────────────────────────────────────────────────
 
@@ -412,7 +413,7 @@ export default function GadgetEditor() {
   }
 
   // ── shared height tokens ──────────────────────────────────────────────────────
-  const TOPBAR_H = 48   // h-12
+  const TOPBAR_H = 56   // h-14 (matches home page Header)
   const TABBAR_H = 48   // h-12
   const RIGHT_CONTENT_H = `calc(100vh - ${TOPBAR_H}px - ${TABBAR_H}px)`
 
@@ -447,16 +448,17 @@ export default function GadgetEditor() {
     <div className="flex flex-col h-screen overflow-hidden bg-kumo-base relative">
       {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
       <div
-        className="flex items-center justify-between px-4 border-b border-kumo-line flex-shrink-0 gap-3"
-        style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 90%, transparent)' }}
+        className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
+        style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)' }}
       >
+        <AlphaWarning />
         {/* Left: logo / title */}
         <div className="flex items-center gap-2 min-w-0">
           <Link
             to="/"
             className="flex-shrink-0 hover:opacity-80 transition-opacity"
           >
-            <Hexagon size={20} className="text-kumo-brand" weight="bold" />
+            <Hexagon size={22} className="text-kumo-brand" weight="bold" />
           </Link>
 
           <span className="text-kumo-inactive flex-shrink-0">/</span>

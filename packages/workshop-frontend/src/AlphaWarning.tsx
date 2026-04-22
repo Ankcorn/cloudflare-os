@@ -1,29 +1,19 @@
-import { useState } from 'react'
-import { Text, Button } from '@cloudflare/kumo'
-import { X } from '@phosphor-icons/react'
-
-const WARNING_TEXT = 'This is an alpha test. All data may be deleted without warning.'
-
-let dismissed = false
-
+/**
+ * Small inline warning banner that appears centered in the top bar.
+ *
+ * Designed to be placed inside a flex container that has `position: relative`;
+ * it absolutely-centers itself so it doesn't affect the left/right layout.
+ * Hidden below the `lg` breakpoint where it would crowd the bar.
+ */
 export default function AlphaWarning() {
-  const [visible, setVisible] = useState(!dismissed)
-
-  if (!visible) return null
-
   return (
-    <span className="inline-flex items-center gap-1.5">
-      <Text variant="error" bold as="span" DANGEROUS_className="text-[17px]">
-        {WARNING_TEXT}
-      </Text>
-      <Button
-        variant="ghost"
-        size="xs"
-        onClick={() => { dismissed = true; setVisible(false) }}
-        aria-label="Dismiss warning"
-      >
-        <X size={12} className="text-kumo-danger" />
-      </Button>
-    </span>
+    <div
+      aria-hidden="false"
+      className="hidden lg:flex absolute inset-0 items-center justify-center pointer-events-none"
+    >
+      <span className="text-xs font-medium text-kumo-warning whitespace-nowrap">
+        Warning: Gadgets is still in alpha. All data may be deleted.
+      </span>
+    </div>
   )
 }

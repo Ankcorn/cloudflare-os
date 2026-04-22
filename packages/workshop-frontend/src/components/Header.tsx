@@ -3,6 +3,7 @@ import { Hexagon, List, X } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../AuthContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
+import AlphaWarning from '../AlphaWarning'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
@@ -35,7 +36,8 @@ export default function Header() {
         backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)',
       }}
       >
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
+      <div className="relative px-4 sm:px-6 h-14 flex items-center justify-between">
+        <AlphaWarning />
         {/* Logo */}
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-2">
