@@ -548,6 +548,17 @@ class PendingActionStore<Action> {
     return this.#kv.get<Action>(this.#actionKey(id));
   }
 
+  put(id: number, action: Action): void {
+    this.#kv.put(this.#actionKey(id), action);
+  }
+
+  list(): {id: number, action: Action}[] {
+    return [...this.#kv.list<Action>({prefix: "pending:action:"})]
+        .map(([key, action]) => ({id: Number(key.slice("pending:action:".length)), action}))
+        .filter(({id}) => Number.isFinite(id))
+        .sort((a, b) => a.id - b.id);
+  }
+
   remove(id: number): void {
     this.#kv.delete(this.#actionKey(id));
   }
@@ -790,11 +801,191 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
 // Google Docs Gatekeeper
 // =======================================================================================
 
-type GoogleDocAction = {
-  type: "batchUpdate";
+type GoogleDocActionBase = {
   documentId: string;
-  revisionId: string;
-  requests: any[];
+  submittedAt: number;
+  baseRevisionId: string;
+  invalidatedReason?: string;
+}
+
+type GoogleDocReplaceAction = GoogleDocActionBase & {
+  type: "replaceText";
+  oldMarkdown: string;
+  newMarkdown: string;
+}
+
+type GoogleDocAppendAction = GoogleDocActionBase & {
+  type: "appendText";
+  markdown: string;
+}
+
+type GoogleDocAction = GoogleDocReplaceAction | GoogleDocAppendAction;
+
+type GoogleDocPendingAction = {id: number, action: GoogleDocAction};
+
+type GoogleDocSimulatedContentCache = {
+  baseRevisionId: string;
+  pendingFingerprint: string;
+  markdown: string;
+  pendingActions: GoogleDocAction[];
+  computedAt: number;
+}
+
+type GoogleDocSimulationCacheHolder = {
+  current?: GoogleDocSimulatedContentCache;
+}
+
+function googleDocPendingFingerprint(pending: GoogleDocPendingAction[]): string {
+  return JSON.stringify(pending);
+}
+
+function previewMarkdown(markdown: string, maxLength: number): string {
+  return markdown.length > maxLength ? markdown.slice(0, maxLength) + "..." : markdown;
+}
+
+function findUniqueMarkdown(markdown: string, oldMarkdown: string, operation: string): number {
+  if (oldMarkdown.length === 0) {
+    throw new Error(`${operation}: oldMarkdown must not be empty.`);
+  }
+
+  let index = markdown.indexOf(oldMarkdown);
+  if (index === -1) {
+    throw new Error(
+      `${operation}: oldMarkdown was not found in the current simulated document. ` +
+      `Make sure the text exactly matches content returned by getContent().`);
+  }
+
+  let secondIndex = markdown.indexOf(oldMarkdown, index + 1);
+  if (secondIndex !== -1) {
+    throw new Error(
+      `${operation}: oldMarkdown matches multiple locations in the current simulated document. ` +
+      `Include more surrounding context to make the match unique.`);
+  }
+
+  return index;
+}
+
+function applyMarkdownReplacement(
+  markdown: string,
+  oldMarkdown: string,
+  newMarkdown: string,
+  operation: string,
+): string {
+  if (oldMarkdown === newMarkdown) {
+    return markdown;
+  }
+
+  let index = findUniqueMarkdown(markdown, oldMarkdown, operation);
+  return markdown.slice(0, index) + newMarkdown + markdown.slice(index + oldMarkdown.length);
+}
+
+function appendMarkdownForSimulation(markdown: string, appendedMarkdown: string): string {
+  let normalizedAppend = appendedMarkdown.endsWith("\n") ? appendedMarkdown : appendedMarkdown + "\n";
+
+  if (markdown.length === 0) {
+    return normalizedAppend;
+  }
+
+  if (markdown.endsWith("\n\n")) {
+    return markdown + normalizedAppend;
+  }
+
+  if (markdown.endsWith("\n")) {
+    return markdown + "\n" + normalizedAppend;
+  }
+
+  return markdown + "\n\n" + normalizedAppend;
+}
+
+function applyGoogleDocActionToMarkdown(markdown: string, action: GoogleDocAction): string {
+  if (action.invalidatedReason) {
+    throw new Error(action.invalidatedReason);
+  }
+
+  switch (action.type) {
+    case "replaceText":
+      return applyMarkdownReplacement(
+          markdown, action.oldMarkdown, action.newMarkdown, "replaceText");
+    case "appendText":
+      return appendMarkdownForSimulation(markdown, action.markdown);
+    default:
+      action satisfies never;
+      throw new Error(`unknown action type: ${(action as any).type}`);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function invalidateGoogleDocAction(
+  pendingActions: PendingActionStore<GoogleDocAction>,
+  pending: GoogleDocPendingAction,
+  reason: string,
+): void {
+  if (!pending.action.invalidatedReason) {
+    pending.action.invalidatedReason = reason;
+    pendingActions.put(pending.id, pending.action);
+  }
+}
+
+function invalidateUnreplayableGoogleDocActions(
+  pendingActions: PendingActionStore<GoogleDocAction>,
+  baseMarkdown: string,
+  pending: GoogleDocPendingAction[],
+  context: string,
+): {markdown: string, pendingActions: GoogleDocAction[]} {
+  let markdown = baseMarkdown;
+  let replayedActions: GoogleDocAction[] = [];
+  for (let i = 0; i < pending.length; i++) {
+    let action = pending[i].action;
+    if (action.invalidatedReason) {
+      continue;
+    }
+
+    try {
+      markdown = applyGoogleDocActionToMarkdown(markdown, action);
+    } catch (error) {
+      invalidateGoogleDocAction(
+          pendingActions,
+          pending[i],
+          `${context}: ${errorMessage(error)} This edit was dropped from the document. ` +
+          `Reject it and retry if it is still needed.`);
+      continue;
+    }
+    replayedActions.push(action);
+  }
+
+  return {markdown, pendingActions: replayedActions};
+}
+
+function materializeGoogleDocAction(snapshot: DocSnapshot, action: GoogleDocAction): any[] {
+  if (action.invalidatedReason) {
+    throw new Error(action.invalidatedReason);
+  }
+
+  switch (action.type) {
+    case "replaceText": {
+      let matchStart = findUniqueMarkdown(
+          snapshot.markdown, action.oldMarkdown, "applyAction(replaceText)");
+      let result = computeReplaceOperations(
+          snapshot.sourceMap,
+          snapshot.markdown,
+          matchStart,
+          matchStart + action.oldMarkdown.length,
+          action.newMarkdown);
+      return result.requests;
+    }
+
+    case "appendText": {
+      let insertAt = snapshot.bodyEndIndex - 1;
+      return markdownToDocRequests("\n" + action.markdown, insertAt);
+    }
+
+    default:
+      action satisfies never;
+      throw new Error(`unknown action type: ${(action as any).type}`);
+  }
 }
 
 type GoogleDocGatekeeperImplProps = {
@@ -806,6 +997,7 @@ export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
     implements Gatekeeper<GoogleDocSession, number, undefined> {
   #accessToken: GoogleAccessToken | undefined;
+  #simulationCache: GoogleDocSimulationCacheHolder = {};
 
   async #getAccessToken(): Promise<string> {
     if (!this.#accessToken) {
@@ -840,32 +1032,95 @@ export class GoogleDocGatekeeperImpl
     let api = new GoogleDocsApi(() => this.#getAccessToken());
     let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
     return new GoogleDocSessionImpl(
-        api, this.ctx.props.documentId, approvalQueue.dup(), pendingActions, this.ctx.storage);
+        api,
+        this.ctx.props.documentId,
+        approvalQueue.dup(),
+        pendingActions,
+        this.ctx.storage,
+        this.#simulationCache);
   }
 
   async applyAction(actionId: number): Promise<void> {
     let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
-    let action = pendingActions.get(actionId);
-    if (!action) {
+    let pending = pendingActions.list();
+    let pendingIndex = pending.findIndex(({id}) => id === actionId);
+    if (pendingIndex === -1) {
       throw new Error(`Unknown pending Google Doc action: ${actionId}`);
+    }
+    let pendingRecord = pending[pendingIndex];
+
+    let action = pendingRecord.action;
+    if (action.invalidatedReason) {
+      pendingActions.remove(actionId);
+      this.#simulationCache.current = undefined;
+      return;
+    }
+
+    let firstPending = pending.find(({action}) => !action.invalidatedReason);
+    if (firstPending?.id !== actionId) {
+      throw new Error(
+        `Google Doc edits must be approved in order. Approve earlier edit ` +
+        `${firstPending?.id} before edit ${actionId}.`);
     }
 
     let api = new GoogleDocsApi(() => this.#getAccessToken());
-    switch (action.type) {
-      case "batchUpdate": {
-        await api.batchUpdate(action.documentId, action.requests, action.revisionId);
-        pendingActions.remove(actionId);
-        break;
+    let doc = await api.getDocument(action.documentId);
+    let snapshot = docToMarkdown(doc);
+    let requests: any[];
+    try {
+      requests = materializeGoogleDocAction(snapshot, action);
+    } catch (error) {
+      console.error("Dropping stale Google Doc action during apply", error);
+      pendingActions.remove(actionId);
+      this.#simulationCache.current = undefined;
+      await this.ctx.storage.put("docSnapshot", snapshot);
+      invalidateUnreplayableGoogleDocActions(
+          pendingActions,
+          snapshot.markdown,
+          pending.slice(pendingIndex + 1),
+          `Pending Google Doc edits could not be replayed after edit ${actionId} was dropped`);
+      return;
+    }
+    if (requests.length > 0) {
+      await api.batchUpdate(action.documentId, requests, snapshot.revisionId);
+    }
+    pendingActions.remove(actionId);
+    this.#simulationCache.current = undefined;
+
+    try {
+      let refreshedSnapshot = snapshot;
+      if (requests.length > 0) {
+        refreshedSnapshot = docToMarkdown(await api.getDocument(action.documentId));
       }
-      default:
-        throw new Error(`unknown action type: ${(action as any).type}`);
+      await this.ctx.storage.put("docSnapshot", refreshedSnapshot);
+      invalidateUnreplayableGoogleDocActions(
+          pendingActions,
+          refreshedSnapshot.markdown,
+          pending.slice(pendingIndex + 1),
+          `Pending Google Doc edits could not be replayed after edit ${actionId} was applied`);
+    } catch (error) {
+      console.error("Failed to refresh Google Doc simulation after applying action", error);
+      await this.ctx.storage.delete("docSnapshot");
     }
   }
 
   async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
-    // No simulation state to roll back.
     let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
+    let pending = pendingActions.list();
+    let index = pending.findIndex(({id}) => id === actionId);
+    if (index === -1) {
+      throw new Error(`Unknown pending Google Doc action: ${actionId}`);
+    }
+
+    let wasActive = !pending[index].action.invalidatedReason;
+
     pendingActions.remove(actionId);
+    this.#simulationCache.current = undefined;
+    await this.ctx.storage.delete("docSnapshot");
+
+    if (wasActive && index < pending.length - 1) {
+      return {restart: true};
+    }
   }
 
   revertAction(action: number, revertInfo: undefined):
@@ -884,6 +1139,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   #approvalQueue: ApprovalQueue<number>;
   #pendingActions: PendingActionStore<GoogleDocAction>;
   #storage: DurableObjectStorage;
+  #simulationCache: GoogleDocSimulationCacheHolder;
 
   constructor(
     docsApi: GoogleDocsApi,
@@ -891,6 +1147,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     approvalQueue: ApprovalQueue<number>,
     pendingActions: PendingActionStore<GoogleDocAction>,
     storage: DurableObjectStorage,
+    simulationCache: GoogleDocSimulationCacheHolder,
   ) {
     super();
     this.#docsApi = docsApi;
@@ -898,6 +1155,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     this.#approvalQueue = approvalQueue;
     this.#pendingActions = pendingActions;
     this.#storage = storage;
+    this.#simulationCache = simulationCache;
   }
 
   async #getSnapshot(forceRefresh?: boolean): Promise<DocSnapshot> {
@@ -925,8 +1183,41 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     return snapshot;
   }
 
-  async getMetadata(): Promise<DocMetadata> {
+  async #getSimulatedContent(): Promise<{
+    snapshot: DocSnapshot,
+    markdown: string,
+    pendingActions: GoogleDocAction[],
+  }> {
     let snapshot = await this.#getSnapshot();
+    let pending = this.#pendingActions.list();
+    let pendingFingerprint = googleDocPendingFingerprint(pending);
+    let cached = this.#simulationCache.current;
+    if (cached && cached.baseRevisionId === snapshot.revisionId &&
+        cached.pendingFingerprint === pendingFingerprint) {
+      return {
+        snapshot,
+        markdown: cached.markdown,
+        pendingActions: cached.pendingActions,
+      };
+    }
+
+    let {markdown, pendingActions} = invalidateUnreplayableGoogleDocActions(
+        this.#pendingActions,
+        snapshot.markdown,
+        pending,
+        "Pending Google Doc edit could not be replayed against the current document");
+    this.#simulationCache.current = {
+      baseRevisionId: snapshot.revisionId,
+      pendingFingerprint: googleDocPendingFingerprint(this.#pendingActions.list()),
+      markdown,
+      pendingActions,
+      computedAt: Date.now(),
+    };
+    return {snapshot, markdown, pendingActions};
+  }
+
+  async getMetadata(): Promise<DocMetadata> {
+    let {snapshot, pendingActions} = await this.#getSimulatedContent();
 
     await this.#approvalQueue.authorizeObservation({
       title: "Read Google Doc metadata",
@@ -936,67 +1227,46 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     // The Docs API doesn't return lastModified directly (that's a Drive API field).
     // For now, use the fetch timestamp as an approximation.
     // TODO: Use Drive API files.get for actual modifiedTime.
+    let lastModified = pendingActions.reduce(
+        (latest, action) => Math.max(latest, action.submittedAt), snapshot.fetchedAt);
     return {
       title: snapshot.title ?? "Untitled document",
-      lastModified: new Date(snapshot.fetchedAt),
+      lastModified: new Date(lastModified),
     };
   }
 
   async getContent(): Promise<string> {
-    let snapshot = await this.#getSnapshot();
+    let {markdown} = await this.#getSimulatedContent();
 
     await this.#approvalQueue.authorizeObservation({
       title: "Read Google Doc content",
-      description: "Read the full content of the document as Markdown.",
+      description: "Read the full simulated content of the document as Markdown.",
     });
 
-    return snapshot.markdown;
+    return markdown;
   }
 
   async replaceText(oldMarkdown: string, newMarkdown: string): Promise<void> {
-    let snapshot = await this.#storage.get<DocSnapshot>("docSnapshot");
-    if (!snapshot) {
-      throw new Error("No document snapshot cached. Call getContent() first.");
-    }
-
-    // Find the match in the cached Markdown.
-    let index = snapshot.markdown.indexOf(oldMarkdown);
-    if (index === -1) {
-      throw new Error(
-        "replaceText: oldMarkdown not found in the document snapshot. " +
-        "Make sure the text exactly matches content returned by getContent().");
-    }
-    let secondIndex = snapshot.markdown.indexOf(oldMarkdown, index + 1);
-    if (secondIndex !== -1) {
-      throw new Error(
-        "replaceText: oldMarkdown matches multiple locations in the document. " +
-        "Include more surrounding context to make the match unique.");
-    }
-
-    let matchStart = index;
-    let matchEnd = index + oldMarkdown.length;
-
-    let result = computeReplaceOperations(
-        snapshot.sourceMap, snapshot.markdown, matchStart, matchEnd, newMarkdown);
-
-    if (result.requests.length === 0) {
+    if (oldMarkdown === newMarkdown) {
       return;
     }
 
+    let {snapshot, markdown} = await this.#getSimulatedContent();
+    findUniqueMarkdown(markdown, oldMarkdown, "replaceText");
+
     let action: GoogleDocAction = {
-      type: "batchUpdate",
+      type: "replaceText",
       documentId: this.#documentId,
-      revisionId: snapshot.revisionId,
-      requests: result.requests,
+      submittedAt: Date.now(),
+      baseRevisionId: snapshot.revisionId,
+      oldMarkdown,
+      newMarkdown,
     };
 
-    let oldPreview = result.trimmedOld.length > 80
-        ? result.trimmedOld.slice(0, 80) + "..."
-        : result.trimmedOld;
-    let newPreview = result.trimmedNew.length > 80
-        ? result.trimmedNew.slice(0, 80) + "..."
-        : result.trimmedNew;
+    let oldPreview = previewMarkdown(oldMarkdown, 80);
+    let newPreview = previewMarkdown(newMarkdown, 80);
     let actionId = this.#pendingActions.submit(action);
+    this.#simulationCache.current = undefined;
 
     try {
       await this.#approvalQueue.submitAction(actionId, {
@@ -1009,32 +1279,25 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
       });
     } catch (error) {
       this.#pendingActions.remove(actionId);
+      this.#simulationCache.current = undefined;
       throw error;
     }
   }
 
   async appendText(markdown: string): Promise<void> {
-    let snapshot = await this.#getSnapshot();
-
-    // Insert before the final newline (bodyEndIndex - 1) since Google Docs
-    // always has a trailing newline that can't be deleted.
-    let insertAt = snapshot.bodyEndIndex - 1;
-
-    // Prepend \n so that the appended content starts a new paragraph rather
-    // than concatenating onto the last existing paragraph.
-    let requests = markdownToDocRequests("\n" + markdown, insertAt);
+    let {snapshot} = await this.#getSimulatedContent();
 
     let action: GoogleDocAction = {
-      type: "batchUpdate",
+      type: "appendText",
       documentId: this.#documentId,
-      revisionId: snapshot.revisionId,
-      requests,
+      submittedAt: Date.now(),
+      baseRevisionId: snapshot.revisionId,
+      markdown,
     };
 
-    let preview = markdown.length > 100
-        ? markdown.slice(0, 100) + "..."
-        : markdown;
+    let preview = previewMarkdown(markdown, 100);
     let actionId = this.#pendingActions.submit(action);
+    this.#simulationCache.current = undefined;
 
     try {
       await this.#approvalQueue.submitAction(actionId, {
@@ -1044,6 +1307,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
       });
     } catch (error) {
       this.#pendingActions.remove(actionId);
+      this.#simulationCache.current = undefined;
       throw error;
     }
   }

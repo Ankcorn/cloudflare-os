@@ -570,6 +570,11 @@ export function markdownToDocRequests(markdown: string, insertAt: number): any[]
   // No trailing \n — the document's existing structure provides paragraph
   // terminators after the insertion point.
   let fullText = blocks.map(b => b.plainText).join("\n");
+  if (fullText.length === 0) {
+    // `parseMarkdown()` treats whitespace-only input as blank Markdown blocks, but replacements
+    // can legitimately insert whitespace inside existing text, e.g. splitting a word in two.
+    return [{ insertText: { location: { index: insertAt }, text: markdown } }];
+  }
 
   // Insert the full text in one go. This is more efficient and avoids
   // index-shifting complexity from multiple insertions.
@@ -737,6 +742,11 @@ function mdRangeToDocRange(
   mdStart: number,
   mdEnd: number,
 ): { start: number; end: number } | null {
+  if (mdStart === mdEnd) {
+    let docIndex = mdPointToDocIndex(sourceMap, mdStart);
+    return docIndex === null ? null : { start: docIndex, end: docIndex };
+  }
+
   let docStart: number | null = null;
   let docEnd: number | null = null;
 
@@ -774,4 +784,35 @@ function mdRangeToDocRange(
 
   if (docStart === null || docEnd === null) return null;
   return { start: docStart, end: docEnd };
+}
+
+function mdPointToDocIndex(sourceMap: SourceMap, mdPoint: number): number | null {
+  for (let block of sourceMap.blocks) {
+    if (mdPoint < block.mdStart) continue;
+    if (mdPoint > block.mdEnd) continue;
+
+    for (let seg of block.segments) {
+      if (mdPoint < seg.mdStart || mdPoint > seg.mdEnd) continue;
+
+      if ("syntaxOnly" in seg) {
+        continue;
+      }
+
+      return seg.docStart + (mdPoint - seg.mdStart);
+    }
+
+    for (let seg of block.segments) {
+      if ("syntaxOnly" in seg) continue;
+      if (mdPoint <= seg.mdStart) return seg.docStart;
+      if (mdPoint <= seg.mdEnd) return seg.docEnd;
+    }
+
+    if (mdPoint === block.mdEnd && block.docEnd > block.docStart) {
+      return block.docEnd - 1;
+    }
+
+    return block.docStart;
+  }
+
+  return null;
 }
