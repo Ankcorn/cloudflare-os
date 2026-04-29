@@ -5,8 +5,14 @@ import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
 import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnapshot } from "./markdown-converter";
+import { BigQueryApi, DEFAULT_MAX_BYTES_BILLED } from "./bigquery-api";
+import {
+  BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryProject,
+  BigQueryQueryOptions, BigQueryQueryResult, BigQuerySession, BigQueryTable,
+} from "./bigquery-types";
 import TYPES_CODE from "./types.txt";
 import DOCS_TYPES_CODE from "./docs-types.txt";
+import BIGQUERY_TYPES_CODE from "./bigquery-types.txt";
 
 // A nonce stored in UserAccount KV to protect the OAuth flow. Only one nonce is active at a time;
 // the `stage` field tracks where we are in the flow.
@@ -119,6 +125,9 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/gmail.labels",
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/documents",
+  // `bigquery` (not `bigquery.readonly`): dry-runs go through `jobs.insert` for scope
+  // enforcement, which `readonly` doesn't permit. Read-only is enforced at the API layer.
+  "https://www.googleapis.com/auth/bigquery",
 ];
 
 const GMAIL_RESOURCE: SupportedResource = {
@@ -133,7 +142,18 @@ const GOOGLE_DOC_RESOURCE: SupportedResource = {
   description: "Read and edit a Google Doc.",
 };
 
-const SUPPORTED_RESOURCES: SupportedResource[] = [GMAIL_RESOURCE, GOOGLE_DOC_RESOURCE];
+const BIGQUERY_HOST = "bigquery.googleapis.com";
+
+const BIGQUERY_RESOURCE: SupportedResource = {
+  urlPattern: `https://${BIGQUERY_HOST}/:projectId/*`,
+  title: "BigQuery",
+  description:
+    "Query one Google Cloud project. Use /projectId/datasetId to scope to one dataset, " +
+    "or /projectId/datasetId/tableId for one table.",
+};
+
+const SUPPORTED_RESOURCES: SupportedResource[] =
+    [GMAIL_RESOURCE, GOOGLE_DOC_RESOURCE, BIGQUERY_RESOURCE];
 
 // Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
 export default {
@@ -251,7 +271,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return [TYPES_CODE, DOCS_TYPES_CODE].join("\n");
+    return [TYPES_CODE, DOCS_TYPES_CODE, BIGQUERY_TYPES_CODE].join("\n");
   }
 }
 
@@ -434,6 +454,44 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         documentId,
       };
       return {class: this.ctx.exports.GoogleDocGatekeeperImpl({props}), resource: GOOGLE_DOC_RESOURCE};
+    }
+
+    if (parsed.hostname === BIGQUERY_HOST) {
+      if (parsed.protocol !== "https:") {
+        throw new Error(`BigQuery resource URLs must use https: ${url}`);
+      }
+      if (parsed.search || parsed.hash) {
+        throw new Error("BigQuery resource URLs must not include query strings or fragments.");
+      }
+
+      // Synthetic path: /<projectId>/<datasetId>/<tableId> (each segment optional after the first).
+      let segments = parsed.pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean)
+          .map(segment => decodeURIComponent(segment));
+      if (segments.length > 3) {
+        throw new Error(
+            "BigQuery resource URLs must be /<projectId>, /<projectId>/<datasetId>, " +
+            "or /<projectId>/<datasetId>/<tableId>.");
+      }
+      let projectId = segments[0] || undefined;
+      let datasetId = segments[1] || undefined;
+      let tableId = segments[2] || undefined;
+      if (!projectId) {
+        throw new Error("BigQuery resource URLs must include a project ID.");
+      }
+      if (tableId && !datasetId) {
+        throw new Error("Cannot scope to a table without specifying a dataset.");
+      }
+
+      let props: BigQueryGatekeeperImplProps = {
+        userObjectId: this.ctx.props.userObjectId,
+        scopedProjectId: projectId,
+        scopedDatasetId: datasetId,
+        scopedTableId: tableId,
+      };
+      return {
+        class: this.ctx.exports.BigQueryGatekeeperImpl({props}),
+        resource: BIGQUERY_RESOURCE,
+      };
     }
 
     // Default: Gmail
@@ -988,5 +1046,380 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
       this.#pendingActions.remove(actionId);
       throw error;
     }
+  }
+}
+
+// =======================================================================================
+// BigQuery Gatekeeper
+// =======================================================================================
+//
+// Scope enforcement: when a session is scoped to a project/dataset/table, every query is
+// dry-run first (via `BigQueryApi.dryRun`) and rejected if it references tables outside the
+// scope. The dry-run also gives us the bytesProcessed estimate, which we cross-check against
+// `maximumBytesBilled` before actually executing — defense in depth, since BigQuery will also
+// enforce maximumBytesBilled server-side.
+
+type BigQueryGatekeeperImplProps = {
+  userObjectId: string;
+  // When set, narrows the session's authority. Project is required for any narrower scope.
+  scopedProjectId?: string;
+  scopedDatasetId?: string;
+  scopedTableId?: string;
+};
+
+export class BigQueryGatekeeperImpl
+    extends DurableObject<Env, BigQueryGatekeeperImplProps>
+    implements Gatekeeper<BigQuerySession, number, undefined> {
+  #accessToken: GoogleAccessToken | undefined;
+
+  async #getAccessToken(): Promise<string> {
+    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
+      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+      this.#accessToken = await stub.getAccessToken();
+    }
+    return this.#accessToken.token;
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    let { scopedProjectId: p, scopedDatasetId: d, scopedTableId: t } = this.ctx.props;
+    let path = p ? (d ? (t ? `/${p}/${d}/${t}` : `/${p}/${d}`) : `/${p}`) : "";
+    let label = t ? `${p}.${d}.${t}` : d ? `${p}.${d}` : p ?? null;
+    return {
+      url: `https://${BIGQUERY_HOST}${path}`,
+      title: label ? `BigQuery (${label})` : "BigQuery",
+      snippet: t
+          ? `Query BigQuery table "${p}.${d}.${t}" (read-only)`
+          : d
+              ? `Query BigQuery dataset "${p}.${d}" (read-only)`
+              : p
+                  ? `Query BigQuery datasets in project "${p}" (read-only)`
+                  : "Browse BigQuery projects and datasets (read-only)",
+      suggestedBindingName: "BIGQUERY",
+      tsType: "BigQuerySession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return BIGQUERY_TYPES_CODE;
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>): Promise<BigQuerySession> {
+    let api = new BigQueryApi(() => this.#getAccessToken());
+    return new BigQuerySessionImpl(
+      api,
+      approvalQueue.dup(),
+      this.ctx.props.scopedProjectId,
+      this.ctx.props.scopedDatasetId,
+      this.ctx.props.scopedTableId,
+    );
+  }
+
+  // Read-only — no side-effecting actions.
+  async applyAction(_action: number): Promise<void> {}
+  async rejectAction(_action: number): Promise<void> {}
+  revertAction(_action: number, _revertInfo: undefined): Promise<void> {
+    throw new Error("BigQuery gatekeeper has no writable actions to revert");
+  }
+
+  async setHook(_hook: Fetcher | null): Promise<void> {
+    // BigQuery doesn't push events.
+  }
+}
+
+class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
+  #api: BigQueryApi;
+  #approvalQueue: ApprovalQueue<number>;
+  #scopedProjectId?: string;
+  #scopedDatasetId?: string;
+  #scopedTableId?: string;
+
+  constructor(
+    api: BigQueryApi,
+    approvalQueue: ApprovalQueue<number>,
+    scopedProjectId?: string,
+    scopedDatasetId?: string,
+    scopedTableId?: string,
+  ) {
+    super();
+    this.#api = api;
+    this.#approvalQueue = approvalQueue;
+    this.#scopedProjectId = scopedProjectId;
+    this.#scopedDatasetId = scopedDatasetId;
+    this.#scopedTableId = scopedTableId;
+  }
+
+  // --- helpers -----------------------------------------------------------
+
+  // Pick the project to bill the query against. When scoped, the scoped project is used and
+  // the caller cannot override. When unscoped, the caller must declare a default project via
+  // `defaultDataset.projectId` (BigQuery requires a billing project on every query).
+  #billingProject(): string {
+    if (this.#scopedProjectId) return this.#scopedProjectId;
+    throw new Error(
+      "This session is not scoped to a project. Connect to a specific BigQuery project " +
+      "(e.g. https://bigquery.googleapis.com/my-project) to run queries.");
+  }
+
+  #effectiveDataset(opts: { defaultDataset?: string } | undefined): string | undefined {
+    if (this.#scopedDatasetId) {
+      if (opts?.defaultDataset && opts.defaultDataset !== this.#scopedDatasetId) {
+        throw new Error(
+          `Cannot override defaultDataset to "${opts.defaultDataset}" — this connection is ` +
+          `scoped to "${this.#scopedDatasetId}".`);
+      }
+      return this.#scopedDatasetId;
+    }
+    return opts?.defaultDataset;
+  }
+
+  // Note: callers can still probe whether out-of-scope tables exist by attempting queries
+  // and observing which error class fires (out-of-scope vs. not-found vs. DML-rejected).
+  // The data is protected; the namespace is partly leaky.
+  #checkScopedTables(referenced: string[]): void {
+    if (!this.#scopedProjectId) throw new Error("BigQuery queries require a project-scoped binding.");
+    // Empty referencedTables is fine for project-only scope (e.g. `SELECT 1`,
+    // `SELECT CURRENT_TIMESTAMP()`) — there are no tables to scope-check. Only require
+    // at least one referenced table when the binding narrows to a specific dataset or
+    // table, since otherwise there's nothing to verify the scope against.
+    if (referenced.length === 0) {
+      if (this.#scopedDatasetId || this.#scopedTableId) {
+        throw new Error(
+          "BigQuery dry run did not report any referenced tables; refusing to execute because " +
+          "resource scope cannot be verified.");
+      }
+      return;
+    }
+    for (let ref of referenced) {
+      let parts = ref.split(".");
+      if (parts.length !== 3) {
+        throw new Error(`Could not parse referenced table "${ref}".`);
+      }
+      let [proj, ds, tbl] = parts;
+      if (proj !== this.#scopedProjectId) {
+        throw new Error(
+          `Query references project "${proj}" but this connection is scoped to ` +
+          `"${this.#scopedProjectId}".`);
+      }
+      if (this.#scopedDatasetId && ds !== this.#scopedDatasetId) {
+        throw new Error(
+          `Query references dataset "${proj}.${ds}" but this connection is scoped to ` +
+          `"${this.#scopedProjectId}.${this.#scopedDatasetId}".`);
+      }
+      if (this.#scopedTableId && tbl !== this.#scopedTableId) {
+        throw new Error(
+          `Query references table "${ref}" but this connection is scoped to ` +
+          `"${this.#scopedProjectId}.${this.#scopedDatasetId}.${this.#scopedTableId}".`);
+      }
+    }
+  }
+
+  #assertReadOnlyEstimate(estimate: {
+    statementType?: string;
+    ddlOperationPerformed?: string;
+    hasScript: boolean;
+    hasDmlStats: boolean;
+    referencedRoutines?: string[];
+  }): void {
+    if (estimate.hasScript || estimate.statementType === "SCRIPT") {
+      throw new Error("Only single-statement read-only SELECT queries are allowed.");
+    }
+    if (estimate.ddlOperationPerformed) {
+      throw new Error("DDL statements are not allowed.");
+    }
+    if (estimate.hasDmlStats) {
+      throw new Error("DML statements are not allowed.");
+    }
+    // Allowlist (fail-closed): require an explicit SELECT statementType. BigQuery's dry-run
+    // doesn't always populate statementType for every form, so a missing value should be
+    // treated as "unknown" and rejected — not assumed safe just because the explicit DDL/DML
+    // guards above didn't trip.
+    if (!estimate.statementType) {
+      throw new Error(
+        "BigQuery dry run did not report a statement type; refusing to execute.");
+    }
+    if (estimate.statementType !== "SELECT") {
+      throw new Error(
+        `Only read-only SELECT queries are allowed (got ${estimate.statementType}).`);
+    }
+    if (estimate.referencedRoutines && estimate.referencedRoutines.length > 0) {
+      throw new Error(
+        "Queries that reference routines are not allowed because their data access cannot " +
+        "be scoped by referencedTables.");
+    }
+  }
+
+  // --- API ---------------------------------------------------------------
+
+  async query(sql: string, opts?: BigQueryQueryOptions): Promise<BigQueryQueryResult> {
+    let billingProject = this.#billingProject();
+    let defaultDataset = this.#effectiveDataset(opts);
+    let maxBytes = opts?.maximumBytesBilled ?? DEFAULT_MAX_BYTES_BILLED;
+
+    // Always dry-run first to enforce scope and get a cost estimate. Dry-runs are free
+    // (BigQuery doesn't bill for them), and the response includes `referencedTables`
+    // parsed by Google's own SQL engine — the only reliable way to check scope on
+    // arbitrary SQL.
+    let estimate = await this.#api.dryRun(billingProject, sql, {
+      defaultDataset, params: opts?.params,
+    });
+    this.#assertReadOnlyEstimate(estimate);
+    this.#checkScopedTables(estimate.referencedTables);
+    if (estimate.bytesProcessed > maxBytes) {
+      throw new Error(
+        `Query would process ${(estimate.bytesProcessed / 1e9).toFixed(2)} GB, exceeding the ` +
+        `limit of ${(maxBytes / 1e9).toFixed(2)} GB. Pass a higher \`maximumBytesBilled\` to ` +
+        `override.`);
+    }
+
+    let result = await this.#api.query(billingProject, sql, {
+      ...opts,
+      defaultDataset,
+      maximumBytesBilled: maxBytes,
+    });
+
+    let preview = sql.replace(/\s+/g, " ").trim().slice(0, 200);
+    await this.#approvalQueue.authorizeObservation({
+      title: `BigQuery query: ${preview}`,
+      description:
+        `SQL preview: \`${preview}\`${sql.length > preview.length ? "..." : ""}\n` +
+        (defaultDataset ? `Default dataset: \`${defaultDataset}\`\n` : "") +
+        `Billing project: \`${billingProject}\`\n` +
+        `Referenced tables: ${estimate.referencedTables.join(", ")}\n` +
+        `Bytes processed: ${result.bytesProcessed.toLocaleString()}\n` +
+        `Returned ${result.rows.length} rows (totalRows=${result.totalRows}).`,
+    });
+
+    return result;
+  }
+
+  async dryRun(
+    sql: string,
+    opts?: Pick<BigQueryQueryOptions, "defaultDataset" | "params">,
+  ): Promise<BigQueryDryRunResult> {
+    let billingProject = this.#billingProject();
+    let defaultDataset = this.#effectiveDataset(opts);
+
+    let estimate = await this.#api.dryRun(billingProject, sql, {
+      defaultDataset, params: opts?.params,
+    });
+    this.#assertReadOnlyEstimate(estimate);
+    this.#checkScopedTables(estimate.referencedTables);
+
+    let preview = sql.replace(/\s+/g, " ").trim().slice(0, 100);
+    await this.#approvalQueue.authorizeObservation({
+      title: `BigQuery dry run: ${preview}`,
+      description:
+        `Estimated bytes processed: ${estimate.bytesProcessed.toLocaleString()}\n` +
+        `Referenced tables: ${estimate.referencedTables.join(", ") || "(none)"}`,
+    });
+
+    return estimate;
+  }
+
+  async getProject(): Promise<BigQueryProject> {
+    let result: BigQueryProject = { projectId: this.#scopedProjectId! };
+    await this.#approvalQueue.authorizeObservation({
+      title: "Get BigQuery project",
+      description: `Returned the scoped project: \`${this.#scopedProjectId}\`.`,
+    });
+    return result;
+  }
+
+  async listDatasets(projectId?: string): Promise<BigQueryDataset[]> {
+    if (this.#scopedProjectId && projectId && projectId !== this.#scopedProjectId) {
+      throw new Error(
+        `Cannot list datasets in "${projectId}" — this connection is scoped to ` +
+        `"${this.#scopedProjectId}".`);
+    }
+    let p = this.#scopedProjectId ?? projectId;
+    if (!p) {
+      throw new Error("listDatasets requires a projectId when the session is unscoped.");
+    }
+
+    if (this.#scopedDatasetId) {
+      let dataset = await this.#api.getDataset(p, this.#scopedDatasetId);
+      await this.#approvalQueue.authorizeObservation({
+        title: `List datasets in ${p}`,
+        description: `Returned scoped dataset \`${p}.${this.#scopedDatasetId}\` (1 dataset).`,
+      });
+      return [dataset];
+    }
+
+    let result = await this.#api.listDatasets(p);
+    await this.#approvalQueue.authorizeObservation({
+      title: `List datasets in ${p}`,
+      description: `Listed ${result.length} dataset(s) in \`${p}\`.`,
+    });
+    return result;
+  }
+
+  async listTables(datasetId?: string, projectId?: string): Promise<BigQueryTable[]> {
+    if (this.#scopedProjectId && projectId && projectId !== this.#scopedProjectId) {
+      throw new Error(
+        `Cannot list tables in project "${projectId}" — this connection is scoped to ` +
+        `"${this.#scopedProjectId}".`);
+    }
+    if (this.#scopedDatasetId && datasetId && datasetId !== this.#scopedDatasetId) {
+      throw new Error(
+        `Cannot list tables in dataset "${datasetId}" — this connection is scoped to ` +
+        `"${this.#scopedDatasetId}".`);
+    }
+    let p = this.#scopedProjectId ?? projectId;
+    let d = this.#scopedDatasetId ?? datasetId;
+    if (!p) throw new Error("listTables requires a projectId when the session is unscoped.");
+    if (!d) throw new Error("listTables requires a datasetId when the session is unscoped.");
+
+    if (this.#scopedTableId) {
+      let { table } = await this.#api.getTable(p, d, this.#scopedTableId);
+      await this.#approvalQueue.authorizeObservation({
+        title: `List tables in ${p}.${d}`,
+        description: `Returned scoped table \`${p}.${d}.${this.#scopedTableId}\` (1 table).`,
+      });
+      return [table];
+    }
+
+    let result = await this.#api.listTables(p, d);
+    await this.#approvalQueue.authorizeObservation({
+      title: `List tables in ${p}.${d}`,
+      description: `Listed ${result.length} table(s) in \`${p}.${d}\`.`,
+    });
+    return result;
+  }
+
+  async describeTable(
+    tableId?: string,
+    datasetId?: string,
+    projectId?: string,
+  ): Promise<{ table: BigQueryTable; schema: BigQueryField[] }> {
+    if (this.#scopedProjectId && projectId && projectId !== this.#scopedProjectId) {
+      throw new Error(
+        `Cannot describe table in project "${projectId}" — this connection is scoped to ` +
+        `"${this.#scopedProjectId}".`);
+    }
+    if (this.#scopedDatasetId && datasetId && datasetId !== this.#scopedDatasetId) {
+      throw new Error(
+        `Cannot describe table in dataset "${datasetId}" — this connection is scoped to ` +
+        `"${this.#scopedDatasetId}".`);
+    }
+    if (this.#scopedTableId && tableId && tableId !== this.#scopedTableId) {
+      throw new Error(
+        `Cannot describe table "${tableId}" — this connection is scoped to ` +
+        `"${this.#scopedTableId}".`);
+    }
+    let p = this.#scopedProjectId ?? projectId;
+    let d = this.#scopedDatasetId ?? datasetId;
+    let t = this.#scopedTableId ?? tableId;
+    if (!p) throw new Error("describeTable requires a projectId when the session is unscoped.");
+    if (!d) throw new Error("describeTable requires a datasetId when the session is unscoped.");
+    if (!t) throw new Error("describeTable requires a tableId when the session is unscoped.");
+
+    let result = await this.#api.getTable(p, d, t);
+    await this.#approvalQueue.authorizeObservation({
+      title: `Describe ${p}.${d}.${t}`,
+      description:
+        `Described table \`${p}.${d}.${t}\` (${result.schema.length} columns).`,
+    });
+    return result;
   }
 }

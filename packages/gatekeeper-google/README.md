@@ -18,7 +18,7 @@ If you're running this project locally and want to use Google API integrations, 
 
 ### Step 2: Enable Required APIs
 
-You'll need to enable the Google APIs that you want to use. Currently supported: Gmail and Google Docs.
+You'll need to enable the Google APIs that you want to use. Currently supported: Gmail, Google Docs, and BigQuery.
 
 1. In the left sidebar, go to **APIs & Services** > **Library** (or [click here](https://console.cloud.google.com/apis/library))
 2. Search for "Gmail API"
@@ -27,6 +27,9 @@ You'll need to enable the Google APIs that you want to use. Currently supported:
 5. Go back to the Library, search for "Google Docs API"
 6. Click on **Google Docs API** in the results
 7. Click **Enable**
+8. Go back to the Library, search for "BigQuery API"
+9. Click on **BigQuery API** in the results
+10. Click **Enable**
 
 ### Step 3: Configure the OAuth Consent Screen
 
