@@ -123,7 +123,11 @@ export async function getGoogleAccountDescription(accessToken: string)
     displayName: data.name,
     uniqueName: data.email,
     avatar: {url: data.picture},
-    scope: [ "Read and label emails", "Read and edit Google Docs" ],
+    scope: [
+      "Read and label emails",
+      "Read and edit Google Docs",
+      "Read BigQuery datasets and run read-only queries",
+    ],
   };
 }
 
