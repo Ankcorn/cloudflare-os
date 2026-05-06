@@ -28,7 +28,7 @@ function PermissionCard({
           <Shield size={14} className="text-kumo-brand" />
         </div>
         <div className="flex-1 min-w-0">
-          <Text variant="body" size="sm" bold as="div">Permission requested</Text>
+          <div className="text-sm font-semibold text-kumo-default">Permission requested</div>
           <div className="mt-0.5">
             <Text variant="secondary" size="xs" as="span">
               Workshop wants to access <strong>{perm.connectionName}</strong>

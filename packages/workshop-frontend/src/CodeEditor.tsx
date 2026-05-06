@@ -3,6 +3,8 @@ import { Editor } from '@monaco-editor/react'
 import type { editor } from 'monaco-editor'
 import * as Y from 'yjs'
 import { MonacoBinding } from 'y-monaco'
+import { GADGETS_CODE_THEME, defineGadgetsCodeTheme, monoFont } from './components/monacoTheme'
+import { getLanguage } from './getLanguage'
 
 interface CodeEditorProps {
   filename: string | null
@@ -57,60 +59,6 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
     setEditorReady(true)
   }
 
-  // Get language from file extension
-  const getLanguage = (filename: string): string => {
-    const extension = filename.split('.').pop()?.toLowerCase()
-    switch (extension) {
-      case 'ts':
-      case 'tsx':
-        return 'typescript'
-      case 'js':
-      case 'jsx':
-        return 'javascript'
-      case 'json':
-        return 'json'
-      case 'html':
-        return 'html'
-      case 'css':
-        return 'css'
-      case 'md':
-        return 'markdown'
-      case 'py':
-        return 'python'
-      case 'rs':
-        return 'rust'
-      case 'go':
-        return 'go'
-      case 'sh':
-      case 'bash':
-        return 'shell'
-      case 'yaml':
-      case 'yml':
-        return 'yaml'
-      case 'toml':
-        return 'toml'
-      case 'xml':
-        return 'xml'
-      case 'svg':
-        return 'xml'
-      case 'sql':
-        return 'sql'
-      case 'graphql':
-      case 'gql':
-        return 'graphql'
-      case 'c':
-        return 'c'
-      case 'cpp':
-      case 'cc':
-      case 'cxx':
-      case 'h':
-      case 'hpp':
-        return 'cpp'
-      default:
-        return 'plaintext'
-    }
-  }
-
   if (!filename) {
     return (
       <div
@@ -128,17 +76,20 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
         height="100%"
         language={getLanguage(filename)}
         defaultValue=""
+        beforeMount={defineGadgetsCodeTheme}
         onMount={handleEditorDidMount}
-        theme="vs"
+        theme={GADGETS_CODE_THEME}
         options={{
           automaticLayout: true,
-          fontSize: 14,
-          lineHeight: 22,
-          fontFamily: "'JetBrains Mono', 'SF Mono', Monaco, Inconsolata, 'Roboto Mono', consolas, 'Courier New', monospace",
-          minimap: { enabled: true },
+          fontSize: 13,
+          lineHeight: 20,
+          letterSpacing: 0,
+          fontFamily: monoFont,
+          fontLigatures: false,
+          minimap: { enabled: false },
           wordWrap: 'on',
           scrollBeyondLastLine: false,
-          renderLineHighlight: 'all',
+          renderLineHighlight: 'none',
           selectOnLineNumbers: true,
           roundedSelection: false,
           readOnly: !isReady,
@@ -155,6 +106,22 @@ export default function CodeEditor({ filename, ytext, isReady, height = '100%' }
           foldingStrategy: 'indentation',
           showFoldingControls: 'mouseover',
           unfoldOnClickAfterEndOfLine: false,
+          lineDecorationsWidth: 12,
+          lineNumbersMinChars: 4,
+          overviewRulerLanes: 0,
+          hideCursorInOverviewRuler: true,
+          renderWhitespace: 'none',
+          guides: {
+            indentation: false,
+            highlightActiveIndentation: false,
+          },
+          occurrencesHighlight: 'off',
+          selectionHighlight: false,
+          scrollbar: {
+            verticalScrollbarSize: 10,
+            horizontalScrollbarSize: 10,
+            useShadows: false,
+          },
           contextmenu: true,
           mouseWheelZoom: true
         }}

@@ -1,12 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
-import { Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
+import { useKumoToastManager } from '@cloudflare/kumo'
 import {
   ShareNetwork,
   Pencil,
   Check,
   X,
   Hexagon,
+  Blueprint,
   Trash,
 } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -23,9 +24,15 @@ import {
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import Connections from './Connections'
+import Activity from './Activity'
 import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
+import BlueprintModal from './BlueprintModal'
 import AlphaWarning from './AlphaWarning'
+import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
+import { TabButton } from './components/TabButton'
+import { useActions } from './useActions'
+import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 
 // ─── console log subscriber ───────────────────────────────────────────────────
 
@@ -61,13 +68,48 @@ function formatConsoleLogs(logs: BufferedLogEntry[]): string {
 
 // ─── right-panel tabs ─────────────────────────────────────────────────────────
 
-type RightTab = 'app' | 'code' | 'connections'
+type RightTab = 'app' | 'code' | 'connections' | 'activity'
+
+type WorkspaceOverride = 'open' | 'closed' | null
+
+function formatHeaderCost(cost: number) {
+  if (cost === 0) return '$0'
+  if (cost < 0.01) return '<$0.01'
+  return `$${cost.toFixed(2)}`
+}
 
 const RIGHT_TABS: { value: RightTab; label: string }[] = [
   { value: 'app', label: 'Gadget' },
-  { value: 'connections', label: 'Connections' },
   { value: 'code', label: 'Code' },
+  { value: 'connections', label: 'Connections' },
+  { value: 'activity', label: 'Activity' },
 ]
+
+const CHAT_WIDTH_STORAGE_KEY = 'gadgets:workshop:chatWidth'
+const MIN_CHAT_WIDTH = 280
+const MIN_WORKSPACE_WIDTH = 400
+const DEFAULT_CHAT_WIDTH = 420
+
+const isBrowser = typeof window !== 'undefined'
+
+function clampChatWidth(width: number) {
+  if (!isBrowser) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
+  const max = Math.max(MIN_CHAT_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
+  return Math.max(MIN_CHAT_WIDTH, Math.min(max, width))
+}
+
+function getInitialChatWidth() {
+  if (!isBrowser) return DEFAULT_CHAT_WIDTH
+  const fallback = Math.min(DEFAULT_CHAT_WIDTH, Math.floor(window.innerWidth * 0.38))
+  let parsed = NaN
+  try {
+    const stored = window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY)
+    if (stored) parsed = Number(stored)
+  } catch {
+    // private mode / sandboxed iframes
+  }
+  return clampChatWidth(Number.isFinite(parsed) ? parsed : fallback)
+}
 
 // ─── component ────────────────────────────────────────────────────────────────
 
@@ -97,12 +139,15 @@ export default function GadgetEditor() {
   const [titleInput, setTitleInput] = useState('')
 
   // ── layout ───────────────────────────────────────────────────────────────────
-  const [chatWidth, setChatWidth] = useState(() => Math.min(420, Math.floor(window.innerWidth * 0.38)))
+  const [chatWidth, setChatWidth] = useState(getInitialChatWidth)
+  const chatWidthRef = useRef(chatWidth)
   const [isResizing, setIsResizing] = useState(false)
   const [activeTab, setActiveTab] = useState<RightTab>('app')
+  const [workspaceOverride, setWorkspaceOverride] = useState<WorkspaceOverride>(null)
+  const [workspaceTransitionEnabled, setWorkspaceTransitionEnabled] = useState(false)
+  const [hasMountedActivity, setHasMountedActivity] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
-  // Always start in edit mode so the chat sidebar is visible — users interact
-  // with the AI even when they are only using the gadget, not editing it.
+  const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
   const [previewMode, _setPreviewMode] = useState(false)
 
   // ── code / chat state ────────────────────────────────────────────────────────
@@ -133,7 +178,12 @@ export default function GadgetEditor() {
   // We only choose this layout after the initial chat/code subscriptions are
   // ready, so existing gadgets do not briefly flash the wrong UI while loading.
   const simpleMode = layoutModeReady && !hasCodeRelatedState && singleInitialChat
-  const showFullEditor = layoutModeReady && !simpleMode
+  const showFullEditor = layoutModeReady && (
+    workspaceOverride === null ? !simpleMode : workspaceOverride === 'open'
+  )
+  const workspaceTransitionClass = workspaceTransitionEnabled && !isResizing
+    ? 'transition-[width,opacity] duration-200 ease-out'
+    : ''
 
   // Before any code has been merged, a single-thread gadget conceptually only
   // has one useful conversation, so keep chat 0 selected even if the URL has
@@ -173,6 +223,8 @@ export default function GadgetEditor() {
     setConsoleLogCount(0)
   }, [])
 
+  chatWidthRef.current = chatWidth
+
   const handleClientConsoleLog = useCallback((log: ConsoleLogEvent) => {
     const method = (console as any)[log.level] ?? console.log
     method('client:', ...log.message)
@@ -181,6 +233,36 @@ export default function GadgetEditor() {
       setConsoleLogCount(consoleLogBufferRef.current.length)
     }
   }, [])
+
+  const persistChatWidth = useCallback((width: number) => {
+    try {
+      window.localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, String(Math.round(width)))
+    } catch {
+      // private mode / sandboxed iframes
+    }
+  }, [])
+
+  useEffect(() => {
+    const handleResize = () => {
+      setChatWidth(width => clampChatWidth(width))
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    if (activeTab === 'activity') setHasMountedActivity(true)
+  }, [activeTab])
+
+  // Pending-actions badge count; shares an RPC subscription with Activity / ChatInterface.
+  const { actionsById } = useActions(overseer?.stub ?? null)
+  const pendingActionsCount = useMemo(() => {
+    let count = 0
+    for (const record of actionsById.values()) {
+      if (record.state === 'pending') count++
+    }
+    return count
+  }, [actionsById])
 
   // ── chat count / auto-switch ─────────────────────────────────────────────────
   const handleChatCountChange = useCallback((count: number, chatZeroExists: boolean) => {
@@ -211,10 +293,7 @@ export default function GadgetEditor() {
     }
   }, [])
 
-  // Auto-switch to the Code tab when the AI starts streaming code for the first
-  // time on a fresh gadget. This lets the user watch code being written in
-  // real-time. The existing handleAgentActiveChange logic above switches to the
-  // Gadget tab once the agent finishes.
+  // Show the Code tab while a fresh gadget's first files are being written.
   useEffect(() => {
     if (
       streamingProposedChanges !== undefined &&
@@ -226,8 +305,6 @@ export default function GadgetEditor() {
     }
   }, [streamingProposedChanges, hasCode])
 
-  // Track whether the user has explicitly navigated back to the list view.
-  // This prevents the auto-select effect from immediately re-redirecting them.
   const userNavigatedToListRef = useRef(false)
 
   useEffect(() => {
@@ -240,6 +317,9 @@ export default function GadgetEditor() {
     setHasChatZero(false)
     setHasAnyProposedChanges(false)
     setSelectedChatHasProposedChanges(false)
+    setWorkspaceOverride(null)
+    setWorkspaceTransitionEnabled(false)
+    setHasMountedActivity(false)
     hasAutoSwitchedToCodeRef.current = false
     hasAutoSwitchedToUiRef.current = false
     hadProposedChangesAtAgentStartRef.current = false
@@ -262,9 +342,7 @@ export default function GadgetEditor() {
   )
 
   // ── keep single-chat routing aligned with the current mode ──────────────────
-  // In simple mode, chat 0 is implied and omitted from the URL. Before any code
-  // has been merged, the full editor still pins the user to chat 0. As soon as
-  // merged code exists, we stop auto-selecting so the conversation list can be shown.
+  // Keep the URL aligned with simple mode's implied chat-0 selection.
   useEffect(() => {
     if (!layoutModeReady) return
 
@@ -281,26 +359,44 @@ export default function GadgetEditor() {
   }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigate, id])
 
   // ── resize handle ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!isResizing) return
+  //
+  // Pointer capture keeps resizing reliable when dragging across the gadget iframe.
+  const handleResizePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (!showFullEditor) return
       e.preventDefault()
-      setChatWidth(Math.max(280, Math.min(window.innerWidth - 400, e.clientX)))
-    }
-    const onUp = () => {
+      e.currentTarget.setPointerCapture(e.pointerId)
+      setIsResizing(true)
+    },
+    [showFullEditor],
+  )
+  const handleResizePointerMove = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
+      setChatWidth(clampChatWidth(e.clientX))
+    },
+    [],
+  )
+  const handleResizePointerUp = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+      const width = e.type === 'pointercancel'
+        ? chatWidthRef.current
+        : clampChatWidth(e.clientX)
+      setChatWidth(width)
+      persistChatWidth(width)
       setIsResizing(false)
-      document.body.style.userSelect = ''
-      document.body.style.cursor = ''
-    }
-    if (isResizing) {
-      document.body.style.userSelect = 'none'
-      document.body.style.cursor = 'col-resize'
-      document.addEventListener('mousemove', onMove)
-      document.addEventListener('mouseup', onUp)
-    }
+    },
+    [persistChatWidth],
+  )
+
+  useEffect(() => {
+    if (!isResizing) return
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
     return () => {
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
     }
@@ -422,12 +518,12 @@ export default function GadgetEditor() {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <p className="text-sm text-kumo-danger">{error}</p>
-        <button
+        <WorkshopButton
+          tone="primary"
           onClick={handleBack}
-          className="px-4 py-2 text-sm font-medium text-kumo-inverse bg-kumo-brand rounded-lg hover:bg-kumo-brand-hover transition-colors"
         >
           Back to home
-        </button>
+        </WorkshopButton>
       </div>
     )
   }
@@ -465,7 +561,7 @@ export default function GadgetEditor() {
 
           {isEditingTitle ? (
             <div className="flex items-center gap-1">
-              <input
+              <WorkshopInput
                 type="text"
                 value={titleInput}
                 onChange={e => setTitleInput(e.target.value)}
@@ -474,34 +570,37 @@ export default function GadgetEditor() {
                   if (e.key === 'Escape') handleCancelEdit()
                 }}
                 autoFocus
-                className="text-sm font-semibold text-kumo-default bg-kumo-tint border border-kumo-brand rounded-md px-2 py-0.5 focus:outline-none w-56"
+                className="!h-7 w-56 bg-kumo-tint text-[14px] leading-5 font-medium tracking-[-0.25px]"
               />
-              <button
+              <WorkshopIconButton
                 onClick={handleSaveTitle}
                 disabled={!titleInput.trim()}
-                className="p-1 rounded-md text-kumo-subtle hover:text-kumo-brand hover:bg-kumo-tint transition-colors disabled:opacity-30"
+                className="!h-7 !w-7 hover:text-kumo-brand disabled:opacity-30"
+                aria-label="Save gadget title"
               >
                 <Check size={14} />
-              </button>
-              <button
+              </WorkshopIconButton>
+              <WorkshopIconButton
                 onClick={handleCancelEdit}
-                className="p-1 rounded-md text-kumo-subtle hover:text-kumo-default hover:bg-kumo-tint transition-colors"
+                className="!h-7 !w-7"
+                aria-label="Cancel title edit"
               >
                 <X size={14} />
-              </button>
+              </WorkshopIconButton>
             </div>
           ) : (
             <div className="flex items-center gap-1 min-w-0">
-              <span className="text-sm font-semibold text-kumo-default truncate">
+              <span className="text-[14px] leading-5 font-medium tracking-[-0.25px] text-kumo-default truncate">
                 {metadata.title}
               </span>
-              <button
+              <WorkshopIconButton
                 onClick={() => setIsEditingTitle(true)}
-                className="p-1.5 text-kumo-subtle hover:text-kumo-default rounded-md hover:bg-kumo-tint transition-colors flex-shrink-0"
+                className="!h-7 !w-7 flex-shrink-0"
                 title="Rename gadget"
+                aria-label="Rename gadget"
               >
                 <Pencil size={16} />
-              </button>
+              </WorkshopIconButton>
             </div>
           )}
 
@@ -512,11 +611,11 @@ export default function GadgetEditor() {
           )}
         </div>
 
-        {/* Right: cost, share, delete */}
-        <div className="flex items-center gap-2 flex-shrink-0">
+        {/* Right: cost, workspace, share, blueprints */}
+        <div className="flex items-center gap-1 flex-shrink-0">
           {metadata.totalCost != null && (
-            <span className="text-xs font-mono text-kumo-subtle">
-              ${metadata.totalCost.toFixed(4)}
+            <span className="mr-2 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+              {formatHeaderCost(metadata.totalCost)}
             </span>
           )}
 
@@ -526,37 +625,64 @@ export default function GadgetEditor() {
             </span>
           )}
 
-          <button
-            onClick={() => setShareModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border border-kumo-line rounded-lg text-kumo-default hover:bg-kumo-tint transition-colors"
+          <WorkshopIconButton
+            onClick={() => {
+              setWorkspaceTransitionEnabled(true)
+              setWorkspaceOverride(showFullEditor ? 'closed' : 'open')
+            }}
+            className="text-kumo-default"
+            title={showFullEditor ? 'Hide workspace' : 'Open workspace'}
+            aria-label={showFullEditor ? 'Hide workspace' : 'Open workspace'}
+            aria-pressed={showFullEditor}
           >
-            <ShareNetwork size={13} />
-            Share
-          </button>
+            <span className="relative inline-flex h-3.5 w-4 rounded-sm border border-current/60">
+              <span className="absolute inset-y-0 left-1/2 border-l border-current/60" />
+              <span
+                className={`absolute inset-y-0 right-0 left-1/2 origin-right bg-current/25 transition-transform duration-200 ease-out ${
+                  showFullEditor ? 'scale-x-100' : 'scale-x-0'
+                }`}
+              />
+            </span>
+          </WorkshopIconButton>
 
-          {/* Delete gadget */}
+          <WorkshopIconButton
+            onClick={() => setShareModalOpen(true)}
+            title="Share gadget"
+            aria-label="Share gadget"
+          >
+            <ShareNetwork size={15} />
+          </WorkshopIconButton>
+
+          <WorkshopIconButton
+            onClick={() => setBlueprintModalOpen(true)}
+            title="Blueprints"
+            aria-label="Blueprints"
+          >
+            <Blueprint size={16} />
+          </WorkshopIconButton>
+
           {!metadata.owner && (
-            <button
+            <WorkshopIconButton
+              danger
               onClick={() => setDeleteDialogOpen(true)}
-              className="p-1.5 text-kumo-subtle hover:text-kumo-danger rounded-md hover:bg-kumo-danger-tint transition-colors"
               title="Delete gadget"
+              aria-label="Delete gadget"
             >
               <Trash size={16} />
-            </button>
+            </WorkshopIconButton>
           )}
 
           {/* User menu */}
-          <div className="ml-1">
+          <div className="ml-2">
             <UserMenu />
           </div>
         </div>
       </div>
 
-      {/* ═══ BODY: always two-pane — chat left, tabs right ════════════════════ */}
-      <div className="flex flex-1 min-h-0 relative">
+      {/* ═══ BODY ═════════════════════════════════════════════════════════════ */}
+      <div className="flex flex-1 min-h-0 relative overflow-hidden">
 
-        {/* Full-width thinking progress bar. In simple mode it aligns with the
-            top bar border; otherwise it aligns with the tab bar border. */}
+        {/* Full-width thinking progress bar. */}
         {isAgentActive && (
           <div className="absolute left-0 right-0 h-0 z-10" style={{ top: simpleMode ? 0 : TABBAR_H }}>
             <div className="absolute left-0 right-0 h-0.5 bg-kumo-fill overflow-hidden">
@@ -567,8 +693,8 @@ export default function GadgetEditor() {
 
         {/* ── LEFT: Chat pane ──────────────────────────────────────────────────── */}
         <div
-          className={`flex flex-col ${showFullEditor ? 'border-r border-kumo-line flex-shrink-0' : 'flex-1'}`}
-          style={showFullEditor ? { width: chatWidth } : undefined}
+          className={`flex flex-col flex-shrink-0 ${workspaceTransitionClass} ${showFullEditor ? 'border-r border-kumo-line' : ''}`}
+          style={{ width: showFullEditor ? chatWidth : '100%' }}
         >
           {overseer ? (
             <div className="flex-1 min-h-0 relative">
@@ -620,34 +746,39 @@ export default function GadgetEditor() {
         </div>
 
         {/* ── Resize handle ───────────────────────────────────────────────────── */}
-        {showFullEditor && (
-          <div
-            className="w-1 flex-shrink-0 bg-kumo-line hover:bg-kumo-brand cursor-col-resize transition-colors relative"
-            onMouseDown={() => setIsResizing(true)}
-          >
-            <div className="absolute inset-y-0 -left-1 -right-1" />
-          </div>
-        )}
+        <div
+          className={`flex-shrink-0 overflow-visible bg-kumo-line cursor-col-resize relative touch-none ${workspaceTransitionClass}`}
+          style={{ width: showFullEditor ? 1 : 0 }}
+          onPointerDown={handleResizePointerDown}
+          onPointerMove={handleResizePointerMove}
+          onPointerUp={handleResizePointerUp}
+          onPointerCancel={handleResizePointerUp}
+        >
+          <div className="absolute inset-y-0 -left-2 -right-2" />
+        </div>
 
         {/* ── RIGHT: App / Code / Connections tabs ───────────────────────────── */}
-        <div className={`flex-1 flex flex-col min-w-0 bg-kumo-base ${showFullEditor ? '' : 'hidden'}`}>
+        <div
+          className={`flex flex-col flex-shrink-0 min-w-0 overflow-hidden bg-kumo-base ${workspaceTransitionClass}`}
+          style={{
+            width: showFullEditor ? `calc(100% - ${chatWidth}px - 1px)` : 0,
+            opacity: showFullEditor ? 1 : 0,
+          }}
+        >
           {/* Tab bar */}
           <div
-            className="flex items-center px-4 border-b border-kumo-line flex-shrink-0 gap-1"
+            className="flex items-center px-4 border-b border-kumo-line flex-shrink-0 gap-5"
             style={{ height: TABBAR_H }}
           >
             {RIGHT_TABS.map(tab => (
-              <button
+              <TabButton
                 key={tab.value}
+                active={activeTab === tab.value}
                 onClick={() => setActiveTab(tab.value)}
-                className={`px-3 py-1.5 text-sm rounded-md transition-colors font-medium ${
-                  activeTab === tab.value
-                    ? 'bg-kumo-tint text-kumo-default'
-                    : 'text-kumo-subtle hover:text-kumo-default hover:bg-kumo-elevated'
-                }`}
+                badgeCount={tab.value === 'activity' ? pendingActionsCount : 0}
               >
                 {tab.label}
-              </button>
+              </TabButton>
             ))}
           </div>
 
@@ -678,6 +809,7 @@ export default function GadgetEditor() {
                   streamingProposedChanges={streamingProposedChanges}
                   streamingActiveFile={streamingActiveFile}
                   isAgentActive={isAgentActive}
+                  isVisible={activeTab === 'code'}
                   onHasCodeChange={setHasCode}
                 />
               )}
@@ -694,11 +826,19 @@ export default function GadgetEditor() {
                 />
               )}
             </div>
+
+            <div className={activeTab === 'activity' ? 'h-full overflow-auto' : 'hidden'}>
+              {overseer && hasMountedActivity && (
+                <Activity
+                  overseer={overseer.stub}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* ═══ PREVIEW OVERLAY — covers only the body below the shared top bar ══ */}
+      {/* ═══ PREVIEW OVERLAY ══════════════════════════════════════════════════ */}
       {previewMode && (
         <div className="absolute inset-x-0 bottom-0 bg-kumo-base z-10" style={{ top: TOPBAR_H }}>
           {overseer && (
@@ -716,46 +856,32 @@ export default function GadgetEditor() {
 
       {/* Share modal */}
       {overseer && metadata && (
-        <ShareModal
-          open={shareModalOpen}
-          onClose={() => setShareModalOpen(false)}
-          overseer={overseer.stub}
-          metadata={metadata}
-          currentUser={userInfo}
-        />
+        <>
+          <ShareModal
+            open={shareModalOpen}
+            onClose={() => setShareModalOpen(false)}
+            overseer={overseer.stub}
+            metadata={metadata}
+            currentUser={userInfo}
+          />
+          <BlueprintModal
+            open={blueprintModalOpen}
+            onClose={() => setBlueprintModalOpen(false)}
+            overseer={overseer.stub}
+            metadata={metadata}
+          />
+        </>
       )}
 
-      {/* Delete confirmation dialog */}
-      <Dialog.Root
-        role="alertdialog"
+      <DeleteConfirmationDialog
         open={deleteDialogOpen}
+        title="Delete gadget?"
+        description={<>This removes <span className="font-medium text-kumo-default">{metadata.title}</span>. You can&apos;t undo this.</>}
+        isDeleting={isDeleting}
         onOpenChange={setDeleteDialogOpen}
-      >
-        <Dialog className="p-8" size="sm">
-          <Dialog.Title className="text-lg font-semibold">
-            Delete gadget
-          </Dialog.Title>
-          <Dialog.Description className="mt-2 text-kumo-subtle">
-            Delete "{metadata?.title}"? This cannot be undone.
-          </Dialog.Description>
-          <div className="mt-6 flex justify-end gap-2">
-            <Dialog.Close
-              render={(props) => (
-                <Button variant="secondary" {...props} disabled={isDeleting}>
-                  Cancel
-                </Button>
-              )}
-            />
-            <Button
-              variant="destructive"
-              onClick={handleDeleteConfirm}
-              loading={isDeleting}
-            >
-              Delete
-            </Button>
-          </div>
-        </Dialog>
-      </Dialog.Root>
+        onConfirm={handleDeleteConfirm}
+      />
+
     </div>
   )
 }

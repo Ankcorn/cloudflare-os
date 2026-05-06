@@ -315,19 +315,21 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
           {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
           {showCredentials && selection && !isOllama && !isCloudflare && (
-            <Collapsible
-              label="Advanced Settings"
+            <Collapsible.Root
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}
             >
-              <Input
-                label="API URL"
-                placeholder="https://..."
-                description="Override the default API endpoint (useful for proxies like Cloudflare AI Gateway)"
-                value={apiUrl}
-                onChange={(e) => setApiUrl(e.target.value)}
-              />
-            </Collapsible>
+              <Collapsible.DefaultTrigger>Advanced Settings</Collapsible.DefaultTrigger>
+              <Collapsible.DefaultPanel>
+                <Input
+                  label="API URL"
+                  placeholder="https://..."
+                  description="Override the default API endpoint (useful for proxies like Cloudflare AI Gateway)"
+                  value={apiUrl}
+                  onChange={(e) => setApiUrl(e.target.value)}
+                />
+              </Collapsible.DefaultPanel>
+            </Collapsible.Root>
           )}
         </div>
 

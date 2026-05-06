@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
+import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
 import { Overseer, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
@@ -287,18 +288,42 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
   if (!sandboxedHtml) {
     return (
       <div
-        className="dotted-bg"
+        className="relative overflow-hidden bg-kumo-base"
         style={{
           height,
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          color: '#999',
         }}
       >
-        <Text variant="secondary">
-          This Gadget doesn't have a custom UI yet. The UI will appear here when the Gadget implements one.
-        </Text>
+        <div
+          className="absolute left-1/2 top-1/2 h-80 w-80 -translate-x-1/2 -translate-y-1/2 rounded-full pointer-events-none"
+          style={{
+            background:
+              'radial-gradient(circle, rgba(255, 72, 1, 0.08) 0%, rgba(235, 213, 193, 0.16) 36%, transparent 68%)',
+            filter: 'blur(18px)',
+          }}
+        />
+
+        <div className="relative flex max-w-sm flex-col items-center gap-3 px-6 text-center">
+          <div
+            className="flex h-12 w-12 items-center justify-center rounded-xl border border-kumo-line bg-kumo-elevated text-kumo-subtle shadow-sm"
+            style={{
+              boxShadow:
+                'inset 0 1px 0 rgba(255,255,255,0.72), 0 8px 24px rgba(82,16,0,0.06)',
+            }}
+          >
+            <Sparkle size={22} weight="regular" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-[20px] leading-7 font-normal tracking-[-0.45px] text-kumo-default">
+              No gadget UI yet
+            </h2>
+            <p className="text-[15px] leading-5 font-normal tracking-[-0.3px] text-kumo-subtle">
+              When the gadget builds one, it will appear here.
+            </p>
+          </div>
+        </div>
       </div>
     )
   }

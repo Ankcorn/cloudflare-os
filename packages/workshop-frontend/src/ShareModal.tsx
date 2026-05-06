@@ -1,13 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Dialog, Button, Input, Tabs, Table, Badge, Checkbox, ClipboardText, Banner, useKumoToastManager } from '@cloudflare/kumo'
-import { Copy, Trash, Plus, Link, ArrowsClockwise } from '@phosphor-icons/react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Checkbox, Dialog, useKumoToastManager } from '@cloudflare/kumo'
+import { Check, Copy, Link, Trash, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, CollaboratorInfo, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo, BlueprintGadgetSummary } from '@gadgets/workshop-shared/api'
+import { Overseer, CollaboratorInfo, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
+import { TabButton } from './components/TabButton'
+import { copyToClipboard } from './clipboard'
 
-// Rows shown in the collaborator table: the owner (always first) plus actual collaborators.
 type CollaboratorRow =
   | { kind: 'owner'; profile: AiChatAuthorInfo }
   | { kind: 'collaborator'; info: CollaboratorInfo }
+
+type Props = {
+  open: boolean
+  onClose: () => void
+  overseer: RpcStub<Overseer>
+  metadata: GadgetMetadata
+  currentUser: AiChatAuthorInfo | null
+}
 
 function formatRelativeTime(date: Date): string {
   const now = new Date()
@@ -24,12 +34,46 @@ function formatRelativeTime(date: Date): string {
   return date.toLocaleDateString()
 }
 
-type Props = {
-  open: boolean
-  onClose: () => void
-  overseer: RpcStub<Overseer>
-  metadata: GadgetMetadata
-  currentUser: AiChatAuthorInfo | null
+function initials(name: string) {
+  return name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()
+}
+
+function DependentKeepList({
+  dependents,
+  keepSet,
+  onKeepSetChange,
+}: {
+  dependents: CollaboratorInfo[]
+  keepSet: Set<string>
+  onKeepSetChange: (next: Set<string>) => void
+}) {
+  if (dependents.length === 0) return null
+
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-base px-3 py-2">
+      <p className="mb-2 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default">
+        Keep access for:
+      </p>
+      <div className="space-y-2">
+        {dependents.map(dep => (
+          <Checkbox
+            key={dep.profile.id}
+            label={`${dep.profile.name} (${dep.profile.id})`}
+            checked={keepSet.has(dep.profile.id)}
+            onCheckedChange={(checked) => {
+              const next = new Set(keepSet)
+              if (checked) {
+                next.add(dep.profile.id)
+              } else {
+                next.delete(dep.profile.id)
+              }
+              onKeepSetChange(next)
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export default function ShareModal({ open, onClose, overseer, metadata, currentUser }: Props) {
@@ -38,34 +82,27 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareKeys, setShareKeys] = useState<ShareKeyInfo[]>([])
   const [addUsername, setAddUsername] = useState('')
-  const [addNote, setAddNote] = useState('')
   const [adding, setAdding] = useState(false)
-  const [shareKeyNote, setShareKeyNote] = useState('')
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
+  const [newShareLinkCopied, setNewShareLinkCopied] = useState<boolean | null>(null)
   const [creatingKey, setCreatingKey] = useState(false)
-  const [tabKey, setTabKey] = useState('collaborators')
-
-  // Blueprint state
-  const [blueprints, setBlueprints] = useState<BlueprintGadgetSummary[]>([])
-  const [blueprintsLoading, setBlueprintsLoading] = useState(false)
-  const [newBpTitle, setNewBpTitle] = useState('')
-  const [newBpDescription, setNewBpDescription] = useState('')
-  const [showCreateForm, setShowCreateForm] = useState(false)
-  const [creatingBp, setCreatingBp] = useState(false)
-  const [editingBpTitle, setEditingBpTitle] = useState<string | null>(null)
-  const [editingBpDesc, setEditingBpDesc] = useState<string | null>(null)
-  const [editTitleValue, setEditTitleValue] = useState('')
-  const [editDescValue, setEditDescValue] = useState('')
-
-  // Confirm dialog state (replaces Modal.confirm and showDependentUsersDialog)
-  const [confirmDialog, setConfirmDialog] = useState<{
-    title: string
-    description?: string
-    dependents?: CollaboratorInfo[]
-    onConfirm: (keepUsers: string[]) => Promise<void>
+  const [tabKey, setTabKey] = useState<'people' | 'links'>('people')
+  const [editingShareKeyId, setEditingShareKeyId] = useState<string | null>(null)
+  const [editingShareKeyNote, setEditingShareKeyNote] = useState('')
+  const [savingShareKeyNote, setSavingShareKeyNote] = useState(false)
+  const [revokeTarget, setRevokeTarget] = useState<{
+    keyId: string
+    dependents: CollaboratorInfo[]
   } | null>(null)
-  const [confirmKeepSet, setConfirmKeepSet] = useState<Set<string>>(new Set())
-  const [confirmLoading, setConfirmLoading] = useState(false)
+  const [revokeLoadingKeyId, setRevokeLoadingKeyId] = useState<string | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{
+    profileId: string
+    dependents: CollaboratorInfo[]
+  } | null>(null)
+  const [removeLoadingProfileId, setRemoveLoadingProfileId] = useState<string | null>(null)
+  const [removeKeepSet, setRemoveKeepSet] = useState<Set<string>>(new Set())
+  const [revokeKeepSet, setRevokeKeepSet] = useState<Set<string>>(new Set())
+  const wasOpenRef = useRef(false)
 
   const isOwner = !metadata.owner
 
@@ -83,41 +120,40 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
   }, [overseer])
 
-  const loadBlueprints = useCallback(async () => {
-    setBlueprintsLoading(true)
-    try {
-      const bps = await overseer.listBlueprints()
-      setBlueprints(bps)
-    } catch (err) {
-      console.error('Failed to load blueprints:', err)
-      toasts.add({ title: 'Failed to load blueprints', variant: 'error' })
-    } finally {
-      setBlueprintsLoading(false)
-    }
-  }, [overseer])
-
   useEffect(() => {
     if (open) {
+      if (!wasOpenRef.current) setTabKey('people')
       loadData()
-      loadBlueprints()
       setNewShareLink(null)
+      setNewShareLinkCopied(null)
     }
-  }, [open, loadData, loadBlueprints])
+    wasOpenRef.current = open
+  }, [open, loadData])
+
+  const ownerProfile: AiChatAuthorInfo | null = isOwner ? currentUser : (metadata.owner ?? null)
+  const collaboratorRows: CollaboratorRow[] = [
+    ...(ownerProfile ? [{ kind: 'owner' as const, profile: ownerProfile }] : []),
+    ...collaborators.map(info => ({ kind: 'collaborator' as const, info })),
+  ]
+
+  const describeEdge = (info: CollaboratorInfo): string => {
+    const parts: string[] = []
+    for (const edge of info.addedBy) {
+      parts.push(edge.type === 'user' ? `Added by ${edge.sharer}` : 'Via share link')
+    }
+    return parts.join(', ') || 'Collaborator'
+  }
 
   const handleAddCollaborator = async () => {
     if (!addUsername.trim()) return
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(
-        addUsername.trim(),
-        addNote.trim() || undefined
-      )
+      const result = await overseer.addCollaborator(addUsername.trim(), undefined)
       if (result === null) {
         toasts.add({ title: 'No account found for that username.', variant: 'error' })
       } else {
         toasts.add({ title: `Added ${result.profile.name} as a collaborator.`, variant: 'success' })
         setAddUsername('')
-        setAddNote('')
         await loadData()
       }
     } catch (err: any) {
@@ -127,72 +163,48 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
   }
 
-  const openConfirmDialog = (opts: {
-    title: string
-    description?: string
-    dependents?: CollaboratorInfo[]
-    onConfirm: (keepUsers: string[]) => Promise<void>
-  }) => {
-    setConfirmKeepSet(new Set())
-    setConfirmDialog(opts)
-  }
-
-  const handleConfirmDialogOk = async () => {
-    if (!confirmDialog) return
-    setConfirmLoading(true)
+  const handleStartRemoveCollaborator = async (profileId: string) => {
+    setRemoveLoadingProfileId(profileId)
     try {
-      await confirmDialog.onConfirm([...confirmKeepSet])
-      setConfirmDialog(null)
+      const dependents = await overseer.previewRemoveCollaborator(profileId)
+      setRemoveTarget({ profileId, dependents })
+      setRemoveKeepSet(new Set())
     } catch (err: any) {
-      toasts.add({ title: err.message || 'Operation failed.', variant: 'error' })
+      toasts.add({ title: err.message || 'Failed to remove collaborator.', variant: 'error' })
     } finally {
-      setConfirmLoading(false)
+      setRemoveLoadingProfileId(null)
     }
   }
 
-  const handleRemoveCollaborator = async (profileId: string) => {
+  const handleConfirmRemoveCollaborator = async () => {
+    if (!removeTarget) return
+    setRemoveLoadingProfileId(removeTarget.profileId)
     try {
-      const dependents = await overseer.previewRemoveCollaborator(profileId)
-
-      if (dependents.length === 0) {
-        openConfirmDialog({
-          title: 'Remove Collaborator',
-          description: 'Are you sure you want to remove this collaborator?',
-          onConfirm: async () => {
-            const removed = await overseer.removeCollaborator(profileId, [])
-            toasts.add({
-              title: removed.length > 0
-                ? 'Collaborator removed.'
-                : 'Your sharing link with this collaborator was removed.',
-              variant: 'success',
-            })
-            await loadData()
-          },
-        })
-      } else {
-        openConfirmDialog({
-          title: 'Remove Collaborator',
-          description: 'This user shared with other users who will be removed as well, unless you choose to keep them.',
-          dependents,
-          onConfirm: async (keepUsers) => {
-            await overseer.removeCollaborator(profileId, keepUsers)
-            toasts.add({ title: 'Collaborator removed.', variant: 'success' })
-            await loadData()
-          },
-        })
-      }
+      const removed = await overseer.removeCollaborator(removeTarget.profileId, [...removeKeepSet])
+      toasts.add({
+        title: removed.length > 0
+          ? 'Collaborator removed.'
+          : 'Your sharing link with this collaborator was removed.',
+        variant: 'success',
+      })
+      setRemoveTarget(null)
+      setRemoveKeepSet(new Set())
+      await loadData()
     } catch (err: any) {
       toasts.add({ title: err.message || 'Failed to remove collaborator.', variant: 'error' })
+    } finally {
+      setRemoveLoadingProfileId(null)
     }
   }
 
   const handleCreateShareKey = async () => {
     setCreatingKey(true)
     try {
-      const { key } = await overseer.createShareKey(shareKeyNote.trim() || undefined)
+      const { key } = await overseer.createShareKey(undefined)
       const url = `${window.location.origin}/gadget/${metadata.id}#share=${key}`
       setNewShareLink(url)
-      setShareKeyNote('')
+      setNewShareLinkCopied(false)
+      toasts.add({ title: 'Share link created.', variant: 'success' })
       await loadData()
     } catch (err: any) {
       toasts.add({ title: err.message || 'Failed to create share link.', variant: 'error' })
@@ -201,494 +213,419 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
   }
 
-  const handleRevokeShareKey = async (keyId: string) => {
+  const handleStartRevokeShareKey = async (keyId: string) => {
+    setRevokeLoadingKeyId(keyId)
     try {
       const dependents = await overseer.previewRevokeShareKey(keyId)
-
-      if (dependents.length === 0) {
-        openConfirmDialog({
-          title: 'Revoke Share Link',
-          description: 'This will prevent anyone from using this link to gain access.',
-          onConfirm: async () => {
-            await overseer.revokeShareKey(keyId, [])
-            toasts.add({ title: 'Share link revoked.', variant: 'success' })
-            await loadData()
-          },
-        })
-      } else {
-        openConfirmDialog({
-          title: 'Revoke Share Link',
-          description: 'Revoking this share link will also remove the following users who gained access through it, unless you choose to keep them.',
-          dependents,
-          onConfirm: async (keepUsers) => {
-            await overseer.revokeShareKey(keyId, keepUsers)
-            toasts.add({ title: 'Share link revoked.', variant: 'success' })
-            await loadData()
-          },
-        })
-      }
+      setRevokeTarget({ keyId, dependents })
+      setRevokeKeepSet(new Set())
     } catch (err: any) {
       toasts.add({ title: err.message || 'Failed to revoke share link.', variant: 'error' })
+    } finally {
+      setRevokeLoadingKeyId(null)
     }
   }
 
-  const describeEdge = (info: CollaboratorInfo): string => {
-    const parts: string[] = []
-    for (const edge of info.addedBy) {
-      if (edge.type === 'user') {
-        parts.push(`Added by ${edge.sharer}`)
-      } else {
-        parts.push('Via share link')
-      }
+  const handleConfirmRevokeShareKey = async () => {
+    if (!revokeTarget) return
+    setRevokeLoadingKeyId(revokeTarget.keyId)
+    try {
+      await overseer.revokeShareKey(revokeTarget.keyId, [...revokeKeepSet])
+      toasts.add({ title: 'Share link revoked.', variant: 'success' })
+      setRevokeTarget(null)
+      setRevokeKeepSet(new Set())
+      await loadData()
+    } catch (err: any) {
+      toasts.add({ title: err.message || 'Failed to revoke share link.', variant: 'error' })
+    } finally {
+      setRevokeLoadingKeyId(null)
     }
-    return parts.join(', ') || 'Unknown'
   }
 
-  // The owner profile: if the current user IS the owner, use their own profile;
-  // otherwise use the owner info from metadata.
-  const ownerProfile: AiChatAuthorInfo | null = isOwner ? currentUser : (metadata.owner ?? null)
+  const startEditingShareKeyNote = (shareKey: ShareKeyInfo) => {
+    setEditingShareKeyId(shareKey.keyId)
+    setEditingShareKeyNote(shareKey.note || '')
+  }
 
-  // Build combined rows: owner first, then collaborators.
-  const collaboratorRows: CollaboratorRow[] = [
-    ...(ownerProfile ? [{ kind: 'owner' as const, profile: ownerProfile }] : []),
-    ...collaborators.map(info => ({ kind: 'collaborator' as const, info })),
-  ]
+  const cancelEditingShareKeyNote = () => {
+    setEditingShareKeyId(null)
+    setEditingShareKeyNote('')
+  }
+
+  const handleSaveShareKeyNote = async () => {
+    if (!editingShareKeyId) return
+    setSavingShareKeyNote(true)
+    try {
+      await overseer.updateShareKey(
+        editingShareKeyId,
+        editingShareKeyNote.trim() || undefined,
+      )
+      toasts.add({ title: 'Share link note updated.', variant: 'success' })
+      cancelEditingShareKeyNote()
+      await loadData()
+    } catch (err: any) {
+      toasts.add({ title: err.message || 'Failed to update share link note.', variant: 'error' })
+    } finally {
+      setSavingShareKeyNote(false)
+    }
+  }
 
   return (
     <>
       <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-        <Dialog className="p-6 !w-[560px] !top-[15%] !-translate-y-0" size="lg">
-          <Dialog.Title className="text-lg font-semibold mb-4">Share</Dialog.Title>
+        <Dialog className="!z-[1000] !w-[min(640px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[10%] !-translate-y-0" size="lg">
+          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-4 py-5 sm:px-6">
+            <div>
+              <Dialog.Title className="text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
+                Share gadget
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                Invite collaborators or create share links for this gadget.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopIconButton
+                  {...props}
+                  aria-label="Close"
+                >
+                  <X size={18} />
+                </WorkshopIconButton>
+              )}
+            />
+          </div>
 
-          <Tabs
-            variant="segmented"
-            tabs={[
-              { value: 'collaborators', label: 'Collaborators' },
-              { value: 'blueprints', label: 'Blueprints' },
-            ]}
-            value={tabKey}
-            onValueChange={setTabKey}
-          />
+          <div className="px-4 pt-4 sm:px-6">
+            <div className="flex items-center gap-5 border-b border-kumo-line">
+              {[
+                ['people', 'People'],
+                ['links', 'Share links'],
+              ].map(([value, label]) => {
+                const selected = tabKey === value
+                return (
+                  <TabButton
+                    key={value}
+                    active={selected}
+                    onClick={() => setTabKey(value as 'people' | 'links')}
+                    className="h-10"
+                  >
+                    {label}
+                  </TabButton>
+                )
+              })}
+            </div>
+          </div>
 
-          <div className="mt-4">
-            {/* ── Collaborators tab ─────────────────────────────────────── */}
-            {tabKey === 'collaborators' && (
-              <div className="space-y-4">
-                {/* Add collaborator */}
+          <div className="px-4 py-5 sm:px-6">
+            {tabKey === 'people' && (
+              <div className="space-y-5">
                 <div>
-                  <p className="text-base font-semibold text-kumo-default mb-2">Add collaborator</p>
-                  <div className="flex gap-2">
-                    <Input
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <WorkshopInput
                       placeholder="Username or email"
+                      aria-label="Username or email"
                       value={addUsername}
                       onChange={(e) => setAddUsername(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleAddCollaborator() }}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      spellCheck={false}
                       className="flex-1"
                     />
-                    <Button
-                      variant="primary"
+                    <WorkshopButton
+                      tone="primary"
+                      className="min-w-[64px]"
                       onClick={handleAddCollaborator}
-                      loading={adding}
-                      disabled={!addUsername.trim()}
+                      disabled={!addUsername.trim() || adding}
                     >
-                      <Plus size={16} weight="bold" />
-                      Add
-                    </Button>
+                      {adding ? 'Inviting...' : 'Invite'}
+                    </WorkshopButton>
                   </div>
                 </div>
 
-                {/* Collaborator table */}
-                <Table>
-                  <Table.Header>
-                    <Table.Row>
-                      <Table.Head>Name</Table.Head>
-                      <Table.Head>Relationship</Table.Head>
-                      <Table.Head className="w-16" />
-                    </Table.Row>
-                  </Table.Header>
-                  <Table.Body>
-                    {collaboratorRows.map(row => {
+                <section>
+                  <h3 className="mb-2 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                    People with access
+                  </h3>
+                  <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+                    {collaboratorRows.map((row, index) => {
                       const profile = row.kind === 'owner' ? row.profile : row.info.profile
                       const key = row.kind === 'owner' ? '__owner__' : row.info.profile.id
+                      const isRemoving = row.kind === 'collaborator' && removeTarget?.profileId === row.info.profile.id
                       return (
-                        <Table.Row key={key}>
-                          <Table.Cell>
-                            <div>
-                              <span className="text-sm font-medium text-kumo-default">{profile.name}</span>
-                              <br />
-                              <span className="text-xs text-kumo-subtle">{profile.id}</span>
+                        <div
+                          key={key}
+                          className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${
+                            isRemoving ? 'bg-kumo-danger-tint/40' : ''
+                          }`}
+                        >
+                          {isRemoving && row.kind === 'collaborator' ? (
+                            <div className="space-y-3">
+                            <div className="flex flex-wrap items-center gap-3">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
+                                  Remove {profile.name}?
+                                </p>
+                                <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                                  {removeTarget.dependents.length > 0
+                                    ? `${removeTarget.dependents.length} user${removeTarget.dependents.length === 1 ? '' : 's'} may lose access.`
+                                    : 'They will no longer have access to this gadget.'}
+                                </p>
+                              </div>
+                              <WorkshopButton
+                                tone="danger"
+                                className="min-w-[68px]"
+                                onClick={handleConfirmRemoveCollaborator}
+                                disabled={removeLoadingProfileId === profile.id}
+                              >
+                                {removeLoadingProfileId === profile.id ? 'Removing...' : 'Remove'}
+                              </WorkshopButton>
+                              <WorkshopButton
+                                className="min-w-[64px]"
+                                onClick={() => {
+                                  setRemoveTarget(null)
+                                  setRemoveKeepSet(new Set())
+                                }}
+                                disabled={removeLoadingProfileId === profile.id}
+                              >
+                                Cancel
+                              </WorkshopButton>
                             </div>
-                          </Table.Cell>
-                          <Table.Cell>
-                            <span className="text-sm text-kumo-subtle">
+                            <DependentKeepList
+                              dependents={removeTarget.dependents}
+                              keepSet={removeKeepSet}
+                              onKeepSetChange={setRemoveKeepSet}
+                            />
+                            </div>
+                          ) : (
+                          <div className="flex flex-wrap items-center gap-3">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-kumo-tint text-[11px] font-medium text-kumo-strong">
+                            {initials(profile.name)}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                              {profile.name}
+                            </p>
+                            <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                              {profile.id}
+                            </p>
+                          </div>
+                          <div className="ml-auto flex shrink-0 items-center gap-2">
+                            <span className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
                               {row.kind === 'owner' ? 'Owner' : describeEdge(row.info)}
                             </span>
-                          </Table.Cell>
-                          <Table.Cell>
                             {row.kind === 'collaborator' && (
-                              <Button
-                                variant="ghost"
-                                size="xs"
-                                onClick={() => handleRemoveCollaborator(row.info.profile.id)}
-                                aria-label="Remove"
+                              <WorkshopIconButton
+                                danger
+                                className="!h-7 !w-7"
+                                onClick={() => handleStartRemoveCollaborator(row.info.profile.id)}
+                                aria-label="Remove collaborator"
+                                disabled={removeLoadingProfileId === row.info.profile.id}
                               >
-                                <Trash size={16} className="text-kumo-danger" />
-                              </Button>
+                                <Trash size={14} />
+                              </WorkshopIconButton>
                             )}
-                          </Table.Cell>
-                        </Table.Row>
+                          </div>
+                          </div>
+                          )}
+                        </div>
                       )
                     })}
-                    {collaboratorRows.length === 0 && (
-                      <Table.Row>
-                        <Table.Cell colSpan={3}>
-                          <span className="text-sm text-kumo-subtle">No collaborators.</span>
-                        </Table.Cell>
-                      </Table.Row>
-                    )}
-                  </Table.Body>
-                </Table>
-
-                {/* Share links */}
-                <div>
-                  <p className="text-base font-semibold text-kumo-default mb-2">Share links</p>
-                  <div className="flex gap-2 mb-3">
-                    <Input
-                      placeholder="Note (optional)"
-                      value={shareKeyNote}
-                      onChange={(e) => setShareKeyNote(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleCreateShareKey() }}
-                      className="flex-1"
-                    />
-                    <Button
-                      variant="secondary"
-                      onClick={handleCreateShareKey}
-                      loading={creatingKey}
-                    >
-                      <Link size={16} />
-                      Create link
-                    </Button>
                   </div>
+                </section>
+              </div>
+            )}
+
+            {tabKey === 'links' && (
+              <div className="space-y-4">
+                  <button
+                    type="button"
+                    onClick={handleCreateShareKey}
+                    disabled={creatingKey}
+                    className="flex w-full items-center justify-between rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left transition-colors hover:bg-kumo-elevated"
+                  >
+                    <span>
+                      <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                        {creatingKey ? 'Creating share link...' : 'Create share link'}
+                      </span>
+                      <span className="mt-0.5 block text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                        Creates a reusable invite link.
+                      </span>
+                    </span>
+                    <Link size={16} className="mr-1 text-kumo-subtle" />
+                  </button>
 
                   {newShareLink && (
-                    <Banner
-                      title="Share link created"
-                      description={
-                        <div className="space-y-2 mt-1">
-                          <p className="text-xs text-kumo-subtle">This link won't be shown again.</p>
-                          <ClipboardText
-                            text={newShareLink}
-                            size="sm"
-                            tooltip={{ text: 'Copy link', copiedText: 'Copied!' }}
-                          />
-                        </div>
-                      }
-                      className="mb-3"
-                    />
-                  )}
-
-                  <Table>
-                    <Table.Header>
-                      <Table.Row>
-                        <Table.Head>Note</Table.Head>
-                        <Table.Head>Created</Table.Head>
-                        <Table.Head>Created by</Table.Head>
-                        <Table.Head className="w-16" />
-                      </Table.Row>
-                    </Table.Header>
-                    <Table.Body>
-                      {shareKeys.map(sk => (
-                        <Table.Row key={sk.keyId}>
-                          <Table.Cell>
-                            <span className="text-sm text-kumo-default">{sk.note || '(no note)'}</span>
-                          </Table.Cell>
-                          <Table.Cell>
-                            <span className="text-xs text-kumo-subtle">{formatRelativeTime(sk.created)}</span>
-                          </Table.Cell>
-                          <Table.Cell>
-                            <span className="text-xs text-kumo-subtle">{sk.createdBy.name}</span>
-                          </Table.Cell>
-                          <Table.Cell>
-                            <Button
-                              variant="ghost"
-                              size="xs"
-                              onClick={() => handleRevokeShareKey(sk.keyId)}
-                              aria-label="Revoke"
-                            >
-                              <Trash size={16} className="text-kumo-danger" />
-                            </Button>
-                          </Table.Cell>
-                        </Table.Row>
-                      ))}
-                      {shareKeys.length === 0 && (
-                        <Table.Row>
-                          <Table.Cell colSpan={4}>
-                            <span className="text-sm text-kumo-subtle">No share links.</span>
-                          </Table.Cell>
-                        </Table.Row>
-                      )}
-                    </Table.Body>
-                  </Table>
-                </div>
-              </div>
-            )}
-
-            {/* ── Blueprints tab ───────────────────────────────────────── */}
-            {tabKey === 'blueprints' && (
-              <div className="space-y-2">
-                {blueprints.map(bp => (
-                  <div key={bp.id} className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      {editingBpTitle === bp.id ? (
-                        <div className="flex flex-1 gap-1">
-                          <Input
-                            value={editTitleValue}
-                            onChange={(e) => setEditTitleValue(e.target.value)}
-                            onKeyDown={async (e) => {
-                              if (e.key === 'Enter') {
-                                await overseer.updateBlueprint(bp.id, { title: editTitleValue })
-                                setEditingBpTitle(null)
-                                loadBlueprints()
-                              }
+                  <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-3">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-kumo-tint text-kumo-default">
+                        {newShareLinkCopied ? <Check size={14} weight="bold" /> : <Copy size={14} />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {newShareLinkCopied ? 'Share link copied' : 'Share link created'}
+                        </p>
+                        <p className="mt-0.5 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                          {newShareLinkCopied
+                            ? 'This link is shown once. Save it if you need to share it again.'
+                            : 'Copy this link manually. It is shown once.'}
+                        </p>
+                        <div className="mt-2 flex items-center gap-2 rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-1.5">
+                          <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4 text-kumo-subtle">
+                            {newShareLink}
+                          </span>
+                          <WorkshopIconButton
+                            className="!h-6 !w-6"
+                            onClick={async () => {
+                              const copied = await copyToClipboard(newShareLink)
+                              toasts.add({
+                                title: copied ? 'Share link copied.' : 'Could not copy share link.',
+                                variant: copied ? 'success' : 'error',
+                              })
+                              if (copied) setNewShareLinkCopied(true)
                             }}
-                            className="flex-1"
-                          />
-                          <Button size="xs" variant="primary" onClick={async () => {
-                            await overseer.updateBlueprint(bp.id, { title: editTitleValue })
-                            setEditingBpTitle(null)
-                            loadBlueprints()
-                          }}>Save</Button>
-                          <Button size="xs" variant="secondary" onClick={() => setEditingBpTitle(null)}>Cancel</Button>
-                        </div>
-                      ) : (
-                        <span
-                          className="text-sm font-medium text-kumo-default cursor-pointer flex-1"
-                          onClick={() => {
-                            setEditingBpTitle(bp.id)
-                            setEditTitleValue(bp.title)
-                          }}
-                        >
-                          {bp.title}
-                        </span>
-                      )}
-                      {bp.dirty && (
-                        <Badge variant="destructive">
-                          Publish failed
-                        </Badge>
-                      )}
-                    </div>
-
-                    {editingBpDesc === bp.id ? (
-                      <div className="mb-2">
-                        <textarea
-                          value={editDescValue}
-                          onChange={(e) => setEditDescValue(e.target.value)}
-                          rows={2}
-                          className="w-full rounded-md border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-2 focus:ring-kumo-brand/40"
-                        />
-                        <div className="flex gap-1 mt-1">
-                          <Button size="xs" variant="primary" onClick={async () => {
-                            await overseer.updateBlueprint(bp.id, { description: editDescValue })
-                            setEditingBpDesc(null)
-                            loadBlueprints()
-                          }}>Save</Button>
-                          <Button size="xs" variant="secondary" onClick={() => setEditingBpDesc(null)}>Cancel</Button>
+                            aria-label="Copy share link"
+                          >
+                            <Copy size={14} />
+                          </WorkshopIconButton>
                         </div>
                       </div>
-                    ) : (
-                      <p
-                        className="text-xs text-kumo-subtle cursor-pointer mb-1"
-                        onClick={() => {
-                          setEditingBpDesc(bp.id)
-                          setEditDescValue(bp.description)
-                        }}
-                      >
-                        {bp.description || '(click to add description)'}
+                    </div>
+                  </div>
+                )}
+
+                <section>
+                  <h3 className="mb-2 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                    Existing links
+                  </h3>
+                  {shareKeys.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-kumo-line bg-kumo-base px-4 py-6 text-center">
+                      <p className="text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                        No share links yet.
                       </p>
-                    )}
-
-                    <p className="text-xs text-kumo-subtle">
-                      v{bp.version} - Code from {new Date(bp.codeVersionDate).toLocaleDateString()}
-                    </p>
-
-                    <div className="flex gap-1 mt-2">
-                      <Button size="xs" variant="secondary" onClick={async () => {
-                        try {
-                          await overseer.updateBlueprint(bp.id, { updateCode: true })
-                          toasts.add({ title: 'Blueprint updated to current code.', variant: 'success' })
-                          loadBlueprints()
-                        } catch (err: any) {
-                          toasts.add({ title: err.message || 'Failed to update blueprint.', variant: 'error' })
-                        }
-                      }}>
-                        <ArrowsClockwise size={14} />
-                        Update code
-                      </Button>
-                      <Button size="xs" variant="secondary" onClick={() => {
-                        const url = `${window.location.origin}/blueprint/${bp.id}`
-                        navigator.clipboard.writeText(url)
-                        toasts.add({ title: 'Blueprint link copied.', variant: 'success' })
-                      }}>
-                        <Copy size={14} />
-                        Copy link
-                      </Button>
-                      {bp.dirty && (
-                        <Button size="xs" variant="secondary" onClick={async () => {
-                          try {
-                            await overseer.retryBlueprintPublish(bp.id)
-                            toasts.add({ title: 'Blueprint published successfully.', variant: 'success' })
-                            loadBlueprints()
-                          } catch (err: any) {
-                            toasts.add({ title: err.message || 'Retry failed.', variant: 'error' })
-                          }
-                        }}>
-                          Retry publish
-                        </Button>
-                      )}
-                      <Button size="xs" variant="ghost" onClick={() => {
-                        openConfirmDialog({
-                          title: 'Delete Blueprint',
-                          description: 'Delete this blueprint? This cannot be undone.',
-                          onConfirm: async () => {
-                            await overseer.deleteBlueprint(bp.id)
-                            toasts.add({ title: 'Blueprint deleted.', variant: 'success' })
-                            loadBlueprints()
-                          },
-                        })
-                      }}>
-                        <Trash size={14} className="text-kumo-danger" />
-                        <span className="text-kumo-danger">Delete</span>
-                      </Button>
                     </div>
-                  </div>
-                ))}
-
-                {blueprints.length === 0 && !blueprintsLoading && (
-                  <div className="text-center py-4">
-                    <p className="text-sm text-kumo-subtle">No blueprints yet.</p>
-                  </div>
-                )}
-
-                {/* Create new blueprint */}
-                {showCreateForm ? (
-                  <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3 space-y-2">
-                    <p className="text-sm font-semibold text-kumo-default">New Blueprint</p>
-                    <Input
-                      placeholder="Title"
-                      value={newBpTitle}
-                      onChange={(e) => setNewBpTitle(e.target.value)}
-                    />
-                    <textarea
-                      placeholder="Description (optional)"
-                      value={newBpDescription}
-                      onChange={(e) => setNewBpDescription(e.target.value)}
-                      rows={2}
-                      className="w-full rounded-md border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-2 focus:ring-kumo-brand/40"
-                    />
-                    <div className="flex gap-2">
-                      <Button
-                        variant="primary"
-                        size="xs"
-                        loading={creatingBp}
-                        onClick={async () => {
-                          setCreatingBp(true)
-                          try {
-                            await overseer.createBlueprint(
-                              newBpTitle.trim() || undefined,
-                              newBpDescription.trim() || undefined,
-                            )
-                            toasts.add({ title: 'Blueprint created.', variant: 'success' })
-                            setShowCreateForm(false)
-                            setNewBpTitle('')
-                            setNewBpDescription('')
-                            loadBlueprints()
-                          } catch (err: any) {
-                            toasts.add({ title: err.message || 'Failed to create blueprint.', variant: 'error' })
-                          } finally {
-                            setCreatingBp(false)
-                          }
-                        }}
-                      >
-                        Create
-                      </Button>
-                      <Button variant="secondary" size="xs" onClick={() => {
-                        setShowCreateForm(false)
-                        setNewBpTitle('')
-                        setNewBpDescription('')
-                      }}>
-                        Cancel
-                      </Button>
+                  ) : (
+                    <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+                      {shareKeys.map((sk, index) => {
+                        const isRevoking = revokeTarget?.keyId === sk.keyId
+                        return (
+                        <div
+                          key={sk.keyId}
+                          className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${
+                            isRevoking ? 'bg-kumo-danger-tint/40' : ''
+                          }`}
+                        >
+                        {isRevoking ? (
+                          <div className="space-y-3">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
+                                Revoke share link?
+                              </p>
+                              <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                                {revokeTarget.dependents.length > 0
+                                  ? `${revokeTarget.dependents.length} user${revokeTarget.dependents.length === 1 ? '' : 's'} may lose access.`
+                                  : 'Anyone with this URL will no longer be able to use it.'}
+                              </p>
+                            </div>
+                            <WorkshopButton
+                              tone="danger"
+                              className="min-w-[68px]"
+                              onClick={handleConfirmRevokeShareKey}
+                              disabled={revokeLoadingKeyId === sk.keyId}
+                            >
+                              {revokeLoadingKeyId === sk.keyId ? 'Revoking...' : 'Revoke'}
+                            </WorkshopButton>
+                            <WorkshopButton
+                              className="min-w-[64px]"
+                              onClick={() => {
+                                setRevokeTarget(null)
+                                setRevokeKeepSet(new Set())
+                              }}
+                              disabled={revokeLoadingKeyId === sk.keyId}
+                            >
+                              Cancel
+                            </WorkshopButton>
+                          </div>
+                          <DependentKeepList
+                            dependents={revokeTarget.dependents}
+                            keepSet={revokeKeepSet}
+                            onKeepSetChange={setRevokeKeepSet}
+                          />
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center gap-3">
+                          <div className="min-w-0 flex-1">
+                            {editingShareKeyId === sk.keyId ? (
+                              <div className="flex flex-col gap-2 sm:flex-row">
+                                <WorkshopInput
+                                  value={editingShareKeyNote}
+                                  onChange={(e) => setEditingShareKeyNote(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleSaveShareKeyNote()
+                                    if (e.key === 'Escape') cancelEditingShareKeyNote()
+                                  }}
+                                  autoFocus
+                                  placeholder="Note (optional)"
+                                  aria-label="Share link note"
+                                  className="flex-1"
+                                />
+                                <WorkshopButton
+                                  tone="primary"
+                                  className="min-w-[64px]"
+                                  onClick={handleSaveShareKeyNote}
+                                  disabled={savingShareKeyNote}
+                                >
+                                  Save
+                                </WorkshopButton>
+                                <WorkshopButton
+                                  className="!h-9 min-w-[64px]"
+                                  onClick={cancelEditingShareKeyNote}
+                                  disabled={savingShareKeyNote}
+                                >
+                                  Cancel
+                                </WorkshopButton>
+                              </div>
+                            ) : (
+                              <>
+                                <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                                  {sk.note || 'Untitled link'}
+                                </p>
+                                <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                                  Created {formatRelativeTime(sk.created)} by {sk.createdBy.name}
+                                </p>
+                              </>
+                            )}
+                          </div>
+                          {editingShareKeyId !== sk.keyId && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => startEditingShareKeyNote(sk)}
+                                className="shrink-0 rounded-md px-2 py-1 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default"
+                              >
+                                {sk.note ? 'Edit note' : 'Add note'}
+                              </button>
+                              <WorkshopIconButton
+                                danger
+                                className="!h-7 !w-7"
+                                onClick={() => handleStartRevokeShareKey(sk.keyId)}
+                                aria-label="Revoke share link"
+                                disabled={revokeLoadingKeyId === sk.keyId}
+                              >
+                                <Trash size={14} />
+                              </WorkshopIconButton>
+                            </>
+                          )}
+                          </div>
+                        )}
+                        </div>
+                      )})}
                     </div>
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => {
-                      setNewBpTitle(metadata.title)
-                      setShowCreateForm(true)
-                    }}
-                  >
-                    <Plus size={16} />
-                    Create Blueprint
-                  </Button>
-                )}
+                  )}
+                </section>
               </div>
             )}
-          </div>
-        </Dialog>
-      </Dialog.Root>
-
-      {/* ── Confirmation dialog (replaces Modal.confirm / dependent users dialog) ── */}
-      <Dialog.Root
-        role="alertdialog"
-        open={confirmDialog !== null}
-        onOpenChange={(o) => { if (!o) setConfirmDialog(null) }}
-      >
-        <Dialog className="p-6" size="sm">
-          <Dialog.Title className="text-lg font-semibold">{confirmDialog?.title}</Dialog.Title>
-          {confirmDialog?.description && (
-            <Dialog.Description className="mt-2 text-sm text-kumo-subtle">
-              {confirmDialog.description}
-            </Dialog.Description>
-          )}
-
-          {/* Dependent users checkboxes */}
-          {confirmDialog?.dependents && confirmDialog.dependents.length > 0 && (
-            <div className="mt-3 space-y-2">
-              <p className="text-sm font-medium text-kumo-default">Keep?</p>
-              {confirmDialog.dependents.map(dep => (
-                <Checkbox
-                  key={dep.profile.id}
-                  label={`${dep.profile.name} (${dep.profile.id})`}
-                  checked={confirmKeepSet.has(dep.profile.id)}
-                  onCheckedChange={(checked) => {
-                    setConfirmKeepSet(prev => {
-                      const next = new Set(prev)
-                      if (checked) {
-                        next.add(dep.profile.id)
-                      } else {
-                        next.delete(dep.profile.id)
-                      }
-                      return next
-                    })
-                  }}
-                />
-              ))}
-            </div>
-          )}
-
-          <div className="mt-6 flex justify-end gap-2">
-            <Dialog.Close render={(props) => (
-              <Button variant="secondary" {...props} disabled={confirmLoading}>Cancel</Button>
-            )} />
-            <Button
-              variant="destructive"
-              onClick={handleConfirmDialogOk}
-              loading={confirmLoading}
-            >
-              Confirm
-            </Button>
           </div>
         </Dialog>
       </Dialog.Root>

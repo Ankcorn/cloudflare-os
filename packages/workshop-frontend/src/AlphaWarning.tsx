@@ -11,7 +11,7 @@ export default function AlphaWarning() {
       aria-hidden="false"
       className="hidden lg:flex absolute inset-0 items-center justify-center pointer-events-none"
     >
-      <span className="text-xs font-medium text-kumo-warning whitespace-nowrap">
+      <span className="text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle whitespace-nowrap">
         Warning: Gadgets is still in alpha. All data may be deleted.
       </span>
     </div>
