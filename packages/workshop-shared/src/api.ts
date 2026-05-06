@@ -423,7 +423,7 @@ export interface CodeSubscriber {
 // Specifies the state of an action in the action log:
 // * pending: Action has not been applied yet. It is waiting for approval.
 // * approved: Action was approved and applied.
-// * denied: Action was rejected by the user.
+// * rejected: Action was rejected by the user.
 export type ActionState = "pending" | "approved" | "rejected";
 
 export type ActionLogEntry = {
@@ -573,6 +573,10 @@ export interface Overseer extends RpcTarget {
   // Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not
   // be approved in the future.
   rejectAction(id: number): Promise<void>;
+
+  // Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
+  // If `startAfter` is set, replay actions changed after that timestamp.
+  subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
 
   // List past AI chats.
   listChats(): Promise<AiChatMetadata[]>;
@@ -746,6 +750,10 @@ export interface Overseer extends RpcTarget {
 
   // List active share keys (for management UI).
   listShareKeys(): Promise<ShareKeyInfo[]>;
+
+  // Update share key management metadata. The raw share key is not available after creation;
+  // this only edits the stored note used by the management UI.
+  updateShareKey(keyId: string, note?: string): Promise<void>;
 
   // Revoke a share key by its ID (the HMAC hash). Users who gained access solely through
   // this key (and have no other edges) will be transitively removed. `keepUsers` lists
@@ -1029,6 +1037,12 @@ export type AiChatStreamEvent = {
   type: "clear";
 };
 
+// Interface implemented by the client to receive action-log upserts.
+export interface ActionsSubscriber {
+  entry(record: ActionLogEntry): void;
+  ready(): void;
+}
+
 // Interface implemented by the client to receive callback notifications whenever there is new
 // chat activity. Use Overseer.subscribeToChat() to register a subscriber.
 export interface AiChatSubscriber {
@@ -1079,6 +1093,7 @@ export type ConsoleLogEvent = {
 export type GatekeeperMetadata = {
   bindingName: string;
   resourceTitle: string;
+  vendorId?: string;
 };
 
 // =======================================================================================
@@ -1109,20 +1124,23 @@ export type GatekeeperCreationSpec = {
 };
 
 // User-provided metadata controlling how a gatekeeper binding should appear in blueprints.
-// Stored on each GatekeeperRecord. Every named binding must have an annotation before a
-// blueprint can be created or updated with code.
+// Stored on each GatekeeperRecord. Optional: when absent, the binding is included in the
+// blueprint with a generated title, empty description, and no resource suggestion.
+//
+// Legacy field `included` may still be present on records written by older versions of
+// the workshop. The backend still honors `included: false`, but new writes omit it.
 export type BlueprintBindingAnnotation = {
-  included: boolean;       // false = explicitly excluded from blueprints
-  title: string;           // display title for blueprint consumers (ignored if not included)
-  description: string;     // explains what resource to connect (ignored if not included)
+  title: string;           // friendly name shown to people using the blueprint
+  description: string;     // explains what resource to connect (may be empty)
   suggestValue?: boolean;  // include the specific URL/model as a suggestion
 };
 
 // Describes one binding required by a blueprint. Stored in BlueprintMetadata.bindings as a
-// Record keyed by binding name.
+// Record keyed by binding name. Consumers identify bindings by their key (the binding name)
+// while `title` and `description` provide user-facing text.
 export type BlueprintBinding = {
-  title: string;        // human-readable name, e.g. "Google Drive" or "Code Assistant"
-  description: string;  // explains what resource to connect here
+  title: string;        // friendly name shown to people using the blueprint
+  description: string;  // explains what resource to connect here (may be empty)
 } & ({
   // A regular external-resource gatekeeper binding.
   type: "gatekeeper";

@@ -30,13 +30,13 @@ A blueprint does **not** capture:
 
 ## Binding Annotations
 
-Before creating a blueprint, every named binding on the gadget must have a **blueprint annotation** configured. This is user-provided metadata that controls how each binding appears in the blueprint:
+Before creating a blueprint, the author can optionally add **blueprint annotations** for the gadget's named bindings. This user-provided metadata controls how each required connection appears to someone creating a gadget from the blueprint:
 
-- **Included** -- whether the binding should appear in the blueprint at all. Some bindings may be development-only or not relevant to consumers.
-- **Title** and **description** -- human-readable labels that tell the blueprint consumer what kind of resource to connect.
+- **Name** -- a friendly connection name shown to blueprint consumers. It defaults to the current resource title, while the binding name remains the stable key used by code.
+- **Description** -- optional helper text that tells the blueprint consumer what kind of resource to connect.
 - **Suggest value** -- optionally includes the specific resource URL or model name as a suggestion. This is useful when the blueprint author intends all instances to use the same resource, but it remains a suggestion rather than a requirement.
 
-Annotations are configured per-binding in the Connections tab via a popover UI (the share icon on each binding row). The annotation is stored on the `GatekeeperRecord` as the `blueprintAnnotation` field.
+All named bindings are included in the blueprint. Annotations are configured in the **Blueprint** modal opened from the gadget editor header. The annotation is stored on the `GatekeeperRecord` as the `blueprintAnnotation` field.
 
 ## Binding Types
 
@@ -111,9 +111,10 @@ Featured blueprint state is split across two stores:
 
 ## Creating and Managing Blueprints
 
-Blueprints are managed through the **Share modal's Blueprints tab** in the gadget editor (the same modal used for collaborators). The UI allows:
+Blueprints are managed through the **Blueprint** button in the gadget editor header. The UI allows:
 
 - **Creating** a new blueprint from the gadget's current committed code, with a title and optional description.
+- **Describing** the required connections with optional per-binding helper text and suggested values.
 - **Listing** existing blueprints with their title, description, version, and code version date.
 - **Editing** a blueprint's title and description inline.
 - **Updating** a blueprint to the gadget's current code (increments the version).

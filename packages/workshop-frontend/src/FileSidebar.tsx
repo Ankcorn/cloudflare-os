@@ -1,6 +1,8 @@
-import { useState } from 'react'
-import { Dialog, Button, Input, useKumoToastManager } from '@cloudflare/kumo'
-import { FileText, Plus, Trash, Pencil } from '@phosphor-icons/react'
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
+import { Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
+import { DotsThree, Pencil, Plus, Trash, X } from '@phosphor-icons/react'
+import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
+import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 
 interface FileSidebarProps {
   files: string[]
@@ -8,12 +10,20 @@ interface FileSidebarProps {
   streamingActiveFile?: string | null
   dirtyFiles: Set<string>
   changedFiles?: Set<string>  // Files with proposed changes (for diff mode)
+  fileChangeStatuses?: Map<string, FileChangeStatus>
   isDiffMode?: boolean         // Whether we're in diff mode
   editLocked?: boolean
   onFileSelect: (filename: string) => void
   onFileCreate: (filename: string) => void
   onFileDelete: (filename: string) => void
   onFileRename: (oldName: string, newName: string) => void
+  ref?: Ref<FileSidebarHandle>
+}
+
+export type FileChangeStatus = 'added' | 'deleted' | 'modified' | 'unchanged'
+
+export interface FileSidebarHandle {
+  openCreateModal: () => void
 }
 
 export default function FileSidebar({
@@ -22,19 +32,25 @@ export default function FileSidebar({
   streamingActiveFile,
   dirtyFiles,
   changedFiles,
+  fileChangeStatuses,
   isDiffMode = false,
   editLocked = false,
   onFileSelect,
   onFileCreate,
   onFileDelete,
-  onFileRename
+  onFileRename,
+  ref,
 }: FileSidebarProps) {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
-  const [isRenameModalOpen, setIsRenameModalOpen] = useState(false)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [deletingFile, setDeletingFile] = useState<string | null>(null)
   const [newFileName, setNewFileName] = useState('')
   const [renamingFile, setRenamingFile] = useState<string | null>(null)
+  const createInputRef = useRef<HTMLInputElement | null>(null)
+
+  useImperativeHandle(ref, () => ({
+    openCreateModal: () => setIsCreateModalOpen(true),
+  }), [])
 
   const toasts = useKumoToastManager()
 
@@ -54,27 +70,28 @@ export default function FileSidebar({
     setIsCreateModalOpen(false)
   }
 
-  const handleRenameFile = () => {
-    if (!newFileName.trim() || !renamingFile) {
-      toasts.add({ title: 'Filename cannot be empty', variant: 'error' })
+  const startRename = (filename: string) => {
+    setRenamingFile(filename)
+  }
+
+  const cancelRename = () => {
+    setRenamingFile(null)
+  }
+
+  const commitRename = (filename: string, nextName: string) => {
+    const trimmed = nextName.trim()
+    if (!trimmed || trimmed === filename) {
+      setRenamingFile(null)
       return
     }
 
-    if (files.includes(newFileName.trim()) && newFileName.trim() !== renamingFile) {
+    if (files.includes(trimmed)) {
       toasts.add({ title: 'A file with this name already exists', variant: 'error' })
       return
     }
 
-    onFileRename(renamingFile, newFileName.trim())
-    setNewFileName('')
+    onFileRename(filename, trimmed)
     setRenamingFile(null)
-    setIsRenameModalOpen(false)
-  }
-
-  const startRename = (filename: string) => {
-    setRenamingFile(filename)
-    setNewFileName(filename)
-    setIsRenameModalOpen(true)
   }
 
   const startDelete = (filename: string) => {
@@ -95,116 +112,60 @@ export default function FileSidebar({
   }
 
   return (
-    <div className="w-[250px] border-r border-kumo-line h-full flex flex-col">
-      {/* New File button */}
-      <div className="p-2 border-b border-kumo-line">
-        <Button
-          variant="primary"
-          size="sm"
-          className="w-full"
-          disabled={editLocked}
+    <div className="flex h-full w-[244px] flex-col border-r border-kumo-line bg-kumo-base">
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 px-3 pt-3 pb-2">
+        <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+          Files
+        </span>
+        <WorkshopIconButton
           onClick={() => setIsCreateModalOpen(true)}
+          disabled={editLocked}
+          aria-label="New file"
+          title="New file"
+          className="!h-6 !w-6 text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default"
         >
-          <Plus size={14} />
-          New File
-        </Button>
+          <Plus size={14} weight="bold" />
+        </WorkshopIconButton>
       </div>
 
-      {/* File list */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto px-2 pb-3">
         {files.map(filename => {
           const isDirty = dirtyFiles.has(filename)
-          const hasChanges = changedFiles?.has(filename) || false
+          const changeStatus = fileChangeStatuses?.get(filename)
+          const hasChanges = changeStatus
+            ? changeStatus !== 'unchanged'
+            : changedFiles?.has(filename) || false
           const isUnchanged = isDiffMode && !hasChanges
           const isActive = activeFile === filename
           const isStreamingActive = streamingActiveFile === filename
+          const dotClass = getStatusDotClass(changeStatus, isDirty)
 
           return (
-            <div
+            <FileRow
               key={filename}
-              className={[
-                'group flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm',
-                isActive
-                  ? 'bg-kumo-tint text-kumo-brand'
-                  : 'text-kumo-default hover:bg-kumo-tint/50',
-                isUnchanged ? 'opacity-40' : '',
-              ].join(' ')}
-              onClick={() => onFileSelect(filename)}
-            >
-              <FileText
-                size={14}
-                className={[
-                  'shrink-0',
-                  isDirty
-                    ? 'text-kumo-danger'
-                    : hasChanges
-                      ? 'text-kumo-brand'
-                      : 'text-kumo-subtle',
-                ].join(' ')}
-              />
-
-              <span
-                className={[
-                  'flex-1 truncate',
-                  isDirty
-                    ? 'text-kumo-danger'
-                    : hasChanges
-                      ? 'text-kumo-brand'
-                      : '',
-                ].join(' ')}
-                title={
-                  isDirty
-                    ? 'File has unsaved changes'
-                    : hasChanges
-                      ? 'File has proposed changes'
-                      : filename
-                }
-              >
-                {filename}
-              </span>
-
-              {isStreamingActive && (
-                <div
-                  className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin shrink-0"
-                  aria-label={`${filename} is being edited`}
-                  title="Agent is editing this file"
-                />
-              )}
-
-              {/* Action buttons — visible on hover */}
-              <div
-                className="hidden group-hover:flex items-center gap-0.5"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  disabled={editLocked}
-                  className="p-0.5 rounded text-kumo-subtle hover:text-kumo-default hover:bg-kumo-tint"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    startRename(filename)
-                  }}
-                  aria-label={`Rename ${filename}`}
-                >
-                  <Pencil size={12} />
-                </button>
-                <button
-                  disabled={editLocked}
-                  className="p-0.5 rounded text-kumo-subtle hover:text-kumo-danger hover:bg-kumo-tint"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    startDelete(filename)
-                  }}
-                  aria-label={`Delete ${filename}`}
-                >
-                  <Trash size={12} />
-                </button>
-              </div>
-            </div>
+              filename={filename}
+              isActive={isActive}
+              isUnchanged={isUnchanged}
+              isStreamingActive={isStreamingActive}
+              changeStatus={changeStatus}
+              dotClass={dotClass}
+              showDot={!!changeStatus || !!isDirty}
+              editLocked={editLocked}
+              isRenaming={renamingFile === filename}
+              onSelect={() => onFileSelect(filename)}
+              onRename={() => {
+                startRename(filename)
+              }}
+              onDelete={() => {
+                startDelete(filename)
+              }}
+              onRenameSubmit={(nextName) => commitRename(filename, nextName)}
+              onRenameCancel={cancelRename}
+            />
           )
         })}
       </div>
 
-      {/* Create File Dialog */}
       <Dialog.Root
         open={isCreateModalOpen}
         onOpenChange={(o) => {
@@ -214,60 +175,76 @@ export default function FileSidebar({
           }
         }}
       >
-        <Dialog className="p-6" size="sm">
-          <Dialog.Title className="text-lg font-semibold mb-4">Create New File</Dialog.Title>
-          <Input
-            placeholder="Enter filename (e.g., main.ts, utils.js)"
-            value={newFileName}
-            onChange={(e) => setNewFileName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleCreateFile() }}
-            autoFocus
-          />
-          <div className="mt-4 flex justify-end gap-2">
+        <Dialog
+          className="!z-[1000] !w-[min(420px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[18%] !-translate-y-0"
+          size="sm"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
+            <div className="min-w-0">
+              <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+                New file
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                Create a new file in this gadget.
+              </Dialog.Description>
+            </div>
             <Dialog.Close
               render={(props) => (
-                <Button variant="secondary" {...props}>Cancel</Button>
+                <WorkshopIconButton
+                  {...props}
+                  className="!h-7 !w-7"
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </WorkshopIconButton>
               )}
             />
-            <Button variant="primary" onClick={handleCreateFile}>Create</Button>
+          </div>
+
+          <div className="px-5 py-4">
+            <WorkshopInput
+              ref={createInputRef}
+              autoFocus
+              placeholder="filename.ts"
+              aria-label="Filename"
+              value={newFileName}
+              onChange={(e) => setNewFileName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  handleCreateFile()
+                }
+              }}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              className="w-full font-mono"
+            />
+          </div>
+
+          <div className="flex items-center justify-end gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopButton
+                  {...props}
+                  className="!h-9"
+                >
+                  Cancel
+                </WorkshopButton>
+              )}
+            />
+            <WorkshopButton
+              tone="primary"
+              onClick={handleCreateFile}
+              disabled={!newFileName.trim()}
+            >
+              Create file
+            </WorkshopButton>
           </div>
         </Dialog>
       </Dialog.Root>
 
-      {/* Rename File Dialog */}
-      <Dialog.Root
-        open={isRenameModalOpen}
-        onOpenChange={(o) => {
-          if (!o) {
-            setIsRenameModalOpen(false)
-            setNewFileName('')
-            setRenamingFile(null)
-          }
-        }}
-      >
-        <Dialog className="p-6" size="sm">
-          <Dialog.Title className="text-lg font-semibold mb-4">Rename File</Dialog.Title>
-          <Input
-            placeholder="Enter new filename"
-            value={newFileName}
-            onChange={(e) => setNewFileName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleRenameFile() }}
-            autoFocus
-          />
-          <div className="mt-4 flex justify-end gap-2">
-            <Dialog.Close
-              render={(props) => (
-                <Button variant="secondary" {...props}>Cancel</Button>
-              )}
-            />
-            <Button variant="primary" onClick={handleRenameFile}>Rename</Button>
-          </div>
-        </Dialog>
-      </Dialog.Root>
-
-      {/* Delete Confirmation Dialog */}
-      <Dialog.Root
-        role="alertdialog"
+      <DeleteConfirmationDialog
         open={isDeleteModalOpen}
         onOpenChange={(o) => {
           if (!o) {
@@ -275,22 +252,174 @@ export default function FileSidebar({
             setDeletingFile(null)
           }
         }}
-      >
-        <Dialog className="p-6" size="sm">
-          <Dialog.Title className="text-lg font-semibold mb-2">Delete File</Dialog.Title>
-          <Dialog.Description className="text-sm text-kumo-subtle">
-            Are you sure you want to delete "{deletingFile}"?
-          </Dialog.Description>
-          <div className="mt-4 flex justify-end gap-2">
-            <Dialog.Close
-              render={(props) => (
-                <Button variant="secondary" {...props}>Cancel</Button>
-              )}
-            />
-            <Button variant="destructive" onClick={confirmDelete}>Delete</Button>
-          </div>
-        </Dialog>
-      </Dialog.Root>
+        title="Delete file?"
+        description={<>This removes <span className="font-mono text-kumo-default">{deletingFile}</span> from the gadget. You can&apos;t undo this.</>}
+        onConfirm={confirmDelete}
+      />
     </div>
   )
+}
+
+interface FileRowProps {
+  filename: string
+  isActive: boolean
+  isUnchanged: boolean
+  isStreamingActive: boolean
+  changeStatus?: FileChangeStatus
+  dotClass: string | null
+  showDot: boolean
+  editLocked: boolean
+  isRenaming: boolean
+  onSelect: () => void
+  onRename: () => void
+  onDelete: () => void
+  onRenameSubmit: (nextName: string) => void
+  onRenameCancel: () => void
+}
+
+function FileRow({
+  filename,
+  isActive,
+  isUnchanged,
+  isStreamingActive,
+  changeStatus,
+  dotClass,
+  showDot,
+  editLocked,
+  isRenaming,
+  onSelect,
+  onRename,
+  onDelete,
+  onRenameSubmit,
+  onRenameCancel,
+}: FileRowProps) {
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const [renameValue, setRenameValue] = useState(filename)
+  const isDeleted = changeStatus === 'deleted'
+
+  useEffect(() => {
+    if (!isRenaming) return
+    setRenameValue(filename)
+    const id = window.setTimeout(() => {
+      const input = inputRef.current
+      if (!input) return
+      input.focus()
+      const dotIndex = filename.lastIndexOf('.')
+      if (dotIndex > 0) {
+        input.setSelectionRange(0, dotIndex)
+      } else {
+        input.select()
+      }
+    }, 0)
+    return () => window.clearTimeout(id)
+  }, [isRenaming, filename])
+
+  return (
+    <div
+      className={[
+        'group relative mb-[2px] flex h-7 items-center gap-2 rounded-md px-2 text-[13px] leading-[18px] tracking-[-0.2px] transition-colors duration-150 ease-out',
+        isRenaming
+          ? 'bg-kumo-base ring-1 ring-kumo-ring/40'
+          : isActive
+            ? 'cursor-pointer bg-kumo-recessed text-kumo-default'
+            : 'cursor-pointer text-kumo-default hover:bg-kumo-tint',
+        isUnchanged && !isRenaming ? 'opacity-50' : '',
+      ].join(' ')}
+      onClick={isRenaming ? undefined : onSelect}
+    >
+      <span
+        aria-hidden="true"
+        className={[
+          'h-1.5 w-1.5 shrink-0 rounded-full',
+          showDot && dotClass ? dotClass : 'bg-transparent',
+        ].join(' ')}
+      />
+
+      {isRenaming ? (
+        <input
+          ref={inputRef}
+          value={renameValue}
+          onChange={(event) => setRenameValue(event.target.value)}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              onRenameSubmit(renameValue)
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              onRenameCancel()
+            }
+          }}
+          onBlur={() => {
+            if (renameValue.trim() === '' || renameValue.trim() === filename) {
+              onRenameCancel()
+            } else {
+              onRenameSubmit(renameValue)
+            }
+          }}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          aria-label={`Rename ${filename}`}
+          className="min-w-0 flex-1 bg-transparent text-[13px] leading-[18px] tracking-[-0.2px] text-kumo-default outline-none placeholder:text-kumo-inactive"
+        />
+      ) : (
+        <span className="min-w-0 flex-1 truncate">{filename}</span>
+      )}
+
+      {isStreamingActive && !isRenaming && (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-kumo-success"
+          aria-label={`${filename} is being edited`}
+          title="Agent is editing this file"
+        />
+      )}
+
+      {!isRenaming && !isDeleted && (
+        <DropdownMenu>
+          <DropdownMenu.Trigger
+            render={(
+              <WorkshopIconButton
+                aria-label={`Actions for ${filename}`}
+                onClick={(event) => event.stopPropagation()}
+                disabled={editLocked}
+                className="!h-5 !w-5 text-kumo-inactive opacity-0 hover:bg-kumo-tint hover:text-kumo-default group-hover:opacity-100 data-[popup-open]:opacity-100"
+              >
+                <DotsThree size={14} weight="bold" />
+              </WorkshopIconButton>
+            )}
+          />
+          <DropdownMenu.Content
+            onClick={(event) => event.stopPropagation()}
+            className="!z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]"
+          >
+            <DropdownMenu.Item
+              icon={<Pencil size={12} className="mr-2" />}
+              onClick={onRename}
+              className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+            >
+              Rename
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              icon={<Trash size={12} className="mr-2" />}
+              variant="danger"
+              onClick={onDelete}
+              className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
+            >
+              Delete
+            </DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu>
+      )}
+    </div>
+  )
+}
+
+function getStatusDotClass(status: FileChangeStatus | undefined, isDirty: boolean): string | null {
+  if (isDirty) return 'bg-kumo-danger'
+  if (status === 'added') return 'bg-kumo-success'
+  if (status === 'deleted') return 'bg-kumo-danger'
+  if (status === 'modified') return 'bg-kumo-warning'
+  if (status === 'unchanged') return null
+  return null
 }

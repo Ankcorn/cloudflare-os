@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
 import { RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
+import type { FileChangeStatus, FileSidebarHandle } from './FileSidebar'
+import { WorkshopButton } from './components/WorkshopControls'
 import CodeEditor from './CodeEditor'
 import CodeDiffEditor from './CodeDiffEditor'
 import type { StreamingProposedChanges } from './ChatInterface'
@@ -54,6 +56,7 @@ interface GadgetCodeInterfaceProps {
   streamingProposedChanges?: StreamingProposedChanges
   streamingActiveFile?: string | null
   isAgentActive: boolean
+  isVisible?: boolean
   onHasCodeChange?: (hasCode: boolean) => void
 }
 
@@ -114,7 +117,7 @@ type QueuedCodeUpdate = {
   update: Uint8Array
 }
 
-export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, selectedChatId = null, proposedChanges, draftProposedChanges, streamingProposedChanges, streamingActiveFile, isAgentActive, onHasCodeChange }: GadgetCodeInterfaceProps) {
+export default function GadgetCodeInterface({ overseer, height = '100%', onCodeChange, selectedChatId = null, proposedChanges, draftProposedChanges, streamingProposedChanges, streamingActiveFile, isAgentActive, isVisible = true, onHasCodeChange }: GadgetCodeInterfaceProps) {
   const toasts = useKumoToastManager()
   const branchMode = selectedChatId !== null
 
@@ -134,6 +137,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   // React state for UI
   const [fileNames, setFileNames] = useState<string[]>([])
   const [activeFile, setActiveFile] = useState<string | null>(null)
+  const fileSidebarRef = useRef<FileSidebarHandle | null>(null)
   const [isReady, setIsReady] = useState(false)
   const [loading, setLoading] = useState(true)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
@@ -198,10 +202,6 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   }, []) // Only run once on mount
 
   // Auto-select first file when files appear and nothing is selected.
-  // In diff mode, files may only exist in the editable/preview branch document,
-  // so we check the full displayed file list, not just fileNames.
-  // changedFiles is included as a dependency because its update signals that
-  // the current preview map has been populated.
   useEffect(() => {
     if (activeFile !== null) return
 
@@ -215,9 +215,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     }
   }, [fileNames, activeFile, changedFiles])
 
-  // Notify parent when code file existence is known. We avoid reporting the
-  // initial empty state before the first code subscription has reached ready,
-  // which would otherwise make the editor briefly think every gadget has no code.
+  // Avoid reporting an empty state before the first code sync is ready.
   const onHasCodeChangeRef = useRef(onHasCodeChange)
   onHasCodeChangeRef.current = onHasCodeChange
   useEffect(() => {
@@ -739,6 +737,18 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   // Determine if we're in diff mode
   const isDiffMode = branchMode || (streamingProposedChanges !== undefined && streamingYdocRef.current !== null)
 
+  const displayedFiles = useMemo(() => {
+    return isDiffMode && previewFilesMap
+      ? Array.from(new Set([...fileNames, ...Array.from(previewFilesMap.keys())])).sort()
+      : fileNames
+  }, [fileNames, isDiffMode, previewFilesMap])
+
+  const fileChangeStatuses = useMemo(() => {
+    return isDiffMode && previewFilesMap
+      ? computeFileChangeStatuses(filesMapRef.current, previewFilesMap, displayedFiles, changedFiles)
+      : undefined
+  }, [changedFiles, displayedFiles, isDiffMode, previewFilesMap])
+
   if (loading) {
     return (
       <div
@@ -750,10 +760,9 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     )
   }
 
-  // In diff mode, include files from both original and modified documents
-  const displayedFiles = isDiffMode && previewFilesMap
-    ? Array.from(new Set([...fileNames, ...Array.from(previewFilesMap.keys())])).sort()
-    : fileNames
+  if (!isVisible) {
+    return <div style={{ height, width: '100%' }} />
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
@@ -765,11 +774,13 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       )}
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <FileSidebar
+          ref={fileSidebarRef}
           files={displayedFiles}
           activeFile={activeFile}
           streamingActiveFile={streamingActiveFile}
           dirtyFiles={new Set()}
           changedFiles={changedFiles}
+          fileChangeStatuses={fileChangeStatuses}
           isDiffMode={isDiffMode}
           editLocked={isEditingLocked}
           onFileSelect={handleFileSelect}
@@ -778,7 +789,28 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
           onFileRename={handleFileRename}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          {isDiffMode ? (
+          {isReady && !loading && displayedFiles.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center bg-kumo-base px-6 text-center">
+              <div className="max-w-[360px]">
+                <p className="m-0 text-[15px] leading-[22px] font-semibold tracking-[-0.3px] text-kumo-default">
+                  No files yet
+                </p>
+                <p className="mt-1.5 mb-0 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
+                  Keep building with the agent in chat and files will appear here as it works, or create one yourself.
+                </p>
+                <div className="mt-4 flex justify-center">
+                  <WorkshopButton
+                    onClick={() => fileSidebarRef.current?.openCreateModal()}
+                    disabled={isEditingLocked}
+                    tone="primary"
+                    className="!h-8"
+                  >
+                    New file
+                  </WorkshopButton>
+                </div>
+              </div>
+            </div>
+          ) : isDiffMode ? (
             <CodeDiffEditor
               filename={activeFile}
               originalYText={activeFileYText}
@@ -798,4 +830,30 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       </div>
     </div>
   )
+}
+
+function computeFileChangeStatuses(
+  originalMap: Y.Map<Y.Text>,
+  previewMap: Y.Map<Y.Text>,
+  filenames: string[],
+  changedFiles: Set<string>,
+) {
+  const statuses = new Map<string, FileChangeStatus>()
+
+  for (const filename of filenames) {
+    const original = originalMap.get(filename)
+    const preview = previewMap.get(filename)
+
+    if (!original && preview) {
+      statuses.set(filename, 'added')
+    } else if (original && !preview) {
+      statuses.set(filename, 'deleted')
+    } else if (original && preview && changedFiles.has(filename)) {
+      statuses.set(filename, 'modified')
+    } else {
+      statuses.set(filename, 'unchanged')
+    }
+  }
+
+  return statuses
 }

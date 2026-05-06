@@ -17,7 +17,11 @@ export default function UserMenu() {
     <DropdownMenu>
       <DropdownMenu.Trigger
         render={
-          <button className="w-8 h-8 rounded-full flex items-center justify-center bg-kumo-tint hover:bg-kumo-fill transition-colors overflow-hidden">
+          <button
+            className="w-8 h-8 cursor-pointer rounded-full flex items-center justify-center bg-kumo-tint hover:bg-kumo-fill transition-colors overflow-hidden"
+            title="Open profile menu"
+            aria-label="Open profile menu"
+          >
             {avatarUrl ? (
               <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
             ) : (
@@ -26,15 +30,25 @@ export default function UserMenu() {
           </button>
         }
       />
-      <DropdownMenu.Content>
-        <DropdownMenu.Item onClick={() => navigate({ to: '/profile' })}>
+      <DropdownMenu.Content className="!z-[1100] !min-w-[160px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(82,16,0,0.10)]">
+        <DropdownMenu.Item
+          onClick={() => navigate({ to: '/profile' })}
+          className="!h-auto rounded-md !px-3 !py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+        >
           Profile
         </DropdownMenu.Item>
-        <DropdownMenu.Item onClick={() => navigate({ to: '/providers' })}>
+        <DropdownMenu.Item
+          onClick={() => navigate({ to: '/providers' })}
+          className="!h-auto rounded-md !px-3 !py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+        >
           Providers
         </DropdownMenu.Item>
         <DropdownMenu.Separator />
-        <DropdownMenu.Item variant="danger" onClick={logout}>
+        <DropdownMenu.Item
+          variant="danger"
+          onClick={logout}
+          className="!h-auto rounded-md !px-3 !py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] transition-colors data-highlighted:bg-kumo-danger-tint"
+        >
           Sign out
         </DropdownMenu.Item>
       </DropdownMenu.Content>

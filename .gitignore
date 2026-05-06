@@ -16,3 +16,6 @@ wrangler.prod.jsonc
 
 # Site-specific dev server configs.
 wrangler.dev.jsonc
+
+# macOS
+.DS_Store

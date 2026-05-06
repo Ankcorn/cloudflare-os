@@ -435,23 +435,29 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 Required connections ({bindingEntries.length})
               </p>
               <div className="space-y-1">
-                {bindingEntries.map(([name, binding]) => (
-                  <div key={name} className="flex items-center gap-2 px-3 py-2 bg-kumo-elevated rounded-md">
-                    {binding.type === 'gatekeeper' && <Plugs size={14} className="text-kumo-subtle flex-shrink-0" />}
-                    {binding.type === 'aiModel' && <Robot size={14} className="text-kumo-subtle flex-shrink-0" />}
-                    {binding.type === 'agentSpawner' && <Lightning size={14} className="text-kumo-subtle flex-shrink-0" />}
-                    <div className="flex-1 min-w-0">
-                      <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded text-kumo-default">{name}</span>
-                      {' '}
-                      <span className="text-sm text-kumo-default">{binding.title}</span>
-                      <br />
-                      <span className="text-xs text-kumo-subtle">{binding.description}</span>
+                {bindingEntries.map(([name, binding]) => {
+                  const title = binding.title || name
+                  return (
+                    <div key={name} className="flex items-center gap-2 px-3 py-2 bg-kumo-elevated rounded-md">
+                      {binding.type === 'gatekeeper' && <Plugs size={14} className="text-kumo-subtle flex-shrink-0" />}
+                      {binding.type === 'aiModel' && <Robot size={14} className="text-kumo-subtle flex-shrink-0" />}
+                      {binding.type === 'agentSpawner' && <Lightning size={14} className="text-kumo-subtle flex-shrink-0" />}
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm font-medium text-kumo-default">{title}</span>
+                        <span className="ml-2 text-[11px] text-kumo-inactive">Referenced in code as: <span className="font-mono text-kumo-subtle">{name}</span></span>
+                        {binding.description && (
+                          <>
+                            <br />
+                            <span className="text-xs text-kumo-subtle">{binding.description}</span>
+                          </>
+                        )}
+                      </div>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-kumo-tint text-kumo-subtle border border-kumo-line flex-shrink-0">
+                        {binding.type}
+                      </span>
                     </div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-kumo-tint text-kumo-subtle border border-kumo-line flex-shrink-0">
-                      {binding.type}
-                    </span>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}
@@ -468,7 +474,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
           {showConfigure && isAuthenticated ? (
             <div>
               <hr className="border-kumo-line mb-4" />
-              <h5 className="text-base font-semibold text-kumo-default mb-4">Configure bindings</h5>
+              <h5 className="text-base font-semibold text-kumo-default mb-4">Configure connections</h5>
               <div className="space-y-5">
                 {bindingEntries.map(([name, binding]) => (
                   <BindingField
@@ -563,6 +569,7 @@ function BindingField({
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
   const [selectedAccountName, setSelectedAccountName] = useState('')
   const [selectedVendorName, setSelectedVendorName] = useState('')
+  const title = binding.title || name
   const [resourceUrlInput, setResourceUrlInput] = useState(
     () => binding.type === 'gatekeeper' ? (binding.resourceUrl || '') : ''
   )
@@ -575,9 +582,9 @@ function BindingField({
     return (
       <div>
         <label className="block text-sm font-medium text-kumo-default mb-1">
-          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
-          {' '}- {binding.title}
+          {title}
         </label>
+        <p className="text-[11px] text-kumo-inactive mb-1">Referenced in code as: <span className="font-mono text-kumo-subtle">{name}</span></p>
         {binding.description && (
           <p className="text-xs text-kumo-subtle mb-2">{binding.description}</p>
         )}
@@ -645,9 +652,9 @@ function BindingField({
     return (
       <div>
         <label className="block text-sm font-medium text-kumo-default mb-1">
-          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
-          {' '}- {binding.title}
+          {title}
         </label>
+        <p className="text-[11px] text-kumo-inactive mb-1">Referenced in code as: <span className="font-mono text-kumo-subtle">{name}</span></p>
         {binding.description && (
           <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
         )}
@@ -678,9 +685,9 @@ function BindingField({
     return (
       <div>
         <label className="block text-sm font-medium text-kumo-default mb-1">
-          <span className="text-xs font-mono bg-kumo-tint px-1 py-0.5 rounded">{name}</span>
-          {' '}- {binding.title}
+          {title}
         </label>
+        <p className="text-[11px] text-kumo-inactive mb-1">Referenced in code as: <span className="font-mono text-kumo-subtle">{name}</span></p>
         {binding.description && (
           <p className="text-xs text-kumo-subtle mb-1">{binding.description}</p>
         )}

@@ -151,12 +151,13 @@
 /* ── Capsule pill in messages ─────────────────────────────────────────────── */
 .capsulePill {
   display: inline-block;
-  background-color: var(--color-selection-bg);
-  border: 1px solid var(--color-kumo-brand);
+  background-color: var(--color-kumo-tint);
+  border: 1px solid color-mix(in srgb, var(--color-kumo-brand) 24%, var(--color-kumo-line));
   border-radius: 10px;
   padding: 1px 8px;
+  margin: 0 2px;
   font-size: 12px;
-  color: var(--color-kumo-brand);
+  color: var(--text-color-kumo-strong);
   cursor: default;
   vertical-align: baseline;
   line-height: 1.4;

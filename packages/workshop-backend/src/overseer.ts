@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -110,6 +110,14 @@ type QueuedAgentCallback = {
 };
 
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
+
+type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
+  included?: boolean;
+};
+
+function defaultBlueprintBindingTitle(record: GatekeeperRecord): string {
+  return record.resourceTitle || record.bindingName || "Connection";
+}
 
 type GatekeeperRecord = {
   id: number,
@@ -1647,16 +1655,13 @@ class OverseerImpl implements AgentHooks {
     for (let gk of this.storage.gatekeepers.list()) {
       if (!gk.bindingName) continue;
 
-      if (!gk.blueprintAnnotation) {
-        throw new Error(
-          `Binding "${gk.bindingName}" has no blueprint annotation configured. ` +
-          `All named bindings must be configured before creating or updating a blueprint.`
-        );
-      }
+      // Annotation is optional. When absent, the binding is included with an empty
+      // description and no resource suggestion. Legacy records may carry an `included:
+      // false` flag; honor it for backwards compatibility, but the current UI no longer
+      // surfaces an exclusion control.
+      let annotation = gk.blueprintAnnotation as LegacyBlueprintBindingAnnotation | undefined;
+      if (annotation?.included === false) continue;
 
-      if (!gk.blueprintAnnotation.included) continue;
-
-      let annotation = gk.blueprintAnnotation;
       let spec = gk.creationSpec;
 
       if (!spec) {
@@ -1666,9 +1671,10 @@ class OverseerImpl implements AgentHooks {
       }
 
       let base = {
-        title: annotation.title,
-        description: annotation.description,
+        title: annotation?.title || defaultBlueprintBindingTitle(gk),
+        description: annotation?.description ?? "",
       };
+      let suggestValue = annotation?.suggestValue ?? false;
 
       if (spec.type === "gatekeeper") {
         bindings[gk.bindingName] = {
@@ -1678,13 +1684,13 @@ class OverseerImpl implements AgentHooks {
           // Use the vendor's URL pattern, not the specific resource URL.
           // Fall back to resourceUrl for gatekeepers created before typeUrlPattern was stored.
           typeUrlPattern: spec.typeUrlPattern || spec.resourceUrl,
-          ...(annotation.suggestValue ? {resourceUrl: spec.resourceUrl} : {}),
+          ...(suggestValue ? {resourceUrl: spec.resourceUrl} : {}),
         };
       } else if (spec.type === "aiModel") {
         bindings[gk.bindingName] = {
           ...base,
           type: "aiModel",
-          ...(annotation.suggestValue
+          ...(suggestValue
             ? {suggestedModel: {provider: spec.provider, modelName: spec.modelName}}
             : {}),
         };
@@ -1695,7 +1701,7 @@ class OverseerImpl implements AgentHooks {
           type: "agentSpawner",
           config: restConfig,
         };
-        if (annotation.suggestValue) {
+        if (suggestValue) {
           if (spec.config.modelId === null) {
             binding.suggestedModel = null;
           } else if (spec.modelProvider && spec.modelName) {
@@ -3013,6 +3019,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return {
         bindingName: gatekeeper.bindingName!,
         resourceTitle: gatekeeper.resourceTitle || "(title unavailable)",
+        vendorId: gatekeeper.creationSpec?.type === "gatekeeper"
+            ? gatekeeper.creationSpec.vendorId
+            : undefined,
       };
     });
 
@@ -3147,7 +3156,63 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await gatekeeper.rejectAction(action.action);
 
     action.state = "rejected";
+    action.appliedAt = new Date();
     this.impl.storage.actions.put(action);
+  }
+
+  async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
+      : Promise<RpcStub<{}>> {
+    let actions = this.impl.storage.actions;
+
+    subscriber = subscriber.dup();  // keep stub after return
+    let subscribed = false;
+    let disposed = false;
+    subscriber.onRpcBroken(_ => unsubscribe());
+
+    let dbSubscriber = {
+      add(record: ActionRecord) {
+        subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
+      },
+      update(_oldRecord: ActionRecord, newRecord: ActionRecord): void {
+        subscriber.entry(actionRecordToLog(newRecord)).catch(unsubscribe);
+      },
+      remove(_record: ActionRecord): void {
+        // Required by typed-storage's Subscriber interface; actions are append-only today.
+      }
+    }
+
+    function unsubscribe() {
+      if (disposed) return;
+      disposed = true;
+      if (subscribed) actions.unsubscribe(dbSubscriber);
+      subscriber[Symbol.dispose]();
+    };
+
+    actions.subscribe(dbSubscriber);
+    subscribed = true;
+
+    // Replay actions changed since `startAfter`; resolved actions use `appliedAt`,
+    // pending actions use `createdAt`.
+    if (startAfter !== undefined) {
+      let startAfterTimestamp = startAfter.valueOf();
+      for (let record of actions.list()) {
+        if (disposed) break;
+        let appliedAt = record.type === "action" ? record.appliedAt : undefined;
+        let recordTimestamp = (appliedAt ?? record.createdAt).valueOf();
+        if (recordTimestamp > startAfterTimestamp) {
+          await subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
+        }
+      }
+    }
+
+    if (!disposed) subscriber.ready().catch(unsubscribe);
+
+    // @ts-expect-error Bugs in native RPC types make this not work currently.
+    return new NativeRpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+      }
+    });
   }
 
   async listChats(): Promise<AiChatMetadata[]> {
@@ -4030,6 +4095,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     return result;
   }
+
+  async updateShareKey(keyId: string, note?: string): Promise<void> {
+    let keyRecord = this.impl.storage.shareKeys.get(keyId);
+    if (!keyRecord) {
+      throw new Error("Share key not found.");
+    }
+
+    // Permission check: owner can edit any key; collaborators can only edit keys they created.
+    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
+      throw new Error("You can only edit share keys that you created.");
+    }
+
+    keyRecord.note = note === undefined ? undefined : note.slice(0, 500);
+    this.impl.storage.shareKeys.put(keyRecord);
+  }
 }
 
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
@@ -4109,7 +4189,13 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   async getBlueprintAnnotation(): Promise<BlueprintBindingAnnotation | null> {
     let record = this.impl.storage.gatekeepers.get(this.id);
     if (!record) throw new Error("No such gatekeeper.");
-    return record.blueprintAnnotation ?? null;
+    let annotation = record.blueprintAnnotation;
+    if (!annotation) return null;
+    return {
+      title: annotation.title || defaultBlueprintBindingTitle(record),
+      description: annotation.description ?? "",
+      suggestValue: annotation.suggestValue,
+    };
   }
 
   async setBlueprintAnnotation(annotation: BlueprintBindingAnnotation): Promise<void> {
@@ -4118,7 +4204,11 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     if (!record.bindingName) {
       throw new Error("Cannot set blueprint annotation on a gatekeeper without a binding name.");
     }
-    record.blueprintAnnotation = annotation;
+    record.blueprintAnnotation = {
+      title: annotation.title.trim() || defaultBlueprintBindingTitle(record),
+      description: annotation.description,
+      suggestValue: annotation.suggestValue,
+    };
     this.impl.storage.gatekeepers.put(record);
   }
 }

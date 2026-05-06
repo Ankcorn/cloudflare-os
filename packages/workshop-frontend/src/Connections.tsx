@@ -1,18 +1,23 @@
 import { useState, useEffect } from 'react'
-import { Button, Table, Switch, Popover, Dialog, useKumoToastManager } from '@cloudflare/kumo'
+import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
-  Plus,
   Pencil,
-  Check,
-  X,
   Trash,
-  ShareNetwork,
-  CaretRight,
+  Blueprint,
+  Warning,
+  X,
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, GatekeeperMetadata, ActionLogEntry, AuthenticatedApi, BlueprintBindingAnnotation } from '@gadgets/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import NewGatekeeperModal from './NewGatekeeperModal'
-
+import { GatekeeperIcon } from './components/GatekeeperIcon'
+import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
+import { EmptyState } from './components/EmptyState'
+import {
+  BindingCardData,
+  BlueprintBindingCard,
+  loadBindingCardData,
+} from './components/BlueprintBindingCard'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -22,17 +27,14 @@ interface ConnectionsProps {
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
 }
 
-export default function Connections({ overseer, authenticatedApi: _authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi: _authenticatedApi, onConnectionsChange, isVisible: _isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
-  const [actions, setActions] = useState<ActionLogEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [actionsLoading, setActionsLoading] = useState(true)
   const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
-  const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
   const [deleteTarget, setDeleteTarget] = useState<{ bindingName: string; resourceTitle: string } | null>(null)
-  const [expandedActions, setExpandedActions] = useState<Set<number>>(new Set())
+  const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
@@ -48,28 +50,9 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
     }
   }
 
-  const loadActions = async () => {
-    try {
-      const actionsList = await overseer.listActions()
-      setActions(actionsList)
-    } catch (err) {
-      console.error('Failed to load actions:', err)
-      toasts.add({ title: 'Failed to load actions', variant: 'error' })
-    } finally {
-      setActionsLoading(false)
-    }
-  }
-
   useEffect(() => {
     loadGatekeepers()
-    loadActions()
   }, [overseer])
-
-  useEffect(() => {
-    if (isVisible) {
-      loadActions()
-    }
-  }, [isVisible])
 
   const handleEditStart = (bindingName: string) => {
     setEditingGatekeeper(bindingName)
@@ -119,237 +102,148 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
     }
   }
 
-  const handleApproveAction = async (actionId: number) => {
-    setProcessingActions(prev => new Set(prev).add(actionId))
-    try {
-      await overseer.approveAction(actionId)
-      await loadActions()
-    } catch (err) {
-      console.error('Failed to approve action:', err)
-      toasts.add({ title: 'Failed to approve action', variant: 'error' })
-    } finally {
-      setProcessingActions(prev => {
-        const newSet = new Set(prev)
-        newSet.delete(actionId)
-        return newSet
-      })
-    }
-  }
-
-  const handleRejectAction = async (actionId: number) => {
-    setProcessingActions(prev => new Set(prev).add(actionId))
-    try {
-      await overseer.rejectAction(actionId)
-      await loadActions()
-    } catch (err) {
-      console.error('Failed to reject action:', err)
-      toasts.add({ title: 'Failed to reject action', variant: 'error' })
-    } finally {
-      setProcessingActions(prev => {
-        const newSet = new Set(prev)
-        newSet.delete(actionId)
-        return newSet
-      })
-    }
-  }
-
-  const toggleExpanded = (id: number) => {
-    setExpandedActions(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  const formatDate = (date: Date) => {
-    return new Date(date).toLocaleString()
-  }
-
-  const sortedActions = [...actions].sort((a, b) =>
-    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  )
-
   return (
-    <div className="p-6 h-[calc(100vh-64px-46px)] overflow-auto bg-kumo-elevated">
-      {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-kumo-default m-0">
-          Connections
-        </h2>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => setIsNewConnectionModalVisible(true)}
-        >
-          <Plus size={14} className="mr-1" />
-          New Connection
-        </Button>
-      </div>
-
-      {/* Gatekeepers table */}
-      {loading ? (
-        <div className="flex items-center justify-center py-12 text-sm text-kumo-subtle">
-          Loading connections...
-        </div>
-      ) : gatekeepers.length === 0 ? (
-        <div className="text-center py-12">
-          <p className="text-sm text-kumo-subtle">No connections yet.</p>
-          <p className="text-xs text-kumo-inactive mt-1">
-            Click "New Connection" to connect to external resources.
-          </p>
-        </div>
-      ) : (
-        <Table layout="fixed">
-          <Table.Header>
-            <Table.Row>
-              <Table.Head>Binding Name</Table.Head>
-              <Table.Head>Resource Title</Table.Head>
-            </Table.Row>
-          </Table.Header>
-          <Table.Body>
-            {gatekeepers.map((gk) => (
-              <Table.Row key={gk.bindingName}>
-                <Table.Cell>
-                  {editingGatekeeper === gk.bindingName ? (
-                    <div className="flex items-center gap-1">
-                      <input
-                        value={editValue}
-                        onChange={(e) => setEditValue(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') handleEditSave(gk.bindingName) }}
-                        placeholder="Enter binding name"
-                        autoFocus
-                        className="flex-1 px-2 py-1 text-sm rounded border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
-                      />
-                      <Button
-                        variant="primary"
-                        size="xs"
-                        onClick={() => handleEditSave(gk.bindingName)}
-                        disabled={!editValue.trim()}
-                      >
-                        <Check size={12} />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        onClick={handleEditCancel}
-                      >
-                        <X size={12} />
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm text-kumo-default bg-kumo-tint px-1.5 py-0.5 rounded">
-                        {gk.bindingName}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        onClick={() => handleEditStart(gk.bindingName)}
-                      >
-                        <Pencil size={12} />
-                      </Button>
-                      <BlueprintAnnotationPopover
-                        overseer={overseer}
-                        bindingName={gk.bindingName}
-                        resourceTitle={gk.resourceTitle}
-                        toasts={toasts}
-                      />
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        className="text-kumo-danger hover:text-kumo-danger"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setDeleteTarget({ bindingName: gk.bindingName, resourceTitle: gk.resourceTitle })
-                        }}
-                      >
-                        <Trash size={12} />
-                      </Button>
-                    </div>
-                  )}
-                </Table.Cell>
-                <Table.Cell>
-                  <span className="text-sm font-semibold text-kumo-default">
-                    {gk.resourceTitle}
-                  </span>
-                </Table.Cell>
-              </Table.Row>
-            ))}
-          </Table.Body>
-        </Table>
-      )}
-
-      {/* Action Log */}
-      <div className="mt-8 mb-4">
-        <h3 className="text-base font-semibold text-kumo-default m-0">
-          Action Log ({actions.length})
-        </h3>
-      </div>
-
-      {actionsLoading ? (
-        <div className="flex items-center justify-center py-12 text-sm text-kumo-subtle">
-          Loading actions...
-        </div>
-      ) : sortedActions.length === 0 ? (
-        <div className="text-center py-12">
-          <p className="text-sm text-kumo-subtle">No actions yet.</p>
-          <p className="text-xs text-kumo-inactive mt-1">
-            Actions will appear here as the gadget interacts with external resources.
-          </p>
-        </div>
-      ) : (
-        <Table layout="fixed">
-          <Table.Header>
-            <Table.Row>
-              <Table.Head style={{ width: '3%' }}>{/* expand */}</Table.Head>
-              <Table.Head style={{ width: '15%' }}>Resource</Table.Head>
-              <Table.Head style={{ width: '15%' }}>Created</Table.Head>
-              <Table.Head style={{ width: '42%' }}>Action</Table.Head>
-              <Table.Head style={{ width: '25%' }}>Status</Table.Head>
-            </Table.Row>
-          </Table.Header>
-          <Table.Body>
-            {sortedActions.map((record) => {
-              const isProcessing = processingActions.has(record.id)
-              const isExpanded = expandedActions.has(record.id)
-
-              return (
-                <ActionRow
-                  key={record.id}
-                  record={record}
-                  isProcessing={isProcessing}
-                  isExpanded={isExpanded}
-                  onToggleExpand={() => toggleExpanded(record.id)}
-                  onApprove={() => handleApproveAction(record.id)}
-                  onReject={() => handleRejectAction(record.id)}
-                  formatDate={formatDate}
-                />
-              )
-            })}
-          </Table.Body>
-        </Table>
-      )}
-
-      {/* Delete confirmation dialog */}
-      <Dialog.Root open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
-        <Dialog className="p-6" size="sm">
-          <Dialog.Title className="text-lg font-semibold mb-2">
-            Delete Connection
-          </Dialog.Title>
-          <p className="text-sm text-kumo-subtle mb-6">
-            Are you sure you want to delete the connection "{deleteTarget?.resourceTitle}" ({deleteTarget?.bindingName})? This action cannot be undone.
-          </p>
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleDeleteConfirm}>
-              Delete
-            </Button>
+    <div className="h-full overflow-auto bg-kumo-base">
+      <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-4 py-5 sm:px-6">
+        <section>
+          <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h2 className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
+                Connections
+              </h2>
+              <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                External resources this gadget can use.
+              </p>
+            </div>
+            <WorkshopButton
+              tone="primary"
+              onClick={() => setIsNewConnectionModalVisible(true)}
+              className="self-start"
+            >
+              Connect resource
+            </WorkshopButton>
           </div>
-        </Dialog>
-      </Dialog.Root>
+
+          {loading ? (
+            <div className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-6 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+              Loading connections...
+            </div>
+          ) : gatekeepers.length === 0 ? (
+            <EmptyState
+              title="No connected resources"
+              description="Connect Google Docs, GitHub, Google Sheets, and other services so this gadget can safely use external data."
+              actionLabel="Connect resource"
+              onAction={() => setIsNewConnectionModalVisible(true)}
+            />
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+              {gatekeepers.map((gk, index) => {
+                const isEditing = editingGatekeeper === gk.bindingName
+                const isDeleting = deleteTarget?.bindingName === gk.bindingName
+
+                return (
+                  <div
+                    key={gk.bindingName}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
+                  >
+                    {isDeleting ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
+                            Delete {gk.resourceTitle}?
+                          </p>
+                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            The binding <span className="font-mono">{gk.bindingName}</span> will be removed from this gadget.
+                          </p>
+                        </div>
+                        <WorkshopButton
+                          tone="danger"
+                          className="min-w-[68px]"
+                          onClick={handleDeleteConfirm}
+                        >
+                          Delete
+                        </WorkshopButton>
+                        <WorkshopButton
+                          onClick={() => setDeleteTarget(null)}
+                        >
+                          Cancel
+                        </WorkshopButton>
+                      </div>
+                    ) : isEditing ? (
+                      <div className="flex items-center gap-2">
+                        <WorkshopInput
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleEditSave(gk.bindingName)
+                            if (e.key === 'Escape') handleEditCancel()
+                          }}
+                          placeholder="Binding name"
+                          aria-label="Binding name"
+                          autoFocus
+                          className="min-w-0 flex-1 font-mono"
+                        />
+                        <WorkshopButton
+                          tone="primary"
+                          className="!h-8"
+                          onClick={() => handleEditSave(gk.bindingName)}
+                          disabled={!editValue.trim()}
+                        >
+                          Save
+                        </WorkshopButton>
+                        <WorkshopButton
+                          onClick={handleEditCancel}
+                        >
+                          Cancel
+                        </WorkshopButton>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <GatekeeperIcon vendorId={gk.vendorId} bindingName={gk.bindingName} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            {gk.resourceTitle}
+                          </p>
+                          <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                            Referenced in code as: <span className="font-mono text-kumo-subtle">{gk.bindingName}</span>
+                          </p>
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-1">
+                          <Tooltip content="Edit name used in code" asChild>
+                            <WorkshopIconButton
+                              onClick={() => handleEditStart(gk.bindingName)}
+                              aria-label="Edit name used in code"
+                            >
+                              <Pencil size={14} />
+                            </WorkshopIconButton>
+                          </Tooltip>
+                          <Tooltip content="Edit blueprint settings" asChild>
+                            <WorkshopIconButton
+                              onClick={() => setAnnotationTarget(gk)}
+                              aria-label="Edit blueprint settings"
+                            >
+                              <Blueprint size={14} />
+                            </WorkshopIconButton>
+                          </Tooltip>
+                          <Tooltip content="Delete connection" asChild>
+                            <WorkshopIconButton
+                              danger
+                              onClick={() => setDeleteTarget({ bindingName: gk.bindingName, resourceTitle: gk.resourceTitle })}
+                              aria-label="Delete connection"
+                            >
+                              <Trash size={14} />
+                            </WorkshopIconButton>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      </div>
 
       <NewGatekeeperModal
         open={isNewConnectionModalVisible}
@@ -367,238 +261,144 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
           }
         }}
       />
+
+      <BlueprintAnnotationModal
+        target={annotationTarget}
+        overseer={overseer}
+        onClose={() => setAnnotationTarget(null)}
+        onSaved={() => {
+          toasts.add({ title: 'Blueprint settings saved.', variant: 'success' })
+          setAnnotationTarget(null)
+        }}
+      />
     </div>
   )
 }
 
-// ── Action row with expandable detail ────────────────────────────────────────
-
-function ActionRow({
-  record,
-  isProcessing,
-  isExpanded,
-  onToggleExpand,
-  onApprove,
-  onReject,
-  formatDate,
-}: {
-  record: ActionLogEntry
-  isProcessing: boolean
-  isExpanded: boolean
-  onToggleExpand: () => void
-  onApprove: () => void
-  onReject: () => void
-  formatDate: (date: Date) => string
-}) {
-  return (
-    <>
-      <Table.Row>
-        <Table.Cell>
-          <button
-            onClick={onToggleExpand}
-            className="p-0.5 rounded hover:bg-kumo-tint transition-colors"
-          >
-            <CaretRight
-              size={14}
-              className={`text-kumo-subtle transition-transform ${isExpanded ? 'rotate-90' : ''}`}
-            />
-          </button>
-        </Table.Cell>
-        <Table.Cell>
-          <span className="text-sm">
-            {record.bindingName && (
-              <span className="font-mono text-xs text-kumo-default bg-kumo-tint px-1 py-0.5 rounded mr-1">
-                {record.bindingName}
-              </span>
-            )}
-            {record.resourceUrl ? (
-              <a
-                href={record.resourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-kumo-brand hover:underline"
-              >
-                {record.resourceTitle}
-              </a>
-            ) : (
-              <span className="text-kumo-default">{record.resourceTitle}</span>
-            )}
-          </span>
-        </Table.Cell>
-        <Table.Cell>
-          <span className="text-xs text-kumo-subtle">{formatDate(record.createdAt)}</span>
-        </Table.Cell>
-        <Table.Cell>
-          <span className="text-sm text-kumo-default">{record.description.title}</span>
-        </Table.Cell>
-        <Table.Cell>
-          {record.state === 'pending' ? (
-            <div className="flex items-center gap-2">
-              <Button
-                variant="primary"
-                size="xs"
-                onClick={onApprove}
-                loading={isProcessing}
-                disabled={isProcessing}
-              >
-                Approve
-              </Button>
-              <Button
-                variant="destructive"
-                size="xs"
-                onClick={onReject}
-                loading={isProcessing}
-                disabled={isProcessing}
-              >
-                Reject
-              </Button>
-            </div>
-          ) : record.state === 'approved' ? (
-            <span className="text-xs text-kumo-subtle">
-              Approved {record.appliedAt ? formatDate(record.appliedAt) : ''}
-            </span>
-          ) : record.state === 'rejected' ? (
-            <span className="text-xs text-kumo-subtle">Rejected</span>
-          ) : null}
-        </Table.Cell>
-      </Table.Row>
-      {isExpanded && (
-        <Table.Row>
-          <Table.Cell />
-          <Table.Cell colSpan={4}>
-            <div className="py-3 px-4 bg-kumo-tint rounded">
-              <p className="text-xs font-semibold text-kumo-default mb-1">Description:</p>
-              <p className="text-sm text-kumo-subtle whitespace-pre-wrap m-0">
-                {record.description.description}
-              </p>
-            </div>
-          </Table.Cell>
-        </Table.Row>
-      )}
-    </>
-  )
-}
-
-// ── Blueprint annotation popover ─────────────────────────────────────────────
-
-function BlueprintAnnotationPopover({
+function BlueprintAnnotationModal({
+  target,
   overseer,
-  bindingName,
-  resourceTitle,
-  toasts,
+  onClose,
+  onSaved,
 }: {
+  target: GatekeeperMetadata | null
   overseer: RpcStub<Overseer>
-  bindingName: string
-  resourceTitle: string
-  toasts: ReturnType<typeof useKumoToastManager>
+  onClose: () => void
+  onSaved: () => void
 }) {
-  const [annotation, setAnnotation] = useState<BlueprintBindingAnnotation>({
-    included: true,
-    title: resourceTitle,
-    description: '',
-    suggestValue: false,
-  })
-  const [loaded, setLoaded] = useState(false)
+  const [data, setData] = useState<BindingCardData | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
-  const loadAnnotation = async () => {
-    if (loaded) return
-    try {
-      using gk = await overseer.getGatekeeper(bindingName)
-      if (gk) {
-        const existing = await gk.getBlueprintAnnotation()
-        if (existing) {
-          setAnnotation(existing)
-        } else {
-          setAnnotation({ included: true, title: resourceTitle, description: '', suggestValue: false })
-        }
-        setLoaded(true)
-      }
-    } catch (err) {
-      console.error('Failed to load annotation:', err)
-      toasts.add({ title: 'Failed to load annotation', variant: 'error' })
+  useEffect(() => {
+    if (!target) {
+      setData(null)
+      setLoadError(null)
+      setSaveError(null)
+      return
     }
-  }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const loaded = await loadBindingCardData(overseer, target)
+        if (!cancelled) {
+          if (loaded) {
+            setData(loaded)
+          } else {
+            setLoadError('Connection not found.')
+          }
+        }
+      } catch (err: any) {
+        if (!cancelled) setLoadError(err?.message || 'Could not load binding.')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [target, overseer])
 
   const handleSave = async () => {
+    if (!data || !target) return
     setSaving(true)
+    setSaveError(null)
     try {
-      using gk = await overseer.getGatekeeper(bindingName)
-      if (gk) {
-        await gk.setBlueprintAnnotation(annotation)
-        toasts.add({ title: 'Blueprint annotation saved', variant: 'success' })
-      }
+      using gk = await overseer.getGatekeeper(target.bindingName)
+      if (gk) await gk.setBlueprintAnnotation(data.annotation)
+      onSaved()
     } catch (err: any) {
-      toasts.add({ title: err.message || 'Failed to save annotation', variant: 'error' })
+      setSaveError(err?.message || 'Could not save.')
     } finally {
       setSaving(false)
     }
   }
 
+  const open = target !== null
+
   return (
-    <Popover onOpenChange={(open: boolean) => { if (open) loadAnnotation() }}>
-      <Popover.Trigger asChild>
-        <Button
-          variant="ghost"
-          size="xs"
-          aria-label="Blueprint annotation"
-        >
-          <ShareNetwork size={12} />
-        </Button>
-      </Popover.Trigger>
-      <Popover.Content side="bottom" align="start" className="w-72">
-        <p className="text-sm font-semibold text-kumo-default mb-3">Blueprint annotation</p>
-        <div className="space-y-3">
-          <Switch
-            label="Include in blueprints"
-            size="sm"
-            checked={annotation.included}
-            onCheckedChange={(checked) =>
-              setAnnotation(prev => ({ ...prev, included: checked }))
-            }
-          />
-          {annotation.included && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-kumo-subtle mb-1">Title</label>
-                <input
-                  value={annotation.title}
-                  onChange={(e) => setAnnotation(prev => ({ ...prev, title: e.target.value }))}
-                  placeholder="Display name for this binding"
-                  className="w-full px-2 py-1.5 text-sm rounded border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
+    <>
+      <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+        <Dialog className="!z-[1000] !w-[min(480px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0" size="lg">
+          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-4 py-4 sm:px-5">
+            <div className="min-w-0">
+              <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+                Blueprint settings
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                How this connection appears in blueprints.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopIconButton {...props} aria-label="Close">
+                  <X size={16} />
+                </WorkshopIconButton>
+              )}
+            />
+          </div>
+
+          <div className="space-y-4 px-4 py-4 sm:px-5">
+            {loadError ? (
+              <div className="text-[13px] text-kumo-subtle">{loadError}</div>
+            ) : !data ? (
+              <div className="py-2 text-center text-[13px] text-kumo-subtle">Loading...</div>
+            ) : (
+              <>
+                <BlueprintBindingCard
+                  data={data}
+                  onChange={(annotation) => setData({ ...data, annotation })}
+                  autoFocusDescription
+                  flat
                 />
+              </>
+            )}
+          </div>
+
+          <div className="border-t border-kumo-line px-4 py-3 sm:px-5">
+            {saveError && (
+              <div className="mb-3 flex items-start gap-2 rounded-lg border border-l-2 border-l-kumo-brand border-y-kumo-line border-r-kumo-line bg-kumo-base px-3 py-2 text-[12px] leading-[18px] font-normal tracking-[-0.2px] text-kumo-default">
+                <Warning size={14} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" />
+                <span>{saveError}</span>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-kumo-subtle mb-1">Description</label>
-                <textarea
-                  value={annotation.description}
-                  onChange={(e) => setAnnotation(prev => ({ ...prev, description: e.target.value }))}
-                  placeholder="Explain what kind of resource to connect"
-                  rows={2}
-                  className="w-full px-2 py-1.5 text-sm rounded border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand resize-none"
-                />
-              </div>
-              <Switch
-                label="Suggest specific resource"
-                size="sm"
-                checked={annotation.suggestValue ?? false}
-                onCheckedChange={(checked) =>
-                  setAnnotation(prev => ({ ...prev, suggestValue: checked }))
-                }
-              />
-            </>
-          )}
-          <Button
-            variant="primary"
-            size="sm"
-            className="w-full"
-            onClick={handleSave}
-            loading={saving}
-          >
-            Save
-          </Button>
-        </div>
-      </Popover.Content>
-    </Popover>
+            )}
+            <div className="flex items-center justify-end gap-2">
+              <WorkshopButton
+                onClick={onClose}
+                disabled={saving}
+              >
+                Cancel
+              </WorkshopButton>
+              <WorkshopButton
+                tone="primary"
+                onClick={handleSave}
+                disabled={saving || !data}
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </WorkshopButton>
+            </div>
+          </div>
+        </Dialog>
+      </Dialog.Root>
+    </>
   )
 }
