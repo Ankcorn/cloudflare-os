@@ -9,6 +9,17 @@
 // `OverseerImpl.recordAgentObservation()`), tagged with `freeFormContent: true` and
 // `untrustedSource: { kind: "web", origin }` so that future policy machinery can track which
 // external influencers the agent has been exposed to during a turn.
+//
+// Known residual risk: DNS rebinding. We validate the textual hostname against a block list,
+// but the runtime resolves DNS independently when actually issuing the fetch (and again on
+// each redirect hop). A hostile authoritative server can return a public IP at validation
+// time and a private/metadata IP at fetch time. Mitigating this properly requires resolving
+// once and pinning the IP for the request, which the Workers `fetch()` API doesn't currently
+// support. The mitigations we *do* have are: (a) no credentials/cookies/auth headers are
+// forwarded, so a rebound metadata endpoint can't easily exfiltrate secrets via this path;
+// (b) the response is treated as untrusted free-form content in the audit log; (c) bodies
+// are capped so the rebound endpoint can't dump arbitrary data into the agent. This is
+// considered acceptable for now given those mitigations.
 
 export type WebFetchAccept = "markdown" | "text" | "html" | "json";
 
@@ -44,18 +55,28 @@ const BLOCKED_HOSTNAMES = new Set([
   "metadata",
 ]);
 
+// Normalize a hostname for block-list matching. The WHATWG URL parser preserves trailing
+// dots on hostnames (they denote an absolute FQDN), e.g. `new URL("https://localhost./")
+// .hostname === "localhost."`. DNS resolvers strip the trailing dot before lookup, so
+// `localhost.` resolves to 127.0.0.1 just like `localhost`. We must strip trailing dots
+// before matching, or the block list is trivially bypassed.
+function normalizeHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.+$/, "");
+}
+
 // Block IP literals entirely. Web servers worth fetching from have real hostnames.
 function isIpLiteral(hostname: string): boolean {
-  if (hostname.startsWith("[") && hostname.endsWith("]")) return true; // IPv6 in URL
+  const h = normalizeHostname(hostname);
+  if (h.startsWith("[") && h.endsWith("]")) return true; // IPv6 in URL
   // IPv4 dotted-decimal
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) return true;
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) return true;
   // IPv6 without brackets (URL.host strips them in some runtimes)
-  if (hostname.includes(":")) return true;
+  if (h.includes(":")) return true;
   return false;
 }
 
 function isBlockedHostname(hostname: string): boolean {
-  const h = hostname.toLowerCase();
+  const h = normalizeHostname(hostname);
   if (BLOCKED_HOSTNAMES.has(h)) return true;
   // Block bare hostnames without a dot (e.g. internal short names).
   if (!h.includes(".")) return true;
@@ -158,8 +179,7 @@ async function readBodyCapped(
   }
 
   // Concatenate and decode as UTF-8 with replacement of invalid sequences.
-  const total2 = chunks.reduce((n, c) => n + c.byteLength, 0);
-  const combined = new Uint8Array(total2);
+  const combined = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
     combined.set(c, offset);
@@ -169,12 +189,28 @@ async function readBodyCapped(
   return { body, truncated };
 }
 
+// Maximum input size we'll attempt to convert to Markdown. Larger inputs are truncated at
+// this boundary before conversion. The byte cap on the raw body is much larger (5 MiB), but
+// htmlToMarkdown runs ~20 sequential full-string `replace()` passes, so we apply a tighter
+// cap here to keep CPU and memory bounded under adversarial input.
+const MARKDOWN_INPUT_CAP = 512 * 1024;
+
+// Cap on how far each inline-content lazy quantifier (`[\s\S]{0,N}?`) is allowed to scan
+// before giving up. Without this, an unclosed `<a>` / `<strong>` / `<em>` in attacker-
+// controlled HTML can force the engine to scan to end-of-string for every such tag,
+// degenerating to O(n*m) work. 50 KiB is well above any reasonable inline-content length.
+const INLINE_LAZY_LIMIT = 50000;
+
 // Convert HTML to a reasonable Markdown approximation. Hand-rolled so we avoid pulling in a
 // new dependency. Not perfect — strips most attributes, ignores CSS, doesn't try to interpret
 // JavaScript-rendered content — but adequate for the agent's "look up a doc page" use case.
 export function htmlToMarkdown(html: string): string {
+  // Cap input before doing anything heavy. The truncation point is best-effort: we cut at
+  // the cap regardless of tag boundaries (the subsequent regex pipeline tolerates dangling
+  // partial tags by simply not matching them).
+  let s = html.length > MARKDOWN_INPUT_CAP ? html.slice(0, MARKDOWN_INPUT_CAP) : html;
+
   // Drop scripts, styles, noscripts, and HTML comments entirely.
-  let s = html;
   s = s.replace(/<!--[\s\S]*?-->/g, "");
   s = s.replace(/<script\b[\s\S]*?<\/script>/gi, "");
   s = s.replace(/<style\b[\s\S]*?<\/style>/gi, "");
@@ -199,9 +235,13 @@ export function htmlToMarkdown(html: string): string {
     );
   }
 
-  // Links: capture href and text.
+  // Links: capture href and text. Bound the inner-content quantifier; an unclosed `<a>` tag
+  // in adversarial input can otherwise force scans to end-of-string.
   s = s.replace(
-    /<a\b[^>]*href\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi,
+    new RegExp(
+      `<a\\b[^>]*href\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))[^>]*>([\\s\\S]{0,${INLINE_LAZY_LIMIT}}?)<\\/a>`,
+      "gi",
+    ),
     (_m, _q, dq, sq, bare, text) => {
       const href = (dq ?? sq ?? bare ?? "").trim();
       const inner = stripTags(text).trim();
@@ -211,14 +251,18 @@ export function htmlToMarkdown(html: string): string {
     },
   );
 
-  // Images: alt + src.
+  // Images: alt + src. The src regex has four capture groups:
+  //   [1] whole quoted-or-bare value
+  //   [2] double-quoted content
+  //   [3] single-quoted content
+  //   [4] bare (unquoted) value
   s = s.replace(
     /<img\b[^>]*>/gi,
     (m) => {
       const alt = /alt\s*=\s*("([^"]*)"|'([^']*)')/i.exec(m);
       const src = /src\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m);
       const altText = (alt?.[2] ?? alt?.[3] ?? "").trim();
-      const srcUrl = (src?.[2] ?? src?.[3] ?? src?.[5] ?? "").trim();
+      const srcUrl = (src?.[2] ?? src?.[3] ?? src?.[4] ?? "").trim();
       if (!srcUrl) return "";
       return `![${altText}](${srcUrl})`;
     },
@@ -234,9 +278,22 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<br\s*\/?>/gi, "\n");
   s = s.replace(/<hr\s*\/?>/gi, "\n\n---\n\n");
 
-  // Bold / italic.
-  s = s.replace(/<(strong|b)[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner) => `**${stripTags(inner)}**`);
-  s = s.replace(/<(em|i)[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, inner) => `*${stripTags(inner)}*`);
+  // Bold / italic. Split into separate matchers per tag (rather than using a `\1` backref
+  // with a lazy `[\s\S]*?`) and bound the inner-content quantifier, for the same reason
+  // as the `<a>` regex above.
+  const boldItalicPairs: Array<[string, string, string]> = [
+    ["strong", "**", "**"],
+    ["b", "**", "**"],
+    ["em", "*", "*"],
+    ["i", "*", "*"],
+  ];
+  for (const [tag, open, close] of boldItalicPairs) {
+    const re = new RegExp(
+      `<${tag}\\b[^>]*>([\\s\\S]{0,${INLINE_LAZY_LIMIT}}?)<\\/${tag}>`,
+      "gi",
+    );
+    s = s.replace(re, (_m, inner) => `${open}${stripTags(inner)}${close}`);
+  }
 
   // Drop any remaining tags.
   s = stripTags(s);
@@ -300,12 +357,15 @@ export function htmlToText(html: string): string {
 }
 
 // Issue the fetch with manual redirect handling so we can re-validate each hop's destination
-// against the SSRF block-list.
+// against the SSRF block-list. Returns both the final response and the URL it came from, so
+// the audit log can be accurate even if `response.url` happens to be empty.
 async function followRedirects(
   startUrl: URL,
   abortSignal: AbortSignal,
-): Promise<Response> {
+): Promise<{ response: Response; finalUrl: URL }> {
   let url = startUrl;
+  // i=0 is the initial fetch; i=1..MAX_REDIRECTS are redirect hops. Total iterations is
+  // therefore MAX_REDIRECTS + 1, and we allow up to MAX_REDIRECTS redirects before failing.
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     const response = await fetch(url.toString(), {
       method: "GET",
@@ -321,7 +381,7 @@ async function followRedirects(
     if (status >= 300 && status < 400) {
       const loc = response.headers.get("location");
       if (!loc) {
-        return response; // No location header; return as-is.
+        return { response, finalUrl: url }; // No location header; return as-is.
       }
       // Drain the body so we don't leak the previous response.
       try {
@@ -336,7 +396,7 @@ async function followRedirects(
       continue;
     }
 
-    return response;
+    return { response, finalUrl: url };
   }
 
   throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
@@ -355,8 +415,11 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
   const timeoutId = setTimeout(() => abortController.abort(), FETCH_TIMEOUT_MS);
 
   let response: Response;
+  let postRedirectUrl: URL;
   try {
-    response = await followRedirects(parsed, abortController.signal);
+    const r = await followRedirects(parsed, abortController.signal);
+    response = r.response;
+    postRedirectUrl = r.finalUrl;
   } catch (err) {
     if (
       err instanceof Error &&
@@ -369,7 +432,9 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
     clearTimeout(timeoutId);
   }
 
-  const finalUrl = response.url || parsed.toString();
+  // Prefer `response.url` (set by the runtime when redirects were followed) but fall back
+  // to the post-redirect URL we tracked ourselves so the audit log is always accurate.
+  const finalUrl = response.url || postRedirectUrl.toString();
   const contentType = response.headers.get("content-type") ?? "";
 
   const { body: rawBody, truncated } = await readBodyCapped(response, maxBytes);

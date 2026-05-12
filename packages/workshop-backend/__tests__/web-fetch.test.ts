@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   validateWebFetchUrl,
+  webFetch,
   htmlToMarkdown,
   htmlToText,
 } from "../src/web-fetch.js";
@@ -55,6 +56,25 @@ describe("validateWebFetchUrl", () => {
   it("rejects bare hostnames (no dot)", () => {
     expect(() => validateWebFetchUrl("https://internalhost/")).toThrow();
   });
+
+  // Regression: trailing-dot hostnames are preserved by the WHATWG URL parser and DNS
+  // resolvers treat them as equivalent FQDNs. Without trailing-dot normalization, every
+  // entry in the block list could be trivially bypassed.
+  it("rejects trailing-dot variants of blocked hostnames", () => {
+    expect(() => validateWebFetchUrl("https://localhost./")).toThrow();
+    expect(() =>
+      validateWebFetchUrl("https://metadata.google.internal./"),
+    ).toThrow();
+    expect(() => validateWebFetchUrl("https://service.internal./")).toThrow();
+    expect(() => validateWebFetchUrl("https://router.local./")).toThrow();
+    expect(() => validateWebFetchUrl("https://x.lan./")).toThrow();
+    // Multiple trailing dots should be stripped too.
+    expect(() => validateWebFetchUrl("https://localhost.../")).toThrow();
+  });
+
+  it("normalization leaves legitimate hostnames alone", () => {
+    expect(() => validateWebFetchUrl("https://example.com./")).not.toThrow();
+  });
 });
 
 describe("htmlToMarkdown", () => {
@@ -82,6 +102,19 @@ describe("htmlToMarkdown", () => {
     expect(md).toContain("![x](https://example.com/x.png)");
   });
 
+  // Regression: a previous implementation read the wrong capture-group index for the
+  // unquoted-src branch of the img regex, silently dropping such images. (Bare/unquoted
+  // alt attributes are not supported; only the src branch is asserted here.)
+  it("preserves images with bare (unquoted) src", () => {
+    const md = htmlToMarkdown(`<img src=https://example.com/y.png alt="y">`);
+    expect(md).toContain("![y](https://example.com/y.png)");
+  });
+
+  it("preserves bare-src even without alt", () => {
+    const md = htmlToMarkdown(`<img src=https://example.com/z.png>`);
+    expect(md).toContain("](https://example.com/z.png)");
+  });
+
   it("converts lists", () => {
     const md = htmlToMarkdown(`<ul><li>one</li><li>two</li></ul>`);
     expect(md).toMatch(/- one/);
@@ -103,6 +136,81 @@ describe("htmlToMarkdown", () => {
   it("collapses excessive blank lines", () => {
     const md = htmlToMarkdown(`<p>a</p><p>b</p><p>c</p>`);
     expect(md).not.toMatch(/\n\n\n/);
+  });
+});
+
+describe("webFetch redirect handling", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("rejects a redirect that points at a blocked host", async () => {
+    // Mock fetch: first call returns a 302 to 169.254.169.254 (AWS/GCP metadata-style).
+    // followRedirects() must re-validate the Location and throw before issuing the next
+    // fetch.
+    const fetchMock = vi.fn(async (url: any) => {
+      if (typeof url === "string" && url.startsWith("https://example.com")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://169.254.169.254/latest/meta-data/" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    await expect(webFetch({ url: "https://example.com/" })).rejects.toThrow(
+      /IP|blocked|Refusing/i,
+    );
+    // We should have made exactly one network call -- the redirect target must never have
+    // been fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a redirect that points at a trailing-dot blocked host", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      if (typeof url === "string" && url.startsWith("https://example.com")) {
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://metadata.google.internal./" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    await expect(webFetch({ url: "https://example.com/" })).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows a redirect to another public host successfully", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      if (url === "https://example.com/") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://example.org/landed" },
+        });
+      }
+      if (url === "https://example.org/landed") {
+        return new Response("hello", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const result = await webFetch({ url: "https://example.com/" });
+    expect(result.status).toBe(200);
+    expect(result.body).toBe("hello");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

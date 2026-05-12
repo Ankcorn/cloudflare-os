@@ -1131,20 +1131,36 @@ export async function runAgent(
         truncated: z.boolean().describe("True if the body was truncated at the byte cap."),
       }),
       execute: async ({url, accept, maxBytes}, {toolCallId}) => {
+        let result;
         try {
-          let result = await webFetchImpl({url, accept, maxBytes});
-
-          // Store the result on the tool call record so the chat history can be replayed
-          // without re-issuing the fetch.
+          result = await webFetchImpl({url, accept, maxBytes});
+        } catch (error) {
+          // The fetch itself failed; surface the error to the agent. Preserve any previously
+          // stored notes for this tool call rather than blindly overwriting.
           toolCallNotes.set(toolCallId, {
-            toolName: "webFetch",
-            output: result,
-          } as Partial<AiToolCall>);
+            ...toolCallNotes.get(toolCallId),
+            error: `${error}`,
+          });
+          throw error;
+        }
 
-          // Record an audit-log observation so the user can see what the agent fetched, and so
-          // future policy can track external influencers. We deliberately do not include the
-          // body in the description -- it can be large and possibly contain prompt-injection
-          // payloads we don't want surfacing in the UI by default.
+        // Store the result on the tool call record so the chat history can be replayed
+        // without re-issuing the fetch.
+        toolCallNotes.set(toolCallId, {
+          ...toolCallNotes.get(toolCallId),
+          toolName: "webFetch",
+          output: result,
+        } as Partial<AiToolCall>);
+
+        // Record an audit-log observation so the user can see what the agent fetched, and so
+        // future policy can track external influencers. We deliberately do not include the
+        // body in the description -- it can be large and possibly contain prompt-injection
+        // payloads we don't want surfacing in the UI by default.
+        //
+        // If recording the observation fails (e.g. transient storage error), log it but do
+        // NOT rethrow: the fetch already succeeded and the LLM should see the result. Falling
+        // through here also avoids clobbering the stored `output` we just set.
+        try {
           let origin: string | undefined;
           try {
             origin = new URL(result.finalUrl).origin;
@@ -1170,14 +1186,11 @@ export async function runAgent(
                     ? {untrustedSource: {kind: "web" as const, origin}}
                     : {}),
               });
-
-          return result;
-        } catch (error) {
-          toolCallNotes.set(toolCallId, {
-            error: `${error}`
-          });
-          throw error;
+        } catch (err) {
+          console.error("Failed to record webFetch observation:", err);
         }
+
+        return result;
       }
     }),
 
