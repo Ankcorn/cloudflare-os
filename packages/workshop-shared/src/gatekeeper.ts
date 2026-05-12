@@ -391,8 +391,11 @@ export type ObservationDescription = {
   // ----------------------------------------------------------------------------
   // Policy hints
   //
-  // TODO: Define policy hints that might allow a policy engine to make better decisions. A policy
-  // engine might want to know things like:
+  // These hints describe properties of the observation that a future policy engine can use to
+  // make decisions about scrutiny. They are also recorded in the audit log so history is
+  // labeled consistently before the policy engine exists.
+  //
+  // TODO: Additional hints to define later:
   // - Does the observation include free-form content (that could include prompt injection
   //   attacks)?
   // - Who are the users who may have contributed to such free-from content (to judge if they are
@@ -414,6 +417,24 @@ export type ObservationDescription = {
   //   sensitive data as long as the recipients also have access to that same data, but this
   //   requires a more complex policy framework to compute.
   prohibitAllSharing?: boolean;
+
+  // True if the observation includes free-form content (e.g. arbitrary text, HTML, images) that
+  // could carry prompt-injection attacks or secrets. False (or omitted) for purely structured
+  // or boolean observations (e.g. "the light is on").
+  freeFormContent?: boolean;
+
+  // If this observation pulls content from an external untrusted source, describes that source
+  // so policy can track which influencers the agent has been exposed to during this turn.
+  // Omitted for trusted/internal observations.
+  untrustedSource?: {
+    // The kind of source. Currently only web fetches; more kinds (e.g. email senders, issue
+    // commenters) will be added as other gatekeepers adopt this field.
+    kind: "web";
+
+    // For "web": the origin of the page that was fetched (scheme + host + port), e.g.
+    // "https://example.com".
+    origin: string;
+  };
 }
 
 // Describes an action submitted to the action approval queue. This contains all the information

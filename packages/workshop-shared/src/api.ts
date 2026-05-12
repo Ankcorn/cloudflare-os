@@ -958,6 +958,23 @@ export type AiToolCall = {
     error: string;
   };
 } | {
+  toolName: "webFetch";
+  input: {
+    url: string;
+    accept?: "markdown" | "text" | "html" | "json";
+    maxBytes?: number;
+  };
+
+  // Output, if the fetch actually completed. (Otherwise, `error` should be present.) This is
+  // stored so that the agent's chat history can be replayed without re-issuing the fetch.
+  output?: {
+    status: number;
+    finalUrl: string;
+    contentType: string;
+    body: string;
+    truncated: boolean;
+  };
+} | {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
   toolName: "observeUserChanges";
   input: {};

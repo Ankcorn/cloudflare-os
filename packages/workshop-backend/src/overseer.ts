@@ -172,6 +172,13 @@ type ShareKeyRecord = {
   createdBy: string; // profile.id of the creator
 };
 
+// Sentinel gatekeeperId used on ActionRecords that originated from built-in agent tools
+// (e.g. webFetch) rather than from a real gatekeeper. Real gatekeeper IDs are assigned
+// starting at 1, so -1 is a safe out-of-band marker. Only "observation" records ever carry
+// this value; observations never go through the approve/reject paths that would dereference
+// the gatekeeper, so no lookup is ever attempted.
+const BUILTIN_TOOL_GATEKEEPER_ID = -1;
+
 type ActionRecord = {
   id: number,
   gatekeeperId: number;
@@ -1036,6 +1043,38 @@ class OverseerImpl implements AgentHooks {
       bindingName: gatekeeper?.bindingName,
       resourceTitle: gatekeeper?.resourceTitle,
       resourceUrl: gatekeeper?.resourceUrl,
+      createdAt: new Date(),
+      state: "approved",
+      type: "observation",
+      description
+    };
+
+    this.storage.actions.put(record);
+    this.#associateAction(caller, actionId);
+  }
+
+  // Record an observation that originated from a built-in agent tool (not a gatekeeper).
+  // The `gatekeeperId` is set to the BUILTIN_TOOL_GATEKEEPER_ID sentinel so that downstream
+  // code (which expects a gatekeeper to dereference for approve/reject) never touches it —
+  // observations bypass the approve/reject paths anyway.
+  async recordAgentObservation(
+      chatId: number,
+      bindingName: string,
+      resourceTitle: string,
+      resourceUrl: string | undefined,
+      description: ObservationDescription): Promise<void> {
+    let caller: GatekeeperCaller = {from: "agent", chatId};
+
+    let actionId = this.storage.nextActionId.get();
+    this.storage.nextActionId.put(actionId + 1);
+
+    let record: ActionRecord = {
+      id: actionId,
+      gatekeeperId: BUILTIN_TOOL_GATEKEEPER_ID,
+      caller,
+      bindingName,
+      resourceTitle,
+      resourceUrl,
       createdAt: new Date(),
       state: "approved",
       type: "observation",
