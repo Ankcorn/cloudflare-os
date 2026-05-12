@@ -1162,12 +1162,15 @@ export async function runAgent(
         // through here also avoids clobbering the stored `output` we just set.
         try {
           let origin: string | undefined;
+          let host: string;
           try {
-            origin = new URL(result.finalUrl).origin;
+            let u = new URL(result.finalUrl);
+            origin = u.origin;
+            host = u.host;
           } catch {
-            // Leave undefined.
+            // Leave origin undefined and fall back to the final URL itself for display.
+            host = result.finalUrl;
           }
-          let host = origin ? new URL(origin).host : result.finalUrl;
           let truncNote = result.truncated ? ", truncated" : "";
           await hooks.recordAgentObservation(
               chatId,
