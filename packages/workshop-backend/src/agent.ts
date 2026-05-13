@@ -1127,27 +1127,35 @@ export async function runAgent(
       outputSchema: z.string().describe(
           "YAML frontmatter (url, status, content-type, truncated) followed by the body."),
       execute: async ({url, raw}, {toolCallId}) => {
-        let result = await webFetchImpl(hooks.getWebFetchEnv(), {url, raw});
+        try {
+          let result = await webFetchImpl(hooks.getWebFetchEnv(), {url, raw});
 
-        let host = new URL(result.finalUrl).host;
-        await hooks.recordAgentObservation(
-            chatId,
-            "webFetch",
-            `Web fetch: ${host}`,
-            result.finalUrl,
-            {
-              title: `Fetched ${host}`,
-              description:
-                  `GET \`${result.finalUrl}\`\n\n` +
-                  `Status: ${result.status}\n` +
-                  `Content-Type: \`${result.contentType || "(unspecified)"}\`\n` +
-                  `Body: ${result.body.length} chars` +
-                  (result.truncated ? ", truncated" : ""),
-            });
+          let host = new URL(result.finalUrl).host;
+          await hooks.recordAgentObservation(
+              chatId,
+              "webFetch",
+              `Web fetch: ${host}`,
+              result.finalUrl,
+              {
+                title: `Fetched ${host}`,
+                description:
+                    `GET \`${result.finalUrl}\`\n\n` +
+                    `Status: ${result.status}\n` +
+                    `Content-Type: \`${result.contentType || "(unspecified)"}\`\n` +
+                    `Body: ${result.body.length} chars` +
+                    (result.truncated ? ", truncated" : ""),
+              });
 
-        let formatted = formatWebFetchResult(result);
-        toolCallNotes.set(toolCallId, {output: formatted} as Partial<AiToolCall>);
-        return formatted;
+          let formatted = formatWebFetchResult(result);
+          toolCallNotes.set(toolCallId, {output: formatted} as Partial<AiToolCall>);
+          return formatted;
+        } catch (error) {
+          // Record the error on the tool call so chat-history replay can render it as an
+          // error tool result (matching how readFile/writeFile/etc. behave). Then rethrow
+          // so the agent sees an error tool response and any underlying bug still surfaces.
+          toolCallNotes.set(toolCallId, {error: `${error}`});
+          throw error;
+        }
       }
     }),
 

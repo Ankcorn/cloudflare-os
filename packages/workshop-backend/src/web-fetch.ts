@@ -9,13 +9,14 @@
 // because it uses paid Workers AI models. Plain-text, JSON, and other unknown content types
 // pass through unconverted.
 //
-// SSRF protection: relies on workerd's post-DNS-lookup IP address filtering. In production,
-// the `global_fetch_strictly_public` compatibility flag restricts `fetch()` to public IP
-// addresses; reserved ranges (loopback, RFC1918, link-local, cloud-metadata, etc.) are
-// rejected by the runtime, *after* the hostname has been resolved. This is the only correct
-// place to enforce such restrictions, since a symbolic hostname can resolve to anything.
-// `wrangler dev` deliberately disables this restriction so local development can talk to
-// localhost; we accept that the dev environment is therefore less restricted than prod.
+// SSRF protection: relies on workerd's post-DNS-lookup IP address filtering. The
+// `global_fetch_strictly_public` compatibility flag (set in wrangler.jsonc) restricts
+// `fetch()` to public IP addresses; reserved ranges (loopback, RFC1918, link-local,
+// cloud-metadata, etc.) are rejected by the runtime, *after* the hostname has been
+// resolved. This is the only correct place to enforce such restrictions, since a symbolic
+// hostname can resolve to anything. `wrangler dev` reconfigures its global outbound to
+// permit fetching from any address (so localhost services stay reachable), so the flag
+// only takes effect in production -- an acceptable tradeoff for dev.
 
 import type { AiGatewayConfig } from "./ai-gateway";
 

@@ -7,8 +7,9 @@
   // `global_fetch_strictly_public` enables workerd's post-DNS IP-address filtering so that
   // outbound fetch() can only reach public IPs. This is the SSRF defense for the webFetch
   // agent tool (see packages/workshop-backend/src/web-fetch.ts). Note that `wrangler dev`
-  // intentionally relaxes this so local development can talk to localhost; the protection
-  // only applies in production.
+  // intentionally reconfigures its global outbound to permit fetching from any address
+  // (so local services on localhost stay reachable), so this flag effectively only takes
+  // effect in production. That's an acceptable tradeoff for dev.
   "compatibility_flags": [
     "experimental",
     "allow_irrevocable_stub_storage",
