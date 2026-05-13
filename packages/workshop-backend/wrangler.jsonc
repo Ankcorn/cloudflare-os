@@ -3,7 +3,17 @@
   "name": "workshop-backend",
   "main": "src/server.ts",
   "compatibility_date": "2026-02-02",
-  "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
+
+  // `global_fetch_strictly_public` enables workerd's post-DNS IP-address filtering so that
+  // outbound fetch() can only reach public IPs. This is the SSRF defense for the webFetch
+  // agent tool (see packages/workshop-backend/src/web-fetch.ts). Note that `wrangler dev`
+  // intentionally relaxes this so local development can talk to localhost; the protection
+  // only applies in production.
+  "compatibility_flags": [
+    "experimental",
+    "allow_irrevocable_stub_storage",
+    "global_fetch_strictly_public"
+  ],
 
   // Gatekeeper service bindings and the Workers AI binding are dynamically
   // added by run-dev-server.js (for dev) and generate-wrangler-prod.js (for
