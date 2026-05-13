@@ -203,14 +203,14 @@ describe("webFetch document conversion", () => {
     expect(result.body).toBe('{"a":1}');
   });
 
-  it("returns raw body when accept=html, skipping toMarkdown even for HTML", async () => {
+  it("returns raw body when raw=true, skipping toMarkdown even for HTML", async () => {
     mockResponse("<h1>Raw</h1>", "text/html");
     const toMarkdown = vi.fn();
     const env = makeEnv(toMarkdown as unknown as ToMarkdownStub);
 
     const result = await webFetch(env, {
       url: "https://example.com/",
-      accept: "html",
+      raw: true,
     });
     expect(toMarkdown).not.toHaveBeenCalled();
     expect(result.body).toBe("<h1>Raw</h1>");

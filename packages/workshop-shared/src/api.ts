@@ -961,7 +961,8 @@ export type AiToolCall = {
   toolName: "webFetch";
   input: {
     url: string;
-    accept?: "markdown" | "html" | "json";
+    // If true, return the raw response body without Markdown conversion.
+    raw?: boolean;
   };
 
   // Output, if the fetch actually completed. (Otherwise, `error` should be present.) This is

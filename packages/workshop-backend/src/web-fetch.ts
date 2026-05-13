@@ -26,11 +26,12 @@ export type WebFetchEnv = {
   gateway: AiGatewayConfig | null;
 };
 
-export type WebFetchAccept = "markdown" | "html" | "json";
-
 export type WebFetchInput = {
   url: string;
-  accept?: WebFetchAccept;
+  // If true, return the exact response bytes (decoded as UTF-8) without any document
+  // conversion. If false or omitted, supported document formats (HTML, PDF, DOCX, ...) are
+  // converted to Markdown via env.WORKERS_AI.toMarkdown().
+  raw?: boolean;
   // Caller-requested cap on body length (characters). Server enforces its own hard cap on top.
   maxBytes?: number;
 };
@@ -230,9 +231,10 @@ async function convertToMarkdown(
   return result.data;
 }
 
-// Issue the fetch with manual redirect handling so we can re-validate each hop's destination
-// against the SSRF block-list. Returns both the final response and the URL it came from, so
-// the audit log can be accurate even if `response.url` happens to be empty.
+// Issue the fetch with manual redirect handling so we can re-validate each hop's URL
+// (https-only, no credentials) before following it. Returns both the final response and
+// the URL it came from, so the audit log can be accurate even if `response.url` happens
+// to be empty.
 async function followRedirects(
   startUrl: URL,
   abortSignal: AbortSignal,
@@ -328,35 +330,24 @@ export async function webFetch(
 
   // Prefer `response.url` (set by the runtime when redirects were followed) but fall back
   // to the post-redirect URL we tracked ourselves so the audit log is always accurate.
-  const finalUrlStr = response.url || postRedirectUrl.toString();
-  let finalUrlParsed: URL;
-  try {
-    finalUrlParsed = new URL(finalUrlStr);
-  } catch {
-    finalUrlParsed = postRedirectUrl;
-  }
+  // `response.url` is always either empty or a valid URL the runtime constructed itself,
+  // so it's safe to parse here.
+  const finalUrl = response.url ? new URL(response.url) : postRedirectUrl;
   const contentType = response.headers.get("content-type") ?? "";
 
   const { bytes, truncated } = await readBodyCapped(response, maxBytes);
 
-  const accept: WebFetchAccept = input.accept ?? "markdown";
   let body: string;
-
-  switch (accept) {
-    case "markdown": {
-      const md = await convertToMarkdown(env, bytes, contentType, finalUrlParsed);
-      body = md !== null ? md : decodeUtf8(bytes);
-      break;
-    }
-    case "html":
-    case "json":
-      body = decodeUtf8(bytes);
-      break;
+  if (input.raw) {
+    body = decodeUtf8(bytes);
+  } else {
+    const md = await convertToMarkdown(env, bytes, contentType, finalUrl);
+    body = md !== null ? md : decodeUtf8(bytes);
   }
 
   return {
     status: response.status,
-    finalUrl: finalUrlStr,
+    finalUrl: finalUrl.toString(),
     contentType,
     body,
     truncated,
