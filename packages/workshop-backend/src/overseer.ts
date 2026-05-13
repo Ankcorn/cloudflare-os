@@ -6,7 +6,9 @@ import { createTypedStorage, collection, keyString } from "@gadgets/typed-storag
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
+import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
+import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 
@@ -1051,6 +1053,15 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
+  }
+
+  // Provides web-fetch with the Workers AI binding and AI Gateway config it needs to call
+  // `env.WORKERS_AI.toMarkdown()`. The initiator is needed for AI Gateway metadata.
+  getWebFetchEnv(): WebFetchEnv {
+    return {
+      ai: this.env.WORKERS_AI,
+      gateway: getAiGatewayConfig(this.env),
+    };
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).

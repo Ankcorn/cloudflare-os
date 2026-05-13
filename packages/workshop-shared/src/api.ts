@@ -961,7 +961,7 @@ export type AiToolCall = {
   toolName: "webFetch";
   input: {
     url: string;
-    accept?: "markdown" | "text" | "html" | "json";
+    accept?: "markdown" | "html" | "json";
     maxBytes?: number;
   };
 

@@ -2,8 +2,13 @@
 //
 // Provides an HTTP GET against arbitrary public HTTPS URLs, with hard server-side limits to
 // guard against SSRF and data-exfiltration vectors. There is intentionally no support for
-// POST/PUT/DELETE/PATCH or for forwarding credentials. Bodies are returned to the agent as
-// Markdown by default, but text/html/json passthrough is also supported.
+// POST/PUT/DELETE/PATCH or for forwarding credentials.
+//
+// Document-to-Markdown conversion is delegated to Cloudflare Workers AI's
+// `env.WORKERS_AI.toMarkdown()` utility, which handles HTML, PDF, DOCX, XLSX/XLS, ODT/ODS,
+// CSV, XML, and Apple Numbers documents. Image conversion is intentionally NOT exposed here
+// because it uses paid Workers AI models. Plain-text, JSON, and other unknown content types
+// pass through unconverted.
 //
 // Each successful fetch is recorded as an Overseer "observation" (see
 // `OverseerImpl.recordAgentObservation()`), tagged with `freeFormContent: true` and
@@ -21,7 +26,16 @@
 // are capped so the rebound endpoint can't dump arbitrary data into the agent. This is
 // considered acceptable for now given those mitigations.
 
-export type WebFetchAccept = "markdown" | "text" | "html" | "json";
+import type { AiGatewayConfig } from "./ai-gateway";
+
+// The bits of the Workers AI binding and gateway config that `webFetch` needs. Kept narrow
+// so the caller can pass a stub in tests without constructing a full Cloudflare.Env.
+export type WebFetchEnv = {
+  ai: Ai;
+  gateway: AiGatewayConfig | null;
+};
+
+export type WebFetchAccept = "markdown" | "html" | "json";
 
 export type WebFetchInput = {
   url: string;
@@ -131,14 +145,15 @@ export function validateWebFetchUrl(input: string): URL {
   return parsed;
 }
 
-// Read up to `maxBytes` from the body of a response. Returns the body as a string (decoded as
-// UTF-8) and a flag indicating whether it was truncated.
+// Read up to `maxBytes` from the body of a response. Returns the raw bytes (so callers can
+// hand them to either a text decoder or a Blob) and a flag indicating whether the stream
+// was truncated.
 async function readBodyCapped(
   response: Response,
   maxBytes: number,
-): Promise<{ body: string; truncated: boolean }> {
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   if (!response.body) {
-    return { body: "", truncated: false };
+    return { bytes: new Uint8Array(0), truncated: false };
   }
 
   const reader = response.body.getReader();
@@ -178,182 +193,108 @@ async function readBodyCapped(
     reader.releaseLock();
   }
 
-  // Concatenate and decode as UTF-8 with replacement of invalid sequences.
   const combined = new Uint8Array(total);
   let offset = 0;
   for (const c of chunks) {
     combined.set(c, offset);
     offset += c.byteLength;
   }
-  const body = new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(combined);
-  return { body, truncated };
+  return { bytes: combined, truncated };
 }
 
-// Maximum input size we'll attempt to convert to Markdown. Larger inputs are truncated at
-// this boundary before conversion. The byte cap on the raw body is much larger (5 MiB), but
-// htmlToMarkdown runs ~20 sequential full-string `replace()` passes, so we apply a tighter
-// cap here to keep CPU and memory bounded under adversarial input.
-const MARKDOWN_INPUT_CAP = 512 * 1024;
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(bytes);
+}
 
-// Cap on how far each inline-content lazy quantifier (`[\s\S]{0,N}?`) is allowed to scan
-// before giving up. Without this, an unclosed `<a>` / `<strong>` / `<em>` in attacker-
-// controlled HTML can force the engine to scan to end-of-string for every such tag,
-// degenerating to O(n*m) work. 50 KiB is well above any reasonable inline-content length.
-const INLINE_LAZY_LIMIT = 50000;
+// Strip parameters from a Content-Type header (e.g. `text/html; charset=utf-8` -> `text/html`).
+function baseContentType(contentType: string): string {
+  const i = contentType.indexOf(";");
+  return (i >= 0 ? contentType.slice(0, i) : contentType).trim().toLowerCase();
+}
 
-// Convert HTML to a reasonable Markdown approximation. Hand-rolled so we avoid pulling in a
-// new dependency. Not perfect — strips most attributes, ignores CSS, doesn't try to interpret
-// JavaScript-rendered content — but adequate for the agent's "look up a doc page" use case.
-export function htmlToMarkdown(html: string): string {
-  // Cap input before doing anything heavy. The truncation point is best-effort: we cut at
-  // the cap regardless of tag boundaries (the subsequent regex pipeline tolerates dangling
-  // partial tags by simply not matching them).
-  let s = html.length > MARKDOWN_INPUT_CAP ? html.slice(0, MARKDOWN_INPUT_CAP) : html;
+// MIME types that `env.WORKERS_AI.toMarkdown()` can convert for free (no Workers AI model
+// usage). Derived from the public list of supported formats:
+// https://developers.cloudflare.com/workers-ai/features/markdown-conversion/supported-formats/
+//
+// Image MIME types are intentionally excluded -- image conversion uses paid Workers AI
+// models (object detection + Gemma-3 for image-to-text), and we don't want webFetch to
+// silently incur per-fetch costs.
+const TO_MARKDOWN_MIME_TYPES = new Set([
+  "text/html",
+  "application/xhtml+xml",
+  "application/pdf",
+  "application/xml",
+  "text/xml",
+  "text/csv",
+  // Office / OpenDocument
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",       // .xlsx
+  "application/vnd.ms-excel",                                                // .xls
+  "application/vnd.ms-excel.sheet.macroenabled.12",                          // .xlsm
+  "application/vnd.ms-excel.sheet.binary.macroenabled.12",                   // .xlsb
+  "application/vnd.oasis.opendocument.spreadsheet",                          // .ods
+  "application/vnd.oasis.opendocument.text",                                 // .odt
+  "application/vnd.apple.numbers",                                           // .numbers
+]);
 
-  // Drop scripts, styles, noscripts, and HTML comments entirely.
-  s = s.replace(/<!--[\s\S]*?-->/g, "");
-  s = s.replace(/<script\b[\s\S]*?<\/script>/gi, "");
-  s = s.replace(/<style\b[\s\S]*?<\/style>/gi, "");
-  s = s.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, "");
-  s = s.replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
+// Build the gateway options object that pairs `toMarkdown()` calls with the project's
+// AI Gateway, mirroring how the LLM path in `ai-models.ts` does it. Returns undefined when
+// AI Gateway mode isn't enabled, in which case `toMarkdown` runs against Workers AI
+// directly.
+function buildGatewayOptions(
+  gateway: AiGatewayConfig | null,
+): GatewayOptions | undefined {
+  if (!gateway) return undefined;
+  // We use the Workers-AI-specific gateway (CF_AI_GATEWAY_WAI) when set, falling back to
+  // the general gateway. `toMarkdown` invokes Workers AI models under the hood for any
+  // paid sub-tasks (e.g. embedded image summarization), so it's the right destination.
+  return {
+    id: gateway.workersAiGateway,
+    metadata: { tool: "webFetch", automated: true },
+  };
+}
 
-  // Common block conversions. Order matters — handle pre/code before generic block handling.
-  s = s.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_m, inner) => {
-    const stripped = stripTags(inner);
-    return `\n\n\`\`\`\n${stripped.trim()}\n\`\`\`\n\n`;
-  });
-
-  s = s.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_m, inner) => {
-    return `\`${stripTags(inner).replace(/`/g, "\\`")}\``;
-  });
-
-  // Headings
-  for (let level = 1; level <= 6; level++) {
-    const tag = new RegExp(`<h${level}[^>]*>([\\s\\S]*?)<\\/h${level}>`, "gi");
-    s = s.replace(tag, (_m, inner) =>
-      `\n\n${"#".repeat(level)} ${stripTags(inner).trim()}\n\n`,
-    );
+// Attempt to convert a document to Markdown using the Workers AI binding. Returns the
+// Markdown body on success, or null if the document's MIME type isn't in the supported
+// allow-list. Throws (with a contextual error) if the conversion itself fails.
+async function convertToMarkdown(
+  env: WebFetchEnv,
+  bytes: Uint8Array,
+  contentType: string,
+  url: URL,
+): Promise<string | null> {
+  const mime = baseContentType(contentType);
+  if (!TO_MARKDOWN_MIME_TYPES.has(mime)) {
+    return null;
   }
 
-  // Links: capture href and text. Bound the inner-content quantifier; an unclosed `<a>` tag
-  // in adversarial input can otherwise force scans to end-of-string.
-  s = s.replace(
-    new RegExp(
-      `<a\\b[^>]*href\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))[^>]*>([\\s\\S]{0,${INLINE_LAZY_LIMIT}}?)<\\/a>`,
-      "gi",
-    ),
-    (_m, _q, dq, sq, bare, text) => {
-      const href = (dq ?? sq ?? bare ?? "").trim();
-      const inner = stripTags(text).trim();
-      if (!href) return inner;
-      if (!inner) return href;
-      return `[${inner}](${href})`;
+  // Build a name from the URL path so toMarkdown's format detection has a hint.
+  const pathBasename = url.pathname.split("/").filter(Boolean).pop() || "document";
+
+  const result = await env.ai.toMarkdown(
+    {
+      name: pathBasename,
+      blob: new Blob([bytes], { type: mime }),
+    },
+    {
+      gateway: buildGatewayOptions(env.gateway),
+      conversionOptions: {
+        // Resolve relative links against the page's own origin.
+        html: {
+          hostname: url.origin,
+          // Skip per-image summarization (which would invoke paid Workers AI models). The
+          // agent gets a Markdown skeleton with image alt text and src URLs, which is
+          // sufficient for documentation-lookup use cases.
+          images: { convert: false, convertOGImage: false },
+        },
+      },
     },
   );
 
-  // Images: alt + src. The src regex has four capture groups:
-  //   [1] whole quoted-or-bare value
-  //   [2] double-quoted content
-  //   [3] single-quoted content
-  //   [4] bare (unquoted) value
-  s = s.replace(
-    /<img\b[^>]*>/gi,
-    (m) => {
-      const alt = /alt\s*=\s*("([^"]*)"|'([^']*)')/i.exec(m);
-      const src = /src\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m);
-      const altText = (alt?.[2] ?? alt?.[3] ?? "").trim();
-      const srcUrl = (src?.[2] ?? src?.[3] ?? src?.[4] ?? "").trim();
-      if (!srcUrl) return "";
-      return `![${altText}](${srcUrl})`;
-    },
-  );
-
-  // Lists. Quick-and-dirty: <li> becomes "- " on its own line. We don't try to track ordered
-  // vs unordered or nesting depth — the LLM is fine with bullet lists either way.
-  s = s.replace(/<li[^>]*>/gi, "\n- ");
-  s = s.replace(/<\/li>/gi, "");
-
-  // Block separators.
-  s = s.replace(/<\/?(p|div|section|article|header|footer|aside|nav|main|tr|table|thead|tbody|tfoot|ul|ol|blockquote)[^>]*>/gi, "\n\n");
-  s = s.replace(/<br\s*\/?>/gi, "\n");
-  s = s.replace(/<hr\s*\/?>/gi, "\n\n---\n\n");
-
-  // Bold / italic. Split into separate matchers per tag (rather than using a `\1` backref
-  // with a lazy `[\s\S]*?`) and bound the inner-content quantifier, for the same reason
-  // as the `<a>` regex above.
-  const boldItalicPairs: Array<[string, string, string]> = [
-    ["strong", "**", "**"],
-    ["b", "**", "**"],
-    ["em", "*", "*"],
-    ["i", "*", "*"],
-  ];
-  for (const [tag, open, close] of boldItalicPairs) {
-    const re = new RegExp(
-      `<${tag}\\b[^>]*>([\\s\\S]{0,${INLINE_LAZY_LIMIT}}?)<\\/${tag}>`,
-      "gi",
-    );
-    s = s.replace(re, (_m, inner) => `${open}${stripTags(inner)}${close}`);
+  if (result.format === "error") {
+    throw new Error(`Markdown conversion failed: ${result.error}`);
   }
-
-  // Drop any remaining tags.
-  s = stripTags(s);
-
-  // Decode a handful of HTML entities.
-  s = decodeEntities(s);
-
-  // Collapse excess whitespace. Multiple blank lines → one blank line; trim each line's trailing
-  // whitespace.
-  s = s.replace(/[ \t]+\n/g, "\n");
-  s = s.replace(/\n{3,}/g, "\n\n");
-  s = s.trim();
-
-  return s;
-}
-
-function stripTags(html: string): string {
-  return html.replace(/<[^>]+>/g, "");
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_m, n) => {
-      const code = parseInt(n, 10);
-      if (!isFinite(code) || code < 0 || code > 0x10ffff) return _m;
-      try {
-        return String.fromCodePoint(code);
-      } catch {
-        return _m;
-      }
-    })
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, n) => {
-      const code = parseInt(n, 16);
-      if (!isFinite(code) || code < 0 || code > 0x10ffff) return _m;
-      try {
-        return String.fromCodePoint(code);
-      } catch {
-        return _m;
-      }
-    });
-}
-
-// Strip tags from HTML and return text content. Used for `accept: "text"`.
-export function htmlToText(html: string): string {
-  let s = html;
-  s = s.replace(/<!--[\s\S]*?-->/g, "");
-  s = s.replace(/<script\b[\s\S]*?<\/script>/gi, "");
-  s = s.replace(/<style\b[\s\S]*?<\/style>/gi, "");
-  s = stripTags(s);
-  s = decodeEntities(s);
-  s = s.replace(/[ \t]+/g, " ");
-  s = s.replace(/\n{3,}/g, "\n\n");
-  return s.trim();
+  return result.data;
 }
 
 // Issue the fetch with manual redirect handling so we can re-validate each hop's destination
@@ -402,7 +343,10 @@ async function followRedirects(
   throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
 }
 
-export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
+export async function webFetch(
+  env: WebFetchEnv,
+  input: WebFetchInput,
+): Promise<WebFetchResult> {
   const parsed = validateWebFetchUrl(input.url);
 
   const requestedMax = input.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -434,32 +378,35 @@ export async function webFetch(input: WebFetchInput): Promise<WebFetchResult> {
 
   // Prefer `response.url` (set by the runtime when redirects were followed) but fall back
   // to the post-redirect URL we tracked ourselves so the audit log is always accurate.
-  const finalUrl = response.url || postRedirectUrl.toString();
+  const finalUrlStr = response.url || postRedirectUrl.toString();
+  let finalUrlParsed: URL;
+  try {
+    finalUrlParsed = new URL(finalUrlStr);
+  } catch {
+    finalUrlParsed = postRedirectUrl;
+  }
   const contentType = response.headers.get("content-type") ?? "";
 
-  const { body: rawBody, truncated } = await readBodyCapped(response, maxBytes);
+  const { bytes, truncated } = await readBodyCapped(response, maxBytes);
 
   const accept: WebFetchAccept = input.accept ?? "markdown";
-  let body = rawBody;
-
-  const isHtml = /text\/html|application\/xhtml\+xml/i.test(contentType);
+  let body: string;
 
   switch (accept) {
-    case "markdown":
-      body = isHtml ? htmlToMarkdown(rawBody) : rawBody;
+    case "markdown": {
+      const md = await convertToMarkdown(env, bytes, contentType, finalUrlParsed);
+      body = md !== null ? md : decodeUtf8(bytes);
       break;
-    case "text":
-      body = isHtml ? htmlToText(rawBody) : rawBody;
-      break;
+    }
     case "html":
     case "json":
-      body = rawBody;
+      body = decodeUtf8(bytes);
       break;
   }
 
   return {
     status: response.status,
-    finalUrl,
+    finalUrl: finalUrlStr,
     contentType,
     body,
     truncated,
