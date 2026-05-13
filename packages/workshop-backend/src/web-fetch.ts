@@ -1,8 +1,7 @@
 // Built-in WebFetch capability for the agent.
 //
-// Provides an HTTP GET against arbitrary public HTTPS URLs, with hard server-side limits to
-// guard against SSRF and data-exfiltration vectors. There is intentionally no support for
-// POST/PUT/DELETE/PATCH or for forwarding credentials.
+// Provides an HTTP GET against arbitrary public HTTPS URLs. There is intentionally no
+// support for POST/PUT/DELETE/PATCH or for forwarding credentials.
 //
 // Document-to-Markdown conversion is delegated to Cloudflare Workers AI's
 // `env.WORKERS_AI.toMarkdown()` utility, which handles HTML, PDF, DOCX, XLSX/XLS, ODT/ODS,
@@ -10,21 +9,13 @@
 // because it uses paid Workers AI models. Plain-text, JSON, and other unknown content types
 // pass through unconverted.
 //
-// Each successful fetch is recorded as an Overseer "observation" (see
-// `OverseerImpl.recordAgentObservation()`), tagged with `freeFormContent: true` and
-// `untrustedSource: { kind: "web", origin }` so that future policy machinery can track which
-// external influencers the agent has been exposed to during a turn.
-//
-// Known residual risk: DNS rebinding. We validate the textual hostname against a block list,
-// but the runtime resolves DNS independently when actually issuing the fetch (and again on
-// each redirect hop). A hostile authoritative server can return a public IP at validation
-// time and a private/metadata IP at fetch time. Mitigating this properly requires resolving
-// once and pinning the IP for the request, which the Workers `fetch()` API doesn't currently
-// support. The mitigations we *do* have are: (a) no credentials/cookies/auth headers are
-// forwarded, so a rebound metadata endpoint can't easily exfiltrate secrets via this path;
-// (b) the response is treated as untrusted free-form content in the audit log; (c) bodies
-// are capped so the rebound endpoint can't dump arbitrary data into the agent. This is
-// considered acceptable for now given those mitigations.
+// SSRF protection: relies on workerd's post-DNS-lookup IP address filtering. In production,
+// the `global_fetch_strictly_public` compatibility flag restricts `fetch()` to public IP
+// addresses; reserved ranges (loopback, RFC1918, link-local, cloud-metadata, etc.) are
+// rejected by the runtime, *after* the hostname has been resolved. This is the only correct
+// place to enforce such restrictions, since a symbolic hostname can resolve to anything.
+// `wrangler dev` deliberately disables this restriction so local development can talk to
+// localhost; we accept that the dev environment is therefore less restricted than prod.
 
 import type { AiGatewayConfig } from "./ai-gateway";
 
@@ -59,58 +50,12 @@ const FETCH_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
 const USER_AGENT = "GadgetsWebFetch/1.0";
 
-// Hosts and host patterns that are never allowed, to guard against SSRF / leaking secrets to
-// cloud-metadata or local services.
-const BLOCKED_HOSTNAMES = new Set([
-  "localhost",
-  "ip6-localhost",
-  "ip6-loopback",
-  "metadata.google.internal",
-  "metadata",
-]);
-
-// Normalize a hostname for block-list matching. The WHATWG URL parser preserves trailing
-// dots on hostnames (they denote an absolute FQDN), e.g. `new URL("https://localhost./")
-// .hostname === "localhost."`. DNS resolvers strip the trailing dot before lookup, so
-// `localhost.` resolves to 127.0.0.1 just like `localhost`. We must strip trailing dots
-// before matching, or the block list is trivially bypassed.
-function normalizeHostname(hostname: string): string {
-  return hostname.toLowerCase().replace(/\.+$/, "");
-}
-
-// Block IP literals entirely. Web servers worth fetching from have real hostnames.
-function isIpLiteral(hostname: string): boolean {
-  const h = normalizeHostname(hostname);
-  if (h.startsWith("[") && h.endsWith("]")) return true; // IPv6 in URL
-  // IPv4 dotted-decimal
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) return true;
-  // IPv6 without brackets (URL.host strips them in some runtimes)
-  if (h.includes(":")) return true;
-  return false;
-}
-
-function isBlockedHostname(hostname: string): boolean {
-  const h = normalizeHostname(hostname);
-  if (BLOCKED_HOSTNAMES.has(h)) return true;
-  // Block bare hostnames without a dot (e.g. internal short names).
-  if (!h.includes(".")) return true;
-  // Block .local, .internal, .lan, .home, .corp, .intranet TLDs.
-  if (
-    h.endsWith(".local") ||
-    h.endsWith(".internal") ||
-    h.endsWith(".lan") ||
-    h.endsWith(".home") ||
-    h.endsWith(".corp") ||
-    h.endsWith(".intranet") ||
-    h.endsWith(".localhost")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-// Validate a URL string for use with webFetch. Throws on bad input.
-// Returns the parsed URL on success.
+// Validate a URL string for use with webFetch. Throws on bad input. Returns the parsed URL
+// on success.
+//
+// Note: we do NOT inspect the hostname for "looks-internal" patterns here. That kind of
+// blocklist is fundamentally unsound because a symbolic hostname can resolve to any IP at
+// fetch time. SSRF protection is provided post-DNS-lookup by workerd (see the file header).
 export function validateWebFetchUrl(input: string): URL {
   let parsed: URL;
   try {
@@ -128,18 +73,6 @@ export function validateWebFetchUrl(input: string): URL {
 
   if (parsed.username || parsed.password) {
     throw new Error("URLs with embedded credentials are not allowed.");
-  }
-
-  if (isIpLiteral(parsed.hostname)) {
-    throw new Error(
-      `URLs targeting IP literals are not allowed: ${parsed.hostname}`,
-    );
-  }
-
-  if (isBlockedHostname(parsed.hostname)) {
-    throw new Error(
-      `Refusing to fetch from blocked host: ${parsed.hostname}`,
-    );
   }
 
   return parsed;
@@ -341,6 +274,23 @@ async function followRedirects(
   }
 
   throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
+}
+
+// Format a `WebFetchResult` as a single string for the agent: a small YAML frontmatter
+// header followed by `---` then the body. This is friendlier to LLMs than a JSON-wrapped
+// object, since the body lives inline rather than as an escaped JSON string.
+export function formatWebFetchResult(result: WebFetchResult): string {
+  const lines = [
+    "---",
+    `url: ${result.finalUrl}`,
+    `status: ${result.status}`,
+    `content-type: ${result.contentType || "(unspecified)"}`,
+    `truncated: ${result.truncated}`,
+    "---",
+    "",
+    result.body,
+  ];
+  return lines.join("\n");
 }
 
 export async function webFetch(

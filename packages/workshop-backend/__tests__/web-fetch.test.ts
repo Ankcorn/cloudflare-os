@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   validateWebFetchUrl,
   webFetch,
+  formatWebFetchResult,
   type WebFetchEnv,
 } from "../src/web-fetch.js";
 
@@ -57,48 +58,11 @@ describe("validateWebFetchUrl", () => {
     );
   });
 
-  it("rejects IPv4 literals", () => {
-    expect(() => validateWebFetchUrl("https://127.0.0.1/")).toThrow(/IP/);
-    expect(() => validateWebFetchUrl("https://10.0.0.1/")).toThrow(/IP/);
-    expect(() => validateWebFetchUrl("https://169.254.169.254/")).toThrow(/IP/);
-    expect(() => validateWebFetchUrl("https://8.8.8.8/")).toThrow(/IP/);
-  });
-
-  it("rejects IPv6 literals", () => {
-    expect(() => validateWebFetchUrl("https://[::1]/")).toThrow(/IP/);
-    expect(() => validateWebFetchUrl("https://[fe80::1]/")).toThrow(/IP/);
-  });
-
-  it("rejects local/internal hostnames", () => {
-    expect(() => validateWebFetchUrl("https://localhost/")).toThrow();
-    expect(() => validateWebFetchUrl("https://router.local/")).toThrow();
-    expect(() => validateWebFetchUrl("https://service.internal/")).toThrow();
-    expect(() => validateWebFetchUrl("https://machine.lan/")).toThrow();
-    expect(() => validateWebFetchUrl("https://metadata.google.internal/")).toThrow();
-  });
-
-  it("rejects bare hostnames (no dot)", () => {
-    expect(() => validateWebFetchUrl("https://internalhost/")).toThrow();
-  });
-
-  // Regression: trailing-dot hostnames are preserved by the WHATWG URL parser and DNS
-  // resolvers treat them as equivalent FQDNs. Without trailing-dot normalization, every
-  // entry in the block list could be trivially bypassed.
-  it("rejects trailing-dot variants of blocked hostnames", () => {
-    expect(() => validateWebFetchUrl("https://localhost./")).toThrow();
-    expect(() =>
-      validateWebFetchUrl("https://metadata.google.internal./"),
-    ).toThrow();
-    expect(() => validateWebFetchUrl("https://service.internal./")).toThrow();
-    expect(() => validateWebFetchUrl("https://router.local./")).toThrow();
-    expect(() => validateWebFetchUrl("https://x.lan./")).toThrow();
-    // Multiple trailing dots should be stripped too.
-    expect(() => validateWebFetchUrl("https://localhost.../")).toThrow();
-  });
-
-  it("normalization leaves legitimate hostnames alone", () => {
-    expect(() => validateWebFetchUrl("https://example.com./")).not.toThrow();
-  });
+  // Note: there are deliberately no tests asserting that "internal-looking" hostnames are
+  // rejected. SSRF protection happens post-DNS-lookup at the workerd layer (via the
+  // global_fetch_strictly_public compatibility flag), not via string-matching in this
+  // function. A symbolic hostname can resolve to anything, so a textual blocklist would be
+  // fundamentally unsound.
 });
 
 describe("webFetch redirect handling", () => {
@@ -112,15 +76,12 @@ describe("webFetch redirect handling", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("rejects a redirect that points at a blocked host", async () => {
-    // Mock fetch: first call returns a 302 to 169.254.169.254 (AWS/GCP metadata-style).
-    // followRedirects() must re-validate the Location and throw before issuing the next
-    // fetch.
+  it("rejects a redirect that points at a non-https URL", async () => {
     const fetchMock = vi.fn(async (url: any) => {
       if (typeof url === "string" && url.startsWith("https://example.com")) {
         return new Response(null, {
           status: 302,
-          headers: { location: "https://169.254.169.254/latest/meta-data/" },
+          headers: { location: "http://example.com/insecure" },
         });
       }
       throw new Error(`unexpected fetch to ${url}`);
@@ -129,27 +90,7 @@ describe("webFetch redirect handling", () => {
 
     await expect(
       webFetch(makeEnv(), { url: "https://example.com/" }),
-    ).rejects.toThrow(/IP|blocked|Refusing/i);
-    // We should have made exactly one network call -- the redirect target must never have
-    // been fetched.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects a redirect that points at a trailing-dot blocked host", async () => {
-    const fetchMock = vi.fn(async (url: any) => {
-      if (typeof url === "string" && url.startsWith("https://example.com")) {
-        return new Response(null, {
-          status: 301,
-          headers: { location: "https://metadata.google.internal./" },
-        });
-      }
-      throw new Error(`unexpected fetch to ${url}`);
-    });
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    await expect(
-      webFetch(makeEnv(), { url: "https://example.com/" }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/https/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -323,5 +264,49 @@ describe("webFetch document conversion", () => {
     // Body is decoded as UTF-8 (with replacement chars for invalid sequences); the test
     // only cares that the call didn't go through toMarkdown.
     expect(typeof result.body).toBe("string");
+  });
+});
+
+describe("formatWebFetchResult", () => {
+  it("emits YAML frontmatter followed by the body", () => {
+    const out = formatWebFetchResult({
+      status: 200,
+      finalUrl: "https://example.com/page",
+      contentType: "text/html; charset=utf-8",
+      body: "# Title\n\nBody",
+      truncated: false,
+    });
+    expect(out).toBe(
+      "---\n" +
+        "url: https://example.com/page\n" +
+        "status: 200\n" +
+        "content-type: text/html; charset=utf-8\n" +
+        "truncated: false\n" +
+        "---\n" +
+        "\n" +
+        "# Title\n\nBody",
+    );
+  });
+
+  it("reflects the truncated flag", () => {
+    const out = formatWebFetchResult({
+      status: 200,
+      finalUrl: "https://example.com/",
+      contentType: "text/plain",
+      body: "hi",
+      truncated: true,
+    });
+    expect(out).toContain("truncated: true");
+  });
+
+  it("renders an empty content-type as (unspecified)", () => {
+    const out = formatWebFetchResult({
+      status: 204,
+      finalUrl: "https://example.com/",
+      contentType: "",
+      body: "",
+      truncated: false,
+    });
+    expect(out).toContain("content-type: (unspecified)");
   });
 });
