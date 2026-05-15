@@ -105,6 +105,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const wasOpenRef = useRef(false)
 
   const isOwner = !metadata.owner
+  const sharingProhibited = metadata.sharingProhibited === true
 
   const loadData = useCallback(async () => {
     try {
@@ -145,7 +146,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleAddCollaborator = async () => {
-    if (!addUsername.trim()) return
+    if (!addUsername.trim() || sharingProhibited) return
     setAdding(true)
     try {
       const result = await overseer.addCollaborator(addUsername.trim(), undefined)
@@ -198,6 +199,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleCreateShareKey = async () => {
+    if (sharingProhibited) return
     setCreatingKey(true)
     try {
       const { key } = await overseer.createShareKey(undefined)
@@ -319,6 +321,16 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           <div className="px-4 py-5 sm:px-6">
             {tabKey === 'people' && (
               <div className="space-y-5">
+                {sharingProhibited && (
+                  <div className="rounded-xl border border-kumo-warning bg-kumo-warning-tint px-4 py-3">
+                    <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                      Sharing is disabled for this gadget.
+                    </p>
+                    <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                      It has observed sensitive data that can only be accessed by the owner.
+                    </p>
+                  </div>
+                )}
                 <div>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <WorkshopInput
@@ -331,12 +343,13 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                       autoCorrect="off"
                       spellCheck={false}
                       className="flex-1"
+                      disabled={sharingProhibited}
                     />
                     <WorkshopButton
                       tone="primary"
                       className="min-w-[64px]"
                       onClick={handleAddCollaborator}
-                      disabled={!addUsername.trim() || adding}
+                      disabled={!addUsername.trim() || adding || sharingProhibited}
                     >
                       {adding ? 'Inviting...' : 'Invite'}
                     </WorkshopButton>
@@ -438,10 +451,21 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
             {tabKey === 'links' && (
               <div className="space-y-4">
+                  {sharingProhibited && (
+                    <div className="rounded-xl border border-kumo-warning bg-kumo-warning-tint px-4 py-3">
+                      <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                        Share links are disabled for this gadget.
+                      </p>
+                      <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                        It has observed sensitive data that can only be accessed by the owner.
+                        Existing links can still be revoked.
+                      </p>
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={handleCreateShareKey}
-                    disabled={creatingKey}
+                    disabled={creatingKey || sharingProhibited}
                     className="flex w-full items-center justify-between rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left transition-colors hover:bg-kumo-elevated"
                   >
                     <span>
@@ -449,7 +473,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                         {creatingKey ? 'Creating share link...' : 'Create share link'}
                       </span>
                       <span className="mt-0.5 block text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                        Creates a reusable invite link.
+                        {sharingProhibited ? 'New invite links cannot be created.' : 'Creates a reusable invite link.'}
                       </span>
                     </span>
                     <Link size={16} className="mr-1 text-kumo-subtle" />

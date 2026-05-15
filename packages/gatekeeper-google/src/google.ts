@@ -598,7 +598,7 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
     let queryDesc = this.#searchQuery
         ? ` matching "${this.#searchQuery}"` : "";
 
-    this.#approvalQueue.authorizeObservation({
+    await this.#approvalQueue.authorizeObservation({
       title: "List Gmail threads",
       description:
           `List the top ${count} threads${queryDesc} in the Gmail inbox, including IDs and snippets.`
@@ -624,7 +624,7 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
 
     let result = await this.#gmailApi.readThread(threadId);
 
-    this.#approvalQueue.authorizeObservation({
+    await this.#approvalQueue.authorizeObservation({
       title: `Read thread: ${result.messages[0].subject}`,
       description: `Fetch the full content of thread ${threadId}, including all messages.`
     });

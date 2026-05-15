@@ -269,6 +269,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       nextGatekeeperId: 0,
       nextActionId: 0,
       nextChatId: 0,
+
+      // True if any past observation was authorized that had the `prohibitAllSharing` flag set
+      // in its `ObservationDescription`.
+      prohibitAllSharing: false,
     },
 
     collections: {
@@ -1007,6 +1011,19 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
+    if (description.prohibitAllSharing) {
+      let hasCollaborators = [...this.storage.collaborators.list({limit: 1})].length > 0;
+      let hasShareKeys = [...this.storage.shareKeys.list({limit: 1})].length > 0;
+      if (hasCollaborators || hasShareKeys) {
+        throw new Error(
+            "This observation was blocked because it contains sensitive data that must only be " +
+            "shown to the account owner, but this Gadget is shared with other users. Try again " +
+            "from a Gadget that is not shared.");
+      }
+
+      this.storage.prohibitAllSharing.put(true);
+    }
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -1032,6 +1049,12 @@ class OverseerImpl implements AgentHooks {
   async submitAction(gatekeeperId: number, action: any,
                      description: ActionDescription, caller: GatekeeperCaller)
       : Promise<void> {
+    if (this.storage.prohibitAllSharing.get()) {
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget is prohibited " +
+          "from performing actions.");
+    }
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -2280,6 +2303,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         : this.impl.users.get(this.impl.users.idFromString(userId));
 
     if (!isOwner) {
+      if (this.impl.storage.prohibitAllSharing.get()) {
+        throw new Error("This gadget can no longer be shared because it observed sensitive data.");
+      }
+
       // If a share key was provided, compute its HMAC hash and redeem it.
       // The owner already has full access and should not appear in the collaborators table.
       if (shareKey) {
@@ -2826,6 +2853,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
+      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
     };
     if (!this.isOwner) {
       result.owner = await this.owner.whoami();
@@ -2841,7 +2869,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
-      totalCost: this.impl.storage.totalCost.get()
+      totalCost: this.impl.storage.totalCost.get(),
+      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
     };
 
     // For collaborators, include owner info.
@@ -2861,15 +2890,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         callback(metadata).catch(unsubscribe);
       }
     };
+    let sharingProhibitedSubscriber = {
+      update(value: boolean | undefined) {
+        metadata.sharingProhibited = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
+      this.impl.storage.prohibitAllSharing.unsubscribe(sharingProhibitedSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
+    this.impl.storage.prohibitAllSharing.subscribe(sharingProhibitedSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -3762,6 +3799,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Cannot add the gadget owner as a collaborator.");
     }
 
+    if (this.impl.storage.prohibitAllSharing.get()) {
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "shared.");
+    }
+
     let existing = this.impl.storage.collaborators.get(profile.id);
     let edge: PermissionEdge = {
       type: "user",
@@ -4044,8 +4087,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let rawBytes = new Uint8Array(16);
     crypto.getRandomValues(rawBytes);
     let key = rawBytes.toHex();
-
     let keyId = await shareKeyId(key);
+
+    if (this.impl.storage.prohibitAllSharing.get()) {
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "shared.");
+    }
+
     this.impl.storage.shareKeys.put({
       id: keyId,
       note,

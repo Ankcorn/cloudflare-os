@@ -660,6 +660,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
       : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
+    let options = {
+      userId: this.storage.profile.get().id
+    };
+
     let promises: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}|null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
@@ -670,8 +674,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
         let [description, supportedResources] = await Promise.all([
           vendor.describe(),
-          vendor.getSupportedResources(),
+          vendor.getSupportedResources(options),
         ]);
+        if (supportedResources.length == 0) {
+          return null;
+        }
+
         return {id, description, supportedResources};
       })());
     }

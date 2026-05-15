@@ -354,6 +354,10 @@ export type GadgetMetadata = {
   // user is a collaborator, not the owner.
   owner?: AiChatAuthorInfo;
 
+  // True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
+  // be shared with additional users or links.
+  sharingProhibited?: boolean;
+
   // TODO:
   // - created / modified / activity times
   // - icon? thumbnail?
