@@ -264,11 +264,15 @@ export default function GadgetList() {
   }
 
   const handleShare = async (gadget: GadgetMetadataWithTimestamps) => {
+    let overseer: RpcStub<Overseer> | null = null
     try {
-      const overseer = await authenticatedApi.openGadget(gadget.id)
+      overseer = authenticatedApi.openGadget(gadget.id)
+      const metadata = await overseer.getMetadata()
       setShareOverseer({ stub: overseer })
-      setShareTarget(gadget)
+      setShareTarget({ ...gadget, ...metadata })
+      overseer = null
     } catch (err) {
+      overseer?.[Symbol.dispose]()
       console.error('Failed to open gadget for sharing:', err)
       toasts.add({ title: 'Failed to open share settings', variant: 'error' })
     }

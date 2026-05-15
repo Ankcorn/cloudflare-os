@@ -130,8 +130,15 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // Get the list of resource types this vendor supports. Each entry describes a category of
   // resource the vendor can provide access to, along with a URL pattern for matching.
   //
+  // `options.userId` specifies the user ID (usually, email address) of the user who is driving the
+  // query, which the gatekeeper can consider in deciding what resources are available. If it
+  // returns an empty list, then the gatekeeper will be totally hidden from the user.
+  //
+  // TODO: Providing the user ID here is a temporary hack to enable a hidden internal gatekeeper.
+  //   Later on we should come up with a better way to manage which users see which gatekeepers.
+  //
   // TODO: How does the Gadget Workshop know when the supported URLs have changed, without polling?
-  getSupportedResources(): Promise<SupportedResource[]>;
+  getSupportedResources(options?: {userId?: string}): Promise<SupportedResource[]>;
 
   // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
   // The returned string is the content of a `.d.ts` file. All types refereced by
@@ -392,6 +399,21 @@ export type ObservationDescription = {
   //   prompt injection risks).
   // - If this content may contain secrets, who are the users that are allowed to view it? This
   //   can help detect situations where the gadget could leak information.
+
+  // If true, then this observation contains sensitive information that MUST NOT be shared with
+  // ANYONE except the account owner. This means:
+  // - If the gadget is shared already, authorizeObservation() must throw an exception to block
+  //   the observation.
+  // - All future sharing of the gadget is prohibited.
+  // - Once observed, the gadget goes into "lockdown mode" where it can no longer perform any
+  //   actions, only make observations. This prevents the gadget from leaking data through other
+  //   gatekeepers.
+  //
+  // TODO(someday): This was added as a stopgap in order to be able to make certain sensitive data
+  //   sources available to internal users. In the longer-term, it should be possible to share
+  //   sensitive data as long as the recipients also have access to that same data, but this
+  //   requires a more complex policy framework to compute.
+  prohibitAllSharing?: boolean;
 }
 
 // Describes an action submitted to the action approval queue. This contains all the information
