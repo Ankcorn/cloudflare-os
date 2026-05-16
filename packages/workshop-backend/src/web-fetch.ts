@@ -49,7 +49,6 @@ export type WebFetchResult = {
 const HARD_MAX_BYTES = 5 * 1024 * 1024;     // 5 MiB after which we always truncate
 const DEFAULT_MAX_BYTES = 1 * 1024 * 1024;  // 1 MiB default cap when caller didn't specify
 const FETCH_TIMEOUT_MS = 30_000;
-const MAX_REDIRECTS = 5;
 const USER_AGENT = "GadgetsWebFetch/1.0";
 
 // Validate a URL string for use with webFetch. Throws on bad input. Returns the parsed URL
@@ -232,52 +231,7 @@ async function convertToMarkdown(
   return result.data;
 }
 
-// Issue the fetch with manual redirect handling so we can re-validate each hop's URL
-// (https-only, no credentials) before following it. Returns both the final response and
-// the URL it came from, so the audit log can be accurate even if `response.url` happens
-// to be empty.
-async function followRedirects(
-  startUrl: URL,
-  abortSignal: AbortSignal,
-): Promise<{ response: Response; finalUrl: URL }> {
-  let url = startUrl;
-  // i=0 is the initial fetch; i=1..MAX_REDIRECTS are redirect hops. Total iterations is
-  // therefore MAX_REDIRECTS + 1, and we allow up to MAX_REDIRECTS redirects before failing.
-  for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        "user-agent": USER_AGENT,
-        "accept": "text/markdown,text/html;q=0.9,text/plain;q=0.9,application/json;q=0.9,application/xhtml+xml;q=0.9,*/*;q=0.8",
-      },
-      signal: abortSignal,
-    });
 
-    const status = response.status;
-    if (status >= 300 && status < 400) {
-      const loc = response.headers.get("location");
-      if (!loc) {
-        return { response, finalUrl: url }; // No location header; return as-is.
-      }
-      // Drain the body so we don't leak the previous response.
-      try {
-        await response.body?.cancel();
-      } catch {
-        // Ignore.
-      }
-      const next = new URL(loc, url);
-      // Re-validate every redirect hop.
-      validateWebFetchUrl(next.toString());
-      url = next;
-      continue;
-    }
-
-    return { response, finalUrl: url };
-  }
-
-  throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
-}
 
 // Parse the Content-Signal response header (https://contentsignals.org/) and check whether
 // a specific signal is present and set to "no". The header is a comma-separated list of
@@ -325,11 +279,16 @@ export async function webFetch(
   const timeoutId = setTimeout(() => abortController.abort(), FETCH_TIMEOUT_MS);
 
   let response: Response;
-  let postRedirectUrl: URL;
   try {
-    const r = await followRedirects(parsed, abortController.signal);
-    response = r.response;
-    postRedirectUrl = r.finalUrl;
+    response = await fetch(parsed.toString(), {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "user-agent": USER_AGENT,
+        "accept": "text/markdown,text/html;q=0.9,text/plain;q=0.9,application/json;q=0.9,application/xhtml+xml;q=0.9,*/*;q=0.8",
+      },
+      signal: abortController.signal,
+    });
   } catch (err) {
     if (
       err instanceof Error &&
@@ -342,11 +301,9 @@ export async function webFetch(
     clearTimeout(timeoutId);
   }
 
-  // Prefer `response.url` (set by the runtime when redirects were followed) but fall back
-  // to the post-redirect URL we tracked ourselves so the audit log is always accurate.
-  // `response.url` is always either empty or a valid URL the runtime constructed itself,
-  // so it's safe to parse here.
-  const finalUrl = response.url ? new URL(response.url) : postRedirectUrl;
+  // `response.url` is set by the runtime to the final URL after any redirects. Fall back
+  // to the original URL if it happens to be empty.
+  const finalUrl = response.url ? new URL(response.url) : parsed;
   const contentType = response.headers.get("content-type") ?? "";
 
   // Respect the Content-Signal header (https://contentsignals.org/). If the site

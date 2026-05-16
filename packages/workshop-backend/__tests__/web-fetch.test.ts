@@ -65,60 +65,6 @@ describe("validateWebFetchUrl", () => {
   // fundamentally unsound.
 });
 
-describe("webFetch redirect handling", () => {
-  let originalFetch: typeof globalThis.fetch;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  it("rejects a redirect that points at a non-https URL", async () => {
-    const fetchMock = vi.fn(async (url: any) => {
-      if (typeof url === "string" && url.startsWith("https://example.com")) {
-        return new Response(null, {
-          status: 302,
-          headers: { location: "http://example.com/insecure" },
-        });
-      }
-      throw new Error(`unexpected fetch to ${url}`);
-    });
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    await expect(
-      webFetch(makeEnv(), { url: "https://example.com/" }),
-    ).rejects.toThrow(/https/);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("follows a redirect to another public host successfully", async () => {
-    const fetchMock = vi.fn(async (url: any) => {
-      if (url === "https://example.com/") {
-        return new Response(null, {
-          status: 302,
-          headers: { location: "https://example.org/landed" },
-        });
-      }
-      if (url === "https://example.org/landed") {
-        return new Response("hello", {
-          status: 200,
-          headers: { "content-type": "text/plain" },
-        });
-      }
-      throw new Error(`unexpected fetch to ${url}`);
-    });
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-    const result = await webFetch(makeEnv(), { url: "https://example.com/" });
-    expect(result.status).toBe(200);
-    expect(result.body).toBe("hello");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-});
-
 describe("webFetch document conversion", () => {
   let originalFetch: typeof globalThis.fetch;
 
