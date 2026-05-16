@@ -66,6 +66,8 @@ import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { useActionEntries } from "./useActions";
+import { useAuthenticatedApi } from "./AuthContext";
+import { formatFullTimestamp } from "./utils/formatTimestamp";
 
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
@@ -1361,7 +1363,10 @@ function groupObservationEntries(messages: AiChatMessage[]): ChatDisplayEntry[] 
 
     if (!isObservationActionMessage(msg)) {
       let isAgentContinuation = false;
-      if (msg.type === "message") {
+      // Track agent continuation across both regular "message" entries and "changes" (checkpoint)
+      // entries, since a checkpoint emitted by the same agent immediately after one of its
+      // messages is part of the same turn and should suppress redundant author/time chrome.
+      if (msg.type === "message" || msg.type === "changes") {
         if (msg.author.type === "user") {
           lastAgentIdInTurn = null;
         } else if (msg.author.type === "agent") {
@@ -1632,6 +1637,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
+  const { currentUser } = useAuthenticatedApi();
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -1836,6 +1842,21 @@ function ChatInterface({
     () => groupObservationEntries(currentMessages),
     [currentMessages],
   );
+
+  // Hide the user name on user message rows when the only human in the chat is the
+  // currently-logged-in user (it would just say "you" on every message). If anyone else has ever
+  // posted in this chat, names stay so it's clear who said what.
+  const hideOwnUserName = useMemo(() => {
+    if (!currentUser) return false;
+    let sawSelf = false;
+    for (const msg of currentMessages) {
+      if (msg.type !== "message" || msg.author.type !== "user") continue;
+      if (msg.author.id !== currentUser.id) return false;
+      sawSelf = true;
+    }
+    return sawSelf;
+  }, [currentMessages, currentUser]);
+
   const lastMessageSequence = currentMessages[currentMessages.length - 1]?.sequence;
 
   // Get metadata for selected chat
@@ -2841,12 +2862,14 @@ function ChatInterface({
                 log.resourceTitle
               )}
             </span>
-            <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-              {msg.timestamp.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </span>
+            <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+              <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
+                {msg.timestamp.toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </span>
+            </Tooltip>
           </div>
           <p className="m-0 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
             {log.description.title}
@@ -3346,7 +3369,7 @@ function ChatInterface({
                     className={`space-y-4 px-4 pt-5 ${pendingConsoleLogCount > 0 ? "pb-14" : "pb-5"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[760px]" : ""}`}
                   >
                     {displayEntries.map((entry) => {
-                      const isAgentContinuation = entry.type === "message" && entry.isAgentContinuation;
+                      const isAgentContinuation = entry.type === "message" ? entry.isAgentContinuation : false;
                       if (entry.type === "observationGroup") {
                         const open = expandedObservationGroups.has(entry.key);
                         const lastObservation = entry.messages[entry.messages.length - 1];
@@ -3372,12 +3395,14 @@ function ChatInterface({
                               <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-kumo-subtle">
                                 {entry.messages.length} observations
                               </span>
-                              <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                                {lastObservation.timestamp.toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
-                              </span>
+                              <Tooltip content={formatFullTimestamp(lastObservation.timestamp)} asChild>
+                                <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
+                                  {lastObservation.timestamp.toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })}
+                                </span>
+                              </Tooltip>
                             </button>
                             {open && (
                               <div className="space-y-2 border-t border-kumo-line bg-kumo-base p-2">
@@ -3401,13 +3426,18 @@ function ChatInterface({
                           msg.author.type === "user" ? (
                             <div className="flex flex-col items-end">
                               <div className="mb-1 flex justify-end gap-2 text-[11px] leading-4 text-kumo-inactive">
-                                <span className="font-medium">{msg.author.name}</span>
-                                <span className="font-mono">
-                                  {msg.timestamp.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })}
-                                </span>
+                                {/* hideOwnUserName implies currentUser is non-null (see memo). */}
+                                {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
+                                  <span className="font-medium">{msg.author.name}</span>
+                                )}
+                                <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                  <span className="font-mono">
+                                    {msg.timestamp.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                </Tooltip>
                               </div>
                               <div className={`w-fit max-w-[78%] rounded-2xl rounded-br-md border border-kumo-line bg-kumo-tint px-3.5 py-2.5 text-[14px] leading-[21px] tracking-[-0.25px] text-kumo-default shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] ${styles.markdownContent}`}>
                                 <MarkdownMessage
@@ -3438,13 +3468,15 @@ function ChatInterface({
                                         <span className="text-[12px] leading-4 font-semibold tracking-[-0.2px] text-kumo-default">
                                           {msg.author.name}
                                         </span>
-                                        <span className="font-mono text-[11px] text-kumo-inactive">
-                                          {msg.timestamp.toLocaleTimeString([], {
-                                            hour: "2-digit",
-                                            minute: "2-digit",
-                                          })}
-                                        </span>
-                                        {msg.reasoning && (
+                                         <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                           <span className="font-mono text-[11px] text-kumo-inactive">
+                                             {msg.timestamp.toLocaleTimeString([], {
+                                               hour: "2-digit",
+                                               minute: "2-digit",
+                                             })}
+                                           </span>
+                                         </Tooltip>
+                                         {msg.reasoning && (
                                           <>
                                             <span className="text-[11px] text-kumo-inactive" aria-hidden="true">·</span>
                                             <button
@@ -3593,14 +3625,27 @@ function ChatInterface({
                             const labelClass = status === "reverted"
                               ? "text-kumo-inactive line-through"
                               : "text-kumo-subtle";
-                            const authorChunk = status === "pending"
+                            // When the checkpoint immediately follows a message from the same
+                            // agent author, the assistant header right above already shows the
+                            // author and timestamp. Suppress them on the checkpoint row to avoid
+                            // redundancy. They remain visible for user-authored ("Save checkpoint")
+                            // rows and detached agent checkpoints.
+                            const showAuthorAndTime =
+                              status === "pending" && !isAgentContinuation;
+                            const authorChunk = showAuthorAndTime
                               ? msg.author.type === "user"
                                 ? "You"
                                 : msg.author.name
                               : null;
+                            const timeText = msg.timestamp.toLocaleTimeString(
+                              [],
+                              { hour: "2-digit", minute: "2-digit" },
+                            );
+                            // Always include the time in the accessible label even when it's
+                            // visually suppressed, so screen-reader users keep temporal context.
                             const ariaLabel = authorChunk
-                              ? `${labelText} by ${authorChunk} at ${msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                              : `${labelText} at ${msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+                              ? `${labelText} by ${authorChunk} at ${timeText}`
+                              : `${labelText} at ${timeText}`;
                             return (
                               <div
                                 className="group flex items-center gap-3 py-1.5 text-[12px] leading-4 tracking-[-0.2px]"
@@ -3621,12 +3666,13 @@ function ChatInterface({
                                     </span>
                                   </>
                                 )}
-                                <span className="font-mono text-[11px] text-kumo-inactive">
-                                  {msg.timestamp.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })}
-                                </span>
+                                {showAuthorAndTime && (
+                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                    <span className="font-mono text-[11px] text-kumo-inactive">
+                                      {timeText}
+                                    </span>
+                                  </Tooltip>
+                                )}
                                 <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
                                 {status === "pending" && (
                                   <Tooltip content="Rewind to this checkpoint, discarding this and all later draft changes." asChild>
@@ -3668,12 +3714,14 @@ function ChatInterface({
                                     ? `accepted through ${ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "earlier"}`
                                     : `rewound from ${ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "earlier"} onward`}
                                 </span>
-                                <span className="font-mono text-[11px] text-kumo-inactive">
-                                  {msg.timestamp.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })}
-                                </span>
+                                <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                  <span className="font-mono text-[11px] text-kumo-inactive">
+                                    {msg.timestamp.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                </Tooltip>
                                 <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
                               </div>
                             );
@@ -3685,12 +3733,14 @@ function ChatInterface({
                           <div className="ml-10 max-w-[78%] flex items-center gap-2 rounded-xl border border-kumo-line bg-kumo-elevated px-3 py-2 text-[12px] leading-4 text-kumo-subtle">
                             <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-kumo-inactive" />
                             Agent used the Gadget
-                            <span className="ml-auto font-mono text-[11px] text-kumo-inactive">
-                              {msg.timestamp.toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </span>
+                            <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                              <span className="ml-auto font-mono text-[11px] text-kumo-inactive">
+                                {msg.timestamp.toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </span>
+                            </Tooltip>
                           </div>
                         )}
 
@@ -3744,12 +3794,14 @@ function ChatInterface({
                                       Retry
                                     </WorkshopButton>
                                   )}
-                                  <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                                    {msg.timestamp.toLocaleTimeString([], {
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    })}
-                                  </span>
+                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                    <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
+                                      {msg.timestamp.toLocaleTimeString([], {
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                      })}
+                                    </span>
+                                  </Tooltip>
                                 </div>
                                 {expanded && (
                                   <div className="border-t border-kumo-line px-3 py-2.5">
@@ -3813,14 +3865,26 @@ function ChatInterface({
                                 {description}
                               </p>
                             </div>
-                            <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                              {currentDraftState.entries[
-                                currentDraftState.entries.length - 1
-                              ]?.timestamp.toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </span>
+                            {(() => {
+                              // Outer condition asserts entries.length > 0, so last is defined.
+                              const lastDraftEntry =
+                                currentDraftState.entries[
+                                  currentDraftState.entries.length - 1
+                                ];
+                              return (
+                                <Tooltip
+                                  content={formatFullTimestamp(lastDraftEntry.timestamp)}
+                                  asChild
+                                >
+                                  <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
+                                    {lastDraftEntry.timestamp.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                </Tooltip>
+                              );
+                            })()}
                           </div>
                           <div className="mt-3 flex flex-wrap justify-end gap-2">
                             <Tooltip content="Throw away these draft edits." asChild>
@@ -4025,11 +4089,13 @@ function ChatInterface({
                       const lastActiveChange = lastDurablePendingChange;
                       if (!lastActiveChange) return null;
                       return (
-                        <div className="relative flex items-center gap-3 border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+                        <div className="relative flex items-center gap-3 overflow-hidden rounded-t-2xl border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
-                          <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                            Accept changes to apply them to the gadget.
-                          </span>
+                          <Tooltip content="Accept changes to apply them to the gadget." asChild>
+                            <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                              Accept changes to apply them to the gadget.
+                            </span>
+                          </Tooltip>
                           <Tooltip content="Accept the current draft update and apply it to your gadget." asChild>
                             <WorkshopButton
                               onClick={() =>
