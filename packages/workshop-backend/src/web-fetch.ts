@@ -249,7 +249,7 @@ async function followRedirects(
       redirect: "manual",
       headers: {
         "user-agent": USER_AGENT,
-        "accept": "text/html,text/plain,application/json,application/xhtml+xml,*/*;q=0.8",
+        "accept": "text/markdown,text/html;q=0.9,text/plain;q=0.9,application/json;q=0.9,application/xhtml+xml;q=0.9,*/*;q=0.8",
       },
       signal: abortSignal,
     });
