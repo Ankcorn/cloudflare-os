@@ -1058,6 +1058,16 @@ class OverseerImpl implements AgentHooks {
   // Provides web-fetch with the Workers AI binding and AI Gateway config it needs to call
   // `env.WORKERS_AI.toMarkdown()`. The initiator is needed for AI Gateway metadata.
   getWebFetchEnv(): WebFetchEnv {
+    if (this.storage.prohibitAllSharing.get()) {
+      // TODO: Disallwing fetches is a bit draconian. Ideally, we would have some way to detect
+      //   if a URL is well-known, and therefore not a leak problem. E.g. if the URL is already in
+      //   a search index, then it's not leaking anything. If we had a search provider we could
+      //   trust... for now though, we will be extra-careful specifically when prohibiting sharing.
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget is prohibited " +
+          "from fetching from public web sites.");
+    }
+
     return {
       ai: this.env.WORKERS_AI,
       gateway: getAiGatewayConfig(this.env),
