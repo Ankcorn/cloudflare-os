@@ -279,6 +279,19 @@ async function followRedirects(
   throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
 }
 
+// Parse the Content-Signal response header (https://contentsignals.org/) and check whether
+// a specific signal is present and set to "no". The header is a comma-separated list of
+// key=value pairs, e.g. `ai-train=yes, search=yes, ai-input=no`.
+function contentSignalDenies(response: Response, signal: string): boolean {
+  const header = response.headers.get("content-signal");
+  if (!header) return false;
+  for (const part of header.split(",")) {
+    const [key, value] = part.split("=").map((s) => s.trim().toLowerCase());
+    if (key === signal && value === "no") return true;
+  }
+  return false;
+}
+
 // Format a `WebFetchResult` as a single string for the agent: a small YAML frontmatter
 // header followed by `---` then the body. This is friendlier to LLMs than a JSON-wrapped
 // object, since the body lives inline rather than as an escaped JSON string.
@@ -335,6 +348,20 @@ export async function webFetch(
   // so it's safe to parse here.
   const finalUrl = response.url ? new URL(response.url) : postRedirectUrl;
   const contentType = response.headers.get("content-type") ?? "";
+
+  // Respect the Content-Signal header (https://contentsignals.org/). If the site
+  // explicitly sets `ai-input=no`, we must not feed its content to the AI agent.
+  if (contentSignalDenies(response, "ai-input")) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Ignore.
+    }
+    throw new Error(
+      `The site at ${finalUrl} sets Content-Signal: ai-input=no, indicating that ` +
+        `it does not permit its content to be used as AI input.`,
+    );
+  }
 
   const { bytes, truncated } = await readBodyCapped(response, maxBytes);
 
