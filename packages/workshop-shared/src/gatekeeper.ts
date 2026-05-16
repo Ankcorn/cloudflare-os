@@ -391,7 +391,8 @@ export type ObservationDescription = {
   // ----------------------------------------------------------------------------
   // Policy hints
   //
-  // TODO: Define more policy hints, including things like:
+  // TODO: Define policy hints that might allow a policy engine to make better decisions. A policy
+  // engine might want to know things like:
   // - Does the observation include free-form content (that could include prompt injection
   //   attacks)?
   // - Who are the users who may have contributed to such free-from content (to judge if they are
