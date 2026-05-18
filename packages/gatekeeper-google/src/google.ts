@@ -1,5 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
@@ -13,6 +13,14 @@ import {
 import TYPES_CODE from "./types.txt";
 import DOCS_TYPES_CODE from "./docs-types.txt";
 import BIGQUERY_TYPES_CODE from "./bigquery-types.txt";
+import {
+  BigQueryConfiguratorUI,
+  GmailConfiguratorUI,
+  GoogleDocConfiguratorUI,
+} from "./google-configurators";
+import BIGQUERY_CONFIGURATOR_HTML from "./generated/bigquery-configurator-ui.txt";
+import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
+import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
 
 // A nonce stored in UserAccount KV to protect the OAuth flow. Only one nonce is active at a time;
 // the `stage` field tracks where we are in the flow.
@@ -25,6 +33,7 @@ type StoredNonce = {
 const NONCE_BYTES = 32;
 const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
 const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;    // 10 minutes
+const ACCESS_TOKEN_EXPIRY_SAFETY_MS = 60 * 1000;
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -125,6 +134,7 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/gmail.labels",
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
   // `bigquery` (not `bigquery.readonly`): dry-runs go through `jobs.insert` for scope
   // enforcement, which `readonly` doesn't permit. Read-only is enforced at the API layer.
   "https://www.googleapis.com/auth/bigquery",
@@ -147,9 +157,7 @@ const BIGQUERY_HOST = "bigquery.googleapis.com";
 const BIGQUERY_RESOURCE: SupportedResource = {
   urlPattern: `https://${BIGQUERY_HOST}/:projectId/*`,
   title: "BigQuery",
-  description:
-    "Query one Google Cloud project. Use /projectId/datasetId to scope to one dataset, " +
-    "or /projectId/datasetId/tableId for one table.",
+  description: "Choose a Google Cloud project, then optionally narrow access to a dataset or table.",
 };
 
 const SUPPORTED_RESOURCES: SupportedResource[] =
@@ -349,8 +357,7 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
-
-    // TODO: Cache the access token.
+    this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", response.accessToken);
 
     let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
     if (reconnecting) {
@@ -385,8 +392,11 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("no refresh token set");
     }
 
-    // TODO: Cache the access token.
     // TODO: If new refresh token returned, use it.
+    let cached = this.ctx.storage.kv.get<GoogleAccessToken>("accessToken");
+    if (cached && cached.expires.valueOf() > Date.now() + ACCESS_TOKEN_EXPIRY_SAFETY_MS) {
+      return cached;
+    }
 
     let result = await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
     if (result === null) {
@@ -400,6 +410,7 @@ export class UserAccount extends DurableObject<Env> {
       }
       throw new Error("Google credentials have expired or been revoked. Please re-authenticate.");
     }
+    this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", result);
     return result;
   }
 
@@ -509,6 +520,38 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     }
 
     return {class: this.ctx.exports.GmailGatekeeperImpl({props}), resource: GMAIL_RESOURCE};
+  }
+
+  async startResourceConfigurator(
+      resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    let getToken = async () => {
+      let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+      let obj = this.ctx.exports.UserAccount.get(id);
+      return await obj.getAccessToken();
+    };
+
+    if (resourceUrlPattern === BIGQUERY_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: BIGQUERY_CONFIGURATOR_HTML,
+        ui: new RpcStub(new BigQueryConfiguratorUI(getToken)),
+      };
+    }
+
+    if (resourceUrlPattern === GMAIL_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GMAIL_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GmailConfiguratorUI()),
+      };
+    }
+
+    if (resourceUrlPattern === GOOGLE_DOC_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GOOGLE_DOC_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GoogleDocConfiguratorUI(getToken)),
+      };
+    }
+
+    throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
   }
 
   async revoke(): Promise<void> {
@@ -1536,12 +1579,6 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
         `override.`);
     }
 
-    let result = await this.#api.query(billingProject, sql, {
-      ...opts,
-      defaultDataset,
-      maximumBytesBilled: maxBytes,
-    });
-
     let preview = sql.replace(/\s+/g, " ").trim().slice(0, 200);
     await this.#approvalQueue.authorizeObservation({
       title: `BigQuery query: ${preview}`,
@@ -1550,8 +1587,14 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
         (defaultDataset ? `Default dataset: \`${defaultDataset}\`\n` : "") +
         `Billing project: \`${billingProject}\`\n` +
         `Referenced tables: ${estimate.referencedTables.join(", ")}\n` +
-        `Bytes processed: ${result.bytesProcessed.toLocaleString()}\n` +
-        `Returned ${result.rows.length} rows (totalRows=${result.totalRows}).`,
+        `Estimated bytes processed: ${estimate.bytesProcessed.toLocaleString()}\n` +
+        `Maximum bytes billed: ${maxBytes.toLocaleString()}.`,
+    });
+
+    let result = await this.#api.query(billingProject, sql, {
+      ...opts,
+      defaultDataset,
+      maximumBytesBilled: maxBytes,
     });
 
     return result;

@@ -5,11 +5,13 @@
   "main": "./src/github.ts",
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
-    "deploy": "wrangler deploy",
-    "build": "tsc",
-    "clean": "rm -rf dist"
+    "build:configurator": "node ../../scripts/build-gatekeeper-configurator.mjs .",
+    "deploy": "pnpm run build:configurator && wrangler deploy",
+    "build": "pnpm run build:configurator && tsc",
+    "clean": "rm -rf dist src/generated"
   },
   "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.8.0"
   },

@@ -76,7 +76,7 @@ export default function ResourcePicker({
     seenAccountIdsRef.current = new Set()
 
     class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
-      add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = [], credentialsValid: boolean = true) {
+      add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = [], credentialsValid: boolean = true, _vendorId: string = '') {
         seenAccountIdsRef.current.add(id)
         setAllAccounts(prev => {
           const next = new Map(prev)

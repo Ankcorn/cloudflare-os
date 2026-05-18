@@ -484,6 +484,31 @@ export class GitHubApi {
     );
   }
 
+  async listRepos(options: {
+    affiliation?: string;
+    sort?: string;
+    direction?: string;
+    per_page: number;
+    page: number;
+  }): Promise<GitHubRepoResponse[]> {
+    const result = await this.#request<GitHubRepoResponse[]>("GET", "/user/repos", { query: options });
+    return result.data;
+  }
+
+  // GitHub's `/search/repositories` endpoint. Use this when the user has typed a query so we
+  // only fetch the matching repos rather than enumerating their entire affiliation list. The
+  // query string follows GitHub's search-syntax (e.g. "react user:jonesphillip in:name").
+  async searchRepos(options: {
+    q: string;
+    per_page: number;
+    page: number;
+    sort?: "stars" | "forks" | "help-wanted-issues" | "updated";
+    order?: "asc" | "desc";
+  }): Promise<GitHubRepoResponse[]> {
+    const result = await this.#request<{ items: GitHubRepoResponse[] }>("GET", "/search/repositories", { query: options });
+    return result.data.items;
+  }
+
   async getIssue(owner: string, repo: string, issueNumber: number): Promise<GitHubIssueResponse> {
     const result = await this.getIssueConditional(owner, repo, issueNumber);
     if (result.status === 304) {

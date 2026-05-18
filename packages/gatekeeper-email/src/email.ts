@@ -10,6 +10,7 @@ import {
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
+  ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
 import {
   EmailSession,
@@ -21,6 +22,8 @@ import {
 import PostalMime from "postal-mime";
 import type { Email } from "postal-mime";
 import TYPES_CODE from "./types.txt";
+import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
+import type { EmailMailboxConfiguratorRpc } from "./configurator/email-configurator-types";
 
 const NONCE_BYTES = 32;
 const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
@@ -53,7 +56,8 @@ function getBaseUrl(env: Env) {
 }
 
 function getBasePath(env: Env) {
-  return new URL(getBaseUrl(env)).pathname;
+  let path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 function getEmailMailboxResource(env: Env): SupportedResource {
@@ -75,6 +79,38 @@ function getEmailHost(env: Env) {
   //   maybe we can get rid of this entirely, or maybe we should bring back the env var that
   //   specifies the default host.
   return new URL(getBaseUrl(env)).hostname;
+}
+
+function validateEmailName(value: string | undefined): { ok: true, emailName: string } | { ok: false, message: string } {
+  let emailName = value?.trim().toLowerCase();
+  if (!emailName) return { ok: false, message: "Choose an email address." };
+  if (!/^[a-z0-9._+-]{1,64}$/.test(emailName)) {
+    return { ok: false, message: "Use letters, numbers, dots, underscores, plus signs, or hyphens." };
+  }
+  if (emailName.startsWith(".") || emailName.endsWith(".") || emailName.includes("..")) {
+    return { ok: false, message: "Email names cannot start or end with a dot or contain consecutive dots." };
+  }
+  return { ok: true, emailName };
+}
+
+const emailConfiguratorEnvs = new WeakMap<object, Env>();
+
+// RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+class EmailMailboxConfiguratorUI extends RpcTarget implements EmailMailboxConfiguratorRpc {
+  constructor(env: Env) {
+    super();
+    emailConfiguratorEnvs.set(this, env);
+  }
+
+  // Email mailbox resource URLs depend on Gatekeeper's configured BASE_URL,
+  // so the iframe asks Gatekeeper to construct the URL.
+  async resourceUrl(emailName: string | null | undefined): Promise<string> {
+    let validated = validateEmailName(emailName ?? undefined);
+    if (!validated.ok) throw new Error(validated.message);
+    let env = emailConfiguratorEnvs.get(this);
+    if (!env) throw new Error("Email configurator is not initialized.");
+    return `${getBaseUrl(env)}/mailbox/${encodeURIComponent(validated.emailName)}`;
+  }
 }
 
 // =======================================================================================
@@ -307,6 +343,17 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return getSupportedResourcesList(this.env);
   }
 
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    let resource = getEmailMailboxResource(this.env);
+    if (resourceUrlPattern !== resource.urlPattern) {
+      throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
+    }
+    return {
+      iframeHtml: EMAIL_CONFIGURATOR_HTML,
+      ui: new RpcStub(new EmailMailboxConfiguratorUI(this.env)),
+    };
+  }
+
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
@@ -315,24 +362,48 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     // URL format: <BASE_URL>/mailbox/<name>
     // Strip the base path prefix before checking for /mailbox/.
     let parsed = new URL(url);
+    let baseUrl = new URL(getBaseUrl(this.env));
+    if (parsed.origin !== baseUrl.origin) {
+      throw new Error(`URL origin ${parsed.origin} does not match email gatekeeper origin ${baseUrl.origin}`);
+    }
     let basePath = getBasePath(this.env);
     if (!parsed.pathname.startsWith(basePath + "/") && parsed.pathname !== basePath) {
       throw new Error(`URL path ${parsed.pathname} does not match BASE_URL path ${basePath}`);
     }
     let relPath = parsed.pathname.slice(basePath.length);
-    let emailName = relPath.slice("/mailbox/".length);
-    if (!relPath.startsWith("/mailbox/") || !emailName) {
+    let emailNameSegment = relPath.slice("/mailbox/".length);
+    if (!relPath.startsWith("/mailbox/") || !emailNameSegment) {
       throw new Error(`Invalid email URL: ${url}`);
     }
 
+    let decodedEmailName: string;
+    try {
+      decodedEmailName = decodeURIComponent(emailNameSegment);
+    } catch {
+      throw new Error(`Invalid email URL encoding: ${url}`);
+    }
+
+    let validated = validateEmailName(decodedEmailName);
+    if (!validated.ok) throw new Error(validated.message);
+    if (emailNameSegment !== encodeURIComponent(validated.emailName)) {
+      throw new Error(`Email URL is not canonical: ${url}`);
+    }
+    let emailName = validated.emailName;
+
     let userAccountId = this.ctx.props.userAccountId;
+    let userAccountDOId = this.ctx.exports.UserAccount.idFromString(userAccountId);
+    let userAccount = this.ctx.exports.UserAccount.get(userAccountDOId);
+    let emailAddress = this.ctx.exports.EmailAddress.getByName(emailName);
 
     // Claim the email address. EmailAddress is the source of truth for ownership, so we
     // check/claim there first, then record the association in UserAccount.
-    await this.ctx.exports.EmailAddress.getByName(emailName).claim(userAccountId);
-
-    let userAccountDOId = this.ctx.exports.UserAccount.idFromString(userAccountId);
-    await this.ctx.exports.UserAccount.get(userAccountDOId).addEmail(emailName);
+    let newlyClaimed = await emailAddress.claim(userAccountId);
+    try {
+      await userAccount.addEmail(emailName);
+    } catch (error) {
+      if (newlyClaimed) await emailAddress.releaseClaimAndHook(userAccountId);
+      throw error;
+    }
 
     let props: EmailGatekeeperImplProps = { emailName, userAccountId };
     return {class: this.ctx.exports.EmailGatekeeperImpl({ props }), resource: getEmailMailboxResource(this.env)};
@@ -389,7 +460,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
     return {
-      url: `${getBaseUrl(this.env)}/mailbox/${emailName}`,
+      url: `${getBaseUrl(this.env)}/mailbox/${encodeURIComponent(emailName)}`,
       title: `${emailName}@${host}`,
       snippet: `Receive emails sent to ${emailName}@${host}`,
       suggestedBindingName: "EMAIL",
@@ -443,13 +514,23 @@ export class EmailAddress extends DurableObject<Env> {
   // Claim this email address for a user account. The first caller to claim an address becomes
   // its permanent owner. Subsequent calls from the same owner are idempotent. Calls from a
   // different owner are rejected.
-  async claim(userAccountId: string): Promise<void> {
+  async claim(userAccountId: string): Promise<boolean> {
     let owner = this.ctx.storage.kv.get<string>("owner");
     if (owner && owner !== userAccountId) {
       throw new Error("This email address is claimed by another user");
     }
     if (!owner) {
       this.ctx.storage.kv.put("owner", userAccountId);
+      return true;
+    }
+    return false;
+  }
+
+  async releaseClaimAndHook(userAccountId: string): Promise<void> {
+    let owner = this.ctx.storage.kv.get<string>("owner");
+    if (owner === userAccountId) {
+      this.ctx.storage.kv.delete("owner");
+      this.ctx.storage.kv.delete("hook");
     }
   }
 

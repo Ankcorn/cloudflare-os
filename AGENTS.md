@@ -17,6 +17,8 @@ The project structure is:
 * packages/workshop-shared: Shared API definitions between client and server.
     * This defines the application's RPC interface.
     * The RPC protocol is Cap'n Web, which has similar semantics to Cloudflare's Worker-to-Worker RPC system, while being able to run in a browser over WebSocket. Read the readme for details.
+* packages/configurator-ui: Type-only component helpers used by optional gatekeeper resource configurator UI modules.
+    * Gatekeeper configurator UI modules are compiled by `scripts/build-gatekeeper-configurator.mjs` as part of package builds.
 * packages/gatekeeper-*: Gatekeeper workers for external service integrations.
     * Each gatekeeper runs as a separate Cloudflare Worker.
     * Gatekeepers handle OAuth flows and provide sandboxed access to external APIs.

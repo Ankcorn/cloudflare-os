@@ -244,9 +244,9 @@ function ConnectionsPage() {
         vendor: VendorDescription,
         _supportedResources: SupportedResource[] = [],
         credentialsValid: boolean = true,
+        vendorId: string = '',
       ) {
         if (cancelled) return;
-        const vendorId = vendor.displayName.toLowerCase().split(" ")[0];
         accountMap.set(id, {
           id,
           accountDescription: description,

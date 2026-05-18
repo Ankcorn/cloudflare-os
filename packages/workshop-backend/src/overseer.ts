@@ -3297,7 +3297,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         let appliedAt = record.type === "action" ? record.appliedAt : undefined;
         let recordTimestamp = (appliedAt ?? record.createdAt).valueOf();
         if (recordTimestamp > startAfterTimestamp) {
-          await subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
+          subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
         }
       }
     }

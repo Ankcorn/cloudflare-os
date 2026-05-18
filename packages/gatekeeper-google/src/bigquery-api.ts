@@ -6,8 +6,8 @@
 // `dryRun: true`; BigQuery's parser metadata is the authority for read-only and scope checks.
 
 import type {
-  BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryParam, BigQueryQueryOptions,
-  BigQueryQueryResult, BigQueryTable,
+  BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryParam, BigQueryProject,
+  BigQueryQueryOptions, BigQueryQueryResult, BigQueryTable,
 } from "./bigquery-types";
 
 const API_BASE = "https://bigquery.googleapis.com/bigquery/v2";
@@ -23,6 +23,19 @@ export const DEFAULT_MAX_BYTES_BILLED = 100 * 1024 * 1024 * 1024;  // 100 GB
 // caps each list response at 5,000 entries; callers needing more should narrow the scope
 // or paginate at a higher layer.
 const LIST_MAX_PAGES = 5;
+
+type ListOptions = {
+  maxPages?: number;
+  maxResults?: number;
+};
+
+function listPageLimit(options?: ListOptions): number {
+  return Math.max(1, Math.min(LIST_MAX_PAGES, Math.floor(options?.maxPages ?? LIST_MAX_PAGES)));
+}
+
+function listMaxResults(options?: ListOptions): string {
+  return String(Math.max(1, Math.min(DEFAULT_MAX_RESULTS, Math.floor(options?.maxResults ?? DEFAULT_MAX_RESULTS))));
+}
 
 // =============================================================================
 // REST shapes (only the fields we actually consume).
@@ -93,6 +106,16 @@ type RestDatasetsListResponse = {
     location?: string;
     friendlyName?: string;
   }[];
+};
+
+type RestProjectsListResponse = {
+  projects?: {
+    id: string;
+    friendlyName?: string;
+    numericId?: string;
+    projectReference?: { projectId?: string };
+  }[];
+  nextPageToken?: string;
 };
 
 type RestDatasetResource = {
@@ -261,6 +284,30 @@ async function callRest<T>(
 
 export class BigQueryApi {
   constructor(private getAccessToken: () => Promise<string>) {}
+
+  async listProjects(options?: ListOptions): Promise<BigQueryProject[]> {
+    let projects: BigQueryProject[] = [];
+    let pageToken: string | undefined;
+    let pages = 0;
+    let pageLimit = listPageLimit(options);
+    do {
+      let url = new URL(`${API_BASE}/projects`);
+      url.searchParams.set("maxResults", listMaxResults(options));
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      let resp = await callRest<RestProjectsListResponse>(
+        url.toString(), { method: "GET" }, this.getAccessToken);
+      for (let p of resp.projects ?? []) {
+        projects.push({
+          projectId: p.projectReference?.projectId ?? p.id,
+          friendlyName: p.friendlyName,
+          numericId: p.numericId,
+        });
+      }
+      pageToken = resp.nextPageToken;
+      pages++;
+    } while (pageToken && pages < pageLimit);
+    return projects;
+  }
 
   async #getQueryResults(
     projectId: string,
@@ -431,14 +478,15 @@ export class BigQueryApi {
     };
   }
 
-  async listDatasets(projectId: string): Promise<BigQueryDataset[]> {
+  async listDatasets(projectId: string, options?: ListOptions): Promise<BigQueryDataset[]> {
     let datasets: BigQueryDataset[] = [];
     let pageToken: string | undefined;
     let pages = 0;
+    let pageLimit = listPageLimit(options);
     do {
       let url = new URL(
           `${API_BASE}/projects/${encodeURIComponent(projectId)}/datasets`);
-      url.searchParams.set("maxResults", "1000");
+      url.searchParams.set("maxResults", listMaxResults(options));
       if (pageToken) url.searchParams.set("pageToken", pageToken);
       let resp = await callRest<RestDatasetsListResponse & { nextPageToken?: string }>(
         url.toString(), { method: "GET" }, this.getAccessToken);
@@ -452,7 +500,7 @@ export class BigQueryApi {
       }
       pageToken = resp.nextPageToken;
       pages++;
-    } while (pageToken && pages < LIST_MAX_PAGES);
+    } while (pageToken && pages < pageLimit);
     return datasets;
   }
 
@@ -470,15 +518,16 @@ export class BigQueryApi {
     };
   }
 
-  async listTables(projectId: string, datasetId: string): Promise<BigQueryTable[]> {
+  async listTables(projectId: string, datasetId: string, options?: ListOptions): Promise<BigQueryTable[]> {
     let tables: BigQueryTable[] = [];
     let pageToken: string | undefined;
     let pages = 0;
+    let pageLimit = listPageLimit(options);
     do {
       let url = new URL(
           `${API_BASE}/projects/${encodeURIComponent(projectId)}` +
           `/datasets/${encodeURIComponent(datasetId)}/tables`);
-      url.searchParams.set("maxResults", "1000");
+      url.searchParams.set("maxResults", listMaxResults(options));
       if (pageToken) url.searchParams.set("pageToken", pageToken);
       let resp = await callRest<RestTablesListResponse & { nextPageToken?: string }>(
         url.toString(), { method: "GET" }, this.getAccessToken);
@@ -494,7 +543,7 @@ export class BigQueryApi {
       }
       pageToken = resp.nextPageToken;
       pages++;
-    } while (pageToken && pages < LIST_MAX_PAGES);
+    } while (pageToken && pages < pageLimit);
     return tables;
   }
 

@@ -208,4 +208,3 @@
 .gadgets-diff-surface button.gadgets-deleted-omitted-row:hover {
   background: color-mix(in srgb, var(--gd-del-bg) 78%, white);
 }
-

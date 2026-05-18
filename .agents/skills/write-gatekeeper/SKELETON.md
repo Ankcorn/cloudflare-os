@@ -17,9 +17,11 @@ import {
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
+  ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { MySession, MyHook as MyHookIface } from "./types";  // Remove MyHook if no hooks
 import TYPES_CODE from "./types.txt";
+import MY_CONFIGURATOR_HTML from "./generated/my-configurator-ui.txt";
 
 const NONCE_BYTES = 32;
 const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
@@ -173,6 +175,13 @@ export class UserAccount extends DurableObject<Env> {
     }
   }
 
+  async getAccessToken(): Promise<string> {
+    // TODO: Return a cached short-lived token, refreshing credentials if needed.
+    let token = this.ctx.storage.kv.get<string>("credentials");
+    if (!token) throw new Error("No credentials set.");
+    return token;
+  }
+
   async alarm() {
     if (!this.ctx.storage.kv.get<string>("credentials")) {
       this.ctx.storage.deleteAll();
@@ -208,6 +217,23 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
     return [MY_RESOURCE];
   }
 
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    if (resourceUrlPattern !== MY_RESOURCE.urlPattern) {
+      throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
+    }
+    let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    let userAccount = this.ctx.exports.UserAccount.get(id);
+    let ui = new MyConfiguratorUI(async () => {
+      // TODO: Return a short-lived token or construct a read-only API client.
+      // Keep this helper private; do not expose it as an RPC method.
+      return await userAccount.getAccessToken();
+    });
+    return {
+      iframeHtml: MY_CONFIGURATOR_HTML,
+      ui: new RpcStub(ui),
+    };
+  }
+
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
@@ -229,6 +255,28 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     await this.ctx.exports.UserAccount.get(id).revoke();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Resource configurator — narrow iframe helper API
+
+const configuratorTokenGetters = new WeakMap<object, () => Promise<string>>();
+
+class MyConfiguratorUI extends RpcTarget {
+  constructor(getToken: () => Promise<string>) {
+    super();
+    configuratorTokenGetters.set(this, getToken);
+  }
+
+  async listResources(query: string): Promise<{ value: string; title: string }[]> {
+    let getToken = configuratorTokenGetters.get(this);
+    if (!getToken) throw new Error("Configurator is not initialized.");
+    let token = await getToken();
+    void token;
+    // TODO: Call read-only external APIs and return bounded search results.
+    return [{ value: query || "example", title: query || "Example" }];
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -373,3 +421,38 @@ class MySessionImpl extends RpcTarget implements MySession {
 cd packages/gatekeeper-<name>/src
 ln -s types.d.ts types.txt
 ```
+
+## Resource configurator files
+
+Add per-resource configurator types and UI modules:
+
+```
+src/configurator/my-configurator-types.d.ts
+src/configurator/my-configurator-types.txt -> my-configurator-types.d.ts
+src/configurator/my-configurator-ui.tsx
+```
+
+`my-configurator-types.d.ts` should describe the iframe helper API. The UI module's own `resourceUrl()` hook returns the resource URL to Workshop.
+
+```typescript
+export interface MyConfiguratorUI {
+  listResources(query: string): Promise<{ value: string; title: string }[]>;
+}
+```
+
+Add package scripts:
+
+```json
+{
+  "scripts": {
+    "build:configurator": "node ../../scripts/build-gatekeeper-configurator.mjs .",
+    "build": "pnpm run build:configurator && tsc",
+    "deploy": "pnpm run build:configurator && wrangler deploy"
+  },
+  "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*"
+  }
+}
+```
+
+Keep tokens and broad API clients out of public `RpcTarget` properties; use closures, `#private`, or `WeakMap` state and expose only narrow read-only helper methods.

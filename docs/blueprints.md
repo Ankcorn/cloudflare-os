@@ -42,7 +42,7 @@ All named bindings are included in the blueprint. Annotations are configured in 
 
 Blueprints support three types of bindings, matching the three types of gatekeepers:
 
-1. **Gatekeeper** (`type: "gatekeeper"`) -- an external resource connection (e.g. Google Drive, a REST API). The blueprint records the gatekeeper adapter name and a URL pattern describing what kind of resource is expected. When instantiating, the user picks a connected account and provides a resource URL.
+1. **Gatekeeper** (`type: "gatekeeper"`) -- an external resource connection (e.g. Google Drive, a REST API). The blueprint records the gatekeeper adapter name and a URL pattern describing what kind of resource is expected. When instantiating, the user picks a connected account and configures a matching resource.
 
 2. **AI Model** (`type: "aiModel"`) -- a language model binding. The blueprint may suggest a specific provider/model. When instantiating, the user picks from their own configured models.
 
@@ -132,7 +132,7 @@ When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprin
 2. It displays the title, description, author, version, and a summary of required bindings.
 3. If the user is not logged in, they see a "Log in to create a gadget" button.
 4. Once authenticated, the user enters **configure mode**, where they assign each required binding:
-   - For gatekeeper bindings: pick a connected account and provide a resource URL.
+   - For gatekeeper bindings: pick a connected account and configure the matching resource.
    - For AI model bindings: pick from their configured models.
    - For agent spawner bindings: pick a model (or none).
 5. Clicking "Create Gadget" calls `AuthenticatedApi.newGadgetFromBlueprint()`, which:

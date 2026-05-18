@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -736,7 +736,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
       seenIds.add(record.id);
       subscriber.add(record.id, record.description, record.vendorDescription,
-          supportedResources, credentialsValid).catch(unsubscribe)
+          supportedResources, credentialsValid, record.vendorId).catch(unsubscribe)
     }
 
     let dbSubscriber = {
@@ -795,7 +795,30 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.reconnect();
   }
 
+  async startResourceConfigurator(
+      accountId: number,
+      resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record) throw new Error("No such account.");
+    return record.account.startResourceConfigurator(resourceUrlPattern);
+  }
+
   async putConnectedAccount(record: ConnectedAccountRecord) {
+    let uniqueName = record.description.uniqueName;
+    if (uniqueName) {
+      for (let existing of this.storage.connectedAccounts.list()) {
+        if (existing.id !== record.id &&
+            existing.vendorId === record.vendorId &&
+            existing.description.uniqueName === uniqueName) {
+          // OAuth providers often return the currently logged-in identity when the user tries to
+          // add another account. Avoid showing duplicate account rows. Keep the existing account
+          // record stable for any UI references, and revoke the newly-created duplicate account.
+          await record.account.revoke();
+          return;
+        }
+      }
+    }
+
     this.storage.connectedAccounts.put(record);
   }
 
@@ -822,13 +845,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                 typeUrlPattern: string}> {
+                  typeUrlPattern: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
+
 }
 
 type GatekeeperConnectCallbackProps = {

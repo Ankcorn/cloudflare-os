@@ -8,8 +8,8 @@
 //   --use-workers-ai-binding   Include the Workers AI binding in
 //                               workshop-backend (requires Cloudflare login).
 
-import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
@@ -32,17 +32,66 @@ function findGatekeepers(parentDir) {
       } catch {
         return false;
       }
-    });
+    })
+        .map(name => ({ name, dir: join(parentDir, name) }));
   } catch {
     return [];
   }
 }
 
 const gatekeepers = findGatekeepers(PACKAGES_DIR);
+const configuratorUiWatchers = [];
+
+for (const gk of gatekeepers) {
+  const configuratorUiPath = join(gk.dir, "src", "configurator");
+  if (!existsSync(configuratorUiPath)) continue;
+
+  execFileSync(process.execPath, [
+    join(ROOT, "scripts", "build-gatekeeper-configurator.mjs"),
+    gk.dir,
+    "--quiet",
+  ], {
+    stdio: "inherit",
+    cwd: ROOT,
+  });
+
+  const watcher = spawn(process.execPath, [
+    join(ROOT, "scripts", "build-gatekeeper-configurator.mjs"),
+    gk.dir,
+    "--watch",
+    "--quiet",
+  ], {
+    stdio: "inherit",
+    cwd: ROOT,
+  });
+  watcher.on("exit", (code, signal) => {
+    if (stoppingConfiguratorUiWatchers) return;
+    console.error(
+        `configurator UI watcher for ${gk.name} exited unexpectedly ` +
+        `(code=${code}, signal=${signal}).`);
+  });
+  configuratorUiWatchers.push(watcher);
+}
+
+let stoppingConfiguratorUiWatchers = false;
+function stopConfiguratorUiWatchers() {
+  stoppingConfiguratorUiWatchers = true;
+  for (const watcher of configuratorUiWatchers) watcher.kill();
+}
+
+process.on("exit", stopConfiguratorUiWatchers);
+process.on("SIGINT", () => {
+  stopConfiguratorUiWatchers();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  stopConfiguratorUiWatchers();
+  process.exit(143);
+});
 
 // Helper: "gatekeeper-github" -> "GATEKEEPER_GITHUB"
-function bindingName(pkg) {
-  return pkg.toUpperCase().replaceAll("-", "_");
+function bindingName(gk) {
+  return gk.name.toUpperCase().replaceAll("-", "_");
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +103,7 @@ function bindingName(pkg) {
 
   config.services = config.services || [];
   for (const gk of gatekeepers) {
-    config.services.push({ binding: bindingName(gk), service: gk });
+    config.services.push({ binding: bindingName(gk), service: gk.name });
   }
 
   const outPath = join(ROOT, "wrangler.dev.jsonc");
@@ -79,7 +128,7 @@ function bindingName(pkg) {
   for (const gk of gatekeepers) {
     config.services.push({
       binding: bindingName(gk),
-      service: gk,
+      service: gk.name,
       entrypoint: "GatekeeperVendor",
     });
   }
@@ -100,7 +149,7 @@ function bindingName(pkg) {
 const configs = [
   "wrangler.dev.jsonc",
   join("packages", "workshop-backend", "wrangler.dev.jsonc"),
-  ...gatekeepers.map(gk => join("packages", gk, "wrangler.jsonc")),
+  ...gatekeepers.map(gk => join(gk.dir, "wrangler.jsonc")),
 ];
 
 const args = configs.flatMap(c => ["-c", c]);
