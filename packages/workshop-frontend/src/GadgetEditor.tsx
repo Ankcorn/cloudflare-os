@@ -9,6 +9,7 @@ import {
   Hexagon,
   Blueprint,
   Trash,
+  CornersOut,
 } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
@@ -149,6 +150,82 @@ export default function GadgetEditor() {
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
   const [previewMode, _setPreviewMode] = useState(false)
+
+  // Fullscreen gadget mode — renders the gadget iframe as an overlay covering the whole page.
+  // Tied to the URL hash (#fullscreen) so the state is bookmarkable and survives reloads.
+  const [isGadgetFullscreen, setIsGadgetFullscreen] = useState(
+    () => typeof window !== 'undefined' && window.location.hash === '#fullscreen'
+  )
+
+  useEffect(() => {
+    const onHashChange = () => {
+      setIsGadgetFullscreen(window.location.hash === '#fullscreen')
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  // Brief hint banner shown when entering fullscreen, instructing the user how to exit.
+  // We don't use the global Kumo toast manager here because the fullscreen overlay sits above
+  // it in stacking order (and toasts render bottom-right, not top-center).
+  const [showFullscreenHint, setShowFullscreenHint] = useState(false)
+  // Element that had focus before entering fullscreen; we restore focus to it on exit so
+  // keyboard users aren't stranded.
+  const focusBeforeFullscreenRef = useRef<HTMLElement | null>(null)
+  // Fullscreen overlay wrapper — we focus this on enter to move focus out of the now-occluded
+  // Enter button. From here, Tab moves into the iframe.
+  const fullscreenOverlayRef = useRef<HTMLDivElement>(null)
+
+  const enterGadgetFullscreen = useCallback(() => {
+    if (window.location.hash !== '#fullscreen') {
+      // pushState so the browser Back button also exits fullscreen — natural for many users
+      // and helpful for bookmarks: a bookmarked /gadget/foo#fullscreen can still go Back to a
+      // useful (non-fullscreen) state if there's prior history.
+      window.history.pushState(null, '', '#fullscreen')
+    }
+    focusBeforeFullscreenRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setIsGadgetFullscreen(true)
+    setShowFullscreenHint(true)
+  }, [])
+
+  // Auto-dismiss the hint a few seconds after entering fullscreen.
+  useEffect(() => {
+    if (!showFullscreenHint) return
+    const t = setTimeout(() => setShowFullscreenHint(false), 4000)
+    return () => clearTimeout(t)
+  }, [showFullscreenHint])
+
+  // Move focus into the overlay when entering fullscreen, and back to the prior element on exit.
+  useEffect(() => {
+    if (isGadgetFullscreen) {
+      fullscreenOverlayRef.current?.focus()
+    } else if (focusBeforeFullscreenRef.current) {
+      focusBeforeFullscreenRef.current.focus()
+      focusBeforeFullscreenRef.current = null
+    }
+  }, [isGadgetFullscreen])
+
+  const exitGadgetFullscreen = useCallback(() => {
+    if (window.location.hash === '#fullscreen') {
+      // Replace the hash without growing the history stack.
+      const { pathname, search } = window.location
+      window.history.replaceState(null, '', `${pathname}${search}`)
+    }
+    setIsGadgetFullscreen(false)
+  }, [])
+
+  // Escape exits fullscreen. When focus is in the workshop chrome this listener catches it
+  // directly; when focus is in the gadget iframe, the iframe forwards Escape via postMessage
+  // (see GadgetUI's `onIframeEscape`).
+  useEffect(() => {
+    if (!isGadgetFullscreen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') exitGadgetFullscreen()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isGadgetFullscreen, exitGadgetFullscreen])
 
   // ── code / chat state ────────────────────────────────────────────────────────
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
@@ -780,20 +857,55 @@ export default function GadgetEditor() {
                 {tab.label}
               </TabButton>
             ))}
+            {activeTab === 'app' && !previewMode && (
+              <WorkshopIconButton
+                aria-label="Enter full screen"
+                title="Full screen"
+                onClick={enterGadgetFullscreen}
+                className="ml-auto"
+              >
+                <CornersOut size={16} />
+              </WorkshopIconButton>
+            )}
           </div>
 
           {/* Tab content — all kept mounted to preserve state */}
           <div className="flex-1 min-h-0 overflow-hidden">
-            <div className={activeTab === 'app' && !previewMode ? 'h-full' : 'hidden'}>
+            <div
+              ref={fullscreenOverlayRef}
+              tabIndex={isGadgetFullscreen ? -1 : undefined}
+              role={isGadgetFullscreen ? 'dialog' : undefined}
+              aria-modal={isGadgetFullscreen ? true : undefined}
+              aria-label={isGadgetFullscreen ? 'Gadget full screen' : undefined}
+              className={
+                activeTab !== 'app' || previewMode
+                  ? 'hidden'
+                  : isGadgetFullscreen
+                    ? 'fixed inset-0 z-20 bg-kumo-base outline-none'
+                    : 'h-full'
+              }
+            >
               {overseer && !previewMode && (
                 <GadgetUI
                   overseer={overseer.stub}
-                  height={RIGHT_CONTENT_H}
+                  height={isGadgetFullscreen ? '100%' : RIGHT_CONTENT_H}
                   reloadTrigger={uiReloadTrigger}
                   isVisible={activeTab === 'app' && !previewMode}
                   chatId={previewChatId}
                   onConsoleLog={handleClientConsoleLog}
+                  onIframeEscape={isGadgetFullscreen ? exitGadgetFullscreen : undefined}
                 />
+              )}
+              {isGadgetFullscreen && showFullscreenHint && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="pointer-events-none absolute left-1/2 top-4 z-10 -translate-x-1/2 transform"
+                >
+                  <div className="rounded-full border border-kumo-line bg-kumo-base/90 px-4 py-1.5 text-[13px] leading-[18px] text-kumo-default shadow-md backdrop-blur-sm">
+                    Press <kbd className="rounded border border-kumo-line bg-kumo-elevated px-1.5 py-0.5 text-[11px] font-medium">Esc</kbd> to exit full screen
+                  </div>
+                </div>
               )}
             </div>
 

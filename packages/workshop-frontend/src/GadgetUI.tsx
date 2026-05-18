@@ -57,6 +57,15 @@ try {
   Window.prototype.open = blockedOpen;
 } catch {}
 
+// Forward Escape key presses to the parent frame. The sandboxed iframe captures keydown events
+// when it has focus, so the parent never sees them. The workshop UI uses Escape to exit fullscreen
+// gadget mode, so forward it explicitly.
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    window.parent.postMessage({ type: 'escape' }, '*');
+  }
+}, true);
+
 window.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) {
     return;
@@ -110,9 +119,12 @@ interface GadgetUIProps {
   isVisible?: boolean
   chatId?: number
   onConsoleLog?: (log: ConsoleLogEvent) => void
+  // Fires when the user presses Escape while the gadget iframe has focus. Sandboxed iframes
+  // capture keydown events, so we forward Escape explicitly from inside the iframe.
+  onIframeEscape?: () => void
 }
 
-export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId, onConsoleLog }: GadgetUIProps) {
+export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -123,6 +135,10 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
   // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
   const gadgetStubRef = useRef<any>(null)
   const rpcSessionRef = useRef<any>(null)
+  // Keep latest onIframeEscape in a ref so the message-handler effect doesn't need to
+  // re-subscribe (and tear down the RPC session) whenever the callback identity changes.
+  const onIframeEscapeRef = useRef(onIframeEscape)
+  useEffect(() => { onIframeEscapeRef.current = onIframeEscape }, [onIframeEscape])
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
@@ -219,6 +235,8 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
           level: event.data.level,
           message: event.data.message,
         })
+      } else if (event.data?.type === 'escape') {
+        onIframeEscapeRef.current?.()
       }
     }
 
