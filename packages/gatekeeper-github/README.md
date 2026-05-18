@@ -40,13 +40,12 @@ CLIENT_SECRET=your-client-secret-here
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. For the URL, enter a GitHub repository URL (e.g., `https://github.com/owner/repo`).
-6. Click **Next**.
-7. You will be prompted to connect an account. Click **GitHub**.
-8. You should be redirected to GitHub's authorization page in a new tab.
-9. After granting access, the tab closes, and you're back to Gadgets.
-10. The GitHub account you just connected should appear under **Your Accounts**. Click it.
-11. You now have access to that repository's issues, pull requests, and more.
+5. Choose a GitHub resource type: repository, issue, or pull request.
+6. If prompted, connect a GitHub account.
+7. You should be redirected to GitHub's authorization page in a new tab.
+8. After granting access, the tab closes, and you're back to Gadgets.
+9. Use the picker to choose the repository, issue, or pull request to connect.
+10. Create the connection. The Gadget now has access only to the selected GitHub resource scope.
 
 You can also see your connected accounts and add and remove them in the settings (accessed through the account menu in the upper-right).
 

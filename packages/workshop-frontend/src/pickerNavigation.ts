@@ -1,5 +1,5 @@
 // Shared keyboard handling for ResourcePicker navigation.
-// Used by both the inline CapsuleOverlay (ChatInterface) and the NewGatekeeperModal.
+// Used by both the inline CapsuleOverlay (ChatInterface) and the GatekeeperModal.
 
 import type React from 'react'
 import type { MutableRefObject, Dispatch, SetStateAction } from 'react'

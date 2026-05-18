@@ -7,6 +7,7 @@ import {
   type GatekeeperConnectCallback,
   type GatekeeperUser,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
@@ -24,7 +25,6 @@ import {
   type GitHubPullRequestResponse,
   type GitHubPullRequestReviewCommentResponse,
   type GitHubPullRequestReviewResponse,
-  type GitHubRepoResponse,
 } from "./github-api";
 import type {
   Cursor,
@@ -64,6 +64,14 @@ import type {
   GitHubSubmittedDiffComment,
 } from "./types";
 import TYPES_CODE from "./types.txt";
+import {
+  GitHubIssueConfiguratorUI,
+  GitHubPullRequestConfiguratorUI,
+  GitHubRepoConfiguratorUI,
+} from "./github-configurators";
+import GITHUB_ISSUE_CONFIGURATOR_HTML from "./generated/github-issue-configurator-ui.txt";
+import GITHUB_PULL_REQUEST_CONFIGURATOR_HTML from "./generated/github-pull-request-configurator-ui.txt";
+import GITHUB_REPO_CONFIGURATOR_HTML from "./generated/github-repo-configurator-ui.txt";
 
 type Env = Cloudflare.Env & {
   BASE_URL?: string;
@@ -272,9 +280,9 @@ const PULL_REQUEST_RESOURCE: SupportedResource = {
 };
 
 const SUPPORTED_RESOURCES: SupportedResource[] = [
+  REPO_RESOURCE,
   ISSUE_RESOURCE,
   PULL_REQUEST_RESOURCE,
-  REPO_RESOURCE,
 ];
 
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
@@ -1213,6 +1221,39 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       class: this.ctx.exports.GitHubGatekeeperImpl({ props }),
       resource,
     };
+  }
+
+  async startResourceConfigurator(
+    resourceUrlPattern: string,
+  ): Promise<ResourceConfiguratorFrame> {
+    const getToken = async () => {
+      const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+      const account = this.ctx.exports.UserAccount.get(id);
+      return await account.getAccessToken();
+    };
+
+    if (resourceUrlPattern === REPO_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GITHUB_REPO_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GitHubRepoConfiguratorUI(getToken)),
+      };
+    }
+
+    if (resourceUrlPattern === ISSUE_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GITHUB_ISSUE_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GitHubIssueConfiguratorUI(getToken)),
+      };
+    }
+
+    if (resourceUrlPattern === PULL_REQUEST_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GITHUB_PULL_REQUEST_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GitHubPullRequestConfiguratorUI(getToken)),
+      };
+    }
+
+    throw new Error(`Unsupported GitHub resource configurator type: ${resourceUrlPattern}`);
   }
 
   async revoke(): Promise<void> {

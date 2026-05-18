@@ -201,6 +201,7 @@ export default function OnboardingWizard({
         vendor: VendorDescription,
         _supportedResources: SupportedResource[] = [],
         _credentialsValid: boolean = true,
+        _vendorId: string = '',
       ) {
         if (cancelled) return
         const url = vendor.url

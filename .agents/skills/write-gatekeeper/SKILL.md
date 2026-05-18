@@ -66,6 +66,7 @@ Package structure:
 ```
 packages/gatekeeper-<name>/
 ├── src/
+│   ├── configurator/         # Optional resource-picker UI modules and UI-facing types
 │   ├── <name>.ts              # Vendor, UserAccount, UserImpl, GatekeeperImpl, SessionImpl
 │   ├── types.d.ts             # Session/Hook types (compile-time)
 │   ├── types.txt -> types.d.ts  # Symlink (runtime, for getTypeScriptTypes())
@@ -88,7 +89,29 @@ Add a service binding to `packages/workshop-backend/wrangler.jsonc`:
 
 The backend auto-discovers vendors from `GATEKEEPER_`-prefixed bindings (see `packages/workshop-backend/src/user.ts`).
 
-### Step 6: STOP — Ask operator whether to proceed to phase 2
+### Step 6: Add resource selection UI
+
+Add a resource selection UI for each resource type returned in `getSupportedResources()`. This will be used by users to select the specific resource.
+
+- Workshop calls `GatekeeperUser.startResourceConfigurator(resourceUrlPattern)` with the selected resource's `urlPattern`.
+- Return `iframeHtml` of the selection UI and `ui` for any RPCs that UI needs.
+- When the user selects "Add connection", Workshop asks the iframe for the selected resource URL.
+
+Keep the iframe-facing capability narrow, only what's necessary to provide desired interface to help user find and select the resource.
+
+#### Optional helper: `@gadgets/configurator-ui`
+
+For simple configuration UIs, consider using `@gadgets/configurator-ui`. It provides the basic form components that look consistent to the Gadget Workshop and a build script that turns `src/configurator/*-ui.tsx` into `iframeHtml`. Gatekeepers with more specialized UI needs can produce their own `iframeHtml`.
+
+If you use this:
+
+- UI modules live in `src/configurator/*-ui.tsx`.
+- `resourceUrl()` returns the selected resource URL.
+- `src/configurator/*-types.d.ts` describes the iframe-facing `ui` API.
+- `scripts/build-gatekeeper-configurator.mjs` generates `src/generated/*.txt`.
+- Package `build` / `deploy` scripts should run `pnpm run build:configurator`.
+
+### Step 7: STOP — Ask operator whether to proceed to phase 2
 
 The operator may prefer to implement phase 2 later, perhaps in a new context. Stop here and ask the operator whether to proceed.
 
@@ -134,7 +157,7 @@ Choose based on the service's data model and the complexity of simulating each a
 
 Keep in mind that the agent calling the API (or the agent writing a gadget to call it) is generally not aware that actions do not take place immediately. If the simulation is correct, the agent doesn't need to be aware. If the simulation has gaps, you may want to mention it in your API's doc comments, so that the calling agent knows to work around them — but ideally there are no gaps and the calling agent does not need to think about it.
 
-> **TODO:** No existing gatekeeper implements caching or simulation yet. Update this section with references to concrete implementations once they exist.
+For concrete examples, see the Google gatekeeper's Google Docs simulation/cache handling and BigQuery dry-run scope enforcement.
 
 ## Tips
 
@@ -150,6 +173,6 @@ Keep in mind that the agent calling the API (or the agent writing a gadget to ca
 
 ## Reference implementations
 
-- `packages/gatekeeper-google/` — OAuth, multiple resource types (Gmail + Google Docs), actions, two Session types.
+- `packages/gatekeeper-google/` — OAuth, multiple resource types (Gmail, Google Docs, BigQuery), actions, caching/simulation examples, multiple Session types.
 - `packages/gatekeeper-email/` — Hook-based push notifications, no actions (`Action = never`), email address claiming.
 - `packages/workshop-shared/src/gatekeeper.ts` — Canonical interfaces with detailed JSDoc.

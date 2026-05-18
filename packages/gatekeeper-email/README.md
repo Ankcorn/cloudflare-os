@@ -21,9 +21,14 @@ Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime)
 
 1. Start the dev server (see root README).
 2. Create or open a Gadget.
-3. In the chat, paste a URL like: `http://localhost:8787/gatekeeper/email/mailbox/myinbox`
-4. This represents the email address `myinbox@<host>`.
-5. The binding will appear as `EMAIL` (the suggested name).
+3. Navigate to the **Connections** tab.
+4. Click **+ New Connection**.
+5. Choose **Email Mailbox**.
+6. Enter the mailbox local part, e.g. `myinbox`.
+7. This represents the email address `myinbox@<host>`.
+8. The binding will appear as `EMAIL` (the suggested name).
+
+Mailbox names are canonicalized to lowercase. They may contain letters, numbers, dots, underscores, plus signs, or hyphens, and cannot start or end with a dot or contain consecutive dots.
 
 The binding provides an `EmailSession` interface with a single method:
 
@@ -78,7 +83,7 @@ This is a test email body.'
 ```
 
 The `to` address's local part (`myinbox`) determines which `EmailAddress` Durable Object receives the email. Make sure:
-- You have a Gadget with a binding for `http://localhost:8787/gatekeeper/email/mailbox/myinbox`
+- You have a Gadget with an Email Mailbox binding for `myinbox@<host>`
 - The binding has a hook connected via `setBindingHook`
 
 If no hook is configured for that address, the email will be rejected.

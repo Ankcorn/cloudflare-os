@@ -70,9 +70,11 @@ The Workshop will search from among available Gatekeeper implementations for one
 
 The Workshop instantiates the Gatekeeper and displays to the user basic information about the resource, so that the user can verify they are connecting to the right thing. (If the user has never used this Gatekeeper before, the Workshop may need to direct the user to an OAuth flow to grant access -- this grants the Workshop itself access to the given service on behalf of the user, but does NOT grant permissions to a specific Gadget.)
 
-Once the user submits the chat message to the AI agent containing a resource URLs, the Gatekeeper is then exposed to the Gadget. The agent can query its schema to learn what operations it provides and what permissions are required for each operation. The agent is then able to decide what particular permissions it needs, and can request those permissions. When it does so, the user is presented with a prompt rendered inline within the chat, outlining what permissions are requested, and asking them to approve or deny the request. The user can also open an advanced dialog in which they can specify which actions should require human-in-the-loop approval when used.
+The user can also add a connection from the Workshop's connections UI. The Workshop shows a UI supplied by the Gatekeeper to guide the user through selecting a resource. When the user confirms, the Workshop gets the resource URL from the UI and uses it to instantiate the Gatekeeper.
 
-Once a connection made and permissions are set, the agent can use the connection directly via tool calls, and the connection can also be invoked by the Gadget's code as an `env` binding exposing an RPC interface.
+Once the user submits the chat message to the AI agent containing a resource URL, the Gatekeeper is then exposed to the Gadget. The agent can query its schema to learn what operations it provides and what permissions are required for each operation. The agent is then able to decide what particular permissions it needs, and can request those permissions. When it does so, the user is presented with a prompt rendered inline within the chat, outlining what permissions are requested, and asking them to approve or deny the request. The user can also open an advanced dialog in which they can specify which actions should require human-in-the-loop approval when used.
+
+Once a connection is made and permissions are set, the agent can use the connection directly via tool calls, and the connection can also be invoked by the Gadget's code as an `env` binding exposing an RPC interface.
 
 ## Editing code
 

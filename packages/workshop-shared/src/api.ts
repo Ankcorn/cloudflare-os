@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, SupportedResource, VendorDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -92,7 +92,7 @@ export interface ConnenctedAccountsSubscriber {
   // If `credentialsValid` is false, the account's credentials are known to be expired, and the
   // UI should call reconnectAccount() to fix this if the user tries to select this account.
   add(id: number, description: AccountDescription, vendor: VendorDescription,
-      supportedResources: SupportedResource[], credentialsValid: boolean): void;
+      supportedResources: SupportedResource[], credentialsValid: boolean, vendorId: string): void;
   remove(id: number): void;
 
   // Called after add() has been called for all accounts known so far.
@@ -214,6 +214,15 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Remove a connected account, revoking the token.
   disconnectAccount(accountId: number): Promise<void>;
+
+  // Get the UI used to choose a specific resource from a connected account.
+  //
+  // `accountId` is the user's connected account that provides this resource.
+  // `resourceUrlPattern` is the `urlPattern` associated with the supported resource.
+  startResourceConfigurator(
+    accountId: number,
+    resourceUrlPattern: string,
+  ): Promise<ResourceConfiguratorFrame>;
 
   // Remove a shared gadget from the user's home page listing. Does NOT revoke the user's
   // access -- if they open the gadget again (e.g., via link), it reappears on their home page.

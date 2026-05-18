@@ -25,9 +25,9 @@ export default function ConnectionChips() {
     const accountMap = new Map<number, ConnectedAccount>()
 
     class ChipsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
-      add(id: number, description: AccountDescription, vendor: VendorDescription, _supportedResources: SupportedResource[] = [], _credentialsValid: boolean = true) {
+      add(id: number, description: AccountDescription, vendor: VendorDescription, _supportedResources: SupportedResource[] = [], _credentialsValid: boolean = true, vendorId: string = '') {
         if (cancelled) return
-        const logoKey = vendor.displayName.toLowerCase().split(' ')[0]
+        const logoKey = vendorId
         accountMap.set(id, {
           id,
           name: description.displayName ?? description.uniqueName ?? vendor.displayName,

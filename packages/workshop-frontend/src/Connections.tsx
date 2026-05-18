@@ -9,7 +9,7 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperMetadata, AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import NewGatekeeperModal from './NewGatekeeperModal'
+import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { EmptyState } from './components/EmptyState'
@@ -245,7 +245,7 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
         </section>
       </div>
 
-      <NewGatekeeperModal
+      <GatekeeperModal
         open={isNewConnectionModalVisible}
         onClose={() => setIsNewConnectionModalVisible(false)}
         getOverseer={() => overseer}

@@ -18,6 +18,7 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
+// A small image used to identify a vendor, account, or resource type in the UI.
 export type AvatarImage = {
   url: string;
 }
@@ -89,8 +90,8 @@ export type ResourceDescription = {
   hookTsType?: string;
 }
 
-// Describes a type of resource that a vendor can provide access to. Each entry represents a
-// category of resource (e.g. "Jira Issue", "Gmail Mailbox") rather than a specific instance.
+// Describes a kind of resource that a vendor can provide access to (e.g. "Jira Issue", "Gmail
+// Mailbox") rather than a specific instance.
 export type SupportedResource = {
   // URLPattern string for matching URLs, e.g. "https://jira.cfdata.org/*"
   urlPattern: string;
@@ -100,6 +101,57 @@ export type SupportedResource = {
 
   // Short description of what this resource provides.
   description: string;
+
+  // Optional icon for display in Workshop UI.
+  icon?: AvatarImage;
+}
+
+// RPC interface exposed by the resource selection/configuration iframe to Workshop.
+export interface ResourceConfiguratorIframe extends RpcTarget {
+  // Return the resource URL chosen by iframe. Workshop calls this when user selects
+  // `Add connection`.
+  collectResourceUrl(): Promise<string>;
+
+  // Tell the iframe where it sits in parent viewport. This is used by some configuration UIs
+  // to determine height of dropdowns.
+  //
+  // `iframeTop` is the iframe's top edge in the parent viewport.
+  // `viewportHeight` is the visible height of the parent window.
+  updateViewport(iframeTop: number, viewportHeight: number): void;
+
+  // Tell the iframe that the parent window was resized. This is used by some configuration UIs
+  // to close open autocomplete dropdowns.
+  windowResized(): void;
+}
+
+// RPC interface exposed by Workshop to the selection/configuration iframe.
+export interface ResourceConfiguratorHost extends RpcTarget {
+  gatekeeper: RpcStub<RpcTarget>;
+
+  // Update the parent's iframe sizing to match content in selection/configuration UI.
+  // This lets iframe behave like part of the modal while still rendering floating UI naturally.
+  //
+  // `layoutHeight` is the height reserved for the configuration UI in the connections modal.
+  // `height` is the full iframe height, which may be larger when floating UI like autocomplete
+  // dropdowns need to render over the modal footer without pushing layout down.
+  resize(height: number, layoutHeight: number): void;
+
+  // Tell Workshop whether the current selection is ready to submit.
+  // Workshop uses this to determine whether `Add connection` button should be enabled/disabled.
+  setSelectionReady(ready: boolean): void;
+
+  // Forward scroll gestures from iframe to parent.
+  // Otherwise, when the cursor is over the configuration UI, scroll gestures are swallowed by the iframe
+  // when user expects the connections modal to scroll.
+  forwardScroll(deltaX: number, deltaY: number): void;
+}
+
+export type ResourceConfiguratorFrame = {
+  // Complete HTML for the resource selection/configuration UI. Workshop hosts it in a sandboxed iframe.
+  iframeHtml: string;
+
+  // Capability exposed to the iframe for any RPCs needed by UI.
+  ui: RpcStub<RpcTarget>;
 }
 
 // The root interface of an Adapter, as provided to the Gadget Workshop.
@@ -211,6 +263,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }>;
+
+  // Get the UI used to choose a specific resource.
+  // `resourceUrlPattern` is the `urlPattern` associated with the supported resource.
+  startResourceConfigurator(
+    resourceUrlPattern: string,
+  ): Promise<ResourceConfiguratorFrame>;
 
   // Revoke this account connection. The GatekeeperUser, and all Gatekeepers created through it,
   // become broken.

@@ -3,6 +3,7 @@ node_modules/
 
 # Build outputs
 dist/
+packages/gatekeeper-*/src/generated/
 
 # TypeScript build info
 *.tsbuildinfo

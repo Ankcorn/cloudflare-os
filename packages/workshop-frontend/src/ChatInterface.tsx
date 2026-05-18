@@ -60,7 +60,7 @@ import {
 import { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
-import NewGatekeeperModal from "./NewGatekeeperModal";
+import GatekeeperModal from "./GatekeeperModal";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
@@ -782,7 +782,7 @@ export const ChatInput = ({
     setAttachModalOpen(true);
   };
 
-  // Called by the NewGatekeeperModal when a gatekeeper is created via the attach flow.
+  // Called by the GatekeeperModal when a gatekeeper is created via the attach flow.
   // Inserts a capsule at the previously-saved cursor position.
   const handleAttachCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
     try {
@@ -1309,7 +1309,7 @@ export const ChatInput = ({
         </div>
       </div>
 
-      <NewGatekeeperModal
+      <GatekeeperModal
         open={attachModalOpen}
         onClose={() => setAttachModalOpen(false)}
         getOverseer={getOverseer}
@@ -4089,7 +4089,7 @@ function ChatInterface({
                       const lastActiveChange = lastDurablePendingChange;
                       if (!lastActiveChange) return null;
                       return (
-                        <div className="relative flex items-center gap-3 overflow-hidden rounded-t-2xl border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+                        <div className="relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
                           <Tooltip content="Accept changes to apply them to the gadget." asChild>
                             <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">

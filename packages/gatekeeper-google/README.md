@@ -27,9 +27,14 @@ You'll need to enable the Google APIs that you want to use. Currently supported:
 5. Go back to the Library, search for "Google Docs API"
 6. Click on **Google Docs API** in the results
 7. Click **Enable**
-8. Go back to the Library, search for "BigQuery API"
-9. Click on **BigQuery API** in the results
+8. Go back to the Library, search for "Google Drive API"
+9. Click on **Google Drive API** in the results
 10. Click **Enable**
+11. Go back to the Library, search for "BigQuery API"
+12. Click on **BigQuery API** in the results
+13. Click **Enable**
+
+The Google Drive API is used only to search and display document metadata in the resource picker. Document reads and edits still go through the Google Docs API.
 
 ### Step 3: Configure the OAuth Consent Screen
 
@@ -43,6 +48,14 @@ Before creating credentials, you must configure how the consent screen appears t
    - Details are largely optional / irrelevant here, since this app will run it testing mode.
    - Click **Save and Continue**
 5. On the Scopes page, you can just click **Save and Continue** without adding anything. The scopes are specified by the OAuth request itself, not the console configuration. (The console's scope UI is only relevant if you later want to publish your app for Google's verification review.)
+
+The OAuth request currently asks for:
+
+- `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
+- `gmail.labels` and `gmail.modify` for Gmail thread reads and label changes.
+- `documents` for Google Docs reads and edits.
+- `drive.metadata.readonly` so the resource picker can search Google Docs by title.
+- `bigquery` for BigQuery dry-runs and queries. This is intentionally broader than `bigquery.readonly` because dry-runs use `jobs.insert`; the gatekeeper enforces read-only SQL and resource scope checks before running queries.
 
 ### Step 4: Test Users
 
@@ -85,14 +98,13 @@ Replace the values with the credentials from Step 4.
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. For the URL, enter: `https://mail.google.com/`
-6. Click **Next**.
-7. You will be prompted to connect an account. Click **Google**.
-8. You should be redirected to Google's consent screen in a new tab.
-9. The consent screen acts extra-scary since this is an "unverified" test app.
-10. After granting access, the tab closes, and you're back to Gadgets.
-11. If you successfully authorized, the Google account you just added should appear under **Your Accounts**. Click it.
-12. You now have a `GMAIL_INBOX` binding. Ask the agent what it can do, or ask it to write a gadget using it.
+5. Choose a Google resource type: Gmail, Google Doc, or BigQuery.
+6. If prompted, connect a Google account.
+7. You should be redirected to Google's consent screen in a new tab.
+8. The consent screen acts extra-scary since this is an "unverified" test app.
+9. After granting access, the tab closes, and you're back to Gadgets.
+10. Use the picker to choose the mailbox scope, document, project, dataset, or table to connect.
+11. Create the connection. Ask the agent what it can do, or ask it to write a gadget using the new binding.
 
 You can also see your connected accounts and add and remove them in the settings (accessed through the account menu in the upper-right).
 
