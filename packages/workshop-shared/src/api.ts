@@ -958,6 +958,18 @@ export type AiToolCall = {
     error: string;
   };
 } | {
+  toolName: "webFetch";
+  input: {
+    url: string;
+    // If true, return the raw response body without Markdown conversion.
+    raw?: boolean;
+  };
+
+  // Output, if the fetch actually completed. (Otherwise, `error` should be present.) This is
+  // stored so that the agent's chat history can be replayed without re-issuing the fetch.
+  // Formatted as a YAML-frontmatter header followed by the body (see formatWebFetchResult).
+  output?: string;
+} | {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
   toolName: "observeUserChanges";
   input: {};

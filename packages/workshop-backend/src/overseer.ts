@@ -6,7 +6,9 @@ import { createTypedStorage, collection, keyString } from "@gadgets/typed-storag
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
+import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
+import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 
@@ -171,6 +173,13 @@ type ShareKeyRecord = {
   created: Date;
   createdBy: string; // profile.id of the creator
 };
+
+// Sentinel gatekeeperId used on ActionRecords that originated from built-in agent tools
+// (e.g. webFetch) rather than from a real gatekeeper. Real gatekeeper IDs are assigned
+// starting at 1, so -1 is a safe out-of-band marker. Only "observation" records ever carry
+// this value; observations never go through the approve/reject paths that would dereference
+// the gatekeeper, so no lookup is ever attempted.
+const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 
 type ActionRecord = {
   id: number,
@@ -1036,6 +1045,57 @@ class OverseerImpl implements AgentHooks {
       bindingName: gatekeeper?.bindingName,
       resourceTitle: gatekeeper?.resourceTitle,
       resourceUrl: gatekeeper?.resourceUrl,
+      createdAt: new Date(),
+      state: "approved",
+      type: "observation",
+      description
+    };
+
+    this.storage.actions.put(record);
+    this.#associateAction(caller, actionId);
+  }
+
+  // Provides web-fetch with the Workers AI binding and AI Gateway config it needs to call
+  // `env.WORKERS_AI.toMarkdown()`. The initiator is needed for AI Gateway metadata.
+  getWebFetchEnv(): WebFetchEnv {
+    if (this.storage.prohibitAllSharing.get()) {
+      // TODO: Disallwing fetches is a bit draconian. Ideally, we would have some way to detect
+      //   if a URL is well-known, and therefore not a leak problem. E.g. if the URL is already in
+      //   a search index, then it's not leaking anything. If we had a search provider we could
+      //   trust... for now though, we will be extra-careful specifically when prohibiting sharing.
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget is prohibited " +
+          "from fetching from public web sites.");
+    }
+
+    return {
+      ai: this.env.WORKERS_AI,
+      gateway: getAiGatewayConfig(this.env),
+    };
+  }
+
+  // Record an observation that originated from a built-in agent tool (not a gatekeeper).
+  // The `gatekeeperId` is set to the BUILTIN_TOOL_GATEKEEPER_ID sentinel so that downstream
+  // code (which expects a gatekeeper to dereference for approve/reject) never touches it —
+  // observations bypass the approve/reject paths anyway.
+  async recordAgentObservation(
+      chatId: number,
+      bindingName: string,
+      resourceTitle: string,
+      resourceUrl: string | undefined,
+      description: ObservationDescription): Promise<void> {
+    let caller: GatekeeperCaller = {from: "agent", chatId};
+
+    let actionId = this.storage.nextActionId.get();
+    this.storage.nextActionId.put(actionId + 1);
+
+    let record: ActionRecord = {
+      id: actionId,
+      gatekeeperId: BUILTIN_TOOL_GATEKEEPER_ID,
+      caller,
+      bindingName,
+      resourceTitle,
+      resourceUrl,
       createdAt: new Date(),
       state: "approved",
       type: "observation",

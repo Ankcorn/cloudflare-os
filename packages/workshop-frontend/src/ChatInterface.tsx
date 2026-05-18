@@ -369,6 +369,15 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
     }
     case "giveUp":
       return { verb: "giveUp" };
+    case "webFetch": {
+      let target = tc.input.url;
+      try {
+        target = new URL(tc.input.url).host;
+      } catch {
+        // Leave as the raw URL.
+      }
+      return { verb: "webFetch", target };
+    }
     case "observeUserChanges":
       return { verb: "observeUserChanges" };
   }

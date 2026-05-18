@@ -3,7 +3,25 @@
   "name": "workshop-backend",
   "main": "src/server.ts",
   "compatibility_date": "2026-02-02",
-  "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
+
+  // `global_fetch_strictly_public` makes the global fetch() function strictly fetch from
+  // the public internet in production, rather than the legacy behavior in which same-zone
+  // requests go directly to origin bypassing Cloudflare. This flag is important to protect
+  // against SSRF, particularly in the webFetch agent tool, but also generally.
+  //
+  // When self-hosting with `workerd` stand-alone, it is already the default behavior that the
+  // global fetch() function blocks private-network IP addresses or hostnames that resolve to such
+  // addresses.
+  //
+  // Note that `wrangler dev` intentionally reconfigures its global outbound to permit fetching
+  // from any address (so local services on localhost stay reachable), so this flag effectively
+  // only takes effect in production or when running workerd stand-alone. That's an acceptable
+  // tradeoff for dev.
+  "compatibility_flags": [
+    "experimental",
+    "allow_irrevocable_stub_storage",
+    "global_fetch_strictly_public"
+  ],
 
   // Gatekeeper service bindings and the Workers AI binding are dynamically
   // added by run-dev-server.js (for dev) and generate-wrangler-prod.js (for
