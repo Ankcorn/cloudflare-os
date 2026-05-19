@@ -1,7 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect, useRef } from "react";
-import { Button, Dialog, useKumoToastManager } from "@cloudflare/kumo";
-import { MagnifyingGlass, ArrowsClockwise, PlugsConnected, Plug } from "@phosphor-icons/react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { Button, Dialog, DropdownMenu, useKumoToastManager } from "@cloudflare/kumo";
+import {
+  MagnifyingGlass,
+  ArrowsClockwise,
+  PlugsConnected,
+  Plug,
+  Plus,
+  CaretDown,
+  Sparkle,
+} from "@phosphor-icons/react";
 import { useAuthenticatedApi } from "../AuthContext";
 import { logoComponents } from "../components/ConnectionLogos";
 import {
@@ -149,49 +157,108 @@ function ConnectedAccountCard({
   );
 }
 
-function AvailableVendorCard({
-  vendor,
+function AddConnectionMenu({
+  vendors,
   onConnect,
+  triggerLabel = "Add connection",
 }: {
-  vendor: VendorEntry;
-  onConnect: () => void;
+  vendors: VendorEntry[];
+  onConnect: (vendorId: string) => void;
+  triggerLabel?: string;
 }) {
-  const Logo = logoComponents[vendor.logoKey];
+  const sortedVendors = useMemo(
+    () =>
+      [...vendors].sort((a, b) =>
+        a.description.displayName.localeCompare(b.description.displayName),
+      ),
+    [vendors],
+  );
 
   return (
-    <div className="rounded-xl border border-kumo-line bg-kumo-base p-4 hover:border-kumo-fill transition-colors">
-      <div className="flex items-start gap-3">
-        <div
-          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: vendor.bgColor }}
-        >
-          {Logo ? (
-            <Logo size={20} />
-          ) : (
-            <span className="text-sm font-bold text-kumo-strong">
-              {vendor.description.displayName[0]}
-            </span>
-          )}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-kumo-default">
-              {vendor.description.displayName}
-            </span>
+    <DropdownMenu>
+      <DropdownMenu.Trigger
+        render={
+          <Button variant="primary" size="base">
+            <Plus size={16} className="mr-1.5" />
+            {triggerLabel}
+            <CaretDown size={14} className="ml-1.5 opacity-70" />
+          </Button>
+        }
+      />
+      <DropdownMenu.Content
+        align="end"
+        sideOffset={6}
+        className="min-w-[280px] max-h-[60vh] overflow-y-auto p-1"
+      >
+        {sortedVendors.length === 0 ? (
+          <div className="px-3 py-2 text-xs text-kumo-subtle">
+            No connection types available.
           </div>
-          <p className="text-xs text-kumo-subtle mt-0.5">
-            {vendor.description.url}
-          </p>
+        ) : (
+          sortedVendors.map((vendor) => {
+            const Logo = logoComponents[vendor.logoKey];
+            return (
+              <DropdownMenu.Item
+                key={vendor.id}
+                onClick={() => onConnect(vendor.id)}
+                className="!h-auto !px-2 !py-2 !text-sm"
+                icon={
+                  <div
+                    className="mr-3 w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 border border-kumo-line/60"
+                    style={{ backgroundColor: vendor.bgColor }}
+                  >
+                    {Logo ? (
+                      <Logo size={16} />
+                    ) : (
+                      <span className="text-[11px] font-bold text-kumo-strong">
+                        {vendor.description.displayName[0]}
+                      </span>
+                    )}
+                  </div>
+                }
+              >
+                <span className="font-medium text-kumo-default">
+                  {vendor.description.displayName}
+                </span>
+              </DropdownMenu.Item>
+            );
+          })
+        )}
+      </DropdownMenu.Content>
+    </DropdownMenu>
+  );
+}
+
+function EmptyState({
+  vendors,
+  onConnect,
+}: {
+  vendors: VendorEntry[];
+  onConnect: (vendorId: string) => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-dashed border-kumo-line bg-kumo-elevated/40 py-16 px-6 flex flex-col items-center text-center">
+      <div className="relative mb-5">
+        <div className="w-16 h-16 rounded-2xl bg-kumo-base border border-kumo-line flex items-center justify-center shadow-sm">
+          <PlugsConnected size={28} className="text-kumo-brand" weight="duotone" />
+        </div>
+        <div className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-kumo-base border border-kumo-line flex items-center justify-center">
+          <Sparkle size={12} weight="fill" className="text-kumo-brand" />
         </div>
       </div>
-      <div className="flex items-center justify-between mt-4 pt-3 border-t border-kumo-fill">
-        <span className="flex items-center gap-1 text-xs text-kumo-subtle">
-          <Plug size={14} />
-          Not connected
-        </span>
-        <Button variant="primary" size="sm" onClick={onConnect}>
-          Connect
-        </Button>
+      <h2 className="text-lg font-semibold text-kumo-default">
+        Connect your first service
+      </h2>
+      <p className="mt-2 text-sm text-kumo-subtle max-w-md">
+        Link accounts like Google, GitHub, Slack and more so your Gadgets can read,
+        write and act on your behalf — all within a sandboxed connection you control.
+      </p>
+      <div className="mt-6">
+        <AddConnectionMenu
+          vendors={vendors}
+          onConnect={onConnect}
+          triggerLabel="Add your first connection"
+        />
       </div>
     </div>
   );
@@ -201,17 +268,23 @@ function ConnectionsPage() {
   const { authenticatedApi } = useAuthenticatedApi();
   const toasts = useKumoToastManager();
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<"all" | "connected" | "available">(
-    "all",
-  );
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
   const [vendors, setVendors] = useState<VendorEntry[]>([]);
   const [loadError, setLoadError] = useState(false);
+  const [accountsReady, setAccountsReady] = useState(false);
   const subscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const accountMap = new Map<number, AccountEntry>();
+
+    // Reset state so that a re-run (e.g. authenticatedApi changing after
+    // re-auth) doesn't briefly show stale accounts, a stale empty state, or a
+    // stale error banner before the fresh data arrives.
+    setAccounts([]);
+    setVendors([]);
+    setAccountsReady(false);
+    setLoadError(false);
 
     // Load vendors
     authenticatedApi
@@ -262,7 +335,9 @@ function ConnectionsPage() {
         accountMap.delete(id);
         if (!cancelled) setAccounts(Array.from(accountMap.values()));
       }
-      ready() {}
+      ready() {
+        if (!cancelled) setAccountsReady(true);
+      }
     }
 
     const subscriber = new AccountsSubscriber();
@@ -284,6 +359,9 @@ function ConnectionsPage() {
     return () => {
       cancelled = true;
       subscriptionRef.current?.[Symbol.dispose]();
+      // Null the ref so React Strict Mode's double-invoked cleanup doesn't
+      // double-dispose the same stub.
+      subscriptionRef.current = null;
     };
   }, [authenticatedApi]);
 
@@ -316,46 +394,39 @@ function ConnectionsPage() {
     }
   };
 
-  // Filter vendors that are not already connected
-  const connectedVendorIds = new Set(accounts.map((a) => a.vendorId));
-  const availableVendors = vendors.filter((v) => !connectedVendorIds.has(v.id));
+  const searchLower = search.trim().toLowerCase();
+  const filteredAccounts = accounts.filter((a) => {
+    if (!searchLower) return true;
+    const name = a.accountDescription.displayName ?? a.accountDescription.uniqueName ?? '';
+    return (
+      a.vendorDescription.displayName.toLowerCase().includes(searchLower) ||
+      name.toLowerCase().includes(searchLower)
+    );
+  });
 
-  const filterOptions: { value: typeof filter; label: string }[] = [
-    { value: "all", label: "All" },
-    { value: "connected", label: "Connected" },
-    { value: "available", label: "Available" },
-  ];
-
-  const searchLower = search.toLowerCase();
-  const filteredAccounts = accounts.filter(
-    (a) =>
-      !search ||
-      a.vendorDescription.displayName.toLowerCase().includes(searchLower),
-  );
-  const filteredAvailable = availableVendors.filter(
-    (v) =>
-      !search ||
-      v.description.displayName.toLowerCase().includes(searchLower),
-  );
-
-  const showDivider =
-    filter === "all" &&
-    filteredAccounts.length > 0 &&
-    filteredAvailable.length > 0;
+  const hasAccounts = accounts.length > 0;
+  const showEmptyState = accountsReady && !loadError && !hasAccounts;
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold text-kumo-default">
-          Connections
-        </h1>
-        <p className="text-sm text-kumo-subtle mt-1">
-          Manage your data sources and what Gadgets can access.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-kumo-default">
+            Connections
+          </h1>
+          <p className="text-sm text-kumo-subtle mt-1">
+            Manage your data sources and what Gadgets can access.
+          </p>
+        </div>
+        {hasAccounts && (
+          <div className="flex-shrink-0">
+            <AddConnectionMenu vendors={vendors} onConnect={handleConnect} />
+          </div>
+        )}
       </div>
 
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-        <div className="relative flex-1">
+      {hasAccounts && (
+        <div className="relative">
           <MagnifyingGlass
             size={16}
             className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive pointer-events-none"
@@ -368,26 +439,11 @@ function ConnectionsPage() {
             className="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
           />
         </div>
-        <div className="flex items-center gap-1">
-          {filterOptions.map((f) => (
-            <button
-              key={f.value}
-              onClick={() => setFilter(f.value)}
-              className={`text-sm px-3 py-1.5 rounded-full border transition-colors ${
-                filter === f.value
-                  ? "text-kumo-inverse bg-kumo-contrast border-kumo-contrast"
-                  : "text-kumo-subtle border-kumo-line hover:text-kumo-default"
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      )}
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        {(filter === "all" || filter === "connected") &&
-          filteredAccounts.map((account) => (
+      {hasAccounts && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {filteredAccounts.map((account) => (
             <ConnectedAccountCard
               key={account.id}
               account={account}
@@ -395,30 +451,23 @@ function ConnectionsPage() {
               onReconnect={() => handleReconnect(account.id)}
             />
           ))}
+        </div>
+      )}
 
-        {showDivider && (
-          <hr className="col-span-full border-t border-kumo-line my-2" />
-        )}
+      {hasAccounts && filteredAccounts.length === 0 && (
+        <div className="text-center py-12 text-kumo-inactive text-sm">
+          No connections match your search.
+        </div>
+      )}
 
-        {(filter === "all" || filter === "available") &&
-          filteredAvailable.map((vendor) => (
-            <AvailableVendorCard
-              key={vendor.id}
-              vendor={vendor}
-              onConnect={() => handleConnect(vendor.id)}
-            />
-          ))}
-      </div>
+      {showEmptyState && (
+        <EmptyState vendors={vendors} onConnect={handleConnect} />
+      )}
 
-      {loadError && accounts.length === 0 && vendors.length === 0 && (
+      {loadError && !hasAccounts && (
         <div className="text-center py-16 text-sm">
           <p className="text-kumo-danger">Something went wrong loading your connections.</p>
           <p className="text-kumo-subtle mt-1">Check your connection and try refreshing the page.</p>
-        </div>
-      )}
-      {!loadError && accounts.length === 0 && availableVendors.length === 0 && (
-        <div className="text-center py-16 text-kumo-inactive text-sm">
-          No connections found
         </div>
       )}
     </div>
