@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
 import {
+  CaretDown,
   CaretLeft,
   CaretRight,
   Check,
@@ -51,6 +52,14 @@ type ConnectionTypeId =
 type ConnectionType = {
   id: ConnectionTypeId
   vendorId?: string
+  // Stable grouping key used by the picker to bucket connection types. For
+  // resource connections this is the vendor's stable ID (so all of Google's
+  // resources land in one group). Platform types use their own `id` so that
+  // each is its own single-item group instead of merging by displayName.
+  groupKey: string
+  // Display name shown for the group; safe to localize/change without
+  // affecting grouping behavior.
+  groupLabel: string
   title: string
   vendor: string
   description: string
@@ -85,6 +94,8 @@ type ConfiguratorFrameState = {
 const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
   {
     id: 'ai-model',
+    groupKey: 'platform:ai-model',
+    groupLabel: 'AI Model',
     title: 'AI Model',
     vendor: 'Gadgets',
     description: 'Expose a selected model to this gadget as a capability.',
@@ -93,6 +104,8 @@ const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
   },
   {
     id: 'agent-spawner',
+    groupKey: 'platform:agent-spawner',
+    groupLabel: 'Agent',
     title: 'Agent',
     vendor: 'Gadgets',
     description: 'Allow this gadget to start new AI agent conversations with selected tools.',
@@ -112,6 +125,10 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
   return {
     id: `resource:${vendor.id}:${resource.urlPattern}`,
     vendorId: vendor.id,
+    // Group by stable vendor ID, not displayName, so two distinct vendors that
+    // happen to share a display name don't get merged into the same group.
+    groupKey: `vendor:${vendor.id}`,
+    groupLabel: vendor.description.displayName,
     title: resource.title,
     vendor: vendor.description.displayName,
     description: resource.description,
@@ -141,6 +158,7 @@ export default function GatekeeperModal({
 
   const [selectedConnectionId, setSelectedConnectionId] = useState<ConnectionTypeId | null>(null)
   const [searchText, setSearchText] = useState('')
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
   const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
@@ -257,6 +275,7 @@ export default function GatekeeperModal({
 
     setSelectedConnectionId(null)
     setSearchText('')
+    setExpandedGroups(new Set())
     setCreating(false)
     setConnectingVendor(null)
     setReconnectingAccountId(null)
@@ -372,6 +391,34 @@ export default function GatekeeperModal({
       return query.split(/\s+/).every(token => haystack.includes(token))
     })
   }, [allConnections, searchText])
+
+  // Group connections by stable vendor key (e.g. all Google resources together).
+  // Preserves the order in which a vendor's first item appears in the flat list.
+  // Used to render a collapsible, grouped picker when the search box is empty.
+  // Platform types (AI Model, Agent) each have their own unique groupKey so
+  // they remain single-item leaves rather than collapsing into a shared
+  // 'Gadgets' bucket.
+  const groupedConnections = useMemo(() => {
+    const groups = new Map<string, { label: string; items: ConnectionType[] }>()
+    for (const connection of allConnections) {
+      const key = connection.groupKey
+      const existing = groups.get(key)
+      if (existing) existing.items.push(connection)
+      else groups.set(key, { label: connection.groupLabel, items: [connection] })
+    }
+    return Array.from(groups.entries()).map(([key, { label, items }]) => ({ key, label, items }))
+  }, [allConnections])
+
+  const isSearching = searchText.trim().length > 0
+
+  const toggleGroup = useCallback((key: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   const matchingAccounts = useMemo(() => {
     if (!selectedConnection?.vendorId) return []
@@ -708,18 +755,37 @@ export default function GatekeeperModal({
 
             <div className="new-gatekeeper-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
               <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-                {filteredConnections.length === 0 ? (
-                  <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                    No matching connection types.
-                  </div>
-                ) : filteredConnections.map((connection, index) => (
-                  <ConnectionTypeRow
-                    key={connection.id}
-                    connection={connection}
-                    first={index === 0}
-                    onClick={() => handleSelectConnection(connection)}
-                  />
-                ))}
+                {isSearching ? (
+                  filteredConnections.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                      No matching connection types.
+                    </div>
+                  ) : filteredConnections.map((connection, index) => (
+                    <ConnectionTypeRow
+                      key={connection.id}
+                      connection={connection}
+                      first={index === 0}
+                      onClick={() => handleSelectConnection(connection)}
+                    />
+                  ))
+                ) : (
+                  groupedConnections.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                      No connection types available.
+                    </div>
+                  ) : groupedConnections.map((group, index) => (
+                    <ConnectionGroupRow
+                      key={group.key}
+                      groupKey={group.key}
+                      label={group.label}
+                      items={group.items}
+                      first={index === 0}
+                      expanded={expandedGroups.has(group.key)}
+                      onToggle={toggleGroup}
+                      onSelectItem={handleSelectConnection}
+                    />
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -790,6 +856,125 @@ function ConnectionTypeRow({
       </div>
       <CaretRight size={14} className="shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5 group-hover:text-kumo-default" />
     </button>
+  )
+}
+
+function ConnectionGroupRow({
+  groupKey,
+  label,
+  items,
+  first,
+  expanded,
+  onToggle,
+  onSelectItem,
+}: {
+  groupKey: string
+  label: string
+  items: ConnectionType[]
+  first: boolean
+  expanded: boolean
+  onToggle: (key: string) => void
+  onSelectItem: (connection: ConnectionType) => void
+}) {
+  // Defensive: the grouping memo guarantees every group has >= 1 item, but the
+  // prop type can't express that. Bail out if the invariant is ever violated.
+  if (items.length === 0) return null
+
+  // If a vendor exposes exactly one connection type, the group acts as a leaf:
+  // clicking the row goes straight into the selected connection rather than
+  // expanding a sub-list. Multi-item groups (e.g. Google with Gmail + Docs +
+  // Drive) collapse/expand to reveal their contents.
+  const isSingleItem = items.length === 1
+  const handleClick = () => {
+    if (isSingleItem) onSelectItem(items[0])
+    else onToggle(groupKey)
+  }
+
+  // Use the first item as a representative for the group's icon/logo. For
+  // multi-item groups every item shares a vendorId so the logo is consistent.
+  const representative = items[0]
+  const Icon = representative.icon
+  const Logo = logoForVendor(representative.vendorId)
+  const iconUrl = !isSingleItem ? undefined : representative.iconUrl
+
+  const subtitle = isSingleItem
+    ? `${representative.vendor} · ${representative.description}`
+    : items.map(item => item.title).join(', ')
+
+  const title = isSingleItem ? representative.title : label
+
+  return (
+    <div className={first ? '' : 'border-t border-kumo-line'}>
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-expanded={isSingleItem ? undefined : expanded}
+        className="group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated"
+      >
+        <div
+          className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-kumo-elevated"
+          style={isSingleItem && representative.accent ? { backgroundColor: representative.accent } : undefined}
+        >
+          {iconUrl ? (
+            <img src={iconUrl} alt="" className="h-full w-full object-cover" />
+          ) : Logo ? (
+            <Logo size={18} />
+          ) : Icon ? (
+            <Icon size={19} weight="duotone" className="text-kumo-strong" />
+          ) : (
+            <Database size={19} weight="duotone" className="text-kumo-strong" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+            {title}
+          </p>
+          <p className="mt-0.5 line-clamp-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+            {subtitle}
+          </p>
+        </div>
+        {isSingleItem ? (
+          <CaretRight size={14} className="shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5 group-hover:text-kumo-default" />
+        ) : (
+          <CaretDown
+            size={14}
+            className={`shrink-0 text-kumo-inactive transition-transform group-hover:text-kumo-default ${expanded ? 'rotate-180' : ''}`}
+          />
+        )}
+      </button>
+
+      {!isSingleItem && expanded && (
+        <div className="border-t border-kumo-line bg-kumo-elevated/30">
+          {items.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelectItem(item)}
+              className="group flex w-full items-center gap-3 border-t border-kumo-line/60 pl-10 pr-3 py-2.5 text-left transition-colors first:border-t-0 hover:bg-kumo-elevated"
+            >
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-kumo-base">
+                {item.iconUrl ? (
+                  <img src={item.iconUrl} alt="" className="h-full w-full object-cover" />
+                ) : item.icon ? (
+                  <item.icon size={14} weight="duotone" className="text-kumo-strong" />
+                ) : (
+                  <Database size={14} weight="duotone" className="text-kumo-strong" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[12.5px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                  {item.title}
+                </p>
+                <p className="mt-0.5 line-clamp-1 text-[11.5px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                  {item.description}
+                </p>
+              </div>
+              <CaretRight size={13} className="shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5 group-hover:text-kumo-default" />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
