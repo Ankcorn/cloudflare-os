@@ -882,8 +882,9 @@ function ConnectionGroupRow({
   // multi-item groups every item shares a vendorId so the logo is consistent.
   const representative = items[0]
   const Icon = representative.icon
-  const Logo = logoForVendor(representative.vendorId)
-  const iconUrl = !isSingleItem ? undefined : representative.iconUrl
+  const iconUrl = isSingleItem
+    ? representative.iconUrl ?? representative.logoUrl
+    : representative.logoUrl
 
   const subtitle = isSingleItem
     ? `${representative.vendor} · ${representative.description}`
@@ -904,9 +905,7 @@ function ConnectionGroupRow({
           style={isSingleItem && representative.accent ? { backgroundColor: representative.accent } : undefined}
         >
           {iconUrl ? (
-            <img src={iconUrl} alt="" className="h-full w-full object-cover" />
-          ) : Logo ? (
-            <Logo size={18} />
+            <img src={iconUrl} alt="" className="h-6 w-6 object-contain" />
           ) : Icon ? (
             <Icon size={19} weight="duotone" className="text-kumo-strong" />
           ) : (
