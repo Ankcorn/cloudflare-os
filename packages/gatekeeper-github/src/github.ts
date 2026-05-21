@@ -11,6 +11,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   GitHubApi,
@@ -26,6 +27,7 @@ import {
   type GitHubPullRequestReviewCommentResponse,
   type GitHubPullRequestReviewResponse,
 } from "./github-api";
+import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   Cursor,
   GitHubActor,
@@ -258,6 +260,22 @@ const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
 const MAX_REPLY_TARGET_HOPS = 50;
+
+const SCOPE_CATALOG: VendorScope[] = [
+  {
+    displayName: "Know who you are",
+    rationale:
+        "Read your GitHub username, name, and avatar so this account can be labeled in Gadgets.",
+  },
+  {
+    displayName: "Read and write repositories",
+    rationale:
+        "Lets Gadgets read and update issues, pull requests, reviews, and discussions in any " +
+        "repository you can access.",
+  },
+];
+
+const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
 const OAUTH_SCOPES = ["repo", "read:user"];
 
@@ -995,7 +1013,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return {
       displayName: "GitHub",
       url: "https://github.com",
+      logo: { url: GITHUB_LOGO_URL },
+      color: "#f0f0f0",
+      tagline: "Triage issues, review PRs, and manage repos",
+      description:
+          "Connect your GitHub account so Gadgets can read and update issues, pull requests, " +
+          "and reviews on the repositories you choose.",
     };
+  }
+
+  async getScopeCatalog(): Promise<VendorScope[]> {
+    return SCOPE_CATALOG;
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
@@ -1173,9 +1201,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         displayName: viewer.user.name ?? viewer.user.login,
         uniqueName: viewer.user.login,
         avatar: { url: viewer.user.avatar_url },
-        scope: (viewer.scopes.length > 0 ? viewer.scopes : scopes).includes("repo")
-          ? ["Read and write repository issues, pull requests, reviews, and metadata for repositories you can access"]
-          : ["GitHub access authorized for this gatekeeper"],
+        scope: SCOPE_CATALOG.map(entry => entry.displayName),
       };
     });
   }

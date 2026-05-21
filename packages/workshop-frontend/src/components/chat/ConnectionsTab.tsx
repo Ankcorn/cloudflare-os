@@ -109,11 +109,11 @@ export default function ConnectionsTab({ overseer }: ConnectionsTabProps) {
 
       <div className="mt-auto px-4 py-3 border-t border-kumo-fill bg-kumo-elevated flex items-center justify-center">
         <Link
-          to="/connections"
+          to="/gatekeepers"
           className="flex items-center gap-1.5 text-xs text-kumo-subtle hover:text-kumo-default transition-colors"
         >
           <ArrowSquareOut size={12} />
-          Manage all connections
+          Manage gatekeepers
         </Link>
       </div>
     </div>

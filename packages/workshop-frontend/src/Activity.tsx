@@ -343,7 +343,6 @@ function ActivityLogRow({
         </div>
         <div className="flex min-w-0 items-start gap-2 pr-4">
           <GatekeeperIcon
-            resourceUrl={record.resourceUrl}
             bindingName={record.bindingName}
             size={14}
             className="mt-0.5 h-7 w-7 rounded-md"

@@ -17,6 +17,7 @@ import {
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
+  VendorScope,
   ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { MySession, MyHook as MyHookIface } from "./types";  // Remove MyHook if no hooks
@@ -112,7 +113,21 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return {
       displayName: "My Service",
       url: "https://example.com",
+      logo: { url: "TODO: data URL or hosted image URL" },
+      color: "#f0f4ff",
+      tagline: "Short summary of what this connector enables",
+      description:
+          "Explain what Gadgets can do with this connector in plain language.",
     };
+  }
+
+  async getScopeCatalog(): Promise<VendorScope[]> {
+    return [
+      {
+        displayName: "Read useful data",
+        rationale: "Explain why this connector needs the permission.",
+      },
+    ];
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {

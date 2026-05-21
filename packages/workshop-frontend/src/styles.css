@@ -235,6 +235,35 @@ html {
 .new-gatekeeper-scroll {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--color-kumo-line) 55%, transparent) transparent;
+  scrollbar-gutter: stable;
+}
+
+.new-gatekeeper-scroll-balanced {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-kumo-line) 55%, transparent) transparent;
+  scrollbar-gutter: stable both-edges;
+}
+
+.new-gatekeeper-scroll-balanced::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.new-gatekeeper-scroll-balanced::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-kumo-line) 55%, transparent);
+  border-radius: 999px;
+}
+
+.new-gatekeeper-scroll-balanced::-webkit-scrollbar-thumb:hover {
+  background: var(--color-kumo-line);
+}
+
+.new-gatekeeper-scroll-balanced::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.new-gatekeeper-scroll-balanced::-webkit-scrollbar-button {
+  display: none;
 }
 
 .new-gatekeeper-scroll::-webkit-scrollbar {
@@ -257,6 +286,25 @@ html {
 
 .new-gatekeeper-scroll::-webkit-scrollbar-button {
   display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .connectors-hero-flow-line {
+    animation: connectors-hero-flow 700ms linear infinite;
+    stroke: color-mix(in srgb, var(--color-kumo-brand) 52%, currentColor);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connectors-hero-flow-line {
+    animation: none;
+  }
+}
+
+@keyframes connectors-hero-flow {
+  to {
+    stroke-dashoffset: 10;
+  }
 }
 
 /* Right panel tab active */
@@ -321,4 +369,10 @@ html {
   body:has(.home-layout) {
     overflow-y: hidden;
   }
+}
+
+/* Keep the app header from sitting above modal backdrops without depending on
+   Kumo's internal backdrop class names. */
+body:has([role="dialog"], [role="alertdialog"]) .app-header {
+  z-index: 0;
 }

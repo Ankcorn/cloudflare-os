@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -194,6 +194,9 @@ export interface AuthenticatedApi extends RpcTarget {
   // List all third-party services that this account can connect to.
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
       : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]>;
+
+  // Returns the gatekeeper's permission catalog for third-party service at `vendorId`.
+  getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]>;
 
   // Connect this account to a specific account on a third-party service. Returns the URL which
   // should be opened in a new tab in the user's browser to complete the authorization. When the

@@ -33,6 +33,30 @@ export type VendorDescription = {
 
   // Logo for the service.
   logo?: AvatarImage;
+
+  // Background color used behind the logo in connector UI.
+  color?: string;
+
+  // Short tagline shown beneath the name on cards on the Connectors page.
+  // E.g., "Draft replies, edit docs, and analyze data"
+  tagline?: string;
+
+  // 2-3 sentence description of what this Gatekeeper does and enables users to build.
+  // This is shown in detail modals on the Connectors page.
+  // E.g. "Connect your Google account to give Gadgets access to Gmail, Google Docs, and BigQuery.
+  // Build agents that triage email, draft and edit documents, or run analytics queries on your data."
+  description?: string;
+}
+
+// Describes a single permission/scope that a gatekeeper will request during the connect flow.
+// These are shown in the "Permissions" section of the connect modal so the user can review
+// what they're granting before being redirected to the provider.
+export type VendorScope = {
+  // Label shown to the user (e.g. "Read and label emails").
+  displayName: string;
+
+  // Why this scope/permission is requested. Shown under `displayName`.
+  rationale: string;
 }
 
 // Describes a connected user account on an external service, for display purposes.
@@ -191,6 +215,13 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   //
   // TODO: How does the Gadget Workshop know when the supported URLs have changed, without polling?
   getSupportedResources(options?: {userId?: string}): Promise<SupportedResource[]>;
+
+  // Returns the catalog of permissions this vendor will request during the connect flow.
+  // The workshop displays this in the connect modal so the user can review what they're granting
+  // before being redirected to the gatekeeper's consent screen.
+  //
+  // For vendors that don't have granular permissions, return an empty array.
+  getScopeCatalog(): Promise<VendorScope[]>;
 
   // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
   // The returned string is the content of a `.d.ts` file. All types refereced by

@@ -1,5 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
@@ -21,6 +21,7 @@ import {
 import BIGQUERY_CONFIGURATOR_HTML from "./generated/bigquery-configurator-ui.txt";
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
+import GOOGLE_LOGO_SVG from "./google-logo.svg";
 
 // A nonce stored in UserAccount KV to protect the OAuth flow. Only one nonce is active at a time;
 // the `stage` field tracks where we are in the flow.
@@ -127,6 +128,36 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
+const SCOPE_CATALOG: VendorScope[] = [
+  {
+    displayName: "Know who you are",
+    rationale:
+        "Read your name, email, and profile picture so this account can be labeled in Gadgets.",
+  },
+  {
+    displayName: "Read and label Gmail",
+    rationale:
+        "Lets Gadgets triage your inbox and apply labels.",
+  },
+  {
+    displayName: "Read and edit Google Docs",
+    rationale:
+        "Lets Gadgets open documents you choose, summarize them, and make edits.",
+  },
+  {
+    displayName: "List your Google documents",
+    rationale:
+        "Lets Gadgets show a doc picker when you connect a Google Doc to a Gadget. Read-only " +
+        "file metadata; contents are not accessed through this permission.",
+  },
+  {
+    displayName: "Run BigQuery queries",
+    rationale:
+        "Lets Gadgets run analytics queries against datasets you choose. Google grants the " +
+        "BigQuery scope; Gatekeeper restricts use to read-only query flows at the API layer.",
+  },
+];
+
 const OAUTH_SCOPES = [
   "openid",
   "https://www.googleapis.com/auth/userinfo.profile",
@@ -143,7 +174,7 @@ const OAUTH_SCOPES = [
 const GMAIL_RESOURCE: SupportedResource = {
   urlPattern: "https://mail.google.com/*",
   title: "Gmail Mailbox",
-  description: "Read and send emails.",
+  description: "Read emails and apply labels.",
 };
 
 const GOOGLE_DOC_RESOURCE: SupportedResource = {
@@ -162,6 +193,8 @@ const BIGQUERY_RESOURCE: SupportedResource = {
 
 const SUPPORTED_RESOURCES: SupportedResource[] =
     [GMAIL_RESOURCE, GOOGLE_DOC_RESOURCE, BIGQUERY_RESOURCE];
+
+const GOOGLE_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GOOGLE_LOGO_SVG)}`;
 
 // Main HTTP UI entrypoint. We only use this to initiate and complete OAuth requests to Google.
 export default {
@@ -253,8 +286,18 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return {
       displayName: "Google",
       url: "https://google.com",
-      // TODO: logo
+      logo: { url: GOOGLE_LOGO_URL },
+      color: "#e8f0fe",
+      tagline: "Draft replies, edit docs, and analyze data",
+      description:
+          "Connect your Google account to give Gadgets access to Gmail, Google Docs, and " +
+          "BigQuery. Build agents that triage email, draft and edit documents, or run analytics " +
+          "queries on your data.",
     };
+  }
+
+  async getScopeCatalog(): Promise<VendorScope[]> {
+    return SCOPE_CATALOG;
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {

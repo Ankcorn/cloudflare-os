@@ -25,7 +25,6 @@ import { AccountDescription, SupportedResource, VendorDescription } from '@gadge
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
-import { logoComponents } from './components/ConnectionLogos'
 import ResourceConfiguratorHost from './ResourceConfiguratorHost'
 import { AgentSpawnerConfigForm } from './gatekeeper-modal/AgentSpawnerConfigForm'
 import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionConfig'
@@ -65,6 +64,7 @@ type ConnectionType = {
   description: string
   icon?: typeof Database
   iconUrl?: string
+  logoUrl?: string
   accent?: string
   resourceUrlPattern?: string
 }
@@ -114,13 +114,6 @@ const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
   },
 ]
 
-function logoForVendor(vendorId: string | undefined) {
-  if (!vendorId) return undefined
-  const normalized = vendorId.toLowerCase()
-  if (normalized === 'google cloud') return logoComponents.google
-  return logoComponents[normalized]
-}
-
 function connectionForResource(vendor: VendorOption, resource: SupportedResource): ConnectionType {
   return {
     id: `resource:${vendor.id}:${resource.urlPattern}`,
@@ -134,6 +127,8 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
     description: resource.description,
     icon: Database,
     iconUrl: resource.icon?.url,
+    logoUrl: vendor.description.logo?.url,
+    accent: vendor.description.color,
     resourceUrlPattern: resource.urlPattern,
   }
 }
@@ -646,7 +641,7 @@ export default function GatekeeperModal({
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <Dialog
-        className="!top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
+        className="!z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
         style={dialogMinHeight > 0 ? { minHeight: `${dialogMinHeight}px` } : undefined}
         size="lg"
       >
@@ -823,8 +818,7 @@ function ConnectionTypeRow({
   onClick: () => void
 }) {
   const Icon = connection.icon
-  const Logo = logoForVendor(connection.vendorId)
-  const iconUrl = connection.iconUrl
+  const iconUrl = connection.iconUrl ?? connection.logoUrl
 
   return (
     <button
@@ -837,9 +831,7 @@ function ConnectionTypeRow({
         style={connection.accent ? { backgroundColor: connection.accent } : undefined}
       >
         {iconUrl ? (
-          <img src={iconUrl} alt="" className="h-full w-full object-cover" />
-        ) : Logo ? (
-          <Logo size={18} />
+          <img src={iconUrl} alt="" className="h-6 w-6 object-contain" />
         ) : Icon ? (
           <Icon size={19} weight="duotone" className="text-kumo-strong" />
         ) : (
@@ -982,12 +974,12 @@ function ConnectionGroupRow({
 // us short-lived signed CDN URLs for the user's profile photo that can stop working without the
 // credentials themselves expiring; on load failure we fall back to the vendor logo, then a
 // generic user icon.
-function AccountAvatar({ avatarUrl, Logo }: { avatarUrl: string | undefined, Logo: React.FC<{ size?: number }> | undefined }) {
+function AccountAvatar({ avatarUrl, logoUrl }: { avatarUrl: string | undefined, logoUrl: string | undefined }) {
   const [failed, setFailed] = useState(false)
   if (avatarUrl && !failed) {
     return <img src={avatarUrl} alt="" className="h-full w-full object-cover" onError={() => setFailed(true)} />
   }
-  if (Logo) return <Logo size={16} />
+  if (logoUrl) return <img src={logoUrl} alt="" className="h-4 w-4 object-contain" />
   return <UserCircle size={17} className="text-kumo-subtle" />
 }
 
@@ -1014,7 +1006,6 @@ function AccountChooser({
   onConnect: () => void
   onReconnect: (id: number) => void
 }) {
-  const Logo = logoForVendor(vendorId)
   const isEmailMailbox = vendorId === 'email' && resourceTitle === 'Email Mailbox'
 
   return (
@@ -1045,7 +1036,7 @@ function AccountChooser({
                 className="flex min-w-0 flex-1 items-center gap-3 text-left transition-colors enabled:hover:text-kumo-default disabled:opacity-60"
               >
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-kumo-tint">
-                  <AccountAvatar avatarUrl={account.description.avatar?.url} Logo={Logo} />
+                  <AccountAvatar avatarUrl={account.description.avatar?.url} logoUrl={account.vendorDescription.logo?.url} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">{name}</p>

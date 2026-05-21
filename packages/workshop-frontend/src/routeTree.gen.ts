@@ -12,7 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as ProfileRouteImport } from './routes/profile'
-import { Route as ConnectionsRouteImport } from './routes/connections'
+import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
@@ -34,9 +34,9 @@ const ProfileRoute = ProfileRouteImport.update({
   path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ConnectionsRoute = ConnectionsRouteImport.update({
-  id: '/connections',
-  path: '/connections',
+const GatekeepersRoute = GatekeepersRouteImport.update({
+  id: '/gatekeepers',
+  path: '/gatekeepers',
   getParentRoute: () => rootRouteImport,
 } as any)
 const BlueprintsRoute = BlueprintsRouteImport.update({
@@ -68,7 +68,7 @@ const BlueprintIdRoute = BlueprintIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/blueprints': typeof BlueprintsRoute
-  '/connections': typeof ConnectionsRoute
+  '/gatekeepers': typeof GatekeepersRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
@@ -79,7 +79,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/blueprints': typeof BlueprintsRoute
-  '/connections': typeof ConnectionsRoute
+  '/gatekeepers': typeof GatekeepersRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
@@ -91,7 +91,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/blueprints': typeof BlueprintsRoute
-  '/connections': typeof ConnectionsRoute
+  '/gatekeepers': typeof GatekeepersRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
@@ -104,7 +104,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/blueprints'
-    | '/connections'
+    | '/gatekeepers'
     | '/profile'
     | '/providers'
     | '/signup'
@@ -115,7 +115,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/blueprints'
-    | '/connections'
+    | '/gatekeepers'
     | '/profile'
     | '/providers'
     | '/signup'
@@ -126,7 +126,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/blueprints'
-    | '/connections'
+    | '/gatekeepers'
     | '/profile'
     | '/providers'
     | '/signup'
@@ -138,7 +138,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   BlueprintsRoute: typeof BlueprintsRoute
-  ConnectionsRoute: typeof ConnectionsRoute
+  GatekeepersRoute: typeof GatekeepersRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
   SignupRoute: typeof SignupRoute
@@ -170,11 +170,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/connections': {
-      id: '/connections'
-      path: '/connections'
-      fullPath: '/connections'
-      preLoaderRoute: typeof ConnectionsRouteImport
+    '/gatekeepers': {
+      id: '/gatekeepers'
+      path: '/gatekeepers'
+      fullPath: '/gatekeepers'
+      preLoaderRoute: typeof GatekeepersRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/blueprints': {
@@ -218,7 +218,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   BlueprintsRoute: BlueprintsRoute,
-  ConnectionsRoute: ConnectionsRoute,
+  GatekeepersRoute: GatekeepersRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
   SignupRoute: SignupRoute,

@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
-import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { SupportedResource, VendorDescription, VendorScope } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings } from "./admin-settings.js";
@@ -195,6 +195,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
       : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
     return this.user.listGatekeeperVendors(filter);
+  }
+
+  getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]> {
+    return this.user.getGatekeeperScopeCatalog(vendorId);
   }
 
   connectAccount(vendorId: string): Promise<{url: string}> {
