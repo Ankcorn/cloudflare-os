@@ -177,6 +177,7 @@ export default function GatekeeperModal({
   const headerRef = useRef<HTMLDivElement>(null)
   const footerRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const scrollContentRef = useRef<HTMLDivElement>(null)
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
@@ -221,13 +222,7 @@ export default function GatekeeperModal({
     }
   }, [])
 
-  // Compute the dialog's min-height so its scroll container is tall enough to fit the configurator's
-  // form layout without internal scrolling. Without this, in normal viewports the iframe's
-  // placeholder gets clipped by the scroll container, causing the iframe contents (positioned
-  // at the placeholder coords) to render on top of the modal footer. We cap this at the max
-  // available height (the dialog's max-height) so that when the viewport is too short to fit
-  // everything, the dialog falls back to internal scrolling (and the iframe's clip-path
-  // prevents it from rendering over the footer in that case).
+  // Keep the resource configurator visible while still allowing the modal to scroll in short viewports.
   useEffect(() => {
     if (!open || !selectedConnection?.resourceUrlPattern) {
       setDialogMinHeight(0)
@@ -240,8 +235,11 @@ export default function GatekeeperModal({
         const header = headerRef.current?.getBoundingClientRect().height ?? 0
         const footer = footerRef.current?.getBoundingClientRect().height ?? 0
         const scroll = scrollRef.current
-        if (!scroll) return setDialogMinHeight(0)
-        const requested = header + footer + scroll.scrollHeight
+        const scrollContent = scrollContentRef.current
+        if (!scroll || !scrollContent) return setDialogMinHeight(0)
+        const scrollStyle = getComputedStyle(scroll)
+        const scrollPadding = parseFloat(scrollStyle.paddingTop) + parseFloat(scrollStyle.paddingBottom)
+        const requested = header + footer + scrollContent.getBoundingClientRect().height + scrollPadding
         // Cap at the viewport-derived max-height so we don't push the dialog off-screen.
         const top = Math.max(28, Math.min(96, window.innerHeight * 0.1))
         const maxAvailable = (window.innerHeight - top - 28) * 0.9
@@ -249,10 +247,8 @@ export default function GatekeeperModal({
       })
     }
     recompute()
-    // Observe the scroll container only; any descendant resize (including the iframe placeholder
-    // growing/shrinking) changes its scrollHeight, which we re-read on each callback.
     const ro = new ResizeObserver(recompute)
-    if (scrollRef.current) ro.observe(scrollRef.current)
+    if (scrollContentRef.current) ro.observe(scrollContentRef.current)
     const onWindowResize = () => recompute()
     window.addEventListener('resize', onWindowResize)
     return () => {
@@ -672,70 +668,70 @@ export default function GatekeeperModal({
 
         {selectedConnection ? (
           <div ref={scrollRef} className="new-gatekeeper-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
-            <button
-              type="button"
-              onClick={() => setSelectedConnectionId(null)}
-              className="mb-4 inline-flex items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
-            >
-              <CaretLeft size={13} />
-              All connection types
-            </button>
+            <div ref={scrollContentRef}>
+              <button
+                type="button"
+                onClick={() => setSelectedConnectionId(null)}
+                className="mb-4 inline-flex items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
+              >
+                <CaretLeft size={13} />
+                All connection types
+              </button>
 
-            <div className="space-y-4">
-              {needsAccount && (
-                <AccountChooser
-                  accounts={matchingAccounts}
-                  selectedAccountId={selectedAccountId}
-                  vendorId={selectedConnection.vendorId}
-                  vendorName={selectedConnection.vendor}
-                  resourceTitle={selectedConnection.resourceUrlPattern ? selectedConnection.title : undefined}
-                  connecting={connectingVendor === selectedConnection.vendorId}
-                  reconnectingAccountId={reconnectingAccountId}
-                  onSelect={setSelectedAccountId}
-                  onConnect={() => selectedConnection.vendorId && handleConnectAccount(selectedConnection.vendorId)}
-                  onReconnect={handleReconnectAccount}
-                />
-              )}
+              <div className="space-y-4">
+                {needsAccount && (
+                  <AccountChooser
+                    accounts={matchingAccounts}
+                    selectedAccountId={selectedAccountId}
+                    vendorId={selectedConnection.vendorId}
+                    vendorName={selectedConnection.vendor}
+                    resourceTitle={selectedConnection.resourceUrlPattern ? selectedConnection.title : undefined}
+                    connecting={connectingVendor === selectedConnection.vendorId}
+                    reconnectingAccountId={reconnectingAccountId}
+                    onSelect={setSelectedAccountId}
+                    onConnect={() => selectedConnection.vendorId && handleConnectAccount(selectedConnection.vendorId)}
+                    onReconnect={handleReconnectAccount}
+                  />
+                )}
 
-              {selectedConnection.resourceUrlPattern && (
-                <ResourceConfiguratorHost
-                  frame={configuratorFrameState?.frame ?? null}
-                  frameKey={configuratorFrameState?.key ?? null}
-                  loading={configuratorLoading}
-                  error={configuratorError}
-                  disabled={needsAccount && !selectedAccount}
-                  onCollectResourceUrlChange={handleConfiguratorCollectResourceUrlChange}
-                  onSelectionReadyChange={setConfiguratorSelectionReady}
-                />
-              )}
+                {selectedConnection.resourceUrlPattern && (
+                  <ResourceConfiguratorHost
+                    frame={configuratorFrameState?.frame ?? null}
+                    frameKey={configuratorFrameState?.key ?? null}
+                    loading={configuratorLoading}
+                    error={configuratorError}
+                    disabled={needsAccount && !selectedAccount}
+                    onCollectResourceUrlChange={handleConfiguratorCollectResourceUrlChange}
+                    onSelectionReadyChange={setConfiguratorSelectionReady}
+                  />
+                )}
 
-              {selectedConnection.id === 'ai-model' && (
-                <AiModelConnectionConfig
-                  availableModels={availableModels}
-                  selectedModelId={selectedModelId}
-                  onSelectedModelIdChange={setSelectedModelId}
-                />
-              )}
+                {selectedConnection.id === 'ai-model' && (
+                  <AiModelConnectionConfig
+                    availableModels={availableModels}
+                    selectedModelId={selectedModelId}
+                    onSelectedModelIdChange={setSelectedModelId}
+                  />
+                )}
 
-              {selectedConnection.id === 'agent-spawner' && (
-                <AgentSpawnerConfigForm
-                  availableModels={availableModels}
-                  displayName={spawnerDisplayName}
-                  modelId={spawnerModelId}
-                  limitEnv={spawnerLimitEnv}
-                  env={spawnerEnv}
-                  existingBindings={existingBindings}
-                  onDisplayNameChange={setSpawnerDisplayName}
-                  onModelIdChange={setSpawnerModelId}
-                  onLimitEnvChange={(checked) => {
-                    setSpawnerLimitEnv(checked)
-                    if (!checked) setSpawnerEnv([])
-                  }}
-                  onEnvChange={setSpawnerEnv}
-                />
-              )}
-
-
+                {selectedConnection.id === 'agent-spawner' && (
+                  <AgentSpawnerConfigForm
+                    availableModels={availableModels}
+                    displayName={spawnerDisplayName}
+                    modelId={spawnerModelId}
+                    limitEnv={spawnerLimitEnv}
+                    env={spawnerEnv}
+                    existingBindings={existingBindings}
+                    onDisplayNameChange={setSpawnerDisplayName}
+                    onModelIdChange={setSpawnerModelId}
+                    onLimitEnvChange={(checked) => {
+                      setSpawnerLimitEnv(checked)
+                      if (!checked) setSpawnerEnv([])
+                    }}
+                    onEnvChange={setSpawnerEnv}
+                  />
+                )}
+              </div>
             </div>
           </div>
         ) : (
