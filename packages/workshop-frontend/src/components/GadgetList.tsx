@@ -409,7 +409,7 @@ export default function GadgetList() {
         open={deleteTarget !== null}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
       >
-        <Dialog className="p-8" size="sm">
+        <Dialog className="!z-[1000] p-8" size="sm">
           <Dialog.Title className="text-lg font-semibold">
             {deleteTarget?.owner ? 'Remove gadget' : 'Delete gadget'}
           </Dialog.Title>

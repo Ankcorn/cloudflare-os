@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, VendorScope, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -10,7 +10,6 @@ import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archi
 type ConnectedAccountRecord = {
   id: number;
   account: Fetcher<GatekeeperUser>;
-  vendorDescription: VendorDescription;
   description: AccountDescription;
   vendorId: string;   // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
   credentialExpiresAt?: Date;    // When credentials are expected to expire, if known.
@@ -687,13 +686,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (await Promise.all(promises)).filter(value => value !== null);
   }
 
-  async connectAccount(vendorId: string): Promise<{url: string}> {
+  async getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
     }
 
-    let vendorDescription = await vendor.describe();
+    return await vendor.getScopeCatalog();
+  }
+
+  async connectAccount(vendorId: string): Promise<{url: string}> {
+    let vendor = this.vendors.get(vendorId);
+    if (!vendor) {
+      throw new Error("No such service: " + vendorId);
+    }
 
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
@@ -702,7 +708,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       userId: this.ctx.id.toString(),
       accountId,
       vendorId,
-      vendorDescription,
     };
 
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
@@ -715,13 +720,37 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>> {
     let connectedAccounts = this.storage.connectedAccounts;
+    let vendors = this.vendors;
 
     subscriber = subscriber.dup();  // keep stub after return
 
     let seenIds = new Set<number>();
+    let vendorDescriptions = new Map<string, Promise<VendorDescription>>();
 
     async function notifyAdd(record: ConnectedAccountRecord) {
       if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
+        return;
+      }
+
+      let vendor = vendors.get(record.vendorId);
+      if (!vendor) {
+        console.error("No such service for connected account", record.id, record.vendorId);
+        return;
+      }
+
+      let vendorDescription: VendorDescription;
+      try {
+        let vendorDescriptionPromise = vendorDescriptions.get(record.vendorId);
+        if (!vendorDescriptionPromise) {
+          vendorDescriptionPromise = vendor.describe().catch(err => {
+            vendorDescriptions.delete(record.vendorId);
+            throw err;
+          });
+          vendorDescriptions.set(record.vendorId, vendorDescriptionPromise);
+        }
+        vendorDescription = await vendorDescriptionPromise;
+      } catch (err) {
+        console.error("Failed to describe connected account", record.id, err);
         return;
       }
 
@@ -729,13 +758,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         supportedResources = await record.account.getSupportedResources();
       } catch (err) {
-        console.error("getSupportedResources() failed for account", record.id, err);
+        console.error("Failed to get supported resources for connected account", record.id, err);
       }
 
       let credentialsValid = areCredentialsValid(record);
 
       seenIds.add(record.id);
-      subscriber.add(record.id, record.description, record.vendorDescription,
+      subscriber.add(record.id, record.description, vendorDescription,
           supportedResources, credentialsValid, record.vendorId).catch(unsubscribe)
     }
 
@@ -859,7 +888,6 @@ type GatekeeperConnectCallbackProps = {
   userId: string;
   accountId: number;
   vendorId: string;
-  vendorDescription: VendorDescription;
 }
 
 export class GatekeeperConnectCallbackImpl
@@ -877,7 +905,6 @@ export class GatekeeperConnectCallbackImpl
       id: this.ctx.props.accountId,
       account,
       description: await account.describe(),
-      vendorDescription: this.ctx.props.vendorDescription,
       vendorId: this.ctx.props.vendorId,
       credentialExpiresAt: expiresAt,
     });

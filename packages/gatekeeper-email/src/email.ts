@@ -7,6 +7,7 @@ import {
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
+  VendorScope,
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
@@ -24,6 +25,7 @@ import type { Email } from "postal-mime";
 import TYPES_CODE from "./types.txt";
 import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
 import type { EmailMailboxConfiguratorRpc } from "./configurator/email-configurator-types";
+import EMAIL_LOGO_SVG from "./email-logo.svg";
 
 const NONCE_BYTES = 32;
 const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
@@ -71,6 +73,8 @@ function getEmailMailboxResource(env: Env): SupportedResource {
 function getSupportedResourcesList(env: Env): SupportedResource[] {
   return [getEmailMailboxResource(env)];
 }
+
+const EMAIL_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(EMAIL_LOGO_SVG)}`;
 
 function getEmailHost(env: Env) {
   // TODO: This is actually a lie, as email routing can be configured on an entirely different
@@ -243,8 +247,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return {
       displayName: "Email",
       url: getBaseUrl(this.env),
-      // TODO: logo
+      logo: { url: EMAIL_LOGO_URL },
+      color: "#fff5df",
+      tagline: "Trigger Gadgets from incoming email",
+      description:
+          "Give Gadgets an email address they can receive messages from. Useful for triage " +
+          "agents, ticket-from-email workflows, or anything driven by mail.",
     };
+  }
+
+  async getScopeCatalog(): Promise<VendorScope[]> {
+    return [];
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {

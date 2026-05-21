@@ -87,7 +87,7 @@ export default function ConnectionChips() {
         )
       })}
       <Link
-        to="/connections"
+        to="/gatekeepers"
         className="flex items-center gap-1 pl-2 pr-2.5 py-1 rounded-full border border-kumo-line text-sm text-kumo-subtle hover:text-kumo-brand hover:border-kumo-brand transition-colors"
       >
         <Plus size={14} />

@@ -31,7 +31,7 @@ export default function Header() {
   return (
     <header
       ref={headerRef}
-      className="sticky top-0 z-50 backdrop-blur-md border-b border-kumo-line"
+      className="app-header sticky top-0 z-50 backdrop-blur-md border-b border-kumo-line"
       style={{
         backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)',
       }}
@@ -62,11 +62,11 @@ export default function Header() {
               Home
             </Link>
             <Link
-              to="/connections"
+              to="/gatekeepers"
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Connections
+              Gatekeepers
             </Link>
             <Link
               to="/blueprints"
@@ -113,12 +113,12 @@ export default function Header() {
               Home
             </Link>
             <Link
-              to="/connections"
+              to="/gatekeepers"
               onClick={closeMobileMenu}
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Connections
+              Gatekeepers
             </Link>
             <Link
               to="/blueprints"
