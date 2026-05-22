@@ -790,7 +790,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let promises: Promise<void>[] = [];
 
-    for (let record of connectedAccounts.list()) {
+    // We enumerate connected accounts by id rather than via `connectedAccounts.list()` so that a
+    // single corrupt/unreadable record doesn't poison the iterator and prevent us from surfacing
+    // any of the others. The most common cause of a record failing to load is that the
+    // GatekeeperUser stub it holds points at a Worker binding that no longer exists in the
+    // current deployment config (e.g. a gatekeeper that was removed from wrangler.jsonc since
+    // the account was originally connected). In that case workerd throws
+    // "Stub refers to a service that doesn't exist: ..." when deserializing the stored value.
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let record: ConnectedAccountRecord | undefined;
+      try {
+        record = connectedAccounts.get(id);
+      } catch (err) {
+        console.error(
+            `Skipping connected account #${id}: failed to load. The gatekeeper Worker ` +
+            `binding it was connected to may no longer exist in this deployment.`, err);
+        continue;
+      }
+      if (!record) continue;
       promises.push((async () => {
         await notifyAdd(record);
       })());
@@ -835,7 +853,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async putConnectedAccount(record: ConnectedAccountRecord) {
     let uniqueName = record.description.uniqueName;
     if (uniqueName) {
-      for (let existing of this.storage.connectedAccounts.list()) {
+      // Enumerate by id and skip records that fail to load, for the same reasons as
+      // subscribeConnectedAccounts(): a single corrupt record (e.g. one referencing a Worker
+      // binding that no longer exists) would otherwise poison list() and prevent the user from
+      // adding any new account.
+      let nextAccountId = this.storage.nextAccountId.get();
+      for (let id = 0; id < nextAccountId; id++) {
+        let existing: ConnectedAccountRecord | undefined;
+        try {
+          existing = this.storage.connectedAccounts.get(id);
+        } catch (err) {
+          console.error(
+              `Skipping connected account #${id} during dedup check: failed to load. The ` +
+              `gatekeeper Worker binding it was connected to may no longer exist in this ` +
+              `deployment.`, err);
+          continue;
+        }
+        if (!existing) continue;
         if (existing.id !== record.id &&
             existing.vendorId === record.vendorId &&
             existing.description.uniqueName === uniqueName) {
