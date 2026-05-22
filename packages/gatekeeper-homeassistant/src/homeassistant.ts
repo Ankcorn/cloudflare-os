@@ -11,6 +11,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import INSTANCE_CONFIGURATOR_HTML from "./generated/instance-configurator-ui.txt";
 import AREA_CONFIGURATOR_HTML from "./generated/area-configurator-ui.txt";
@@ -354,12 +355,48 @@ export default {
 // ---------------------------------------------------------------------------
 // Vendor
 
+// Permissions catalog shown in the connect modal. Home Assistant's long-lived access tokens
+// don't have granular OAuth-style scopes — the token grants the same level of access as the
+// user who created it. We list the categories of actions Gadgets may perform with the token
+// so the user knows what they're authorizing before pasting it in.
+const SCOPE_CATALOG: VendorScope[] = [
+  {
+    displayName: "Read state of every area, device, and entity",
+    rationale:
+        "Lets Gadgets list rooms and devices, read sensor values, and check whether lights, " +
+        "locks, covers, etc. are on/off/open/closed.",
+  },
+  {
+    displayName: "Call services to control devices",
+    rationale:
+        "Lets Gadgets turn lights on/off, set thermostats, lock/unlock doors, play media, run " +
+        "scenes and scripts — anything that's exposed as a Home Assistant service.",
+  },
+  {
+    displayName: "Edit Lovelace dashboards",
+    rationale:
+        "Lets Gadgets read and rewrite the configuration of dashboards stored in HA's UI " +
+        "(YAML-mode dashboards are left untouched).",
+  },
+  {
+    displayName: "Render Jinja templates and fire events",
+    rationale:
+        "Lets Gadgets compute values against current HA state via templates (e.g. count lights " +
+        "currently on) and emit custom events that automations can react to.",
+  },
+];
+
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   async describe(): Promise<VendorDescription> {
     return {
       displayName: "Home Assistant",
       url: "https://www.home-assistant.io/",
       logo: HOMEASSISTANT_ICON,
+      tagline: "Control your smart home, read sensor state, and edit Lovelace dashboards.",
+      description:
+          "Connect your Home Assistant instance so Gadgets can read entity state, call services " +
+          "to control devices, edit dashboards, and render templates. Build agents that automate " +
+          "your home, alert on sensor changes, or generate custom dashboards.",
     };
   }
 
@@ -372,6 +409,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async getSupportedResources(): Promise<SupportedResource[]> {
     return SUPPORTED_RESOURCES;
+  }
+
+  async getScopeCatalog(): Promise<VendorScope[]> {
+    return SCOPE_CATALOG;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -550,12 +591,9 @@ export class HomeAssistantUserImpl
       displayName,
       uniqueName,
       avatar: HOMEASSISTANT_ICON,
-      scope: [
-        "Read every entity state, area, label, device and dashboard in your Home Assistant",
-        "Call services to control devices (e.g. turn lights on, lock doors)",
-        "Edit Lovelace dashboards stored in HA's UI configuration",
-        "Render Jinja templates and fire events",
-      ],
+      // Derive from SCOPE_CATALOG so the connect modal's "permissions" list and the connected
+      // account's `scope` strings can't drift apart. Matches the GitHub gatekeeper's pattern.
+      scope: SCOPE_CATALOG.map((entry) => entry.displayName),
     };
   }
 
