@@ -868,41 +868,37 @@ function ConnectionGroupRow({
   // prop type can't express that. Bail out if the invariant is ever violated.
   if (items.length === 0) return null
 
-  // If a vendor exposes exactly one connection type, the group acts as a leaf:
-  // clicking the row goes straight into the selected connection rather than
-  // expanding a sub-list. Multi-item groups (e.g. Google with Gmail + Docs +
-  // Drive) collapse/expand to reveal their contents.
-  const isSingleItem = items.length === 1
-  const handleClick = () => {
-    if (isSingleItem) onSelectItem(items[0])
-    else onToggle(groupKey)
-  }
+  // Every group renders as a collapsible accordion, even when it has a single
+  // child — this gives the picker a consistent visual rhythm and makes the
+  // structure (vendor → services) explicit at every level.
+  const handleClick = () => onToggle(groupKey)
+  const panelId = `connection-group-panel-${groupKey}`
 
-  // Use the first item as a representative for the group's icon/logo. For
-  // multi-item groups every item shares a vendorId so the logo is consistent.
+  // Use the first item as a representative for the group's icon/logo. Within a
+  // group every item shares the same vendorId so the logo is consistent.
   const representative = items[0]
   const Icon = representative.icon
-  const iconUrl = isSingleItem
-    ? representative.iconUrl ?? representative.logoUrl
-    : representative.logoUrl
+  const iconUrl = representative.logoUrl
 
-  const subtitle = isSingleItem
+  // For single-item groups the joined-titles string would just repeat the
+  // group label (e.g. "AI Model"), so fall back to the richer vendor +
+  // description subtitle used in the flat search results.
+  const subtitle = items.length === 1
     ? `${representative.vendor} · ${representative.description}`
     : items.map(item => item.title).join(', ')
-
-  const title = isSingleItem ? representative.title : label
 
   return (
     <div className={first ? '' : 'border-t border-kumo-line'}>
       <button
         type="button"
         onClick={handleClick}
-        aria-expanded={isSingleItem ? undefined : expanded}
+        aria-expanded={expanded}
+        aria-controls={panelId}
         className="group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated"
       >
         <div
           className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-kumo-elevated"
-          style={isSingleItem && representative.accent ? { backgroundColor: representative.accent } : undefined}
+          style={representative.accent ? { backgroundColor: representative.accent } : undefined}
         >
           {iconUrl ? (
             <img src={iconUrl} alt="" className="h-6 w-6 object-contain" />
@@ -914,24 +910,20 @@ function ConnectionGroupRow({
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-            {title}
+            {label}
           </p>
           <p className="mt-0.5 line-clamp-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
             {subtitle}
           </p>
         </div>
-        {isSingleItem ? (
-          <CaretRight size={14} className="shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5 group-hover:text-kumo-default" />
-        ) : (
-          <CaretDown
-            size={14}
-            className={`shrink-0 text-kumo-inactive transition-transform group-hover:text-kumo-default ${expanded ? 'rotate-180' : ''}`}
-          />
-        )}
+        <CaretDown
+          size={14}
+          className={`shrink-0 text-kumo-inactive transition-transform group-hover:text-kumo-default ${expanded ? 'rotate-180' : ''}`}
+        />
       </button>
 
-      {!isSingleItem && expanded && (
-        <div className="border-t border-kumo-line bg-kumo-elevated/30">
+      {expanded && (
+        <div id={panelId} className="border-t border-kumo-line bg-kumo-elevated/30">
           {items.map(item => (
             <button
               key={item.id}
