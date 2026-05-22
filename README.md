@@ -38,4 +38,5 @@ To enable support for external APIs, you must do further configuration to regist
 * [GitHub API](packages/gatekeeper-github/README.md)
 * [Google API](packages/gatekeeper-google/README.md)
 * [Email Workers](packages/gatekeeper-email/README.md)
+* [Home Assistant](packages/gatekeeper-homeassistant/README.md)
 

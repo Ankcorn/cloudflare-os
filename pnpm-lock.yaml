@@ -84,6 +84,25 @@ importers:
         specifier: ^4.92.0
         version: 4.92.0(@cloudflare/workers-types@4.20260515.1)
 
+  packages/gatekeeper-homeassistant:
+    dependencies:
+      '@gadgets/configurator-ui':
+        specifier: workspace:*
+        version: link:../configurator-ui
+      '@gadgets/workshop-shared':
+        specifier: workspace:*
+        version: link:../workshop-shared
+      capnweb:
+        specifier: ^0.8.0
+        version: 0.8.0
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      wrangler:
+        specifier: ^4.92.0
+        version: 4.92.0(@cloudflare/workers-types@4.20260515.1)
+
   packages/typed-storage:
     devDependencies:
       '@cloudflare/workers-types':
