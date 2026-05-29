@@ -20,7 +20,7 @@ A blueprint captures:
 
 - **Source code** -- a snapshot of the gadget's committed Yjs document, stripped of edit history. The snapshot contains only the final file contents (one insert operation per file), producing a minimal encoding.
 - **Binding requirements** -- a description of each named binding the gadget uses, including what type of connection is needed (gatekeeper, AI model, or agent spawner) and how to configure it. The blueprint does not include any credentials or live connections.
-- **Metadata** -- title, description, author info, version number, and timestamps.
+- **Metadata** -- title, description, optional screenshot metadata, author info, version number, and timestamps.
 
 A blueprint does **not** capture:
 
@@ -62,12 +62,17 @@ Blueprint **code content** is stored separately in an **R2 bucket** (`BLUEPRINT_
 
 The `dirty` flag handles propagation failures gracefully: it is set to `true` before propagation begins and cleared only after all writes succeed. If a failure leaves it set, the UI shows a warning with a "Retry" button.
 
-## Blueprint Library
+## Explore
 
-The Blueprints page shows blueprints in two sections:
+The Explore page (`/explore`) is a place where users can discover featured blueprints. Goal is to show users what is possible and to give them place to start.
 
-- **Blueprints** -- a merged grid of featured picks and the user's saved library entries (deduplicated, featured first). An Upload button lets users import `.gadget` archives.
-- **My Blueprints** -- blueprints you published from gadgets you own. These are backed by a gadget DO, mirrored into your User DO, and published through KV.
+Admins have the ability to "feature" blueprints. This is what determines what is on this page.
+
+## Blueprints on home page
+
+The home page has a blueprints tab which shows a list of blueprints that they have published plus what is in their library.
+
+Users can pin blueprints to keep them at the top of the home Blueprints tab. Pinning a public blueprint that is not already in the user's library adds it to the library first, then pins it.
 
 Library entries come in two forms:
 
@@ -76,7 +81,7 @@ Library entries come in two forms:
 
 ## Export / Import Format
 
-Blueprints can be downloaded from `/blueprint/<id>` as `.gadget` files and uploaded from the home page into another Workshop instance.
+Blueprints can be downloaded from `/blueprint/<id>` as `.gadget` files and uploaded from the home blueprints tab into another Workshop instance.
 
 The `.gadget` format is a simple internal binary container:
 
@@ -89,7 +94,7 @@ The `.gadget` format is a simple internal binary container:
 
 Imports are validated before publication. Metadata is capped at 64 KiB and the stored snapshot payload is capped at 32 MiB so a malformed archive cannot force unbounded allocation in the worker.
 
-Only `BlueprintMetadata` is included in the file, not the full KV record. In particular, the archive does not include `ownerId` or `gadgetId`.
+Only `BlueprintMetadata` is included in the file, not the full KV record. In particular, the archive does not include `ownerId`, `gadgetId`, or screenshot bytes. Imported archives clear any screenshot marker because screenshots are stored separately from the archive content.
 
 The trailing content bytes are the same gzip-compressed Yjs snapshot that is already stored in R2 for the blueprint's current version. Import/export streams these bytes directly to and from R2 using `pipeTo()` rather than buffering the whole archive in memory on the server.
 
@@ -113,10 +118,10 @@ Featured blueprint state is split across two stores:
 
 Blueprints are managed through the **Blueprint** button in the gadget editor header. The UI allows:
 
-- **Creating** a new blueprint from the gadget's current committed code, with a title and optional description.
+- **Creating** a new blueprint from the gadget's current committed code, with a title, optional description, and optional screenshot.
 - **Describing** the required connections with optional per-binding helper text and suggested values.
 - **Listing** existing blueprints with their title, description, version, and code version date.
-- **Editing** a blueprint's title and description inline.
+- **Editing** a blueprint's title, description, screenshot, and connection guidance through the same form used to create a blueprint.
 - **Updating** a blueprint to the gadget's current code (increments the version).
 - **Copying** the blueprint's share link to the clipboard.
 - **Deleting** a blueprint (with confirmation).
@@ -129,7 +134,7 @@ On the backend, the Overseer handles blueprint lifecycle through `createBlueprin
 When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprint Landing Page**:
 
 1. The page fetches metadata via `PublicApi.getBlueprint()` (unauthenticated -- knowing the ID is sufficient since a blueprint is just data).
-2. It displays the title, description, author, version, and a summary of required bindings.
+2. It displays the title, description, optional screenshot, author, version, and a summary of required bindings.
 3. If the user is not logged in, they see a "Log in to create a gadget" button.
 4. Once authenticated, the user enters **configure mode**, where they assign each required binding:
    - For gatekeeper bindings: pick a connected account and configure the matching resource.

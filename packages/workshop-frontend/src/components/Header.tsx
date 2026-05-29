@@ -69,11 +69,11 @@ export default function Header() {
               Gatekeepers
             </Link>
             <Link
-              to="/blueprints"
+              to="/explore"
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Blueprints
+              Explore
             </Link>
           </nav>
         </div>
@@ -121,12 +121,12 @@ export default function Header() {
               Gatekeepers
             </Link>
             <Link
-              to="/blueprints"
+              to="/explore"
               onClick={closeMobileMenu}
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Blueprints
+              Explore
             </Link>
 
             {auth && (

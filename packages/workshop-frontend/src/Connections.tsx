@@ -65,8 +65,9 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
       return
     }
 
+    let gatekeeper = null
     try {
-      using gatekeeper = await overseer.getGatekeeper(bindingName)
+      gatekeeper = await overseer.getGatekeeper(bindingName)
       if (gatekeeper) {
         await gatekeeper.setBindingName(editValue.trim())
         await loadGatekeepers()
@@ -76,6 +77,7 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
       console.error('Failed to rename gatekeeper:', err)
       toasts.add({ title: 'Failed to update binding name', variant: 'error' })
     } finally {
+      gatekeeper?.[Symbol.dispose]()
       setEditingGatekeeper(null)
     }
   }
@@ -87,8 +89,9 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return
+    let gatekeeper = null
     try {
-      using gatekeeper = await overseer.getGatekeeper(deleteTarget.bindingName)
+      gatekeeper = await overseer.getGatekeeper(deleteTarget.bindingName)
       if (gatekeeper) {
         await gatekeeper.remove()
         await loadGatekeepers()
@@ -98,6 +101,7 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
       console.error('Failed to delete gatekeeper:', err)
       toasts.add({ title: 'Failed to delete connection', variant: 'error' })
     } finally {
+      gatekeeper?.[Symbol.dispose]()
       setDeleteTarget(null)
     }
   }
@@ -322,13 +326,15 @@ function BlueprintAnnotationModal({
     if (!data || !target) return
     setSaving(true)
     setSaveError(null)
+    let gk = null
     try {
-      using gk = await overseer.getGatekeeper(target.bindingName)
+      gk = await overseer.getGatekeeper(target.bindingName)
       if (gk) await gk.setBlueprintAnnotation(data.annotation)
       onSaved()
     } catch (err: any) {
       setSaveError(err?.message || 'Could not save.')
     } finally {
+      gk?.[Symbol.dispose]()
       setSaving(false)
     }
   }

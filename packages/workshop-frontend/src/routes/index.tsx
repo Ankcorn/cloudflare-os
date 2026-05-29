@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Blueprint, Hexagon } from "@phosphor-icons/react";
 import { useKumoToastManager } from "@cloudflare/kumo";
 import { ChatInput } from "../ChatInterface";
 import GadgetList from "../components/GadgetList";
+import HomeBlueprintList from "../components/HomeBlueprintList";
 import MeshBackground from "../components/MeshBackground";
 import { useAuthenticatedApi } from "../AuthContext";
 import { RpcStub } from "capnweb";
@@ -23,7 +25,8 @@ function HomePage() {
   const navigate = useNavigate();
   const toasts = useKumoToastManager();
 
-  // ── model selector ──────────────────────────────────────────────────────────
+  const [workTab, setWorkTab] = useState<'gadgets' | 'blueprints'>('gadgets');
+
   const [models, setModels] = useState<AiChatAuthorInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
@@ -50,7 +53,6 @@ function HomePage() {
     persistSelectedModel(value);
   }, []);
 
-  // ── provisional gadget ──────────────────────────────────────────────────────
   // Pre-create a provisional gadget as soon as the user starts interacting,
   // so that navigation after submit is instant.
   const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer> } | null>(
@@ -73,7 +75,6 @@ function HomePage() {
     };
   }, []);
 
-  // ── submit ──────────────────────────────────────────────────────────────────
   const handleSend = useCallback(
     async (
       message: string,
@@ -117,9 +118,7 @@ function HomePage() {
 
   return (
     <div className="home-layout min-h-[calc(100vh-3.5rem)] flex flex-col lg:flex-row">
-      {/* Left: Hero + Prompt */}
       <div className="lg:w-1/2 flex flex-col items-center justify-center px-6 sm:px-10 lg:px-14 py-12 lg:py-0 relative overflow-hidden bg-kumo-base">
-        {/* Dot grid — fades from top to bottom */}
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
@@ -144,9 +143,7 @@ function HomePage() {
             </p>
           </div>
 
-          {/* Glow + ChatInput */}
           <div className="relative isolate w-full max-w-2xl mx-auto group/prompt">
-            {/* Breathing glow — hidden when focused via group-focus-within */}
             <div className="prompt-glow group-focus-within/prompt:opacity-0 transition-opacity" />
             <ChatInput
               createCapsuleGatekeeper={createCapsuleGatekeeper}
@@ -164,9 +161,61 @@ function HomePage() {
         </div>
       </div>
 
-      {/* Right: Gadgets list */}
       <div className="lg:w-1/2 border-t lg:border-t-0 lg:border-l border-kumo-line bg-kumo-elevated min-h-0 lg:max-h-[calc(100vh-3.5rem)] flex flex-col">
-        <GadgetList />
+        <div className="px-6 sm:px-10 lg:px-10 pt-10 mb-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-kumo-default">
+                Your gadgets
+              </h2>
+              <p className="mt-1 text-[14px] leading-5 font-normal tracking-[-0.25px] text-kumo-subtle">
+                Open a gadget or start from a saved blueprint.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center rounded-full border border-kumo-line bg-kumo-base p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+              <button
+                type="button"
+                onClick={() => setWorkTab('gadgets')}
+                className={`group inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full px-3 text-[13px] font-medium tracking-[-0.25px] transition-[background-color,color,box-shadow,transform] duration-150 ease-out active:scale-[0.98] ${
+                  workTab === 'gadgets'
+                    ? 'bg-[rgba(255,72,1,0.10)] text-kumo-default shadow-[0_1px_2px_rgba(82,16,0,0.05)]'
+                    : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'
+                }`}
+              >
+                <Hexagon
+                  size={13}
+                  weight="bold"
+                  className={workTab === 'gadgets' ? 'text-kumo-brand' : 'text-kumo-inactive transition-colors group-hover:text-kumo-subtle'}
+                />
+                Gadgets
+              </button>
+              <button
+                type="button"
+                onClick={() => setWorkTab('blueprints')}
+                className={`group inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-full px-3 text-[13px] font-medium tracking-[-0.25px] transition-[background-color,color,box-shadow,transform] duration-150 ease-out active:scale-[0.98] ${
+                  workTab === 'blueprints'
+                    ? 'bg-[rgba(255,72,1,0.10)] text-kumo-default shadow-[0_1px_2px_rgba(82,16,0,0.05)]'
+                    : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'
+                }`}
+              >
+                <Blueprint
+                  size={13}
+                  weight="regular"
+                  className={workTab === 'blueprints' ? 'text-kumo-brand' : 'text-kumo-inactive transition-colors group-hover:text-kumo-subtle'}
+                />
+                Blueprints
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1">
+          <div className={workTab === 'gadgets' ? 'h-full' : 'hidden h-full'}>
+            <GadgetList showHeader={false} />
+          </div>
+          <div className={workTab === 'blueprints' ? 'h-full' : 'hidden h-full'}>
+            <HomeBlueprintList />
+          </div>
+        </div>
       </div>
     </div>
   );

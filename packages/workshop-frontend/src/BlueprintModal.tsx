@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
-import { ArrowsClockwise, Check, Copy, Pencil, Plus, Trash, Warning, X } from '@phosphor-icons/react'
+import { ArrowsClockwise, Check, Copy, ImageSquare, Pencil, Plus, Trash, Warning, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { BlueprintGadgetSummary, GadgetMetadata, GatekeeperMetadata, Overseer, BlueprintBindingAnnotation } from '@gadgets/workshop-shared/api'
+import { BlueprintGadgetSummary, GadgetMetadata, GatekeeperMetadata, Overseer, BlueprintBindingAnnotation, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput, WorkshopInputArea } from './components/WorkshopControls'
 import { copyToClipboard } from './clipboard'
 import {
@@ -10,6 +10,56 @@ import {
   BlueprintBindingCard,
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
+
+const BLUEPRINT_SCREENSHOT_WIDTH = 1280
+const BLUEPRINT_SCREENSHOT_HEIGHT = 720
+const MAX_BLUEPRINT_SCREENSHOT_BYTES = 700 * 1024
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob)
+      else reject(new Error('Failed to encode image.'))
+    }, type, quality)
+  })
+}
+
+async function compressBlueprintScreenshot(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file)
+  const canvas = document.createElement('canvas')
+  canvas.width = BLUEPRINT_SCREENSHOT_WIDTH
+  canvas.height = BLUEPRINT_SCREENSHOT_HEIGHT
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Failed to get 2D canvas context')
+
+  try {
+    const targetRatio = BLUEPRINT_SCREENSHOT_WIDTH / BLUEPRINT_SCREENSHOT_HEIGHT
+    const sourceRatio = bitmap.width / bitmap.height
+    let sx = 0
+    let sy = 0
+    let sw = bitmap.width
+    let sh = bitmap.height
+
+    if (sourceRatio > targetRatio) {
+      sw = bitmap.height * targetRatio
+      sx = (bitmap.width - sw) / 2
+    } else if (sourceRatio < targetRatio) {
+      sh = bitmap.width / targetRatio
+      sy = (bitmap.height - sh) / 2
+    }
+
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, BLUEPRINT_SCREENSHOT_WIDTH, BLUEPRINT_SCREENSHOT_HEIGHT)
+
+    for (let quality = 0.86; quality >= 0.5; quality -= 0.12) {
+      const blob = await canvasToBlob(canvas, 'image/jpeg', quality)
+      if (blob.size <= MAX_BLUEPRINT_SCREENSHOT_BYTES) return blob
+    }
+
+    return canvasToBlob(canvas, 'image/jpeg', 0.42)
+  } finally {
+    bitmap.close()
+  }
+}
 
 type Props = {
   open: boolean
@@ -23,14 +73,17 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
 
   const [blueprints, setBlueprints] = useState<BlueprintGadgetSummary[]>([])
   const [loading, setLoading] = useState(false)
-  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [formMode, setFormMode] = useState<'list' | 'create' | 'edit'>('list')
   const [newTitle, setNewTitle] = useState('')
   const [newDescription, setNewDescription] = useState('')
+  const [newScreenshotBlob, setNewScreenshotBlob] = useState<Blob | null>(null)
+  const [newScreenshotUrl, setNewScreenshotUrl] = useState<string | null>(null)
+  const [clearScreenshot, setClearScreenshot] = useState(false)
+  const [processingScreenshot, setProcessingScreenshot] = useState(false)
+  const screenshotInputRef = useRef<HTMLInputElement>(null)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editTitleValue, setEditTitleValue] = useState('')
-  const [editDescriptionValue, setEditDescriptionValue] = useState('')
+  const [editingBlueprint, setEditingBlueprint] = useState<BlueprintGadgetSummary | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
@@ -69,22 +122,58 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
   useEffect(() => {
     if (open) {
       loadBlueprints()
-      setShowCreateForm(false)
+      setFormMode('list')
       setNewTitle(metadata.title)
       setNewDescription('')
+      setNewScreenshotBlob(null)
+      setNewScreenshotUrl(null)
+      setClearScreenshot(false)
       setCreateError(null)
     }
   }, [open, loadBlueprints, metadata.title])
 
   useEffect(() => {
-    if (showCreateForm) {
+    if (formMode !== 'list') {
       loadBindings()
     } else {
       setBindings([])
       setBindingsError(null)
       setCreateError(null)
     }
-  }, [showCreateForm, loadBindings])
+  }, [formMode, loadBindings])
+
+  useEffect(() => {
+    return () => {
+      if (newScreenshotUrl) URL.revokeObjectURL(newScreenshotUrl)
+    }
+  }, [newScreenshotUrl])
+
+  const handleScreenshotSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    if (!file.type.startsWith('image/')) {
+      toasts.add({ title: 'Please select an image file.', variant: 'error' })
+      return
+    }
+
+    setProcessingScreenshot(true)
+    try {
+      const blob = await compressBlueprintScreenshot(file)
+      setNewScreenshotBlob(blob)
+      setNewScreenshotUrl(prev => {
+        if (prev) URL.revokeObjectURL(prev)
+        return URL.createObjectURL(blob)
+      })
+      setClearScreenshot(false)
+    } catch (err) {
+      console.error('Failed to process blueprint screenshot:', err)
+      toasts.add({ title: 'Failed to process screenshot', variant: 'error' })
+    } finally {
+      setProcessingScreenshot(false)
+    }
+  }
 
   const updateBindingAnnotation = (bindingName: string, annotation: BlueprintBindingAnnotation) => {
     setBindings((prev) =>
@@ -99,22 +188,82 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     try {
       await Promise.all(
         bindings.map(async (b) => {
-          using gk = await overseer.getGatekeeper(b.bindingName)
-          if (gk) await gk.setBlueprintAnnotation(b.annotation)
+          const gk = await overseer.getGatekeeper(b.bindingName)
+          try {
+            if (gk) await gk.setBlueprintAnnotation(b.annotation)
+          } finally {
+            gk?.[Symbol.dispose]()
+          }
         }),
       )
+
+      const screenshot: BlueprintScreenshotUpload | undefined = newScreenshotBlob
+        ? {
+          mimeType: 'image/jpeg',
+          content: new Uint8Array(await newScreenshotBlob.arrayBuffer()),
+        }
+        : undefined
 
       await overseer.createBlueprint(
         newTitle.trim() || undefined,
         newDescription.trim() || undefined,
+        screenshot,
       )
       toasts.add({ title: 'Blueprint created.', variant: 'success' })
-      setShowCreateForm(false)
+      setFormMode('list')
       setNewTitle(metadata.title)
       setNewDescription('')
+      setNewScreenshotBlob(null)
+      setNewScreenshotUrl(null)
+      setClearScreenshot(false)
       await loadBlueprints()
     } catch (err: any) {
       setCreateError(err.message || 'Could not create blueprint.')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const saveBlueprintEdits = async () => {
+    if (!editingBlueprint || bindingsLoading) return
+    setCreating(true)
+    setCreateError(null)
+    try {
+      await Promise.all(
+        bindings.map(async (b) => {
+          const gk = await overseer.getGatekeeper(b.bindingName)
+          try {
+            if (gk) await gk.setBlueprintAnnotation(b.annotation)
+          } finally {
+            gk?.[Symbol.dispose]()
+          }
+        }),
+      )
+
+      const screenshot: BlueprintScreenshotUpload | null | undefined = clearScreenshot
+        ? null
+        : newScreenshotBlob
+          ? {
+            mimeType: 'image/jpeg',
+            content: new Uint8Array(await newScreenshotBlob.arrayBuffer()),
+          }
+          : undefined
+
+      await overseer.updateBlueprint(editingBlueprint.id, {
+        title: newTitle.trim() || editingBlueprint.title,
+        description: newDescription.trim(),
+        updateBindings: true,
+        screenshot,
+      })
+      toasts.add({ title: 'Blueprint updated.', variant: 'success' })
+      setFormMode('list')
+      setEditingBlueprint(null)
+      setNewScreenshotBlob(null)
+      setNewScreenshotUrl(null)
+      setClearScreenshot(false)
+      await loadBlueprints()
+    } catch (err: any) {
+      setCreateError(err.message || 'Could not update blueprint.')
     } finally {
       setCreating(false)
     }
@@ -134,6 +283,11 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     }
   }
 
+  const savedScreenshotUrl = formMode === 'edit' && editingBlueprint?.screenshotUrl && !clearScreenshot
+    ? editingBlueprint.screenshotUrl
+    : null
+  const screenshotPreviewUrl = newScreenshotUrl ?? savedScreenshotUrl
+
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <Dialog className="!z-[1000] !w-[min(640px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[10%] !-translate-y-0" size="lg">
@@ -141,12 +295,14 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
             <div className="flex min-w-0 items-start gap-3">
               <div className="min-w-0">
               <Dialog.Title className="text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
-                {showCreateForm ? 'Create blueprint' : 'Blueprints'}
+                {formMode === 'create' ? 'Create blueprint' : formMode === 'edit' ? 'Edit blueprint' : 'Blueprints'}
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                {showCreateForm
+                {formMode === 'create'
                   ? 'Describe what people get when they start from this blueprint.'
-                  : 'Turn this gadget into a reusable starting point.'}
+                  : formMode === 'edit'
+                    ? 'Update the details, screenshot, and connection guidance for this blueprint.'
+                    : 'Turn this gadget into a reusable starting point.'}
               </Dialog.Description>
               </div>
             </div>
@@ -163,10 +319,10 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
           </div>
 
           <div
-            className={showCreateForm ? 'flex flex-col' : ''}
-            style={showCreateForm ? { maxHeight: 'calc(80vh - 80px)' } : undefined}
+            className={formMode !== 'list' ? 'flex flex-col' : ''}
+            style={formMode !== 'list' ? { maxHeight: 'calc(80vh - 80px)' } : undefined}
           >
-            {showCreateForm ? (
+            {formMode !== 'list' ? (
               <>
                 <div className="flex-1 overflow-y-auto chat-panel space-y-5 px-4 py-5 sm:px-6">
                   <div className="space-y-3">
@@ -185,6 +341,66 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
                       rows={3}
                       className="w-full"
                     />
+                    <input
+                      ref={screenshotInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleScreenshotSelected}
+                    />
+                    <div className="rounded-xl border border-kumo-line bg-kumo-base p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="m-0 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            Screenshot
+                          </p>
+                          <p className="m-0 mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            Optional image shown on Explore and the blueprint detail page.
+                            {formMode === 'edit' && !newScreenshotUrl && editingBlueprint?.screenshotUrl && !clearScreenshot ? ' The current screenshot will stay unless you upload a new one.' : ''}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {(newScreenshotUrl || (formMode === 'edit' && editingBlueprint?.screenshotUrl && !clearScreenshot)) && (
+                            <WorkshopButton
+                              className="!h-8"
+                              onClick={() => {
+                                setNewScreenshotBlob(null)
+                                setNewScreenshotUrl(prev => {
+                                  if (prev) URL.revokeObjectURL(prev)
+                                  return null
+                                })
+                                setClearScreenshot(true)
+                              }}
+                              disabled={processingScreenshot || creating}
+                            >
+                              Clear
+                            </WorkshopButton>
+                          )}
+                          <WorkshopButton
+                            className="!h-8"
+                            onClick={() => screenshotInputRef.current?.click()}
+                            disabled={processingScreenshot || creating}
+                          >
+                            <ImageSquare size={13} weight="bold" />
+                            {processingScreenshot ? 'Processing...' : newScreenshotUrl || (formMode === 'edit' && editingBlueprint?.screenshotUrl && !clearScreenshot) ? 'Change' : 'Upload'}
+                          </WorkshopButton>
+                        </div>
+                      </div>
+                      {screenshotPreviewUrl && (
+                        <div className="mt-3 overflow-hidden rounded-lg border border-kumo-line bg-kumo-tint">
+                          <img
+                            src={screenshotPreviewUrl}
+                            alt="Blueprint screenshot preview"
+                            className="max-h-[320px] w-full object-contain"
+                          />
+                        </div>
+                      )}
+                      {clearScreenshot && !newScreenshotUrl && (
+                        <div className="mt-3 rounded-lg border border-dashed border-kumo-line bg-kumo-tint px-3 py-2 text-[12px] leading-4 text-kumo-subtle">
+                          Screenshot will be removed when you save.
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {bindingsLoading ? (
@@ -226,7 +442,10 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
                   <div className="flex items-center justify-between">
                     <WorkshopButton
                       className="!h-9 min-w-[64px]"
-                      onClick={() => setShowCreateForm(false)}
+                      onClick={() => {
+                        setFormMode('list')
+                        setEditingBlueprint(null)
+                      }}
                       disabled={creating}
                     >
                       Back
@@ -234,10 +453,14 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
                     <WorkshopButton
                       tone="primary"
                       className="min-w-[64px]"
-                      onClick={createBlueprint}
-                      disabled={creating || bindingsLoading}
+                      onClick={formMode === 'create' ? createBlueprint : saveBlueprintEdits}
+                      disabled={creating || bindingsLoading || processingScreenshot}
                     >
-                      {creating ? 'Creating...' : bindingsLoading ? 'Loading...' : 'Create'}
+                      {creating
+                        ? formMode === 'create' ? 'Creating...' : 'Saving...'
+                        : processingScreenshot ? 'Processing...'
+                          : bindingsLoading ? 'Loading...'
+                            : formMode === 'create' ? 'Create' : 'Save'}
                     </WorkshopButton>
                   </div>
                 </div>
@@ -248,7 +471,12 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
                 type="button"
                 onClick={() => {
                   setNewTitle(metadata.title)
-                  setShowCreateForm(true)
+                  setNewDescription('')
+                  setNewScreenshotBlob(null)
+                  setNewScreenshotUrl(null)
+                  setClearScreenshot(false)
+                  setEditingBlueprint(null)
+                  setFormMode('create')
                 }}
                 className="flex w-full items-center justify-between rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left transition-colors hover:bg-kumo-elevated"
               >
@@ -285,34 +513,15 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
                       key={bp.id}
                       bp={bp}
                       isFirst={index === 0}
-                      isEditing={editingId === bp.id}
-                      editTitleValue={editTitleValue}
-                      editDescriptionValue={editDescriptionValue}
                       onStartEdit={() => {
-                        setEditingId(bp.id)
-                        setEditTitleValue(bp.title)
-                        setEditDescriptionValue(bp.description)
+                        setNewTitle(bp.title)
+                        setNewDescription(bp.description)
+                        setNewScreenshotBlob(null)
+                        setNewScreenshotUrl(null)
+                        setClearScreenshot(false)
+                        setEditingBlueprint(bp)
+                        setFormMode('edit')
                       }}
-                      onChangeEditTitle={setEditTitleValue}
-                      onChangeEditDescription={setEditDescriptionValue}
-                      onSaveEdit={async () => {
-                        const title = editTitleValue.trim()
-                        if (!title) {
-                          setEditingId(null)
-                          return
-                        }
-                        try {
-                          await overseer.updateBlueprint(bp.id, {
-                            title,
-                            description: editDescriptionValue,
-                          })
-                          setEditingId(null)
-                          loadBlueprints()
-                        } catch (err: any) {
-                          toasts.add({ title: err.message || 'Failed to update blueprint.', variant: 'error' })
-                        }
-                      }}
-                      onCancelEdit={() => setEditingId(null)}
                       onUpdateCode={async () => {
                         try {
                           await overseer.updateBlueprint(bp.id, { updateCode: true })
@@ -356,14 +565,7 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
 function BlueprintRow({
   bp,
   isFirst,
-  isEditing,
-  editTitleValue,
-  editDescriptionValue,
   onStartEdit,
-  onChangeEditTitle,
-  onChangeEditDescription,
-  onSaveEdit,
-  onCancelEdit,
   onUpdateCode,
   onRetryPublish,
   onCopyLink,
@@ -375,14 +577,7 @@ function BlueprintRow({
 }: {
   bp: BlueprintGadgetSummary
   isFirst: boolean
-  isEditing: boolean
-  editTitleValue: string
-  editDescriptionValue: string
   onStartEdit: () => void
-  onChangeEditTitle: (value: string) => void
-  onChangeEditDescription: (value: string) => void
-  onSaveEdit: () => void
-  onCancelEdit: () => void
   onUpdateCode: () => void
   onRetryPublish: () => void
   onCopyLink: () => Promise<boolean>
@@ -440,28 +635,9 @@ function BlueprintRow({
       className={`group/row relative px-4 py-4 ${ROW_MIN_H} ${isFirst ? '' : 'border-t border-kumo-line'}`}
     >
       <div className="flex min-w-0 flex-wrap items-center gap-3">
-        {isEditing ? (
-          <input
-            autoFocus
-            type="text"
-            aria-label="Blueprint title"
-            value={editTitleValue}
-            onChange={(e) => onChangeEditTitle(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                onSaveEdit()
-              }
-              if (e.key === 'Escape') onCancelEdit()
-            }}
-            placeholder="Untitled"
-            className="m-0 block min-w-0 flex-1 border-0 bg-transparent p-0 text-[15px] leading-5 font-semibold tracking-[-0.3px] text-kumo-default placeholder:text-kumo-inactive shadow-none outline-none focus:outline-none focus:ring-0"
-          />
-        ) : (
-          <p className="m-0 min-w-0 flex-1 truncate text-[15px] leading-5 font-semibold tracking-[-0.3px] text-kumo-default">
-            {bp.title}
-          </p>
-        )}
+        <p className="m-0 min-w-0 flex-1 truncate text-[15px] leading-5 font-semibold tracking-[-0.3px] text-kumo-default">
+          {bp.title}
+        </p>
 
         <span
           className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] leading-4 font-semibold tracking-[-0.1px] ${
@@ -482,14 +658,7 @@ function BlueprintRow({
       </div>
 
       <div className="mt-1.5 min-h-[18px]">
-        {isEditing ? (
-          <AutosizingTextarea
-            value={editDescriptionValue}
-            onChange={onChangeEditDescription}
-            onCommit={onSaveEdit}
-            onCancel={onCancelEdit}
-          />
-        ) : bp.description ? (
+        {bp.description ? (
           <p className="m-0 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle whitespace-pre-wrap">
             {bp.description}
           </p>
@@ -501,73 +670,48 @@ function BlueprintRow({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-        {isEditing ? (
-          <>
-            <span aria-hidden="true" />
-            <div className="ml-auto flex items-center gap-1">
-              <button
-                type="button"
-                onClick={onCancelEdit}
-                className="inline-flex h-7 cursor-pointer items-center rounded-md bg-transparent px-2.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={onSaveEdit}
-                disabled={!editTitleValue.trim()}
-                className="inline-flex h-7 cursor-pointer items-center rounded-md bg-kumo-contrast px-2.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-inverse transition-colors hover:bg-kumo-strong disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-kumo-contrast"
-              >
-                Save
-              </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="-ml-[7px] flex flex-wrap items-center gap-1">
-              <GhostButton onClick={onUpdateCode} icon={<ArrowsClockwise size={13} />}>
-                Update code
-              </GhostButton>
-              {bp.dirty && (
-                <GhostButton onClick={onRetryPublish} icon={<ArrowsClockwise size={13} />}>
-                  Retry publish
-                </GhostButton>
-              )}
-              <GhostButton
-                onClick={async () => {
-                  setCopyState(await onCopyLink() ? 'copied' : 'failed')
-                }}
-                icon={
-                  copyState === 'copied' ? (
-                    <Check size={13} className="text-kumo-success" />
-                  ) : (
-                    <Copy size={13} />
-                  )
-                }
-              >
-                {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy link'}
-              </GhostButton>
-            </div>
-            <div className="-mr-1.5 ml-auto flex items-center gap-0.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
-              <button
-                type="button"
-                onClick={onStartEdit}
-                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-transparent text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default"
-                aria-label="Edit blueprint"
-              >
-                <Pencil size={13} />
-              </button>
-              <button
-                type="button"
-                onClick={onStartDelete}
-                className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-transparent text-kumo-subtle transition-colors hover:bg-kumo-danger-tint hover:text-kumo-danger"
-                aria-label="Delete blueprint"
-              >
-                <Trash size={13} />
-              </button>
-            </div>
-          </>
-        )}
+        <div className="-ml-[7px] flex flex-wrap items-center gap-1">
+          <GhostButton onClick={onUpdateCode} icon={<ArrowsClockwise size={13} />}>
+            Update code
+          </GhostButton>
+          {bp.dirty && (
+            <GhostButton onClick={onRetryPublish} icon={<ArrowsClockwise size={13} />}>
+              Retry publish
+            </GhostButton>
+          )}
+          <GhostButton
+            onClick={async () => {
+              setCopyState(await onCopyLink() ? 'copied' : 'failed')
+            }}
+            icon={
+              copyState === 'copied' ? (
+                <Check size={13} className="text-kumo-success" />
+              ) : (
+                <Copy size={13} />
+              )
+            }
+          >
+            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy link'}
+          </GhostButton>
+        </div>
+        <div className="-mr-1.5 ml-auto flex items-center gap-0.5 opacity-60 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
+          <button
+            type="button"
+            onClick={onStartEdit}
+            className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-transparent text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default"
+            aria-label="Edit blueprint"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={onStartDelete}
+            className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-transparent text-kumo-subtle transition-colors hover:bg-kumo-danger-tint hover:text-kumo-danger"
+            aria-label="Delete blueprint"
+          >
+            <Trash size={13} />
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -594,43 +738,3 @@ function GhostButton({
   )
 }
 
-function AutosizingTextarea({
-  value,
-  onChange,
-  onCommit,
-  onCancel,
-}: {
-  value: string
-  onChange: (value: string) => void
-  onCommit: () => void
-  onCancel: () => void
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null)
-
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [value])
-
-  return (
-    <textarea
-      ref={ref}
-      autoFocus
-      aria-label="Blueprint description"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-          e.preventDefault()
-          onCommit()
-        }
-        if (e.key === 'Escape') onCancel()
-      }}
-      rows={1}
-      placeholder="Add a description"
-      className="m-0 block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none outline-none focus:outline-none focus:ring-0"
-    />
-  )
-}
