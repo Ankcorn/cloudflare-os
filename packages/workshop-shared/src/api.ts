@@ -235,9 +235,19 @@ export interface AuthenticatedApi extends RpcTarget {
   // view in Settings.
   listOwnBlueprints(): Promise<BlueprintUserSummary[]>;
 
+  // Return a blueprint created by the current user, or null if it is not owned by this user.
+  getOwnBlueprint(blueprintId: string): Promise<BlueprintUserSummary | null>;
+
   // List the blueprints currently in the user's library. This includes uploaded `.gadget`
   // archives (stored locally) and blueprints saved by reference from other publishers.
   listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]>;
+
+  // Pin a blueprint for quick reuse on the home page. Pinning a public blueprint that isn't
+  // already yours or in your library saves it to your library first.
+  setBlueprintPinned(blueprintId: string, pinned: boolean): Promise<void>;
+
+  // Returns whether the blueprint is pinned by the current user.
+  isBlueprintPinned(blueprintId: string): Promise<boolean>;
 
   // List the deployment-wide featured blueprints. This is served from a KV snapshot rather
   // than directly from the AdminSettings durable object.
@@ -701,7 +711,7 @@ export interface Overseer extends RpcTarget {
   //
   // Steps: generate ID, snapshot code, collect binding metadata, store locally, propagate
   // to User DO + KV + R2.
-  createBlueprint(title?: string, description?: string): Promise<BlueprintGadgetSummary>;
+  createBlueprint(title?: string, description?: string, screenshot?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary>;
 
   // Update an existing blueprint. Any combination of metadata and code can be updated
   // atomically in a single call with one propagation pass.
@@ -709,12 +719,16 @@ export interface Overseer extends RpcTarget {
   // - `title` / `description`: if provided, update the respective field.
   // - `updateCode`: if true, snapshot the gadget's current committed code into the
   //   blueprint and increment the blueprint version.
+  // - `updateBindings`: if true, refresh the blueprint's connection annotations from
+  //   the gadget's current named bindings without changing the code snapshot.
   //
   // At least one option must be provided.
   updateBlueprint(blueprintId: string, options: {
     title?: string;
     description?: string;
     updateCode?: boolean;
+    updateBindings?: boolean;
+    screenshot?: BlueprintScreenshotUpload | null;
   }): Promise<void>;
 
   // Delete a blueprint. Cleans up KV, R2, User DO, and local storage.
@@ -1203,6 +1217,19 @@ export type BlueprintBinding = {
   config: Omit<AgentSpawnerConfig, "modelId">;
 });
 
+export type BlueprintScreenshotUpload = {
+  mimeType: "image/jpeg" | "image/png";
+  content: Uint8Array;
+};
+
+export const BLUEPRINT_SCREENSHOT_R2_PREFIX = 'screenshots/';
+export const BLUEPRINT_SCREENSHOT_PATH_PREFIX = '/blueprint-screenshot/';
+
+export function blueprintScreenshotUrl(id: string, metadata: { screenshot?: true, lastUpdated: Date }): string | undefined {
+  return metadata.screenshot ?
+      `${BLUEPRINT_SCREENSHOT_PATH_PREFIX}${id}?v=${metadata.lastUpdated.valueOf()}` : undefined;
+}
+
 // General metadata about a blueprint. Stored (in slightly different wrapper records) in
 // three locations: Gadget DO, User DO, and KV.
 export type BlueprintMetadata = {
@@ -1214,6 +1241,10 @@ export type BlueprintMetadata = {
   version: number;       // increments every time the blueprint is updated
   lastUpdated: Date;
 
+  // If present, a screenshot is stored separately from the metadata. The server uses this
+  // to decide when to include a derived screenshotUrl.
+  screenshot?: true;
+
   // Key = binding name.
   bindings: Record<string, BlueprintBinding>;
 };
@@ -1222,6 +1253,9 @@ export type BlueprintMetadata = {
 export type BlueprintPublicInfo = {
   id: string;
   metadata: BlueprintMetadata;
+
+  // If present, browser-loadable URL for the public screenshot.
+  screenshotUrl?: string;
 };
 
 // Gadget-side summary (returned by Overseer.listBlueprints).
@@ -1231,17 +1265,20 @@ export type BlueprintGadgetSummary = {
   description: string;
   version: number;
   codeVersionDate: Date;  // timestamp of the exported code version
+  screenshotUrl?: string;
   dirty?: boolean;        // true if last publish failed and needs retry
 };
 
-// User-side summary (returned by AuthenticatedApi.listOwnBlueprints).
+// User-side summary (returned by AuthenticatedApi.listOwnBlueprints and getOwnBlueprint).
 export type BlueprintUserSummary = {
   id: string;
   title: string;
+  description: string;
   gadgetId: string;       // source gadget (may no longer exist)
   gadgetTitle: string;
   version: number;
   lastUpdated: Date;
+  pinned?: boolean;
 };
 
 // User-side library summary (returned by AuthenticatedApi.listLibraryBlueprints).
@@ -1250,6 +1287,7 @@ export type BlueprintLibrarySummary = {
   metadata: BlueprintMetadata;
   addedAt: Date;
   uploaded: boolean;
+  pinned?: boolean;
 };
 
 // Binding assignment (input to newGadgetFromBlueprint).

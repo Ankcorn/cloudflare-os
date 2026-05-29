@@ -6,7 +6,8 @@ import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
 import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import ShareModal from '../ShareModal'
-import { BlueprintCard } from './BlueprintCard'
+import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges } from './BlueprintCard'
+import { BlueprintPreviewImage } from './BlueprintPreviewImage'
 
 // Deterministic gradient by gadget ID
 const gradients = [
@@ -79,7 +80,7 @@ function AppRow({
     <Link
       to="/gadget/$id"
       params={{ id: gadget.id }}
-      className="group flex items-center gap-3 px-3 py-2.5 mr-4 sm:mr-6 rounded-xl border border-transparent hover:border-kumo-fill hover:bg-kumo-elevated transition-all cursor-pointer"
+      className="group mr-4 flex cursor-pointer items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-[background-color,border-color,box-shadow,transform] duration-150 ease-out hover:border-kumo-line hover:bg-kumo-base hover:shadow-[0_8px_20px_-18px_rgba(82,16,0,0.28)] active:scale-[0.995] sm:mr-6"
       onClick={(e) => {
         // Prevent navigation when renaming or clicking the menu
         if (isRenaming) e.preventDefault()
@@ -172,7 +173,7 @@ function AppRow({
   )
 }
 
-export default function GadgetList() {
+export default function GadgetList({ showHeader = true }: { showHeader?: boolean } = {}) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
@@ -337,16 +338,18 @@ export default function GadgetList() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-6 sm:px-10 lg:px-10 pt-10 lg:pt-10 mb-4">
-        <h2 className="text-lg font-semibold text-kumo-default">
-          Your gadgets
-        </h2>
-        {!loading && gadgets.length === 0 && !loadError && (
-          <p className="mt-1 text-sm text-kumo-inactive">
-            You haven&apos;t created any gadgets yet
-          </p>
-        )}
-      </div>
+      {showHeader && (
+        <div className="px-6 sm:px-10 lg:px-10 pt-10 lg:pt-10 mb-4">
+          <h2 className="text-lg font-semibold text-kumo-default">
+            Your gadgets
+          </h2>
+          {!loading && gadgets.length === 0 && !loadError && (
+            <p className="mt-1 text-sm text-kumo-inactive">
+              You haven&apos;t created any gadgets yet
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Search — hidden when the user has no gadgets */}
       {!loading && gadgets.length > 0 && (
@@ -361,14 +364,14 @@ export default function GadgetList() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search gadgets..."
-              className="w-full pl-9 pr-4 py-2 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:border-kumo-brand"
+              className="h-9 w-full rounded-xl border border-kumo-line bg-kumo-base/70 pl-9 pr-4 text-sm text-kumo-default placeholder:text-kumo-inactive transition-[background-color,border-color,box-shadow] duration-150 ease-out focus:border-kumo-brand focus:bg-kumo-base focus:outline-none focus:ring-[3px] focus:ring-black/5"
             />
           </div>
         </div>
       )}
 
       {/* List */}
-      <div className="flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pl-6 sm:pl-10 lg:pl-10 pr-2">
+      <div className="chat-panel flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pl-6 sm:pl-10 lg:pl-10 pr-2 pt-1">
         {loading ? (
           <>
             {[1, 2, 3].map((i) => (
@@ -500,6 +503,53 @@ export default function GadgetList() {
 
 const MAX_FEATURED_SHOWN = 6
 
+function HomeFeaturedBlueprintCard({
+  blueprint,
+}: {
+  blueprint: BlueprintPublicInfo
+}) {
+  const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 1)
+
+  return (
+    <div className="group relative isolate flex min-h-[190px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_10px_24px_-20px_rgba(82,16,0,0.22)] active:scale-[0.995]">
+      <Link
+        to="/blueprint/$id"
+        params={{ id: blueprint.id }}
+        aria-label={`Open blueprint ${blueprint.metadata.title}`}
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+      />
+      <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-2.5">
+        <BlueprintPreviewImage
+          blueprintId={blueprint.id}
+          title={blueprint.metadata.title}
+          screenshotUrl={blueprint.screenshotUrl}
+          className="mb-3"
+        />
+        <div className="flex min-w-0 items-start gap-2 px-1 pb-1">
+          <div className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br ${getBlueprintGradient(blueprint.id)}`}>
+            <Hexagon size={13} className="text-white/75" weight="bold" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="m-0 truncate text-[13px] leading-[18px] font-semibold tracking-[-0.25px] text-kumo-default">
+              {blueprint.metadata.title}
+            </p>
+            <p className={`mt-0.5 line-clamp-2 min-h-8 text-[12px] leading-4 tracking-[-0.2px] ${blueprint.metadata.description ? 'text-kumo-subtle' : 'text-kumo-inactive italic'}`}>
+              {blueprint.metadata.description || 'No description'}
+            </p>
+            {badges.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {badges.map((badge) => (
+                  <BindingBadge key={badge.vendorKey ?? badge.type} badge={badge} />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function FeaturedBlueprintsGallery() {
   const { authenticatedApi } = useAuthenticatedApi()
   const [blueprints, setBlueprints] = useState<BlueprintPublicInfo[]>([])
@@ -541,24 +591,18 @@ function FeaturedBlueprintsGallery() {
   const hasMore = blueprints.length > MAX_FEATURED_SHOWN
 
   return (
-    <div className="px-2 py-4">
+    <div className="py-4 pr-4 sm:pr-6">
       <div className="mb-5">
-        <h3 className="text-sm font-semibold text-kumo-default">
-          Create your own gadget, or start with a blueprint
+        <h3 className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+          Start from a featured blueprint.
         </h3>
-        <p className="mt-1.5 text-xs text-kumo-subtle leading-relaxed">
-          Blueprints are ready-made gadgets built by the community. Pick one to
-          get a working app instantly, then customize it to make it your own.
-        </p>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
         {shown.map((bp) => (
-          <BlueprintCard
+          <HomeFeaturedBlueprintCard
             key={bp.id}
-            id={bp.id}
-            metadata={bp.metadata}
-            featured
+            blueprint={bp}
           />
         ))}
       </div>
@@ -566,7 +610,7 @@ function FeaturedBlueprintsGallery() {
       {hasMore && (
         <div className="mt-4 text-center">
           <Link
-            to="/blueprints"
+            to="/explore"
             className="inline-flex items-center gap-1.5 text-xs font-medium text-kumo-brand hover:text-kumo-brand-hover transition-colors"
           >
             Browse all blueprints

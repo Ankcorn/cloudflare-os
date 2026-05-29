@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, VendorScope, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -111,6 +111,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       preferredModel: <string | null>null,
       onboardingCompleted: false,
       nextAccountId: 0,
+      pinnedBlueprints: <string[]>[],
 
       // `passwordHash` value as passed to `login()`, but with an extra round of SHA-256 applied.
       //
@@ -525,6 +526,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async deleteBlueprint(id: string): Promise<void> {
     this.storage.blueprints.delete(id);
+    this.storage.pinnedBlueprints.put(
+      this.storage.pinnedBlueprints.get().filter(existing => existing !== id));
+  }
+
+  isBlueprintPinned(id: string): boolean {
+    return this.storage.pinnedBlueprints.get().includes(id);
+  }
+
+  async setBlueprintPinned(id: string, pinned: boolean): Promise<void> {
+    let pinnedBlueprints = this.storage.pinnedBlueprints.get().filter(existing => existing !== id);
+
+    if (pinned) {
+      if (!this.storage.blueprints.get(id) && !this.storage.libraryBlueprints.get(id)) {
+        await this.addBlueprintToLibrary(id);
+      }
+      pinnedBlueprints.unshift(id);
+    }
+
+    this.storage.pinnedBlueprints.put(pinnedBlueprints);
   }
 
   async addBlueprintToLibrary(id: string): Promise<void> {
@@ -558,6 +578,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       await this.deleteOwnedBlueprint(id);
     } else {
       this.storage.libraryBlueprints.delete(id);
+      await this.setBlueprintPinned(id, false);
     }
   }
 
@@ -590,6 +611,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       for (let v = 1; v <= kvRecord.metadata.version; v++) {
         await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
       }
+      await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
 
       // Delete from KV.
       await this.env.BLUEPRINTS.delete(id);
@@ -605,6 +627,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (uploadedRecord) {
       this.storage.libraryBlueprints.delete(id);
     }
+    await this.setBlueprintPinned(id, false);
   }
 
   async isBlueprintFeatured(id: string): Promise<boolean | null> {
@@ -626,31 +649,45 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.blueprints.put(record);
   }
 
+  getBlueprint(id: string): BlueprintUserSummary | null {
+    let record = this.storage.blueprints.get(id);
+    return record ? this.blueprintSummary(record, new Set(this.storage.pinnedBlueprints.get())) : null;
+  }
+
   async listBlueprints(): Promise<BlueprintUserSummary[]> {
     let result: BlueprintUserSummary[] = [];
+    let pinnedBlueprintIds = new Set(this.storage.pinnedBlueprints.get());
     for (let record of this.storage.blueprints.list()) {
-      let gadget = record.gadgetId ? this.storage.gadgets.get(record.gadgetId) : undefined;
-      result.push({
-        id: record.id,
-        title: record.metadata.title,
-        gadgetId: record.gadgetId ?? "",
-        gadgetTitle: record.gadgetId ? (gadget?.title ?? "Deleted Gadget") : "Imported Blueprint",
-        version: record.metadata.version,
-        lastUpdated: record.metadata.lastUpdated,
-      });
+      result.push(this.blueprintSummary(record, pinnedBlueprintIds));
     }
     result.sort((a, b) => b.lastUpdated.valueOf() - a.lastUpdated.valueOf());
     return result;
   }
 
+  private blueprintSummary(record: BlueprintUserRecord, pinnedBlueprintIds: Set<string>): BlueprintUserSummary {
+    let gadget = record.gadgetId ? this.storage.gadgets.get(record.gadgetId) : undefined;
+    return {
+      id: record.id,
+      title: record.metadata.title,
+      description: record.metadata.description,
+      gadgetId: record.gadgetId ?? "",
+      gadgetTitle: record.gadgetId ? (gadget?.title ?? "Deleted Gadget") : "Imported Blueprint",
+      version: record.metadata.version,
+      lastUpdated: record.metadata.lastUpdated,
+      pinned: pinnedBlueprintIds.has(record.id) || undefined,
+    };
+  }
+
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
     let result: BlueprintLibrarySummary[] = [];
+    let pinnedBlueprintIds = new Set(this.storage.pinnedBlueprints.get());
     for (let record of this.storage.libraryBlueprints.list()) {
       result.push({
         id: record.id,
         metadata: record.metadata,
         addedAt: record.addedAt,
         uploaded: record.uploaded,
+        pinned: pinnedBlueprintIds.has(record.id) || undefined,
       });
     }
     result.sort((a, b) => b.addedAt.valueOf() - a.addedAt.valueOf());

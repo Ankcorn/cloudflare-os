@@ -1,262 +1,217 @@
 import { Link } from "@tanstack/react-router";
-import { Button, useKumoToastManager } from "@cloudflare/kumo";
+import { useKumoToastManager } from "@cloudflare/kumo";
 import {
-  UploadSimple,
+  ArrowRight,
+  BookOpen,
   Hexagon,
+  type Icon,
 } from "@phosphor-icons/react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ChangeEvent,
-} from "react";
-import {
-  BlueprintLibrarySummary,
-  BlueprintPublicInfo,
-  BlueprintUserSummary,
-} from "@gadgets/workshop-shared/api";
+import { useEffect, useRef, useState } from "react";
+import { BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
+import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { useAuthenticatedApi } from "./AuthContext";
 import {
-  BlueprintCard,
+  BindingBadge,
   getGradient,
+  uniqueBindingBadges,
 } from "./components/BlueprintCard";
+import { BlueprintPreviewImage } from "./components/BlueprintPreviewImage";
 
 export default function BlueprintsPage() {
   const { authenticatedApi } = useAuthenticatedApi();
   const toasts = useKumoToastManager();
-  const uploadInputRef = useRef<HTMLInputElement>(null);
   const toastsRef = useRef(toasts);
   toastsRef.current = toasts;
 
-  const [featuredBlueprints, setFeaturedBlueprints] = useState<
-    BlueprintPublicInfo[]
-  >([]);
-  const [myBlueprints, setMyBlueprints] = useState<BlueprintUserSummary[]>([]);
-  const [libraryBlueprints, setLibraryBlueprints] = useState<
-    BlueprintLibrarySummary[]
-  >([]);
+  const [featuredBlueprints, setFeaturedBlueprints] = useState<BlueprintPublicInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-
-  const loadBlueprints = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [featured, mine, library] = await Promise.all([
-        authenticatedApi.listFeaturedBlueprints(),
-        authenticatedApi.listOwnBlueprints(),
-        authenticatedApi.listLibraryBlueprints(),
-      ]);
-      setFeaturedBlueprints(featured);
-      setMyBlueprints(mine);
-      setLibraryBlueprints(library);
-    } catch (err) {
-      console.error("Failed to load blueprints page:", err);
-      toastsRef.current.add({
-        title: "Failed to load blueprints",
-        variant: "error",
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [authenticatedApi]);
+  const [vendorDescriptions, setVendorDescriptions] = useState<Map<string, VendorDescription>>(
+    () => new Map(),
+  );
 
   useEffect(() => {
-    loadBlueprints();
-  }, [loadBlueprints]);
+    let cancelled = false;
+    setLoading(true);
 
-  const openUploadPicker = useCallback(() => {
-    uploadInputRef.current?.click();
-  }, []);
-
-  const handleBlueprintSelected = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-      if (!file) return;
-
-      setUploading(true);
-      try {
-        await authenticatedApi.importBlueprint(
-          file.stream() as ReadableStream<Uint8Array>,
+    Promise.all([
+      authenticatedApi.listFeaturedBlueprints(),
+      authenticatedApi.listGatekeeperVendors(),
+    ])
+      .then(([featured, vendors]) => {
+        if (cancelled) return;
+        setFeaturedBlueprints(featured);
+        setVendorDescriptions(
+          new Map(
+            vendors.map((vendor) => [vendor.id.toLowerCase(), vendor.description]),
+          ),
         );
+      })
+      .catch((err) => {
+        console.error("Failed to load Explore data:", err);
         toastsRef.current.add({
-          title: "Blueprint uploaded",
-          variant: "success",
-        });
-        await loadBlueprints();
-      } catch (err) {
-        console.error("Failed to upload blueprint:", err);
-        toastsRef.current.add({
-          title: "Failed to upload blueprint",
+          title: "Failed to load featured blueprints",
           variant: "error",
         });
-      } finally {
-        setUploading(false);
-      }
-    },
-    [authenticatedApi, loadBlueprints],
-  );
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
 
-  // Merge featured + library into one list for the Blueprints section, deduped by ID.
-  // Featured come first, then library entries that aren't already featured.
-  const allBlueprints = useMemo(() => {
-    const featuredIds = new Set(featuredBlueprints.map((b) => b.id));
-    return [
-      ...featuredBlueprints.map((b) => ({
-        id: b.id,
-        metadata: b.metadata,
-        featured: true,
-      })),
-      ...libraryBlueprints
-        .filter((b) => !featuredIds.has(b.id))
-        .map((b) => ({
-          id: b.id,
-          metadata: b.metadata,
-          featured: false,
-        })),
-    ];
-  }, [featuredBlueprints, libraryBlueprints]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedApi]);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-8">
-      <input
-        ref={uploadInputRef}
-        type="file"
-        accept=".gadget"
-        className="hidden"
-        onChange={handleBlueprintSelected}
+    <div className="relative min-h-[calc(100vh-3.5rem-1px)] overflow-hidden bg-kumo-base">
+      <div
+        className="pointer-events-none absolute inset-0 h-[320px]"
+        style={{
+          backgroundImage:
+            "radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+          maskImage:
+            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)",
+          WebkitMaskImage:
+            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)",
+        }}
       />
 
-      <section>
-        <h1 className="text-2xl font-semibold text-kumo-default">Blueprints</h1>
-        <p className="mt-2 text-sm text-kumo-subtle max-w-2xl">
-          Browse featured picks, keep track of the blueprints you publish, and
-          manage your personal library.
-        </p>
-      </section>
+      <div className="relative mx-auto w-full max-w-[1040px] px-4 py-12 sm:px-8 sm:py-14">
+        <header className="mb-8 max-w-[680px]">
+          <h1 className="m-0 text-[32px] leading-[1.05] font-semibold tracking-[-1.2px] text-kumo-default sm:text-[38px]">
+            Explore
+          </h1>
+          <p className="mt-3 max-w-[560px] text-[15px] leading-[22px] font-normal tracking-[-0.25px] text-kumo-subtle">
+            Discover featured blueprints you can use as starting points. Create
+            your own gadget and save the ones you want to reuse.
+          </p>
+        </header>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-16">
-          <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        </div>
-      ) : (
-        <div className="space-y-8">
-          {/* Blueprints — merged featured + library */}
-          <section className="space-y-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-kumo-default">
-                  Blueprints
-                </h2>
-                <p className="text-sm text-kumo-subtle">
-                  Featured picks and your saved blueprints.
-                </p>
-              </div>
-              <Button
-                variant="secondary"
-                onClick={openUploadPicker}
-                loading={uploading}
-                icon={UploadSimple}
-              >
-                Upload
-              </Button>
+        {loading ? (
+          <LoadingPanel />
+        ) : featuredBlueprints.length === 0 ? (
+          <EmptySection
+            title="No featured blueprints yet"
+            message="Featured blueprints will appear here when they’re published. You can still create blueprints from your own Gadgets."
+            icon={BookOpen}
+          />
+        ) : (
+          <section className="mb-10">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {featuredBlueprints.map((blueprint) => (
+                <FeaturedBlueprintCard
+                  key={blueprint.id}
+                  blueprint={blueprint}
+                  vendorDescriptions={vendorDescriptions}
+                />
+              ))}
             </div>
-            {allBlueprints.length === 0 ? (
-              <EmptySection message="No blueprints yet." />
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                {allBlueprints.map((blueprint) => (
-                  <BlueprintCard
-                    key={blueprint.id}
-                    id={blueprint.id}
-                    metadata={blueprint.metadata}
-                    featured={blueprint.featured}
-                  />
-                ))}
-              </div>
-            )}
           </section>
-
-          {/* My Blueprints */}
-          <section className="space-y-4">
-            <div>
-              <h2 className="text-lg font-semibold text-kumo-default">
-                My Blueprints
-              </h2>
-              <p className="text-sm text-kumo-subtle">
-                Blueprints you published from your own gadgets.
-              </p>
-            </div>
-            {myBlueprints.length === 0 ? (
-              <EmptySection message="You haven't published any blueprints yet." />
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                {myBlueprints.map((blueprint) => (
-                  <MyBlueprintCard key={blueprint.id} blueprint={blueprint} />
-                ))}
-              </div>
-            )}
-          </section>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MyBlueprintCard({ blueprint }: { blueprint: BlueprintUserSummary }) {
-  return (
-    <div className="relative isolate group rounded-xl border border-kumo-line bg-kumo-elevated transition-colors hover:border-kumo-brand/40 hover:bg-kumo-base flex flex-col min-h-[108px]">
-      <Link
-        to="/blueprint/$id"
-        params={{ id: blueprint.id }}
-        aria-label={`Open blueprint ${blueprint.title}`}
-        className="absolute inset-0 rounded-xl z-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
-      />
-      <div className="p-4 flex flex-col gap-3 flex-1">
-        {/* Icon + title row */}
-        <div className="flex items-start gap-3">
-          <div
-            className={`w-9 h-9 rounded-lg bg-gradient-to-br ${getGradient(blueprint.id)} flex items-center justify-center flex-shrink-0`}
-          >
-            <Hexagon size={14} className="text-white/70" weight="bold" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-kumo-default leading-snug line-clamp-2">
-              {blueprint.title}
-            </p>
-            <p className="mt-1 text-xs text-kumo-subtle">
-              From{" "}
-              {blueprint.gadgetTitle === "Deleted Gadget" ? (
-                <span>{blueprint.gadgetTitle}</span>
-              ) : (
-                <Link
-                  to="/gadget/$id"
-                  params={{ id: blueprint.gadgetId }}
-                  className="relative z-10 pointer-events-auto text-kumo-default hover:text-kumo-brand"
-                >
-                  {blueprint.gadgetTitle}
-                </Link>
-              )}
-            </p>
-          </div>
-        </div>
-
-        {/* Version info */}
-        <p className="text-[11px] text-kumo-subtle">
-          v{blueprint.version} ·{" "}
-          {new Date(blueprint.lastUpdated).toLocaleDateString()}
-        </p>
+        )}
       </div>
     </div>
   );
 }
 
-function EmptySection({ message }: { message: string }) {
+function LoadingPanel() {
   return (
-    <div className="rounded-xl border border-dashed border-kumo-line bg-kumo-elevated px-4 py-8 text-center text-sm text-kumo-subtle">
-      {message}
+    <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-10 text-center">
+      <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
+      <p className="mt-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+        Loading featured blueprints...
+      </p>
+    </div>
+  );
+}
+
+function FeaturedBlueprintCard({
+  blueprint,
+  vendorDescriptions,
+}: {
+  blueprint: BlueprintPublicInfo;
+  vendorDescriptions: Map<string, VendorDescription>;
+}) {
+  const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
+
+  return (
+    <div className="group relative isolate flex min-h-[148px] cursor-pointer overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base/90 text-left backdrop-blur-sm transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_10px_24px_-20px_rgba(82,16,0,0.22)] active:scale-[0.995]">
+      <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-[rgba(255,72,1,0.08)] blur-2xl" />
+      <Link
+        to="/blueprint/$id"
+        params={{ id: blueprint.id }}
+        aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+      />
+
+      <div className="pointer-events-none relative z-20 flex h-full w-full flex-col p-3.5">
+        <BlueprintPreviewImage
+          blueprintId={blueprint.id}
+          title={blueprint.metadata.title}
+          screenshotUrl={blueprint.screenshotUrl}
+          className="mb-3"
+        />
+        <div className="flex items-start gap-3">
+          <div
+            className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br ${getGradient(blueprint.id)}`}
+          >
+            <Hexagon size={15} className="text-white/75" weight="bold" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="m-0 line-clamp-2 text-[15px] leading-5 font-semibold tracking-[-0.25px] text-kumo-default">
+              {blueprint.metadata.title}
+            </p>
+            <p className={`mt-1 line-clamp-2 min-h-8 text-[12px] leading-4 font-normal tracking-[-0.2px] ${blueprint.metadata.description ? "text-kumo-subtle" : "text-kumo-inactive italic"}`}>
+              {blueprint.metadata.description || "No description"}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-auto flex items-end justify-between gap-3 pt-3">
+          {badges.length > 0 ? (
+            <div className="flex min-w-0 flex-wrap gap-1">
+              {badges.map((badge) => (
+                <BindingBadge
+                  key={badge.vendorKey ?? badge.type}
+                  badge={badge}
+                  vendorDescriptions={vendorDescriptions}
+                />
+              ))}
+            </div>
+          ) : (
+            <span />
+          )}
+          <ArrowRight
+            size={14}
+            weight="bold"
+            className="shrink-0 text-kumo-inactive opacity-0 transition-[opacity,transform,color] duration-150 ease-out group-hover:translate-x-0.5 group-hover:text-kumo-default group-hover:opacity-100"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptySection({
+  title,
+  message,
+  icon: Icon,
+}: {
+  title: string;
+  message: string;
+  icon: Icon;
+}) {
+  return (
+    <div className="rounded-2xl border border-dashed border-kumo-line bg-kumo-base px-4 py-8 text-center">
+      <div className="mx-auto grid h-10 w-10 place-items-center rounded-2xl bg-kumo-tint text-kumo-subtle">
+        <Icon size={20} weight="duotone" />
+      </div>
+      <p className="mt-3 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+        {title}
+      </p>
+      <p className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+        {message}
+      </p>
     </div>
   );
 }

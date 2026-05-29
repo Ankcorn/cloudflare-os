@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
 import { SupportedResource, VendorDescription, VendorScope } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -9,6 +9,14 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, listFeaturedBlueprintsF
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GatekeeperHookProxy, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+
+function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
+  return {
+    id,
+    metadata,
+    screenshotUrl: blueprintScreenshotUrl(id, metadata),
+  };
+}
 
 // Re-export entrypoint types from ai-models.ts.
 export { LanguageModelGatekeeper };
@@ -233,12 +241,25 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listBlueprints();
   }
 
+  async getOwnBlueprint(blueprintId: string): Promise<BlueprintUserSummary | null> {
+    return this.user.getBlueprint(blueprintId);
+  }
+
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
     return this.user.listLibraryBlueprints();
   }
 
+  async setBlueprintPinned(blueprintId: string, pinned: boolean): Promise<void> {
+    return this.user.setBlueprintPinned(blueprintId, pinned);
+  }
+
+  async isBlueprintPinned(blueprintId: string): Promise<boolean> {
+    return this.user.isBlueprintPinned(blueprintId);
+  }
+
   async listFeaturedBlueprints(): Promise<BlueprintPublicInfo[]> {
-    return listFeaturedBlueprintsFromKv(this.env);
+    return (await listFeaturedBlueprintsFromKv(this.env)).map(
+        blueprint => publicBlueprintInfo(blueprint.id, blueprint.metadata));
   }
 
   async addBlueprintToLibrary(blueprintId: string): Promise<void> {
@@ -273,6 +294,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string> {
     let { metadata, contentLength, content } = await parseBlueprintArchive(archive);
+    delete metadata.screenshot;
     let blueprintId = randomBlueprintId();
     let r2Key = `${blueprintId}/${metadata.version}`;
 
@@ -374,6 +396,23 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 }
 
+async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<Response> {
+  let object = await env.BLUEPRINT_CONTENT.get(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${blueprintId}`);
+  if (!object) return new Response("Not Found", {status: 404});
+
+  let contentType = object.httpMetadata?.contentType;
+  if (contentType !== "image/jpeg" && contentType !== "image/png") {
+    contentType = "image/jpeg";
+  }
+
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+}
+
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
@@ -444,10 +483,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let kvRecord = await readBlueprintKvRecord(this.env, id);
     if (!kvRecord) return null;
 
-    return {
-      id,
-      metadata: kvRecord.metadata,
-    };
+    return publicBlueprintInfo(id, kvRecord.metadata);
   }
 
   async downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
@@ -457,13 +493,21 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let r2Object = await this.env.BLUEPRINT_CONTENT.get(`${id}/${kvRecord.metadata.version}`);
     if (!r2Object) throw new Error("Blueprint content not found in R2.");
 
-    return buildBlueprintArchiveStream(kvRecord.metadata, r2Object.body, r2Object.size);
+    let metadata = { ...kvRecord.metadata };
+    delete metadata.screenshot;
+
+    return buildBlueprintArchiveStream(metadata, r2Object.body, r2Object.size);
   }
 }
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
+
+    if (url.pathname.startsWith(BLUEPRINT_SCREENSHOT_PATH_PREFIX)) {
+      let blueprintId = url.pathname.slice(BLUEPRINT_SCREENSHOT_PATH_PREFIX.length);
+      return serveBlueprintScreenshot(env, blueprintId);
+    }
 
     if (url.pathname === "/api") {
       let accessPayload: JWTPayload | undefined;

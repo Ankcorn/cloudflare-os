@@ -1,5 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -165,6 +165,17 @@ type BlueprintKvRecord = {
   ownerId: string;
   gadgetId: string;
 };
+
+const MAX_BLUEPRINT_SCREENSHOT_BYTES = 1024 * 1024;
+function validateBlueprintScreenshotUpload(screenshot: BlueprintScreenshotUpload): BlueprintScreenshotUpload {
+  if (screenshot.mimeType !== "image/jpeg" && screenshot.mimeType !== "image/png") {
+    throw new Error("Blueprint screenshot must be a JPEG or PNG image.");
+  }
+  if (screenshot.content.byteLength > MAX_BLUEPRINT_SCREENSHOT_BYTES) {
+    throw new Error("Blueprint screenshot must be under 1 MB.");
+  }
+  return screenshot;
+}
 
 // Share keys table. The actual key is never stored server-side; only its HMAC hash.
 type ShareKeyRecord = {
@@ -1826,8 +1837,11 @@ class OverseerImpl implements AgentHooks {
   // Propagate a blueprint to User DO, KV, and R2.
   // If codeSnapshot is provided, it is uploaded to R2. If omitted (metadata-only update),
   // the R2 content is left unchanged.
-  async propagateBlueprint(record: BlueprintGadgetRecord, codeSnapshot?: Uint8Array)
-      : Promise<void> {
+  async propagateBlueprint(
+      record: BlueprintGadgetRecord,
+      codeSnapshot?: Uint8Array,
+      screenshot?: BlueprintScreenshotUpload | null,
+  ): Promise<void> {
     if (!this.ownerId) throw new Error("Gadget not initialized.");
 
     // Mark dirty.
@@ -1840,6 +1854,20 @@ class OverseerImpl implements AgentHooks {
         `${record.id}/${record.metadata.version}`,
         codeSnapshot
       );
+    }
+
+    if (screenshot !== undefined) {
+      if (screenshot === null) {
+        delete record.metadata.screenshot;
+        await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`);
+      } else {
+        record.metadata.screenshot = true;
+        await this.env.BLUEPRINT_CONTENT.put(
+          `${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`,
+          screenshot.content,
+          { httpMetadata: { contentType: screenshot.mimeType } },
+        );
+      }
     }
 
     // Propagate to User DO.
@@ -1879,6 +1907,7 @@ class OverseerImpl implements AgentHooks {
     for (let v = 1; v <= record.metadata.version; v++) {
       await this.env.BLUEPRINT_CONTENT.delete(`${record.id}/${v}`);
     }
+    await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`);
 
     // Delete from User DO.
     let owner = this.users.get(this.users.idFromString(this.ownerId));
@@ -3717,13 +3746,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         description: record.metadata.description,
         version: record.metadata.version,
         codeVersionDate: codeUpdate?.timestamp ?? record.metadata.lastUpdated,
+        screenshotUrl: blueprintScreenshotUrl(record.id, record.metadata),
         dirty: record.dirty,
       });
     }
     return result;
   }
 
-  async createBlueprint(title?: string, description?: string): Promise<BlueprintGadgetSummary> {
+  async createBlueprint(title?: string, description?: string, screenshotUpload?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary> {
     if (!this.impl.ownerId) throw new Error("Gadget not initialized.");
 
     // NOTE: It is INTENTIONAL that collaborators can publish blueprints on behalf of the owner.
@@ -3761,9 +3791,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       codeVersion,
     };
 
+    let screenshot = screenshotUpload ? validateBlueprintScreenshotUpload(screenshotUpload) : undefined;
+
     // Snapshot current code and propagate to User DO, KV, R2.
     let codeSnapshot = await this.impl.snapshotCode();
-    await this.impl.propagateBlueprint(record, codeSnapshot);
+    await this.impl.propagateBlueprint(record, codeSnapshot, screenshot);
 
     // Derive codeVersionDate from the code collection.
     let codeUpdate = this.impl.storage.code.get(codeVersion);
@@ -3774,6 +3806,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       description: metadata.description,
       version: metadata.version,
       codeVersionDate: codeUpdate?.timestamp ?? now,
+      screenshotUrl: blueprintScreenshotUrl(id, metadata),
       dirty: record.dirty,
     };
   }
@@ -3782,11 +3815,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     title?: string;
     description?: string;
     updateCode?: boolean;
+    updateBindings?: boolean;
+    screenshot?: BlueprintScreenshotUpload | null;
   }): Promise<void> {
     let record = this.impl.storage.blueprints.get(blueprintId);
     if (!record) throw new Error("No such blueprint.");
 
-    if (options.title === undefined && options.description === undefined && !options.updateCode) {
+    if (options.title === undefined && options.description === undefined && !options.updateCode && !options.updateBindings && options.screenshot === undefined) {
       throw new Error("At least one update option must be provided.");
     }
 
@@ -3798,17 +3833,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let codeSnapshot: Uint8Array | undefined;
-    if (options.updateCode) {
+    if (options.updateCode || options.updateBindings) {
       // Re-collect binding metadata (validates annotations).
       record.metadata.bindings = this.impl.collectBindingMetadata();
+    }
+    if (options.updateCode) {
       record.codeVersion = this.impl.storage.codeVersion.get();
       record.metadata.version++;
       codeSnapshot = await this.impl.snapshotCode();
     }
 
+    let screenshot = options.screenshot === undefined
+      ? undefined
+      : options.screenshot === null ? null : validateBlueprintScreenshotUpload(options.screenshot);
+
     record.metadata.lastUpdated = new Date();
 
-    await this.impl.propagateBlueprint(record, codeSnapshot);
+    await this.impl.propagateBlueprint(record, codeSnapshot, screenshot);
   }
 
   async deleteBlueprint(blueprintId: string): Promise<void> {

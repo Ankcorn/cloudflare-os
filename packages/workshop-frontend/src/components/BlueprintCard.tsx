@@ -3,16 +3,14 @@ import {
   Hexagon,
   Robot,
   Lightning,
-  EnvelopeSimple,
   Star,
 } from "@phosphor-icons/react";
 import {
   BlueprintBinding,
   BlueprintMetadata,
 } from "@gadgets/workshop-shared/api";
-import { logoComponents } from "./ConnectionLogos";
+import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 
-// Deterministic gradient by ID (shared palette for gadgets + blueprints)
 const gradients = [
   "from-[#4A154B] to-[#7C3085]",
   "from-[#0052CC] to-[#2684FF]",
@@ -27,8 +25,6 @@ const gradients = [
 export function getGradient(id: string) {
   return gradients[id.charCodeAt(0) % gradients.length];
 }
-
-// ─── binding badges ───────────────────────────────────────────────────────────
 
 export type BindingBadgeInfo = {
   type: BlueprintBinding["type"];
@@ -68,23 +64,31 @@ export function uniqueBindingBadges(
   return badges;
 }
 
-export function BindingBadge({ badge }: { badge: BindingBadgeInfo }) {
-  // For gatekeeper bindings, use the vendor's actual logo if available
-  const VendorLogo = badge.vendorKey
-    ? logoComponents[badge.vendorKey]
+export function BindingBadge({
+  badge,
+  vendorDescriptions,
+}: {
+  badge: BindingBadgeInfo;
+  vendorDescriptions?: Map<string, VendorDescription>;
+}) {
+  const vendorDescription = badge.vendorKey
+    ? vendorDescriptions?.get(badge.vendorKey)
     : undefined;
 
   let icon: React.ReactNode;
-  if (VendorLogo) {
-    icon = <VendorLogo size={12} />;
-  } else if (badge.type === "gatekeeper" && badge.vendorKey === "email") {
-    icon = <EnvelopeSimple size={12} weight="bold" />;
+  if (vendorDescription?.logo?.url) {
+    icon = (
+      <img
+        src={vendorDescription.logo.url}
+        alt=""
+        className="h-3 w-3 object-contain"
+      />
+    );
   } else if (badge.type === "aiModel") {
     icon = <Robot size={12} weight="bold" />;
   } else if (badge.type === "agentSpawner") {
     icon = <Lightning size={12} weight="bold" />;
   } else {
-    // Fallback: first letter of the label
     icon = (
       <span className="text-[10px] font-semibold leading-none">
         {badge.label[0]}
@@ -95,65 +99,64 @@ export function BindingBadge({ badge }: { badge: BindingBadgeInfo }) {
   return (
     <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
       {icon}
-      {badge.label}
+      {vendorDescription?.displayName ?? badge.label}
     </span>
   );
 }
-
-// ─── blueprint card ─────────────────────────────────────────────────────────
 
 export function BlueprintCard({
   id,
   metadata,
   featured,
+  vendorDescriptions,
 }: {
   id: string;
   metadata: BlueprintMetadata;
   featured?: boolean;
+  vendorDescriptions?: Map<string, VendorDescription>;
 }) {
   const badges = uniqueBindingBadges(metadata.bindings);
 
   return (
-    <div className="relative isolate group rounded-xl border border-kumo-line bg-kumo-elevated transition-colors hover:border-kumo-brand/40 hover:bg-kumo-base flex flex-col overflow-hidden min-h-[108px]">
-      {/* Featured star watermark */}
+    <div className="group relative isolate flex min-h-[150px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_8px_20px_-16px_rgba(82,16,0,0.12)] active:scale-[0.995]">
       {featured && (
         <Star
-          size={64}
+          size={72}
           weight="fill"
-          className="absolute -top-3 -right-3 text-kumo-brand/10 pointer-events-none"
+          className="pointer-events-none absolute -right-4 -top-4 text-kumo-brand/10"
         />
       )}
       <Link
         to="/blueprint/$id"
         params={{ id }}
         aria-label={`Open blueprint ${metadata.title}`}
-        className="absolute inset-0 rounded-xl z-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
       />
-      <div className="p-4 flex flex-col gap-3 flex-1">
-        {/* Icon + title row */}
+      <div className="pointer-events-none relative z-20 flex flex-1 flex-col p-4">
         <div className="flex items-start gap-3">
           <div
-            className={`w-9 h-9 rounded-lg bg-gradient-to-br ${getGradient(id)} flex items-center justify-center flex-shrink-0`}
+            className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br ${getGradient(id)}`}
           >
-            <Hexagon size={14} className="text-white/70" weight="bold" />
+            <Hexagon size={16} className="text-white/75" weight="bold" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-kumo-default leading-snug line-clamp-2">
+            <p className="m-0 line-clamp-2 text-[15px] leading-5 font-medium tracking-[-0.25px] text-kumo-default">
               {metadata.title}
             </p>
-            {metadata.description && (
-              <p className="mt-1 text-xs text-kumo-subtle line-clamp-2">
-                {metadata.description}
-              </p>
-            )}
+            <p className={`mt-1.5 line-clamp-2 min-h-8 text-[12px] leading-4 font-normal tracking-[-0.2px] ${metadata.description ? "text-kumo-subtle" : "text-kumo-inactive italic"}`}>
+              {metadata.description || "No description"}
+            </p>
           </div>
         </div>
 
-        {/* Binding badges */}
         {badges.length > 0 && (
-          <div className="flex flex-wrap gap-1">
+          <div className="mt-auto flex flex-wrap gap-1 pt-4">
             {badges.map((b) => (
-              <BindingBadge key={b.vendorKey ?? b.type} badge={b} />
+              <BindingBadge
+                key={b.vendorKey ?? b.type}
+                badge={b}
+                vendorDescriptions={vendorDescriptions}
+              />
             ))}
           </div>
         )}

@@ -106,16 +106,20 @@ export async function loadBindingCardData(
   overseer: RpcStub<Overseer>,
   meta: { bindingName: string; resourceTitle: string; vendorId?: string },
 ): Promise<BindingCardData | null> {
-  using gk = await overseer.getGatekeeper(meta.bindingName)
-  if (!gk) return null
-  const creationSpecP = gk.getCreationSpec()
-  const annotationP = gk.getBlueprintAnnotation()
-  const [creationSpec, existing] = await Promise.all([creationSpecP, annotationP])
-  return {
-    bindingName: meta.bindingName,
-    resourceTitle: meta.resourceTitle,
-    vendorId: meta.vendorId,
-    creationSpec,
-    annotation: existing ?? { ...defaultAnnotation(), title: meta.resourceTitle || meta.bindingName },
+  const gk = await overseer.getGatekeeper(meta.bindingName)
+  try {
+    if (!gk) return null
+    const creationSpecP = gk.getCreationSpec()
+    const annotationP = gk.getBlueprintAnnotation()
+    const [creationSpec, existing] = await Promise.all([creationSpecP, annotationP])
+    return {
+      bindingName: meta.bindingName,
+      resourceTitle: meta.resourceTitle,
+      vendorId: meta.vendorId,
+      creationSpec,
+      annotation: existing ?? { ...defaultAnnotation(), title: meta.resourceTitle || meta.bindingName },
+    }
+  } finally {
+    gk?.[Symbol.dispose]()
   }
 }

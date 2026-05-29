@@ -14,5 +14,8 @@ export default defineConfig({
   server: {
     port: 3000,
     host: true,
+    proxy: {
+      '/blueprint-screenshot': 'http://localhost:8787',
+    },
   },
 })
