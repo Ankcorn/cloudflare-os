@@ -17,10 +17,13 @@ import {
   getStoredSelectedModel,
   persistSelectedModel,
 } from "../modelSelection";
+import { formatDocumentTitle, useDocumentTitle } from "../useDocumentTitle";
 
 export const Route = createFileRoute("/")({ component: HomePage });
 
 function HomePage() {
+  useDocumentTitle(formatDocumentTitle("Home"));
+
   const { authenticatedApi } = useAuthenticatedApi();
   const navigate = useNavigate();
   const toasts = useKumoToastManager();
