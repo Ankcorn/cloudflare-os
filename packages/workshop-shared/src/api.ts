@@ -53,7 +53,7 @@ export interface PublicApi extends RpcTarget {
   //       password,
   //       salt: SERVICE_SALT + encode(username, 'utf8'),
   //       parallelism: 1,
-  //       interations: 3,
+  //       iterations: 3,
   //       memorySize: 64MiB,
   //       hashLength: 32,
   //     });
@@ -88,7 +88,7 @@ export interface PublicApi extends RpcTarget {
 }
 
 // Subscription callback for AuthenticatedApi.subscribeConnectedAccounts().
-export interface ConnenctedAccountsSubscriber {
+export interface ConnectedAccountsSubscriber {
   // If `credentialsValid` is false, the account's credentials are known to be expired, and the
   // UI should call reconnectAccount() to fix this if the user tries to select this account.
   add(id: number, description: AccountDescription, vendor: VendorDescription,
@@ -212,7 +212,7 @@ export interface AuthenticatedApi extends RpcTarget {
   // window. When it completes, we want the list of accounts in the Workshop UI to update
   // immediately, to give the user feedback that the account is now connected.
   subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
+      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>>;
 
   // Remove a connected account, revoking the token.
@@ -509,7 +509,7 @@ export interface Overseer extends RpcTarget {
 
   // Get metadata describing this gadget and subscribe to changes.
   //
-  // `callback` will be called once immeditaely with the current metadata, then again any time it
+  // `callback` will be called once immediately with the current metadata, then again any time it
   // changes.
   //
   // Disposing the returned `RpcStub` will cancel the subscription.
@@ -632,7 +632,7 @@ export interface Overseer extends RpcTarget {
   // Generally, a client should subscribe to chats immediately on loading the gadget editor. If
   // the client needs to call any methods like `listChats()` to backfill content, it should make
   // these calls after `subscribeToChat()`, so that there's no chance of missing a message. (It is
-  // not necessary to wait for `subscribeToChat()` to return -- only to initate the call before
+  // not necessary to wait for `subscribeToChat()` to return -- only to initiate the call before
   // other read calls.)
   subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
 

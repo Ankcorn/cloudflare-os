@@ -1172,12 +1172,12 @@ class OverseerImpl implements AgentHooks {
 
   // What is the last active time that we know the user DO has been made aware of?
   #lastActiveTimeKnownToUserDo?: Date;
-  // What is the lact active time we've seen locally?
+  // What is the last active time we've seen locally?
   #lastActiveTimeKnownToUs?: Date;
   // Do we currently have a timeout scheduled after which we plan to send a last active update?
   #lastActiveBumpScheduled: boolean = false;
 
-  // Update the last-active time and cost conuter as recorded for this gadget in the user-level DO.
+  // Update the last-active time and cost counter as recorded for this gadget in the user-level DO.
   bumpLastActive(now: Date = new Date()) {
     if (this.#lastActiveTimeKnownToUs && this.#lastActiveTimeKnownToUs >= now) {
       // Redundant bump.
@@ -1985,7 +1985,7 @@ class OverseerImpl implements AgentHooks {
       let result = await generateText({
         model,
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
-        //   instrurctions in the user message? I tried putting the paragraph in the system
+        //   instructions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
         //   in mostly worked but Haiku will still sometimes try to follow the instructions.
         prompt: "Generate a brief, descriptive title (2-8 words) for a chat thread starting with " +

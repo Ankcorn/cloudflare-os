@@ -20,7 +20,7 @@ import {
   VendorDescription,
   VendorScope,
 } from '@gadgets/workshop-shared/gatekeeper'
-import { ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
 
 export const Route = createFileRoute('/gatekeepers')({
@@ -454,7 +454,7 @@ function ConnectorsPage() {
 
     class AccountsSubscriber
       extends RpcTarget
-      implements ConnenctedAccountsSubscriber
+      implements ConnectedAccountsSubscriber
     {
       add(
         id: number,

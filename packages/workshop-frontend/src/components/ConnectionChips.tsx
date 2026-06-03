@@ -3,7 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useState, useEffect } from 'react'
 import { logoComponents } from './ConnectionLogos'
-import { ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, VendorDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper'
 import { RpcTarget } from 'capnweb'
 
@@ -24,7 +24,7 @@ export default function ConnectionChips() {
 
     const accountMap = new Map<number, ConnectedAccount>()
 
-    class ChipsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+    class ChipsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(id: number, description: AccountDescription, vendor: VendorDescription, _supportedResources: SupportedResource[] = [], _credentialsValid: boolean = true, vendorId: string = '') {
         if (cancelled) return
         const logoKey = vendorId

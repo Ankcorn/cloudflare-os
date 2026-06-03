@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback, type MutableRefObjec
 import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
-import { AuthenticatedApi, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { AuthenticatedApi, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
 
@@ -75,7 +75,7 @@ export default function ResourcePicker({
   useEffect(() => {
     seenAccountIdsRef.current = new Set()
 
-    class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+    class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(id: number, description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[] = [], credentialsValid: boolean = true, _vendorId: string = '') {
         seenAccountIdsRef.current.add(id)
         setAllAccounts(prev => {
