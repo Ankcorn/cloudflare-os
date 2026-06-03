@@ -197,7 +197,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async authenticateFromCfAccess(email: string): Promise<void> {
+  // Returns true when this login created the account on first use.
+  async authenticateFromCfAccess(email: string): Promise<boolean> {
     if (!this.storage.created.get()) {
       // Create on first use.
       this.storage.created.put(true);
@@ -206,7 +207,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         name: email.split("@")[0],
         id: email,
       });
+      return true;
     }
+
+    return false;
   }
 
   async #newSessionToken(): Promise<string> {
