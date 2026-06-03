@@ -9,6 +9,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, listFeaturedBlueprintsF
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GatekeeperHookProxy, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { recordAnalytics } from "./analytics";
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
   return {
@@ -177,6 +178,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     let result = await overseer.open(userId, profileId, notifyClosed, shareKey);
     started = true;
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "gadget_opened",
+      user_id: userId,
+      gadget_id: id,
+      source: shareKey ? "share_key" : "direct",
+    });
     return result;
   }
 
@@ -189,6 +196,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async newGadget(): Promise<RpcStub<Overseer>> {
     let id = this.overseers.newUniqueId().toString();
     await this.user.newGadget(id, "Untitled Gadget");
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "gadget_created",
+      user_id: this.user.id.toString(),
+      gadget_id: id,
+      source: "blank",
+    });
     let result = await this.openGadget(id);
     if (!result) {
       throw new Error("Open failed despite newly-created gadget?");
@@ -315,6 +328,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
       await this.user.importBlueprint(blueprintId, metadata);
 
+      recordAnalytics(this.ctx, this.env, {
+        event_name: "blueprint_imported",
+        user_id: this.user.id.toString(),
+        blueprint_id: blueprintId,
+      });
+
       return blueprintId;
     } catch (err) {
       // Try to delete what we uploaded, but don't wait for results becasue there's nothing we
@@ -386,6 +405,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     await Promise.all(gkPromises);
 
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "gadget_created",
+      user_id: this.user.id.toString(),
+      gadget_id: id,
+      blueprint_id: blueprintId,
+      source: "blueprint",
+    });
+
     // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
     //     system doesn't know this.
     return overseerResult;
@@ -431,6 +458,11 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let userId = this.users.idFromName(split[0]);
     let stub = this.users.get(userId);
     await stub.authenticate(split[1]);
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "user_authenticated",
+      user_id: userId.toString(),
+      source: "session_token",
+    });
     return new AuthenticatedApiImpl(this.ctx, this.env, stub);
   }
 
@@ -442,7 +474,19 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let email = this.accessPayload.email as string;
     let userId = this.users.idFromName(email);
     let stub = this.users.get(userId);
-    await stub.authenticateFromCfAccess(email);
+    let accountCreated = await stub.authenticateFromCfAccess(email);
+    if (accountCreated) {
+      recordAnalytics(this.ctx, this.env, {
+        event_name: "account_created",
+        user_id: userId.toString(),
+        source: "cf_access",
+      });
+    }
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "user_authenticated",
+      user_id: userId.toString(),
+      source: "cf_access",
+    });
     return new AuthenticatedApiImpl(this.ctx, this.env, stub);
   }
 
@@ -458,6 +502,12 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     let token = await user.login(passwordHash);
     if (!token) return null;
+
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "user_authenticated",
+      user_id: id.toString(),
+      source: "password",
+    });
 
     return `${username}:${token}`;
   }
@@ -475,6 +525,12 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
     let token = await user.createAccount(username, displayName, passwordHash);
     if (!token) return null;
+
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "account_created",
+      user_id: id.toString(),
+      source: "password",
+    });
 
     return `${username}:${token}`;
   }

@@ -11,6 +11,8 @@ import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArg
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
+import { recordAnalytics } from "./analytics";
+import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 
 let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
 `;
@@ -136,6 +138,16 @@ type GatekeeperRecord = {
   // Absence means not yet configured.
   blueprintAnnotation?: BlueprintBindingAnnotation;
 };
+
+function connectionTypeFromCreationSpec(
+    type: GatekeeperCreationSpec["type"] | undefined): ProductAnalyticsConnectionType | undefined {
+  switch (type) {
+    case "gatekeeper": return "gatekeeper";
+    case "aiModel": return "ai_model";
+    case "agentSpawner": return "agent_spawner";
+    case undefined: return undefined;
+  }
+}
 
 // Each gadget stores its collaborator list.
 type CollaboratorRecord = {
@@ -471,6 +483,15 @@ class OverseerImpl implements AgentHooks {
       }
     }
   }
+
+  recordGadgetAnalytics(event: ProductAnalyticsGadgetInput): void {
+    recordAnalytics(this.ctx, this.env, {
+      ...event,
+      gadget_id: this.ctx.id.toString(),
+      gadget_owner_user_id: this.ownerId,
+    });
+  }
+
 
   // Walk the list of updates to get from `fromVersion` to the current version, calling `apply`
   // on each one. `fromVersion` can be zero to start from the beginning.
@@ -3021,6 +3042,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Only the gadget owner can delete it.");
     }
 
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_deleted",
+      user_id: this.clientUser.id.toString(),
+    });
+
     this.impl.destroyAllLiveChats();
     // TODO: Revoke user sessions.
 
@@ -3135,6 +3161,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: this.clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "gadget_ui_connected",
+    });
     return this.impl.getGadgetFacet(chatId);
   }
 
@@ -3170,6 +3202,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new GatekeeperClientImpl(this.impl, id, this.impl.getGatekeeperFacet(id));
   }
 
+  private async recordConnectionCreated(
+      result: GatekeeperClient<any>, connectionType: ProductAnalyticsConnectionType,
+      vendorId?: string): Promise<void> {
+    let gatekeeperId = await result.getId();
+    this.impl.recordGadgetAnalytics({
+      event_name: "connection_created",
+      user_id: this.clientUser.id.toString(),
+      gatekeeper_id: gatekeeperId,
+      connection_type: connectionType,
+      vendor_id: vendorId,
+    });
+  }
+
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
     let {class: cls, vendorId, typeUrlPattern} =
@@ -3180,7 +3225,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceUrl,
       typeUrlPattern,
     };
-    return await this.impl.addGatekeeper(cls, creationSpec);
+    let result = await this.impl.addGatekeeper(cls, creationSpec);
+    await this.recordConnectionCreated(result, "gatekeeper", vendorId);
+    return result;
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -3202,8 +3249,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       modelName: chatMeta.aiModel!.config.model,
     };
 
-    return await this.impl.addGatekeeper(
+    let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec);
+    await this.recordConnectionCreated(result, "ai_model");
+    return result;
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -3226,8 +3275,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
-    return await this.impl.addGatekeeper(
+    let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec);
+    await this.recordConnectionCreated(result, "agent_spawner");
+    return result;
   }
 
   async listActions(): Promise<ActionLogEntry[]> {
@@ -3525,6 +3576,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.generateThreadTitle(chatId, initialMessage, userMeta.quickModel, userMeta.profile);
     }
 
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: this.clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "chat_started",
+    });
+
     return chatId;
   }
 
@@ -3556,6 +3614,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (userMeta.aiModel) {
       this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
     }
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: this.clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "chat_message_sent",
+    });
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -3627,6 +3691,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (isFirstChange && userMeta.quickModel) {
       this.impl.generateGadgetTitle(chatId, userMeta.quickModel, userMeta.profile);
     }
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: this.clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "code_merged",
+    });
   }
 
   async revertChanges(chatId: number, revertFrom: number): Promise<void> {
@@ -3796,6 +3866,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Snapshot current code and propagate to User DO, KV, R2.
     let codeSnapshot = await this.impl.snapshotCode();
     await this.impl.propagateBlueprint(record, codeSnapshot, screenshot);
+
+    this.impl.recordGadgetAnalytics({
+      event_name: "blueprint_created",
+      user_id: this.clientUser.id.toString(),
+      blueprint_id: id,
+    });
 
     // Derive codeVersionDate from the code collection.
     let codeUpdate = this.impl.storage.code.get(codeVersion);
@@ -4271,7 +4347,14 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async remove(): Promise<void> {
+    let record = this.impl.storage.gatekeepers.get(this.id);
     this.impl.removeGatekeeper(this.id);
+    this.impl.recordGadgetAnalytics({
+      event_name: "connection_removed",
+      gatekeeper_id: this.id,
+      connection_type: connectionTypeFromCreationSpec(record?.creationSpec?.type),
+      vendor_id: record?.creationSpec?.type === "gatekeeper" ? record.creationSpec.vendorId : undefined,
+    });
   }
 
   async getId(): Promise<number> {
