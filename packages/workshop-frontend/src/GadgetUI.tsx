@@ -12,11 +12,11 @@ import CAPNWEB_BUNDLE from 'capnweb?raw'
 let CAPNWEB_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${CAPNWEB_BUNDLE}`
 
 // Unfortunately, we will have to embed the code as a data: URL, because our iframe is totally
-// sandboxed. Even more unfortuntaely, since it's a module which we need to import from, we can't
+// sandboxed. Even more unfortunately, since it's a module which we need to import from, we can't
 // use the data URL as a <script> tag's source. Instead, we have to use it in an import statement.
 // And, guess what? That import statement is going to appear in code which is *also* embedded in
 // a data: URL, so we have a doubly-nested data: URL. We'll use base64 encoding for the inner
-// data: and URL encoding for the outer, as this lagely avoids double-escaping.
+// data: and URL encoding for the outer, as this largely avoids double-escaping.
 //
 // In any case, we'll prefix the gadget code with this prefix which imports the Cap'n Web library
 // (from a massive data URL) and sets up the RPC connection to the parent.

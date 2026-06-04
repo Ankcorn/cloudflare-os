@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams } from '@tanstack/react-router'
 import { RpcStub, RpcTarget } from 'capnweb'
-import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnenctedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, PushPin, Robot, Star, Trash, X } from '@phosphor-icons/react'
@@ -146,7 +146,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     const accountMap = new Map<number, AccountOption>()
     let subStub: { [Symbol.dispose](): void } | null = null
 
-    class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+    class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(
         accountId: number,
         description: AccountDescription,

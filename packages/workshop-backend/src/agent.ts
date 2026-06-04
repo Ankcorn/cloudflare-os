@@ -915,15 +915,15 @@ export async function runAgent(
     // call a tool to list files at the start of every thread. In order to avoid cache misses,
     // we specifically list the files that existed at the start of the thread even if the agent
     // adds or removes files during the thread.
-    // Note: If the log so far indicated that file contents have been observed, then `vesionLock`
+    // Note: If the log so far indicated that file contents have been observed, then `versionLock`
     //   will have been set, and this will list the files consistently with that version.
     //   Otherwise, it'll list from the current version, and set `versionLock`, but if the
-    //   agent doesn't acutally read any of the files, then the version won't end up being
+    //   agent doesn't actually read any of the files, then the version won't end up being
     //   stored in the log at all, and on the next turn `versionLock` will be unset again. Thus
     //   we don't actually lock in a version until the first time a file is actually read -- but
     //   in the meantime, the system prompt can theoretically change on each request, if the
     //   files are changing. That would cause a cache miss, but it probably isn't that common
-    //   that files are being created or deleted concurrently to a chat withit the cache TTL,
+    //   that files are being created or deleted concurrently to a chat within the cache TTL,
     //   so no big deal. We could "fix" this by choosing the version at the start of the thread
     //   rather than first read.
     getSessionYDoc();
@@ -1434,11 +1434,11 @@ export async function runAgent(
     // 1. The system prompt, sans any project-specific parts, so the system prompt can be shared
     //    across users.
     // 2. The last message, so the whole conversation is written to cache.
-    // 3. The second-to-last mesasge, in hopes that it is read from cache.
+    // 3. The second-to-last message, in hopes that it is read from cache.
     // 4. The last user message that is not one of the last two messages. This is specifically to
     //    avoid a possible subtle problem: within a single call to streamText(), the AI SDK
     //    is adding new messages to the messages list and sending them back to the LLM for each
-    //    step. But the next time we call streamText(), we recerate these messages just from
+    //    step. But the next time we call streamText(), we recreate these messages just from
     //    the information we stored. It could easily be the case that we don't recreate them
     //    exactly as AI SDK would have internally; we might drop some information by accident.
     //    So we might have a cache miss on the second-to-last message because of this, but we
@@ -1716,7 +1716,7 @@ export function summarizeArgs(args: unknown[]): string {
 // Summarize the content of params passed to an agent callback. This is presented to the agent
 // in the chat log, but the agent can use executeCode to get access to the full value. If the
 // value has a lot of data, we don't want to bloat the agent's context with it, but we also don't
-// want to truncate too execessively as it forces the agent to perform round trips with
+// want to truncate too excessively as it forces the agent to perform round trips with
 // executeCode.
 // TODO: summarizeValue() can probably be optimized further. We also need to experiment with how
 //   to best explain to the agent that it's seeing something truncated -- I've noticed the "..."

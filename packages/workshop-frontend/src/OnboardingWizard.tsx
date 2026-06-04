@@ -5,7 +5,7 @@ import { useAuthenticatedApi } from './AuthContext'
 import {
   AiChatAuthorInfo,
   AiGatewayInfo,
-  ConnenctedAccountsSubscriber,
+  ConnectedAccountsSubscriber,
 } from '@gadgets/workshop-shared/api'
 import {
   VendorDescription,
@@ -194,7 +194,7 @@ export default function OnboardingWizard({
         if (!cancelled) setVendorsLoading(false)
       })
 
-    class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+    class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(
         id: number,
         _description: AccountDescription,

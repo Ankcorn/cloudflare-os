@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
 import { SupportedResource, VendorDescription, VendorScope } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -227,7 +227,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
+      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>> {
     return this.user.subscribeConnectedAccounts(subscriber, filter);
   }

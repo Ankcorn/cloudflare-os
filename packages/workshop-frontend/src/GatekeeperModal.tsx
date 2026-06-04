@@ -14,7 +14,7 @@ import { RpcStub, RpcTarget } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
-  ConnenctedAccountsSubscriber,
+  ConnectedAccountsSubscriber,
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
@@ -308,7 +308,7 @@ export default function GatekeeperModal({
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
 
-    class AccountsSubscriber extends RpcTarget implements ConnenctedAccountsSubscriber {
+    class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(
         id: number,
         description: AccountDescription,
@@ -945,5 +945,4 @@ function ConnectionGroupRow({
     </div>
   )
 }
-
 

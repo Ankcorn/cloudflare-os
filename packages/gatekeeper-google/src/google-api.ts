@@ -1,6 +1,6 @@
 // Basic helpers talking to Google API
 //
-// This file was lagely vibe-coded based on an interface spec.
+// This file was largely vibe-coded based on an interface spec.
 
 import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { GmailMessage, GmailThreadContent, GmailThreadSummary } from "./types";

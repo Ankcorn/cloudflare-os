@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnenctedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnectedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, VendorScope, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -758,7 +758,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnenctedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
+      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
       : Promise<RpcStub<{}>> {
     let connectedAccounts = this.storage.connectedAccounts;
     let vendors = this.vendors;
