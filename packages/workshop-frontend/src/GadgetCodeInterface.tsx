@@ -90,6 +90,14 @@ function areSetsEqual(left: Set<string>, right: Set<string>) {
   return true
 }
 
+function areArraysEqual(left: string[], right: string[]) {
+  if (left.length !== right.length) return false
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false
+  }
+  return true
+}
+
 function getTouchedFilesFromEvents(events: Y.YEvent<any>[], rootMap: Y.Map<Y.Text>) {
   const filenames = new Set<string>()
 
@@ -160,6 +168,10 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   const previewObserverCleanupRef = useRef<(() => void) | null>(null)
   const editableObserverCleanupRef = useRef<(() => void) | null>(null)
   const [changedFiles, setChangedFiles] = useState<Set<string>>(new Set())
+  // Sorted list of file names present in the currently-observed preview map (streaming preview or
+  // editable branch doc). Tracked as state so the file sidebar updates when files are added/removed
+  // mid-turn — the preview map is a mutable ref whose identity doesn't change on incremental edits.
+  const [previewFileNames, setPreviewFileNames] = useState<string[]>([])
   const hasUserSwitchedFilesThisTurnRef = useRef(false)
   const wasAgentActiveRef = useRef(isAgentActive)
 
@@ -207,13 +219,13 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
     const previewMap = streamingFilesMapRef.current ?? editableFilesMapRef.current
     const displayed = previewMap
-      ? Array.from(new Set([...fileNames, ...Array.from(previewMap.keys())])).sort()
+      ? Array.from(new Set([...fileNames, ...previewFileNames])).sort()
       : fileNames
 
     if (displayed.length > 0) {
       setActiveFile(displayed[0])
     }
-  }, [fileNames, activeFile, changedFiles])
+  }, [fileNames, activeFile, previewFileNames])
 
   // Avoid reporting an empty state before the first code sync is ready.
   const onHasCodeChangeRef = useRef(onHasCodeChange)
@@ -278,9 +290,20 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     })
   }, [])
 
+  // Sync the reactive previewFileNames state from a preview map's current keys, so the file
+  // sidebar reflects files added/removed in the (mutable) preview map.
+  const syncPreviewFileNames = useCallback((previewMap: Y.Map<Y.Text> | null) => {
+    setPreviewFileNames(prev => {
+      const next = previewMap ? Array.from(previewMap.keys()).sort() : []
+      return areArraysEqual(prev, next) ? prev : next
+    })
+  }, [])
+
   const observePreviewMap = useCallback((previewMap: Y.Map<Y.Text> | null) => {
     previewObserverCleanupRef.current?.()
     previewObserverCleanupRef.current = null
+
+    syncPreviewFileNames(previewMap)
 
     if (!previewMap) {
       return
@@ -291,13 +314,15 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       if (touchedFiles.size > 0) {
         updateChangedFilesForNames(previewMap, touchedFiles)
       }
+      // The map's key set may have changed (file added/removed); keep the sidebar in sync.
+      syncPreviewFileNames(previewMap)
     }
 
     previewMap.observeDeep(observer)
     previewObserverCleanupRef.current = () => {
       previewMap.unobserveDeep(observer)
     }
-  }, [updateChangedFilesForNames])
+  }, [updateChangedFilesForNames, syncPreviewFileNames])
 
   const observeEditableDoc = useCallback((ydoc: Y.Doc | null) => {
     editableObserverCleanupRef.current?.()
@@ -739,9 +764,9 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
   const displayedFiles = useMemo(() => {
     return isDiffMode && previewFilesMap
-      ? Array.from(new Set([...fileNames, ...Array.from(previewFilesMap.keys())])).sort()
+      ? Array.from(new Set([...fileNames, ...previewFileNames])).sort()
       : fileNames
-  }, [fileNames, isDiffMode, previewFilesMap])
+  }, [fileNames, isDiffMode, previewFilesMap, previewFileNames])
 
   const fileChangeStatuses = useMemo(() => {
     return isDiffMode && previewFilesMap

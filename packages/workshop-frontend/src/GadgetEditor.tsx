@@ -352,6 +352,9 @@ export default function GadgetEditor() {
   const hasAutoSwitchedToCodeRef = useRef(false)
   const hasAutoSwitchedToUiRef = useRef(false)
   const hadProposedChangesAtAgentStartRef = useRef(false)
+  // Set when an agent turn that started without proposed changes finishes; the actual switch to the
+  // gadget UI happens in the effect below, once `proposedChanges` reflects the turn's changes.
+  const pendingAutoSwitchToUiRef = useRef(false)
   const proposedChangesRef = useRef(proposedChanges)
   proposedChangesRef.current = proposedChanges
 
@@ -360,17 +363,34 @@ export default function GadgetEditor() {
     if (chatId !== 0) return
     if (isActive) {
       hadProposedChangesAtAgentStartRef.current = proposedChangesRef.current !== undefined
+      // A new turn started; re-evaluate whether to auto-switch when it finishes.
+      pendingAutoSwitchToUiRef.current = false
     } else {
-      if (
-        !hasAutoSwitchedToUiRef.current &&
-        !hadProposedChangesAtAgentStartRef.current &&
-        proposedChangesRef.current !== undefined
-      ) {
-        hasAutoSwitchedToUiRef.current = true
-        setActiveTab('app')
+      // Arm the auto-switch rather than reading proposedChanges synchronously: the turn's
+      // "changes" message and the agent-inactive metadata update now arrive together, and
+      // `proposedChanges` lags by a render or two. The effect below completes the switch once it
+      // catches up.
+      if (!hasAutoSwitchedToUiRef.current && !hadProposedChangesAtAgentStartRef.current) {
+        pendingAutoSwitchToUiRef.current = true
       }
     }
   }, [])
+
+  // Auto-switch to the gadget UI after the first turn that produced code finishes. Driven by
+  // `proposedChanges`/`isAgentActive` state so it fires even when `proposedChanges` resolves after
+  // the agent-inactive transition.
+  useEffect(() => {
+    if (
+      pendingAutoSwitchToUiRef.current &&
+      !isAgentActive &&
+      proposedChanges !== undefined &&
+      !hasAutoSwitchedToUiRef.current
+    ) {
+      pendingAutoSwitchToUiRef.current = false
+      hasAutoSwitchedToUiRef.current = true
+      setActiveTab('app')
+    }
+  }, [proposedChanges, isAgentActive])
 
   // Show the Code tab while a fresh gadget's first files are being written.
   useEffect(() => {
@@ -402,6 +422,7 @@ export default function GadgetEditor() {
     hasAutoSwitchedToCodeRef.current = false
     hasAutoSwitchedToUiRef.current = false
     hadProposedChangesAtAgentStartRef.current = false
+    pendingAutoSwitchToUiRef.current = false
     userNavigatedToListRef.current = false
   }, [id])
 

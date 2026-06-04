@@ -1077,8 +1077,6 @@ export type AiChatStreamEvent = {
 } | {
   type: "codeUpdate";
   update: Uint8Array;
-} | {
-  type: "clear";
 };
 
 // Interface implemented by the client to receive action-log upserts.

@@ -1531,8 +1531,9 @@ class OverseerImpl implements AgentHooks {
       }
       liveChat.activeAgentCallbacks.clear();
     } finally {
-      this.emitChatStreamEvent(chatId, {type: "clear"});
-
+      // Note: We no longer emit a stream "clear" event here. The client performs a full clear of
+      // provisional streaming state when it observes that the agent is no longer running (i.e. when
+      // chat metadata's activeAgent becomes unset, which happens just below).
       liveChat.cancelController = undefined;
 
       let meta = this.storage.chatMeta.get(chatId);

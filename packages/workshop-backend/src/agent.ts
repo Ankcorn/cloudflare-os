@@ -882,8 +882,6 @@ export async function runAgent(
   // side, ugh.
   let toolCallNotes = new Map<string, Partial<AiToolCall>>();
 
-  capturedYdocChanges = [];
-
   let agentContext = hooks.getChatAgentContext(chatId);
   let emitStreamEvent = (event: AiChatStreamEvent) => {
     hooks.emitChatStreamEvent(chatId, event);
@@ -1597,16 +1595,6 @@ export async function runAgent(
         msgs.push(msg);
       }
 
-      if (capturedYdocChanges.length > 0) {
-        let update = Y.mergeUpdatesV2(capturedYdocChanges);
-        capturedYdocChanges = [];
-
-        msgs.push({
-          type: "changes",
-          update
-        });
-      }
-
       let capturedActions = hooks.consumeCapturedActions(chatId);
       if (capturedActions) {
         for (let actionId of capturedActions.actions) {
@@ -1622,15 +1610,21 @@ export async function runAgent(
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
 
       currentStreamingToolCallId = undefined;
-      codePreviewManager.clear();
       executeCodeStreamManager.clear();
-      emitStreamEvent({type: "clear"});
     },
   });
 
-  // streamText silently swallows stream errors unless onError is provided.
-  // Re-throw so errors propagate to the catch block in startAgent().
-  await stream.consumeStream({ onError: (e) => { throw e; } });
+  try {
+    // streamText silently swallows stream errors unless onError is provided.
+    // Re-throw so errors propagate to the catch block in startAgent().
+    await stream.consumeStream({ onError: (e) => { throw e; } });
+  } finally {
+    // Flush all of the Y.Doc changes captured during this turn as a single "changes" message.
+    if (capturedYdocChanges.length > 0) {
+      let update = Y.mergeUpdatesV2(capturedYdocChanges);
+      hooks.addChatMessages(chatId, author, [{type: "changes", update}]);
+    }
+  }
 }
 
 function formatUnifiedDiff(
