@@ -1577,7 +1577,9 @@ function clearProvisionalTextState(state: ProvisionalChatState) {
   state.reasoning = "";
   state.toolCalls = [];
   state.toolCallsById.clear();
-  state.activeEditingFile = undefined;
+  // Note: This function only clears chat streaming state, not code streaming state. Chat streaming
+  // is reset when a message arrives (once per step), whereas code streaming is reset when code
+  // changes arrive (at the end of a turn).
 }
 
 function clearProvisionalCodeState(state: ProvisionalChatState) {
@@ -2063,6 +2065,16 @@ function ChatInterface({
   // not separate stubs for each method
   class ChatSubscriberImpl extends RpcTarget implements AiChatSubscriber {
     metadata(chat: AiChatMetadata) {
+      // When the agent stops running (activeAgent becomes unset), do a final full clear of this
+      // chat's provisional streaming state. This generally shouldn't be necessary because chat
+      // stream state is cleared when the final message arrives and code stream state is cleared
+      // when the finalized changes arrive, but doing this final clear will "mop up" if there
+      // were any inconsistencies in the streaming.
+      const prevChat = cacheRef.current.chats.get(chat.id);
+      if (prevChat?.activeAgent && !chat.activeAgent) {
+        provisionalRef.current.delete(chat.id);
+      }
+
       cacheRef.current.chats.set(chat.id, chat);
       forceUpdate();
     }
@@ -2232,10 +2244,6 @@ function ChatInterface({
           break;
         case "codeUpdate":
           provisional.codeUpdates.push(event.update);
-          break;
-        case "clear":
-          clearProvisionalTextState(provisional);
-          clearProvisionalCodeState(provisional);
           break;
       }
 
