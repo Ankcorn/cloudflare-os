@@ -1069,6 +1069,11 @@ export type AiChatStreamEvent = {
   type: "setActiveFile";
   filename: string | null;
 } | {
+  // Streaming write/edit target file, used by the UI before the finalized tool call arrives.
+  type: "toolCallTarget";
+  toolCallId: string;
+  target: string;
+} | {
   type: "toolOutputDelta";
   toolCallId: string;
   delta: string;

@@ -11,12 +11,12 @@ import {
 } from "react";
 import {
   DropdownMenu,
-  Select,
   Tooltip,
   useKumoToastManager,
 } from "@cloudflare/kumo";
 
 import {
+  CaretDown,
   CaretLeft,
   CaretRight,
   Check,
@@ -25,9 +25,21 @@ import {
   Trash,
   DotsThreeVertical,
   LinkSimple,
-  PlugsConnected,
-  ArrowCounterClockwise,
+  Plug,
+  Plus,
+  Swap,
+  ArrowUUpLeft,
   ArrowsClockwise,
+  Copy,
+  WarningCircle,
+  Code,
+  File as FileIcon,
+  PencilSimple,
+  Brain,
+  Terminal,
+  Globe,
+  MagnifyingGlass,
+  Question,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -35,16 +47,9 @@ import remarkGfm from "remark-gfm";
 import * as Y from "yjs";
 import styles from "./ChatInterface.module.css";
 import {
-  fromModelSelectValue,
   getStoredSelectedModel,
-  NO_AGENT_OPTION_VALUE,
   persistSelectedModel,
-  toModelSelectValue,
 } from "./modelSelection";
-import {
-  getStoredReasoningExpandedByDefault,
-  persistReasoningExpandedByDefault,
-} from "./reasoningPreference";
 import {
   Overseer,
   GatekeeperClient,
@@ -68,6 +73,7 @@ import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/
 import { useActionEntries } from "./useActions";
 import { useAuthenticatedApi } from "./AuthContext";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
+import { copyToClipboard } from "./clipboard";
 
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
@@ -84,6 +90,34 @@ type DraftChatState = {
   entries: DraftUpdateEntry[];
   latestAuthor: AiChatAuthorInfo | null;
 };
+
+type ChatListScope = "direct" | "agents" | "all";
+
+const CHAT_LIST_SCOPE_LABELS: Record<ChatListScope, string> = {
+  all: "All conversations",
+  direct: "Direct conversations",
+  agents: "Agent runs",
+};
+
+const SHOW_THINKING_TRACES_KEY = "showThinkingTraces";
+
+function getStoredShowThinkingTraces(): boolean {
+  try {
+    // Clean up the key this setting replaced.
+    window.localStorage.removeItem("expandReasoningByDefault");
+    return window.localStorage.getItem(SHOW_THINKING_TRACES_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function persistShowThinkingTraces(show: boolean): void {
+  try {
+    window.localStorage.setItem(SHOW_THINKING_TRACES_KEY, show ? "true" : "false");
+  } catch {
+    // private mode / sandboxed iframes
+  }
+}
 
 function refreshDraftLatestAuthor(state: DraftChatState) {
   state.latestAuthor =
@@ -326,32 +360,26 @@ function getSafeExternalUrl(url: string | undefined): string | undefined {
   }
 }
 
-/**
- * Build a short, skimmable summary for a tool call header.
- *
- * Returns a tuple of [verb, target] so the caller can style them differently
- * (verb = mono name, target = the thing being acted on). Falls back to just the
- * tool name when no useful detail is available.
- */
+// Convert raw tool calls into user-facing transcript labels.
 function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
   switch (tc.toolName) {
     case "readFile":
-      return { verb: "readFile", target: tc.input.filename };
+      return { verb: "Read", target: tc.input.filename };
     case "writeFile":
-      return { verb: "writeFile", target: tc.input.filename };
+      return { verb: "Wrote", target: tc.input.filename };
     case "editFile":
-      return { verb: "editFile", target: tc.input.filename };
+      return { verb: "Edited", target: tc.input.filename };
     case "describeBinding":
-      return { verb: "describeBinding", target: String(tc.input.name) };
+      return { verb: "Inspected", target: `${String(tc.input.name)} binding` };
     case "setBindingHook":
       return {
-        verb: "setBindingHook",
+        verb: "Connected",
         target: tc.input.entrypoint
           ? `${tc.input.bindingName} → ${tc.input.entrypoint}`
           : tc.input.bindingName,
       };
     case "saveCapsuleAsBinding":
-      return { verb: "saveCapsuleAsBinding", target: tc.input.bindingName };
+      return { verb: "Saved resource", target: tc.input.bindingName };
     case "executeCode": {
       // Prefer the first non-empty line as a preview.
       const firstLine = tc.input.code
@@ -359,7 +387,7 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
         .map((line) => line.trim())
         .find((line) => line.length > 0);
       return {
-        verb: "executeCode",
+        verb: "Ran code",
         target: firstLine
           ? firstLine.length > 60
             ? `${firstLine.slice(0, 57)}…`
@@ -368,7 +396,7 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
       };
     }
     case "giveUp":
-      return { verb: "giveUp" };
+      return { verb: "Stopped" };
     case "webFetch": {
       let target = tc.input.url;
       try {
@@ -376,14 +404,267 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
       } catch {
         // Leave as the raw URL.
       }
-      return { verb: "webFetch", target };
+      return { verb: "Fetched", target };
     }
     case "observeUserChanges":
-      return { verb: "observeUserChanges" };
+      return { verb: "Observed user changes" };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
   return { verb: (_exhaustive as { toolName: string }).toolName };
+}
+
+type PhosphorIcon = typeof MagnifyingGlass;
+
+type ActionChatMessage = Extract<AiChatMessage, { type: "action" }>;
+type ObservationChatMessage = ActionChatMessage & {
+  actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
+};
+
+type ToolCallGroup = {
+  key: string;
+  Icon: PhosphorIcon;
+  label: string;
+  detailLines: string[];
+  calls: AiToolCall[];
+  observations: ObservationChatMessage[];
+  hasError: boolean;
+};
+
+function lowerFirst(text: string): string {
+  return text ? text[0].toLowerCase() + text.slice(1) : text;
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function describeObservationCount(count: number): string {
+  return count === 1 ? "Read 1 resource" : `${count} resource reads`;
+}
+
+function describeToolCallCount(toolName: AiToolCall["toolName"], count: number): string {
+  switch (toolName) {
+    case "readFile":
+      return `Read ${pluralize(count, "file")}`;
+    case "writeFile":
+      return `Wrote ${pluralize(count, "file")}`;
+    case "editFile":
+      return count === 1 ? "Made 1 edit" : `Made ${count} edits`;
+    case "webFetch":
+      return `Fetched ${pluralize(count, "page")}`;
+    case "executeCode":
+      return `Ran ${pluralize(count, "code block")}`;
+    case "describeBinding":
+      return `Inspected ${pluralize(count, "binding")}`;
+    case "setBindingHook":
+      return `Connected ${pluralize(count, "binding")}`;
+    case "saveCapsuleAsBinding":
+      return `Saved ${pluralize(count, "resource")}`;
+    case "observeUserChanges":
+      return `Observed ${pluralize(count, "change set")}`;
+    case "giveUp":
+      return count === 1 ? "Stopped" : `Stopped ${count} times`;
+  }
+  const _exhaustive: never = toolName;
+  return _exhaustive;
+}
+
+function getToolIcon(toolName: AiToolCall["toolName"] | null | undefined): PhosphorIcon {
+  switch (toolName) {
+    case "readFile":
+    case "writeFile":
+      return FileIcon;
+    case "editFile":
+      return PencilSimple;
+    case "executeCode":
+      return Terminal;
+    case "webFetch":
+      return Globe;
+    case "describeBinding":
+      return MagnifyingGlass;
+    case "setBindingHook":
+    case "saveCapsuleAsBinding":
+      return LinkSimple;
+    case "observeUserChanges":
+      return MagnifyingGlass;
+    case "giveUp":
+      return Question;
+    default:
+      return Question;
+  }
+}
+
+function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undefined) {
+  switch (toolName) {
+    case "readFile":
+      return "Reading file";
+    case "writeFile":
+      return "Writing file";
+    case "editFile":
+      return "Editing file";
+    case "describeBinding":
+      return "Inspecting binding";
+    case "setBindingHook":
+      return "Connecting binding";
+    case "saveCapsuleAsBinding":
+      return "Saving resource";
+    case "executeCode":
+      return "Running code";
+    case "webFetch":
+      return "Fetching web page";
+    case "observeUserChanges":
+      return "Observing user changes";
+    case "giveUp":
+      return "Stopping";
+    default:
+      return "Using tool";
+  }
+}
+
+function getToolTarget(tc: AiToolCall): string | undefined {
+  return getToolCallSummary(tc).target;
+}
+
+// Present-tense verb for an in-progress tool call.
+function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
+  switch (toolName) {
+    case "readFile": return "Reading";
+    case "writeFile": return "Writing";
+    case "editFile": return "Editing";
+    case "describeBinding": return "Inspecting";
+    case "setBindingHook": return "Connecting";
+    case "saveCapsuleAsBinding": return "Saving resource";
+    case "executeCode": return "Running code";
+    case "webFetch": return "Fetching";
+    case "observeUserChanges": return "Observing user changes";
+    case "giveUp": return "Stopping";
+  }
+  const _exhaustive: never = toolName;
+  return _exhaustive;
+}
+
+// Present-tense, count-aware label mirroring describeToolCallCount (e.g. "Writing 5 files").
+function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: number): string {
+  if (count <= 1) return getProvisionalToolLabel(toolName);
+  switch (toolName) {
+    case "readFile": return `Reading ${pluralize(count, "file")}`;
+    case "writeFile": return `Writing ${pluralize(count, "file")}`;
+    case "editFile": return `Making ${count} edits`;
+    case "webFetch": return `Fetching ${pluralize(count, "page")}`;
+    case "executeCode": return `Running ${pluralize(count, "code block")}`;
+    case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
+    case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
+    case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
+    case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
+    case "giveUp": return "Stopping";
+  }
+  const _exhaustive: never = toolName;
+  return _exhaustive;
+}
+
+// Builds the label + detail lines for the in-progress tool-call row.
+function buildProvisionalToolSummary(
+  calls: ProvisionalToolCallState[],
+): { label: string; detailLines: string[] } {
+  const toolNames = Array.from(
+    new Set(calls.map((c) => c.toolName).filter((n): n is AiToolCall["toolName"] => !!n)),
+  );
+  const detailLines = Array.from(
+    new Set(calls.map((c) => c.target).filter((t): t is string => Boolean(t))),
+  );
+
+  if (toolNames.length === 0) {
+    return { label: "Using tool", detailLines: [] };
+  }
+
+  if (toolNames.length > 1) {
+    const parts = toolNames.map((toolName) =>
+      describeProvisionalToolCount(
+        toolName,
+        calls.filter((c) => c.toolName === toolName).length,
+      ),
+    );
+    return {
+      label: parts.map((part, i) => (i === 0 ? part : lowerFirst(part))).join(", "),
+      detailLines,
+    };
+  }
+
+  const toolName = toolNames[0];
+  if (calls.length === 1) {
+    const target = detailLines[0];
+    return {
+      label: target ? `${getProvisionalToolVerb(toolName)} ${target}` : getProvisionalToolLabel(toolName),
+      detailLines: [],
+    };
+  }
+
+  const label =
+    detailLines.length === 1
+      ? `${getProvisionalToolVerb(toolName)} ${detailLines[0]}`
+      : describeProvisionalToolCount(toolName, calls.length);
+  return { label, detailLines };
+}
+
+function buildToolCallGroups(
+  toolCalls: AiToolCall[],
+  observations: ObservationChatMessage[] = [],
+): ToolCallGroup[] {
+  if (toolCalls.length === 0 && observations.length === 0) return [];
+
+  const distinctToolNames = Array.from(new Set(toolCalls.map((tc) => tc.toolName)));
+  const targets = toolCalls
+    .map((tc) => getToolTarget(tc))
+    .filter((target): target is string => Boolean(target));
+  const observationTargets = observations
+    .map((msg) => msg.actionLog.resourceTitle)
+    .filter((target): target is string => Boolean(target));
+  const detailLines = Array.from(new Set([...targets, ...observationTargets]));
+  const labelParts: string[] = [];
+
+  if (toolCalls.length === 1) {
+    const summary = getToolCallSummary(toolCalls[0]);
+    labelParts.push(`${summary.verb}${summary.target ? ` ${summary.target}` : ""}`);
+  } else if (toolCalls.length > 1 && distinctToolNames.length === 1) {
+    const summary = getToolCallSummary(toolCalls[0]);
+    labelParts.push(detailLines.length === 1 && summary.target && observations.length === 0
+      ? `${summary.verb} ${summary.target}`
+      : describeToolCallCount(toolCalls[0].toolName, toolCalls.length));
+  } else if (toolCalls.length > 1 && distinctToolNames.length <= 3) {
+    labelParts.push(...distinctToolNames.map((toolName) => {
+      const count = toolCalls.filter((tc) => tc.toolName === toolName).length;
+      return describeToolCallCount(toolName, count);
+    }));
+  } else if (toolCalls.length > 0) {
+    labelParts.push(`${toolCalls.length} tool calls`);
+  }
+
+  if (observations.length > 0) {
+    labelParts.push(describeObservationCount(observations.length));
+  }
+
+  const firstToolCall = toolCalls[0];
+  const firstObservation = observations[0];
+
+  return [{
+    // Use the first work item id so expansion survives streaming → committed.
+    key: firstToolCall
+      ? `group-${firstToolCall.toolCallId}`
+      : `group-observation-${firstObservation.chatId}-${firstObservation.sequence}`,
+    Icon: firstToolCall ? getToolIcon(firstToolCall.toolName) : MagnifyingGlass,
+    label: labelParts
+      .map((part, index) => index === 0 ? part : lowerFirst(part))
+      .join(", "),
+    detailLines,
+    calls: toolCalls,
+    observations,
+    hasError: toolCalls.some((tc) => Boolean(tc.error)),
+  }];
+}
+
+function WorkIcon({ Icon }: { Icon: PhosphorIcon }) {
+  return <Icon size={15} className="text-kumo-inactive" />;
 }
 
 function renderCapsulePill(capsule: CapsuleSpecifier) {
@@ -449,9 +730,6 @@ function getMarkdownComponents(
 
 const REMARK_PLUGINS_NO_CAPSULES = [remarkGfm];
 const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
-// Render streaming agent text as plain above this length to avoid re-parsing
-// the full markdown tree per token. The final message re-renders as markdown.
-const LIVE_MARKDOWN_CHAR_LIMIT = 2000;
 
 const MarkdownMessage = memo(function MarkdownMessage(
   { message, capsules }: { message: string; capsules?: CapsuleSpecifier[] },
@@ -486,13 +764,270 @@ const MarkdownMessage = memo(function MarkdownMessage(
   );
 });
 
-function StreamingMarkdownMessage({ message }: { message: string }) {
-  if (message.length > LIVE_MARKDOWN_CHAR_LIMIT) {
-    return <span className="whitespace-pre-wrap break-words">{message}</span>;
-  }
+const ToolCallDetails = memo(function ToolCallDetails(
+  { toolCall: tc }: { toolCall: AiToolCall },
+) {
+  return (
+    <div className="space-y-2">
+      {tc.error && (
+        <pre className="rounded-xl border border-kumo-danger/20 bg-kumo-danger-tint/40 p-3 font-mono text-[12px] leading-[18px] text-kumo-danger whitespace-pre-wrap">
+          {tc.error}
+        </pre>
+      )}
+      {tc.toolName === "executeCode" ? (
+        <>
+          <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
+            Code
+          </span>
+          <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+            {tc.input.code}
+          </pre>
+          {tc.output && (
+            <>
+              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">
+                Output
+              </span>
+              <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+                {tc.output}
+              </pre>
+            </>
+          )}
+        </>
+      ) : (
+        <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+          {JSON.stringify(tc.input, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+});
 
-  return <MarkdownMessage message={message} />;
-}
+const ObservationDetails = memo(function ObservationDetails(
+  { observation }: { observation: ObservationChatMessage },
+) {
+  const log = observation.actionLog;
+  const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
+  const metadata = [log.resourceTitle, log.bindingName].filter(Boolean).join(" · ");
+
+  return (
+    <div className="px-1 py-1.5 text-[13px] leading-[19px] tracking-[-0.25px]">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <WorkIcon Icon={MagnifyingGlass} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="m-0 font-medium text-kumo-default">
+            {log.description.title}
+          </p>
+          {metadata && (
+            <p className="mt-0.5 mb-0 truncate text-[12px] leading-4 text-kumo-inactive">
+              {safeResourceUrl && log.resourceTitle ? (
+                <a
+                  href={safeResourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:underline"
+                >
+                  {metadata}
+                </a>
+              ) : metadata}
+            </p>
+          )}
+          <div className="mt-1.5 text-[12px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
+            <MarkdownMessage message={log.description.description} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const NestedToolCallRow = memo(function NestedToolCallRow({
+  toolCall: tc,
+  open,
+  onToggle,
+}: {
+  toolCall: AiToolCall;
+  open: boolean;
+  onToggle: (key: string) => void;
+}) {
+  const key = `call-${tc.toolCallId}`;
+  const summary = getToolCallSummary(tc);
+  const label = `${summary.verb}${summary.target ? ` ${summary.target}` : ""}`;
+  const Icon = getToolIcon(tc.toolName);
+
+  return (
+    <div className="group/nested">
+      <button
+        type="button"
+        onClick={() => onToggle(key)}
+        className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+        aria-expanded={open}
+      >
+        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <WorkIcon Icon={Icon} />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
+          <span className="min-w-0 truncate">{label}</span>
+          {tc.error && (
+            <span className="rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
+              Error
+            </span>
+          )}
+          <CaretRight
+            size={13}
+            weight="bold"
+            className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+          />
+        </span>
+      </button>
+      {open && (
+        <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+          <ToolCallDetails toolCall={tc} />
+        </div>
+      )}
+    </div>
+  );
+});
+
+const NestedObservationRow = memo(function NestedObservationRow({
+  observation,
+  open,
+  onToggle,
+}: {
+  observation: ObservationChatMessage;
+  open: boolean;
+  onToggle: (key: string) => void;
+}) {
+  const key = `observation-${observation.chatId}-${observation.sequence}`;
+  const log = observation.actionLog;
+  const label = `Read ${log.description.title || log.resourceTitle || "resource"}`;
+
+  return (
+    <div className="group/nested">
+      <button
+        type="button"
+        onClick={() => onToggle(key)}
+        className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+        aria-expanded={open}
+      >
+        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <WorkIcon Icon={MagnifyingGlass} />
+        </span>
+        <span className="inline-flex min-w-0 max-w-full items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
+          <span className="min-w-0 truncate">{label}</span>
+          <CaretRight
+            size={13}
+            weight="bold"
+            className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+          />
+        </span>
+      </button>
+      {open && (
+        <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+          <ObservationDetails observation={observation} />
+        </div>
+      )}
+    </div>
+  );
+});
+
+const ThinkingTraceRow = memo(function ThinkingTraceRow({
+  reasoning,
+}: {
+  reasoning: string;
+}) {
+  return (
+    <div className="min-w-0 py-1 text-kumo-subtle">
+      <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
+        <MarkdownMessage message={reasoning} />
+      </div>
+    </div>
+  );
+});
+
+const ToolGroupRow = memo(function ToolGroupRow({
+  group,
+  open,
+  expandedKeys,
+  onToggle,
+}: {
+  group: ToolCallGroup;
+  open: boolean;
+  expandedKeys: ReadonlySet<string>;
+  onToggle: (key: string) => void;
+}) {
+  return (
+    <div className="group/work -ml-0.5">
+      <button
+        type="button"
+        onClick={() => onToggle(group.key)}
+        className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+        aria-expanded={open}
+      >
+        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <WorkIcon Icon={group.Icon} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
+            <span>{group.label}</span>
+            {group.hasError && (
+              <span className="rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
+                Error
+              </span>
+            )}
+            <CaretRight
+              size={13}
+              weight="bold"
+              className={`text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+            />
+          </span>
+          {group.detailLines.length > 1 && (
+            <span className="mt-1 block truncate font-mono text-[12px] leading-4 text-kumo-inactive">
+              {group.detailLines.join(" · ")}
+            </span>
+          )}
+        </span>
+      </button>
+      {open && (
+        group.calls.length === 1 && group.observations.length === 0 ? (
+          <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+            <ToolCallDetails toolCall={group.calls[0]} />
+          </div>
+        ) : group.calls.length === 0 && group.observations.length === 1 ? (
+          <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+            <ObservationDetails observation={group.observations[0]} />
+          </div>
+        ) : (
+          <div className="ml-8 mt-1 space-y-1">
+            {group.calls.map((toolCall) => {
+              const key = `call-${toolCall.toolCallId}`;
+              return (
+                <NestedToolCallRow
+                  key={toolCall.toolCallId}
+                  toolCall={toolCall}
+                  open={expandedKeys.has(key)}
+                  onToggle={onToggle}
+                />
+              );
+            })}
+            {group.observations.map((observation) => {
+              const key = `observation-${observation.chatId}-${observation.sequence}`;
+              return (
+                <NestedObservationRow
+                  key={key}
+                  observation={observation}
+                  open={expandedKeys.has(key)}
+                  onToggle={onToggle}
+                />
+              );
+            })}
+          </div>
+        )
+      )}
+    </div>
+  );
+});
 
 export const ChatInput = ({
   createCapsuleGatekeeper,
@@ -509,9 +1044,12 @@ export const ChatInput = ({
   onDiscardConsoleLogs = () => {},
   newChat = false,
   autoFocus = false,
+  minRows = 2,
   attachLabel,
   draftUpdateBanner,
   onStop,
+  showThinkingTraces = true,
+  onToggleThinkingTraces,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -536,10 +1074,14 @@ export const ChatInput = ({
   onDiscardConsoleLogs?: () => void;
   newChat?: boolean;
   autoFocus?: boolean;
-  /** When set, the attach button shows this label with a LinkSimple icon instead of the paperclip icon. */
+  /** Minimum number of textarea rows at rest. Defaults to 2. */
+  minRows?: number;
+  /** Optional label for the attach menu item. */
   attachLabel?: string;
   draftUpdateBanner?: ReactNode;
   onStop?: () => void;
+  showThinkingTraces?: boolean;
+  onToggleThinkingTraces?: () => void;
 }) => {
   const [inputValue, setInputValue] = useState("");
   const [capsules, setCapsules] = useState<InputCapsule[]>([]);
@@ -791,55 +1333,48 @@ export const ChatInput = ({
     setAttachModalOpen(true);
   };
 
+  // Insert a capsule chip at the given position and move the caret past it.
+  const insertCapsuleAt = (
+    insertPos: number,
+    id: number,
+    description: ResourceDescription,
+  ) => {
+    // Pad the title with spaces so the mirror highlight has visible interior padding.
+    const paddedTitle = ` ${description.title} `;
+
+    setInputValue(
+      (prev) => prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos),
+    );
+
+    // Shift any existing capsules after the insertion point.
+    setCapsules((prev) => {
+      const adjusted = prev.map((c) =>
+        c.start >= insertPos ? { ...c, start: c.start + paddedTitle.length } : c,
+      );
+      return [
+        ...adjusted,
+        { start: insertPos, length: paddedTitle.length, gatekeeperId: id, description },
+      ];
+    });
+
+    requestAnimationFrame(() => {
+      const textarea = wrapperRef.current?.querySelector("textarea");
+      if (textarea) {
+        const cursorPos = insertPos + paddedTitle.length;
+        textarea.setSelectionRange(cursorPos, cursorPos);
+        textarea.focus();
+      }
+    });
+  };
+
   // Called by the GatekeeperModal when a gatekeeper is created via the attach flow.
   // Inserts a capsule at the previously-saved cursor position.
   const handleAttachCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
     try {
       // Fetch ID and description in parallel (promise pipelining).
       const [id, description] = await Promise.all([gk.getId(), gk.describe()]);
-
-      const insertPos = attachCursorPosRef.current;
-      // Pad the title with spaces so the mirror highlight has visible interior padding.
-      const paddedTitle = ` ${description.title} `;
-
-      // Insert the capsule title at the saved cursor position.
-      setInputValue(
-        (prev) =>
-          prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos),
-      );
-
-      // Adjust positions of existing capsules that come after the insertion point.
-      setCapsules((prev) => {
-        const adjusted = prev.map((c) => {
-          if (c.start >= insertPos) {
-            return { ...c, start: c.start + paddedTitle.length };
-          }
-          return c;
-        });
-        return [
-          ...adjusted,
-          {
-            start: insertPos,
-            length: paddedTitle.length,
-            gatekeeperId: id,
-            description,
-          },
-        ];
-      });
-
+      insertCapsuleAt(attachCursorPosRef.current, id, description);
       setAttachModalOpen(false);
-
-      // Move cursor to end of inserted capsule and focus the textarea.
-      requestAnimationFrame(() => {
-        const wrapper = wrapperRef.current;
-        if (!wrapper) return;
-        const textarea = wrapper.querySelector("textarea");
-        if (textarea) {
-          const cursorPos = insertPos + paddedTitle.length;
-          textarea.setSelectionRange(cursorPos, cursorPos);
-          textarea.focus();
-        }
-      });
     } finally {
       gk[Symbol.dispose]();
     }
@@ -1107,13 +1642,16 @@ export const ChatInput = ({
     : consoleLogSeverity === "warn"
       ? "warning"
       : "log";
+  const selectedModelLabel = selectedModel == null
+    ? "No agent"
+    : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
 
   return (
     // isolation: isolate contains z-indexes used inside the composer (the
     // captured-log floating chip with z-10, the textarea/mirror with z-[1])
     // so they can't paint on top of body-level portaled popovers like the
     // model picker dropdown opening above the composer.
-    <div className="px-4 py-3 relative isolate">
+    <div className={`px-4 py-4 relative isolate ${styles.chatInputRoot}`}>
       {/* Captured-log floating chip — sits above the composer like a transient pill */}
       {pendingConsoleLogCount > 0 && (
         <div className="pointer-events-none absolute inset-x-4 -top-10 z-10 flex justify-center">
@@ -1131,6 +1669,7 @@ export const ChatInput = ({
               asChild
             >
               <button
+                type="button"
                 onClick={handleAttachLogs}
                 className="flex min-w-0 items-center gap-2 truncate text-left hover:text-kumo-default"
               >
@@ -1142,6 +1681,7 @@ export const ChatInput = ({
               </button>
             </Tooltip>
             <button
+              type="button"
               onClick={onDiscardConsoleLogs}
               className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full opacity-60 transition-opacity hover:bg-kumo-tint hover:opacity-100"
               aria-label="Discard captured logs"
@@ -1156,7 +1696,7 @@ export const ChatInput = ({
       <div className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-base shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
         {draftUpdateBanner}
         {/* Textarea */}
-        <div className="relative px-4 pb-2 pt-3">
+        <div className="relative px-4 pb-1 pt-3">
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
             {activeUrl && (
               <CapsuleOverlay
@@ -1186,7 +1726,7 @@ export const ChatInput = ({
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
                 requestAnimationFrame(handleCursorChange);
                 // Auto-resize after value change
-                autoResizeTextarea(e.target, newChat ? 3 : 1, newChat ? 10 : 4);
+                autoResizeTextarea(e.target, minRows, newChat ? 10 : 4);
               }}
               onSelect={handleCursorChange}
               onClick={handleCursorChange}
@@ -1199,7 +1739,7 @@ export const ChatInput = ({
                     : "Ask a follow-up…"
               }
               autoFocus={autoFocus}
-              rows={newChat ? 3 : 1}
+              rows={minRows}
               onKeyDown={(e) => {
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -1221,61 +1761,101 @@ export const ChatInput = ({
               }}
               ref={(el) => {
                 // Initial auto-resize on mount
-                if (el) autoResizeTextarea(el, newChat ? 3 : 1, newChat ? 10 : 4);
+                if (el) autoResizeTextarea(el, minRows, newChat ? 10 : 4);
               }}
               className="relative z-[1] w-full resize-none border-none bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive disabled:cursor-not-allowed disabled:text-kumo-inactive"
             />
           </div>
         </div>
 
-        {/* Footer row: model picker left, attach + send right */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3 pb-3">
-          {/* Model picker */}
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <Select
-              aria-label="Select model"
-              className="w-full min-w-[120px] max-w-[180px] text-sm"
-              value={toModelSelectValue(selectedModel)}
-              onValueChange={(value) =>
-                onModelChange(fromModelSelectValue(value as string))
-              }
-              renderValue={(v) => {
-                if (v === NO_AGENT_OPTION_VALUE) return "No agent";
-                return models.find(m => m.id === v)?.name ?? String(v)
-              }}
+        {/* Footer row: connection/options left, model + send right */}
+        <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+            {onToggleThinkingTraces && (
+              <DropdownMenu>
+                <DropdownMenu.Trigger
+                  render={
+                    <button
+                      type="button"
+                      className="group flex h-8 w-8 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.96] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-subtle"
+                      aria-label="Open chat options"
+                    >
+                      <Plus size={18} />
+                    </button>
+                  }
+                />
+                <DropdownMenu.Content collisionPadding={16} className="!z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+                  <DropdownMenu.Item
+                    onClick={onToggleThinkingTraces}
+                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                  >
+                    <span className="mr-2 inline-flex h-4 w-4 items-center justify-center text-kumo-inactive">
+                      <Brain size={14} />
+                    </span>
+                    <span className="flex-1">
+                      {showThinkingTraces ? "Hide thinking" : "Show thinking"}
+                    </span>
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu>
+            )}
+            <button
+              type="button"
+              onClick={handleAttachOpen}
+              className="inline-flex h-8 flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[13px] leading-none tracking-[-0.25px] text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.97]"
             >
-              {models.map((m) => (
-                <Select.Option key={m.id} value={m.id}>
-                  {m.name}
-                </Select.Option>
-              ))}
-              <Select.Option value={NO_AGENT_OPTION_VALUE}>
-                No agent
-              </Select.Option>
-            </Select>
+              <Plug size={15} className="flex-shrink-0" />
+              <span className={`leading-none ${styles.attachLabelText}`}>{attachLabel ?? "Add resource"}</span>
+            </button>
           </div>
 
           {/* Right actions */}
-          <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">
-            {attachLabel ? (
-              <WorkshopButton
-                onClick={handleAttachOpen}
-                className="!h-8 gap-1.5"
-              >
-                <LinkSimple size={16} />
-                {attachLabel}
-              </WorkshopButton>
-            ) : (
-              <Tooltip content="Attach resource" asChild>
-                <WorkshopIconButton
-                  onClick={handleAttachOpen}
-                  className="!h-8 !w-8 text-kumo-inactive hover:text-kumo-subtle"
-                  aria-label="Attach resource"
-                >
-                  <PlugsConnected size={15} />
-                </WorkshopIconButton>
-              </Tooltip>
-            )}
+          <div className="ml-auto flex min-w-0 flex-shrink items-center gap-1.5">
+              <DropdownMenu>
+                <DropdownMenu.Trigger
+                  render={
+                    <button
+                      type="button"
+                      className="group inline-flex h-8 min-w-0 max-w-[180px] cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[13px] leading-5 tracking-[-0.25px] text-kumo-subtle transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-default focus-visible:bg-kumo-tint focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.97] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
+                      aria-label="Select model"
+                    >
+                      <span className="min-w-0 truncate">{selectedModelLabel}</span>
+                      <CaretDown
+                        size={12}
+                        weight="bold"
+                        className="flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180"
+                      />
+                    </button>
+                  }
+                />
+                <DropdownMenu.Content className="!z-[1100] !min-w-[190px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+                  {models.map((model) => {
+                    const active = selectedModel === model.id;
+                    return (
+                      <DropdownMenu.Item
+                        key={model.id}
+                        onClick={() => onModelChange(model.id)}
+                        className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                      >
+                        <span className="min-w-0 flex-1 truncate">{model.name}</span>
+                        {active && (
+                          <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
+                        )}
+                      </DropdownMenu.Item>
+                    );
+                  })}
+                  <div className="my-1 border-t border-kumo-line/70" />
+                  <DropdownMenu.Item
+                    onClick={() => onModelChange(null)}
+                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                  >
+                    <span className="min-w-0 flex-1 truncate">No agent</span>
+                    {selectedModel == null && (
+                      <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
+                    )}
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu>
               {isAgentActive && onStop ? (
                 <WorkshopIconButton
                   onClick={onStop}
@@ -1341,89 +1921,224 @@ interface MessageState {
   activeChanges: Uint8Array[];
 }
 
-type ActionChatMessage = Extract<AiChatMessage, { type: "action" }>;
-type ObservationChatMessage = ActionChatMessage & {
-  actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
-};
-
 type ChatDisplayEntry =
+  | {
+      type: "modelChange";
+      key: string;
+      author: AiChatAuthorInfo;
+      sequence: number;
+    }
   | {
       type: "message";
       key: string;
       message: AiChatMessage;
-      isAgentContinuation: boolean;
+      toolCalls?: AiToolCall[];
+      toolCallGroups?: ToolCallGroup[];
+      lastMessageSequence?: number;
     }
   | {
-      type: "observationGroup";
+      type: "workRun";
       key: string;
-      messages: ObservationChatMessage[];
+      toolCalls: AiToolCall[];
+      observations: ObservationChatMessage[];
+      toolCallGroups: ToolCallGroup[];
+      lastMessageSequence: number;
     };
 
 function isObservationActionMessage(msg: AiChatMessage): msg is ObservationChatMessage {
   return msg.type === "action" && msg.actionLog?.type === "observation";
 }
 
-function groupObservationEntries(messages: AiChatMessage[]): ChatDisplayEntry[] {
+type WorkMessageParts = {
+  toolCalls: AiToolCall[];
+  observations: ObservationChatMessage[];
+  lastAgentMessageSequence: number | null;
+};
+
+function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
+  if (isObservationActionMessage(msg)) {
+    return { toolCalls: [], observations: [msg], lastAgentMessageSequence: null };
+  }
+
+  if (
+    msg.type === "message" &&
+    msg.author.type !== "user" &&
+    !msg.message.trim() &&
+    !msg.reasoning?.trim() &&
+    !!msg.toolCalls &&
+    msg.toolCalls.length > 0
+  ) {
+    return {
+      toolCalls: msg.toolCalls,
+      observations: [],
+      lastAgentMessageSequence: msg.sequence,
+    };
+  }
+
+  return null;
+}
+
+function appendWorkParts(target: WorkMessageParts, source: WorkMessageParts) {
+  target.toolCalls.push(...source.toolCalls);
+  target.observations.push(...source.observations);
+  if (source.lastAgentMessageSequence !== null) {
+    target.lastAgentMessageSequence = source.lastAgentMessageSequence;
+  }
+}
+
+// Label for the per-turn discard-changes button.
+function getDiscardLabel(isTrailing: boolean | undefined): string {
+  return isTrailing
+    ? "Discard changes from this response"
+    : "Discard changes from this response and later responses";
+}
+
+// Collapse adjacent work rows; fold trailing work into the preceding assistant
+// message so one turn reads as one tool/resource run.
+function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
-  let lastAgentIdInTurn: string | null = null;
+  let lastAgentAuthorId: string | null = null;
+
+  const maybePushModelChange = (msg: AiChatMessage) => {
+    if (msg.type !== "message" || msg.author.type !== "agent") return;
+    if (lastAgentAuthorId === null) {
+      lastAgentAuthorId = msg.author.id;
+      return;
+    }
+    if (msg.author.id === lastAgentAuthorId) return;
+    lastAgentAuthorId = msg.author.id;
+    result.push({
+      type: "modelChange",
+      key: `model-${msg.chatId}-${msg.sequence}`,
+      author: msg.author,
+      sequence: msg.sequence,
+    });
+  };
 
   for (let i = 0; i < messages.length; ) {
     const msg = messages[i];
+    maybePushModelChange(msg);
 
-    if (!isObservationActionMessage(msg)) {
-      let isAgentContinuation = false;
-      // Track agent continuation across both regular "message" entries and "changes" (checkpoint)
-      // entries, since a checkpoint emitted by the same agent immediately after one of its
-      // messages is part of the same turn and should suppress redundant author/time chrome.
-      if (msg.type === "message" || msg.type === "changes") {
-        if (msg.author.type === "user") {
-          lastAgentIdInTurn = null;
-        } else if (msg.author.type === "agent") {
-          isAgentContinuation = lastAgentIdInTurn === msg.author.id;
-          lastAgentIdInTurn = msg.author.id;
-        }
+    const initialWorkParts = getWorkOnlyMessageParts(msg);
+    if (initialWorkParts) {
+      const workParts: WorkMessageParts = {
+        toolCalls: [...initialWorkParts.toolCalls],
+        observations: [...initialWorkParts.observations],
+        lastAgentMessageSequence: initialWorkParts.lastAgentMessageSequence,
+      };
+      let j = i + 1;
+      while (j < messages.length) {
+        const nextWorkParts = getWorkOnlyMessageParts(messages[j]);
+        if (!nextWorkParts) break;
+        appendWorkParts(workParts, nextWorkParts);
+        j++;
       }
 
       result.push({
-        type: "message",
-        key: `msg-${msg.chatId}-${msg.sequence}`,
-        message: msg,
-        isAgentContinuation,
+        type: "workRun",
+        key: `work-${msg.chatId}-${msg.sequence}`,
+        toolCalls: workParts.toolCalls,
+        observations: workParts.observations,
+        toolCallGroups: buildToolCallGroups(workParts.toolCalls, workParts.observations),
+        lastMessageSequence: workParts.lastAgentMessageSequence ?? messages[j - 1].sequence,
       });
-      i++;
+
+      i = j;
       continue;
     }
 
-    const observations = [msg];
-    let j = i + 1;
-    while (j < messages.length) {
-      const nextMessage = messages[j];
-      if (!isObservationActionMessage(nextMessage)) {
-        break;
+    if (msg.type === "message" && msg.author.type !== "user") {
+      const workParts: WorkMessageParts = {
+        toolCalls: msg.toolCalls ? [...msg.toolCalls] : [],
+        observations: [],
+        lastAgentMessageSequence: msg.sequence,
+      };
+      let j = i + 1;
+      while (j < messages.length) {
+        const nextWorkParts = getWorkOnlyMessageParts(messages[j]);
+        if (!nextWorkParts) break;
+        appendWorkParts(workParts, nextWorkParts);
+        j++;
       }
-      observations.push(nextMessage);
-      j++;
+
+      if (workParts.toolCalls.length > 0 || workParts.observations.length > 0) {
+        result.push({
+          type: "message",
+          key: `msg-${msg.chatId}-${msg.sequence}`,
+          message: msg,
+          toolCalls: workParts.toolCalls,
+          toolCallGroups: buildToolCallGroups(workParts.toolCalls, workParts.observations),
+          lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
+        });
+        i = j;
+        continue;
+      }
     }
 
-    if (observations.length === 1) {
-      result.push({
-        type: "message",
-        key: `msg-${msg.chatId}-${msg.sequence}`,
-        message: msg,
-        isAgentContinuation: false,
-      });
-    } else {
-      result.push({
-        type: "observationGroup",
-        key: `obs-${msg.chatId}-${msg.sequence}`,
-        messages: observations,
-      });
-    }
-
-    i = j;
+    result.push({
+      type: "message",
+      key: `msg-${msg.chatId}-${msg.sequence}`,
+      message: msg,
+    });
+    i++;
   }
 
   return result;
+}
+
+// Transcript spacing helpers.
+
+function isUserMessageEntry(entry: ChatDisplayEntry): boolean {
+  return (
+    entry.type === "message" &&
+    entry.message.type === "message" &&
+    entry.message.author.type === "user"
+  );
+}
+
+function isPureWorkRowEntry(entry: ChatDisplayEntry): boolean {
+  if (entry.type === "workRun") return true;
+  if (entry.type === "modelChange") return false;
+  const m = entry.message;
+  return (
+    m.type === "action" ||
+    m.type === "useGadget" ||
+    m.type === "agentCallback" ||
+    m.type === "merge" ||
+    m.type === "revert"
+  );
+}
+
+// Assistant messages with grouped work visually end in work rows.
+function entryEndsInWorkRow(entry: ChatDisplayEntry): boolean {
+  if (isPureWorkRowEntry(entry)) return true;
+  if (entry.type !== "message") return false;
+  return entry.toolCallGroups !== undefined && entry.toolCallGroups.length > 0;
+}
+
+function entryStartsWithWorkRow(entry: ChatDisplayEntry): boolean {
+  if (isPureWorkRowEntry(entry)) return true;
+  if (entry.type !== "message") return false;
+  const m = entry.message;
+  return (
+    m.type === "message" &&
+    m.author.type !== "user" &&
+    !m.message &&
+    entry.toolCallGroups !== undefined &&
+    entry.toolCallGroups.length > 0
+  );
+}
+
+function rhythmTopClass(
+  prev: ChatDisplayEntry | null,
+  curr: ChatDisplayEntry,
+): string {
+  if (!prev) return "";
+  if (curr.type === "modelChange") return "mt-4";
+  if (prev.type === "modelChange") return "mt-2";
+  if (isUserMessageEntry(prev) || isUserMessageEntry(curr)) return "mt-5";
+  if (entryEndsInWorkRow(prev) && entryStartsWithWorkRow(curr)) return "mt-2";
+  return "mt-4";
 }
 
 function computeMessageStates(messages: AiChatMessage[]): MessageState {
@@ -1524,7 +2239,6 @@ interface ChatInterfaceProps {
   consoleLogSeverity: "error" | "warn" | "info";
   onConsumeConsoleLogs: () => string;
   onDiscardConsoleLogs: () => void;
-  hideTitleBar?: boolean;
   onChatCountChange?: (count: number, hasChatZero: boolean) => void;
   onAgentActiveChange?: (chatId: number, isActive: boolean) => void;
   sidebarMode?: boolean;
@@ -1534,6 +2248,59 @@ interface ChatInterfaceProps {
   onHasAnyCodeChange?: (hasAnyCode: boolean) => void;
   onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
   constrainChatWidth?: boolean;
+}
+
+// Bucket a chat's lastActive into a time grouping for the chat list.
+type ChatTimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
+
+const CHAT_TIME_BUCKET_LABELS: Record<ChatTimeBucket, string> = {
+  today: "Today",
+  yesterday: "Yesterday",
+  thisWeek: "Earlier this week",
+  earlier: "Earlier",
+};
+const CHAT_TIME_BUCKET_ORDER: ChatTimeBucket[] = [
+  "today",
+  "yesterday",
+  "thisWeek",
+  "earlier",
+];
+
+function startOfDay(d: Date): Date {
+  const out = new Date(d);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
+function getChatTimeBucket(date: Date, now: Date): ChatTimeBucket {
+  const diffDays = Math.round(
+    (startOfDay(now).getTime() - startOfDay(date).getTime()) / 86_400_000,
+  );
+  if (diffDays <= 0) return "today";
+  if (diffDays === 1) return "yesterday";
+  if (diffDays < 7) return "thisWeek";
+  return "earlier";
+}
+
+// Format a chat's lastActive for display in a row, given its bucket. Buckets
+// own the "date" half of the label (via the section header), so rows only show
+// what the header doesn't.
+function formatChatRowTime(date: Date, bucket: ChatTimeBucket, now: Date): string {
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (bucket === "today" || bucket === "yesterday") {
+    return time;
+  }
+  if (bucket === "thisWeek") {
+    const day = date.toLocaleDateString([], { weekday: "short" });
+    return `${day} ${time}`;
+  }
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleDateString(
+    [],
+    sameYear
+      ? { month: "short", day: "numeric" }
+      : { month: "short", day: "numeric", year: "numeric" },
+  );
 }
 
 // Client-side cache for chats and messages (survives reconnects)
@@ -1547,6 +2314,8 @@ interface ChatCache {
 type ProvisionalToolCallState = {
   toolCallId: string;
   toolName: AiToolCall["toolName"] | null;
+  // Human-readable target (e.g. filename) once known from the streaming input.
+  target?: string;
   code: string;
   output: string;
   finished: boolean;
@@ -1635,7 +2404,6 @@ function ChatInterface({
   consoleLogSeverity,
   onConsumeConsoleLogs,
   onDiscardConsoleLogs,
-  hideTitleBar,
   onChatCountChange,
   onAgentActiveChange,
   sidebarMode,
@@ -1661,6 +2429,8 @@ function ChatInterface({
   // UI state
   const [_isSubscribed, setIsSubscribed] = useState(false);
   const [chatListReady, setChatListReady] = useState(false);
+  const [chatListScope, setChatListScope] = useState<ChatListScope>("all");
+  const [chatListVersion, setChatListVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [updateCounter, setUpdateCounter] = useState(0); // Force re-render when cache updates
   const [proposedChangesVersion, setProposedChangesVersion] = useState(0); // Incremented only for change-affecting messages
@@ -1668,6 +2438,7 @@ function ChatInterface({
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState("");
   const [renamingChatId, setRenamingChatId] = useState<number | null>(null);
+  const renamingChatIdRef = useRef<number | null>(null);
   const [renamingInput, setRenamingInput] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<{
     id: number;
@@ -1677,17 +2448,14 @@ function ChatInterface({
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
   );
-  const [expandedReasoning, setExpandedReasoning] = useState<Map<string, boolean>>(
-    new Map(),
+  const [showThinkingTraces, setShowThinkingTraces] = useState(
+    () => getStoredShowThinkingTraces(),
   );
-  const [reasoningExpandedByDefault, setReasoningExpandedByDefault] =
-    useState(() => getStoredReasoningExpandedByDefault());
   const [expandedActions, setExpandedActions] = useState<Set<number>>(
     new Set(),
   );
-  const [expandedObservationGroups, setExpandedObservationGroups] = useState<Set<string>>(
-    new Set(),
-  );
+  // Remember auto-expanded actions so user collapses stick.
+  const autoExpandedActionIdsRef = useRef<Set<number>>(new Set());
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
   const [processingActions, setProcessingActions] = useState<Set<number>>(
     new Set(),
@@ -1789,6 +2557,7 @@ function ChatInterface({
 
   // Force a re-render when cache is updated
   const forceUpdate = () => setUpdateCounter((prev) => prev + 1);
+  const bumpChatListVersion = () => setChatListVersion((prev) => prev + 1);
 
   // Batched version of forceUpdate for high-frequency stream events.
   // Coalesces multiple updates within a single animation frame.
@@ -1804,9 +2573,52 @@ function ChatInterface({
   };
 
   // Get sorted list of chats from cache
-  const chatList = Array.from(cacheRef.current.chats.values()).sort(
-    (a, b) => b.lastActive.getTime() - a.lastActive.getTime(),
+  const chatList = useMemo(
+    () => Array.from(cacheRef.current.chats.values()).sort(
+      (a, b) => b.lastActive.getTime() - a.lastActive.getTime(),
+    ),
+    [chatListVersion],
   );
+  const {
+    visibleChatList,
+    chatListNow,
+    bucketedVisibleChats,
+    chatListScopes,
+  } = useMemo(() => {
+    const directCount = chatList.filter((chat) => !chat.spawnerName).length;
+    const agentCount = chatList.length - directCount;
+    const visible = chatList.filter((chat) => {
+      if (chatListScope === "direct") return !chat.spawnerName;
+      if (chatListScope === "agents") return Boolean(chat.spawnerName);
+      return true;
+    });
+    const now = new Date();
+    const buckets = new Map<ChatTimeBucket, AiChatMetadata[]>();
+    for (const chat of visible) {
+      const bucket = getChatTimeBucket(chat.lastActive, now);
+      let arr = buckets.get(bucket);
+      if (!arr) {
+        arr = [];
+        buckets.set(bucket, arr);
+      }
+      arr.push(chat);
+    }
+
+    return {
+      visibleChatList: visible,
+      chatListNow: now,
+      bucketedVisibleChats: CHAT_TIME_BUCKET_ORDER.flatMap((bucket) => {
+        const items = buckets.get(bucket);
+        if (!items || items.length === 0) return [];
+        return [{ bucket, items }];
+      }),
+      chatListScopes: [
+        { value: "all" as const, count: chatList.length },
+        { value: "direct" as const, count: directCount },
+        { value: "agents" as const, count: agentCount },
+      ],
+    };
+  }, [chatList, chatListScope]);
 
   // Notify parent when chat list changes. Gated on chatListReady so that we
   // don't report 0 from the empty initial cache before listChats() has completed.
@@ -1850,9 +2662,21 @@ function ChatInterface({
     );
   }, [selectedChatId, updateCounter]);
   const displayEntries = useMemo(
-    () => groupObservationEntries(currentMessages),
+    () =>
+      // Hide individual checkpoints; surface pending changes as turn-level discard actions.
+      buildChatDisplayEntries(
+        currentMessages.filter((m) => m.type !== "changes"),
+      ),
     [currentMessages],
   );
+
+  const entryTopClasses = useMemo(() => {
+    const out: string[] = new Array(displayEntries.length);
+    for (let i = 0; i < displayEntries.length; i++) {
+      out[i] = rhythmTopClass(i > 0 ? displayEntries[i - 1] : null, displayEntries[i]);
+    }
+    return out;
+  }, [displayEntries]);
 
   // Hide the user name on user message rows when the only human in the chat is the
   // currently-logged-in user (it would just say "you" on every message). If anyone else has ever
@@ -1896,10 +2720,6 @@ function ChatInterface({
   const currentDraftChangesCount = currentDraftState?.entries.length ?? 0;
 
   const provisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
-  const hasRunningProvisionalToolCall = provisionalToolCalls.some(
-    (toolCall) => !toolCall.finished,
-  );
-
   const useConstrainedChatWidth = sidebarMode || constrainChatWidth;
 
   const currentStreamingChanges = currentProvisionalState?.codeUpdates;
@@ -1969,6 +2789,7 @@ function ChatInterface({
     currentMessages,
     hasVisibleProvisionalContent,
     currentStreamingChangesCount,
+    isAgentActive,
     scrollMessagesToBottom,
   ]);
 
@@ -2076,6 +2897,7 @@ function ChatInterface({
       }
 
       cacheRef.current.chats.set(chat.id, chat);
+      bumpChatListVersion();
       forceUpdate();
     }
 
@@ -2086,6 +2908,7 @@ function ChatInterface({
       removeChatFromActionMessageIndex(chatId);
       provisionalRef.current.delete(chatId);
       draftRef.current.delete(chatId);
+      bumpChatListVersion();
 
       // If currently viewing this chat, go back to list
       // Use replace to prevent browser-back returning to the deleted chat
@@ -2204,9 +3027,6 @@ function ChatInterface({
             event.toolCallId,
             event.toolName,
           );
-          if (event.toolName === "executeCode") {
-            setExpandedToolCalls((prev) => new Set(prev).add(event.toolCallId));
-          }
           break;
         }
         case "toolCodeDelta": {
@@ -2239,6 +3059,16 @@ function ChatInterface({
         case "setActiveFile":
           provisional.activeEditingFile = event.filename;
           break;
+        case "toolCallTarget": {
+          // Surfaces the file name during streaming for writes and edits so the frontend can update.
+          const toolCall = getOrCreateProvisionalToolCall(
+            provisional,
+            event.toolCallId,
+            null,
+          );
+          toolCall.target = event.target;
+          break;
+        }
         case "codeReset":
           provisional.codeUpdates = [];
           break;
@@ -2290,6 +3120,7 @@ function ChatInterface({
           chats.forEach((chat) => {
             cacheRef.current.chats.set(chat.id, chat);
           });
+          bumpChatListVersion();
           setChatListReady(true);
 
           setAvailableModels(models);
@@ -2330,57 +3161,35 @@ function ChatInterface({
   // Reset per-chat UI state when selectedChatId changes
   useEffect(() => {
     setExpandedToolCalls(new Set());
-    setExpandedReasoning(new Map());
     setExpandedActions(new Set());
-    setExpandedObservationGroups(new Set());
     setExpandedErrors(new Set());
+    autoExpandedActionIdsRef.current = new Set();
     setIsEditingTitle(false);
     setSidebarActiveTab("chat");
   }, [selectedChatId]);
 
-  const initializedReasoningCountRef = useRef(0);
   useEffect(() => {
-    initializedReasoningCountRef.current = 0;
-  }, [selectedChatId]);
-
-  useEffect(() => {
-    if (initializedReasoningCountRef.current > currentMessages.length) {
-      initializedReasoningCountRef.current = 0;
+    let added: number[] | null = null;
+    for (const msg of currentMessages) {
+      if (
+        msg.type === "action" &&
+        msg.actionLog?.type === "action" &&
+        msg.actionLog.state === "pending" &&
+        !autoExpandedActionIdsRef.current.has(msg.actionId)
+      ) {
+        autoExpandedActionIdsRef.current.add(msg.actionId);
+        (added ??= []).push(msg.actionId);
+      }
     }
+    if (added) {
+      setExpandedActions((prev) => {
+        const next = new Set(prev);
+        for (const id of added!) next.add(id);
+        return next;
+      });
+    }
+  }, [currentMessages]);
 
-    setExpandedReasoning((prev) => {
-      const next = new Map(prev);
-      let changed = false;
-
-      for (let i = initializedReasoningCountRef.current; i < currentMessages.length; i++) {
-        const msg = currentMessages[i];
-        if (msg.type !== "message" || !msg.reasoning) continue;
-
-        const key = `${msg.chatId}-${msg.sequence}`;
-        if (!next.has(key)) {
-          next.set(key, reasoningExpandedByDefault);
-          changed = true;
-        }
-      }
-
-      initializedReasoningCountRef.current = currentMessages.length;
-
-      if (selectedChatId !== null && currentProvisionalState?.reasoning) {
-        const key = `stream-${selectedChatId}`;
-        if (!next.has(key)) {
-          next.set(key, reasoningExpandedByDefault);
-          changed = true;
-        }
-      }
-
-      return changed ? next : prev;
-    });
-  }, [
-    currentMessages,
-    currentProvisionalState?.reasoning,
-    reasoningExpandedByDefault,
-    selectedChatId,
-  ]);
 
   // Load chat history when selectedChatId changes to a non-null value
   useEffect(() => {
@@ -2571,20 +3380,37 @@ function ChatInterface({
     setDeleteTarget(null);
   };
 
+  const cancelListRename = () => {
+    renamingChatIdRef.current = null;
+    setRenamingChatId(null);
+  };
+
+  const startListRename = (chatId: number, title: string) => {
+    renamingChatIdRef.current = chatId;
+    setRenamingInput(title);
+    setRenamingChatId(chatId);
+  };
+
   // Handle saving a renamed chat from the list view
   const handleSaveListRename = async (chatId: number) => {
-    if (!renamingInput.trim()) {
-      setRenamingChatId(null);
-      return;
-    }
+    if (renamingChatIdRef.current !== chatId) return;
+
+    renamingChatIdRef.current = null;
+    setRenamingChatId(null);
+
+    const trimmed = renamingInput.trim();
+    const existing = cacheRef.current.chats.get(chatId);
+    // Cancel on empty or no-op so commit-on-blur doesn't fire pointless RPCs.
+    if (!trimmed || trimmed === existing?.title) return;
+
     try {
-      await overseer.setChatTitle(chatId, renamingInput.trim());
-      const chat = cacheRef.current.chats.get(chatId);
-      if (chat) {
+      await overseer.setChatTitle(chatId, trimmed);
+      if (existing) {
         cacheRef.current.chats.set(chatId, {
-          ...chat,
-          title: renamingInput.trim(),
+          ...existing,
+          title: trimmed,
         });
+        bumpChatListVersion();
         forceUpdate();
       }
       toasts.add({ title: "Chat title updated successfully", variant: "success" });
@@ -2592,7 +3418,6 @@ function ChatInterface({
       console.error("Failed to update chat title:", err);
       toasts.add({ title: "Failed to update chat title", variant: "error" });
     }
-    setRenamingChatId(null);
   };
 
   // Handle merging changes up to a specific sequence number
@@ -2735,18 +3560,25 @@ function ChatInterface({
     }
   };
 
-  // Toggle tool call expansion
-  const toggleToolCallExpansion = (toolCallId: string) => {
+  const toggleToolCallExpansion = useCallback((expansionKey: string) => {
     setExpandedToolCalls((prev) => {
       const next = new Set(prev);
-      if (next.has(toolCallId)) {
-        next.delete(toolCallId);
+      if (next.has(expansionKey)) {
+        next.delete(expansionKey);
       } else {
-        next.add(toolCallId);
+        next.add(expansionKey);
       }
       return next;
     });
-  };
+  }, []);
+
+  const toggleShowThinkingTraces = useCallback(() => {
+    setShowThinkingTraces((prev) => {
+      const next = !prev;
+      persistShowThinkingTraces(next);
+      return next;
+    });
+  }, []);
 
   // Toggle action description expansion
   const toggleActionExpansion = (actionId: number) => {
@@ -2761,32 +3593,6 @@ function ChatInterface({
     });
   };
 
-  const toggleObservationGroupExpansion = (groupKey: string) => {
-    setExpandedObservationGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(groupKey)) {
-        next.delete(groupKey);
-      } else {
-        next.add(groupKey);
-      }
-      return next;
-    });
-  };
-
-  // Toggle reasoning expansion
-  const toggleReasoningExpansion = (messageKey: string) => {
-    const nextExpanded =
-      !(expandedReasoning.get(messageKey) ?? reasoningExpandedByDefault);
-
-    setExpandedReasoning((prev) => {
-      const next = new Map(prev);
-      next.set(messageKey, nextExpanded);
-      return next;
-    });
-
-    persistReasoningExpandedByDefault(nextExpanded);
-    setReasoningExpandedByDefault(nextExpanded);
-  };
 
   // Toggle error message expansion
   const toggleErrorExpansion = (messageKey: string) => {
@@ -2818,6 +3624,14 @@ function ChatInterface({
     }
   };
 
+  const handleCopyMessage = useCallback(async (message: string) => {
+    const ok = await copyToClipboard(message);
+    toasts.add({
+      title: ok ? "Copied message" : "Unable to copy message",
+      variant: ok ? "success" : "error",
+    });
+  }, [toasts]);
+
   // Compute message states (merged/reverted status)
   const messageStates = useMemo(
     () => computeMessageStates(currentMessages),
@@ -2840,10 +3654,64 @@ function ChatInterface({
     [currentMessages, messageStates],
   );
 
-  const renderActionCard = (
-    msg: ActionChatMessage,
-    options?: { nested?: boolean },
-  ) => {
+  // Track the last visible agent message in each completed turn. This keeps hover actions like
+  // copy/timestamp on the final response instead of repeating them for every streamed step.
+  const completedAgentTurnMessageSeqs = useMemo(() => {
+    const out = new Set<number>();
+    let lastAgentMessageSeq: number | null = null;
+
+    for (const m of currentMessages) {
+      if (m.type !== "message") continue;
+      if (m.author.type === "user") {
+        if (lastAgentMessageSeq !== null) out.add(lastAgentMessageSeq);
+        lastAgentMessageSeq = null;
+      } else {
+        lastAgentMessageSeq = m.sequence;
+      }
+    }
+
+    if (!isAgentActive && lastAgentMessageSeq !== null) {
+      out.add(lastAgentMessageSeq);
+    }
+
+    return out;
+  }, [currentMessages, isAgentActive]);
+
+  const pendingChangeByTurnItemSeq = useMemo(() => {
+    const out = new Map<number, Extract<AiChatMessage, { type: "changes" }>>();
+    let lastAgentMessageSeq: number | null = null;
+    let lastVisibleWorkSeq: number | null = null;
+
+    for (const m of currentMessages) {
+      if (m.type === "message") {
+        if (m.author.type === "user") {
+          lastAgentMessageSeq = null;
+          lastVisibleWorkSeq = null;
+        } else {
+          lastAgentMessageSeq = m.sequence;
+          lastVisibleWorkSeq = m.sequence;
+        }
+        continue;
+      }
+
+      if (isObservationActionMessage(m) || m.type === "useGadget") {
+        lastVisibleWorkSeq = m.sequence;
+        continue;
+      }
+
+      if (
+        m.type === "changes" &&
+        (lastAgentMessageSeq !== null || lastVisibleWorkSeq !== null) &&
+        (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
+      ) {
+        out.set(lastAgentMessageSeq ?? lastVisibleWorkSeq!, m);
+      }
+    }
+
+    return out;
+  }, [currentMessages, messageStates]);
+
+  const renderActionCard = (msg: ActionChatMessage) => {
     const log = msg.actionLog;
     if (!log) return null;
 
@@ -2853,221 +3721,210 @@ function ChatInterface({
     const isProc = processingActions.has(msg.actionId);
     const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
 
-    if (options?.nested && !isAct) {
+    if (!isAct) {
+      const metadata = [
+        log.resourceTitle,
+        log.bindingName,
+      ].filter(Boolean).join(" · ");
+
       return (
-        <div className="rounded-xl border border-kumo-line bg-kumo-base px-3 py-2.5 text-[13px] leading-[18px] tracking-[-0.25px]">
-          <div className="mb-1.5 flex items-center gap-2 text-[12px] leading-4 text-kumo-subtle">
-            <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px]">
-              Observation
+        <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+          <button
+            type="button"
+            onClick={() => toggleActionExpansion(msg.actionId)}
+            className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+            aria-expanded={open}
+          >
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+              <WorkIcon Icon={MagnifyingGlass} />
             </span>
-            {log.bindingName && (
-              <code className="rounded bg-kumo-fill px-1 font-mono text-[11px] text-kumo-subtle">
-                {log.bindingName}
-              </code>
-            )}
-            <span className="min-w-0 flex-1 truncate">
-              {safeResourceUrl ? (
-                <a
-                  href={safeResourceUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:underline"
-                >
-                  {log.resourceTitle}
-                </a>
-              ) : (
-                log.resourceTitle
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span>{log.description.title}</span>
+                <CaretRight
+                  size={13}
+                  weight="bold"
+                  className={`text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+                />
+              </span>
+              {metadata && (
+                <span className="mt-1 block truncate text-[12px] leading-4 text-kumo-inactive">
+                  {metadata}
+                </span>
               )}
             </span>
-            <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-              <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                {msg.timestamp.toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-            </Tooltip>
-          </div>
-          <p className="m-0 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-            {log.description.title}
-          </p>
-          <p className="mt-1.5 mb-0 text-[12px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
-            {log.description.description}
-          </p>
+          </button>
+          {open && (
+            <div className="ml-8 mt-1 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] text-kumo-subtle shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+              <MarkdownMessage message={log.description.description} />
+            </div>
+          )}
         </div>
       );
     }
 
-    const isPending = isAct && state === "pending";
-    const isAction = isAct;
-    const showDescription = isPending || open;
-    const PILL_NEUTRAL = "border-kumo-line bg-kumo-tint text-kumo-subtle";
-    const PILL_DANGER = "border-kumo-danger/20 bg-kumo-danger-tint text-kumo-danger";
-    const PILL_BRAND = "border-kumo-brand/30 bg-kumo-brand/10 text-kumo-brand";
+    const isPending = state === "pending";
+    const isApproved = state === "approved";
+    const isRejected = state === "rejected";
+    const showDescription = open;
+    const metadata = [log.resourceTitle, log.bindingName]
+      .filter(Boolean)
+      .join(" · ");
+    const titlePrefix = isPending ? "Approve action: " : "";
+    const stateLabel = isApproved
+      ? "Approved"
+      : isRejected
+        ? "Rejected"
+        : null;
+    const stateLabelCls = isRejected
+      ? "text-kumo-danger"
+      : "text-kumo-inactive";
 
-    let pillCls: string;
-    let pillLabel: string;
-    if (!isAction) {
-      pillCls = PILL_NEUTRAL;
-      pillLabel = "Observation";
-    } else if (state === "approved") {
-      pillCls = PILL_NEUTRAL;
-      pillLabel = "Approved";
-    } else if (state === "rejected") {
-      pillCls = PILL_DANGER;
-      pillLabel = "Rejected";
-    } else {
-      pillCls = PILL_BRAND;
-      pillLabel = "Needs approval";
-    }
-    const cardCls = isAction && isPending
-      ? "border-l-2 border-l-kumo-brand border-y border-r border-y-kumo-line border-r-kumo-line bg-kumo-base"
-      : "border border-kumo-line bg-kumo-base";
-    const showPill = !isPending;
-    const headerContent = (
-        <div className="flex items-start gap-3">
-          {!isPending && (
-          <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-kumo-subtle">
-            <CaretRight
-              size={12}
-              className={`transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
-              weight="bold"
-            />
-          </span>
-        )}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            {showPill && (
-              <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] ${pillCls}`}>
-                {pillLabel}
-              </span>
-            )}
-            <span
-              className={`min-w-0 truncate tracking-[-0.25px] text-kumo-default ${
-                isPending
-                  ? "text-[14px] leading-5 font-semibold"
-                  : "text-[13px] leading-[18px]"
-              }`}
-            >
-              {log.description.title}
+    return (
+      <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+        <div className="flex w-full items-center gap-2 px-1.5 py-1">
+          <button
+            type="button"
+            onClick={() => toggleActionExpansion(msg.actionId)}
+            className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-md text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+            aria-expanded={open}
+          >
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center" aria-hidden="true">
+              {isPending ? (
+                <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand" />
+              ) : (
+                <WorkIcon Icon={LinkSimple} />
+              )}
             </span>
-          </div>
-          {(log.resourceTitle || log.bindingName) && (
-            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-              {log.resourceTitle && (
-                <span className="min-w-0 truncate">
-                  {safeResourceUrl ? (
-                    <a
-                      href={safeResourceUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:underline"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {log.resourceTitle}
-                    </a>
-                  ) : (
-                    log.resourceTitle
-                  )}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="min-w-0 truncate">
+                {titlePrefix && (
+                  <span className="font-medium text-kumo-default">{titlePrefix}</span>
+                )}
+                <span className={isPending ? "text-kumo-default" : ""}>
+                  {log.description.title}
+                </span>
+              </span>
+              {stateLabel && (
+                <span className={`text-[12px] font-medium ${stateLabelCls}`}>
+                  {stateLabel}
                 </span>
               )}
-              {log.resourceTitle && log.bindingName && (
-                <span className="text-kumo-inactive" aria-hidden="true">·</span>
-              )}
-              {log.bindingName && (
-                <span className="font-mono text-[11px] text-kumo-inactive">
-                  {log.bindingName}
-                </span>
-              )}
+              <CaretRight
+                size={13}
+                weight="bold"
+                className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+              />
+            </span>
+          </button>
+          {isPending && (
+            <div className="flex flex-shrink-0 items-center gap-2 text-[13px] leading-4">
+              <Tooltip content="Reject this action." asChild>
+                <button
+                  type="button"
+                  onClick={() => handleRejectAction(msg.actionId)}
+                  disabled={isProc}
+                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Reject
+                </button>
+              </Tooltip>
+              <Tooltip content="Approve this action." asChild>
+                <button
+                  type="button"
+                  onClick={() => handleApproveAction(msg.actionId)}
+                  disabled={isProc}
+                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Approve
+                </button>
+              </Tooltip>
             </div>
           )}
         </div>
-      </div>
-    );
-
-    return (
-      <div
-        className={`${options?.nested ? "" : "ml-10 max-w-[78%]"} overflow-hidden rounded-xl text-[13px] leading-[18px] tracking-[-0.25px] ${cardCls}`}
-      >
-        {isPending ? (
-          <div className="px-3 py-2.5">{headerContent}</div>
-        ) : (
-          <div
-            role="button"
-            tabIndex={0}
-            aria-expanded={open}
-            onClick={() => toggleActionExpansion(msg.actionId)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                toggleActionExpansion(msg.actionId);
-              }
-            }}
-            className="cursor-pointer px-3 py-2.5 transition-colors hover:bg-kumo-tint/40 focus-visible:bg-kumo-tint/40 focus-visible:outline-none"
-          >
-            {headerContent}
-          </div>
-        )}
-
         {showDescription && (
-          <div
-            className={`border-t border-kumo-line bg-kumo-elevated/60 px-3 py-2 ${
-              isPending ? "border-b" : ""
-            }`}
-          >
-            <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle ${styles.markdownContent}`}>
+          <div className="ml-8 mt-1 space-y-1 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
+            <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
-          </div>
-        )}
-
-        {isPending && (
-          <div className="flex justify-end gap-2 px-3 py-2">
-            <WorkshopButton
-              onClick={() => handleRejectAction(msg.actionId)}
-              disabled={isProc}
-              className="!h-8"
-            >
-              Reject
-            </WorkshopButton>
-            <WorkshopButton
-              onClick={() => handleApproveAction(msg.actionId)}
-              disabled={isProc}
-              tone="primary"
-              className="!h-8"
-            >
-              Approve
-            </WorkshopButton>
+            {metadata && (
+              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
+                {log.resourceTitle && (
+                  <span className="min-w-0 truncate">
+                    {safeResourceUrl ? (
+                      <a
+                        href={safeResourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {log.resourceTitle}
+                      </a>
+                    ) : (
+                      log.resourceTitle
+                    )}
+                  </span>
+                )}
+                {log.resourceTitle && log.bindingName && (
+                  <span aria-hidden="true">·</span>
+                )}
+                {log.bindingName && (
+                  <span className="font-mono text-[11px]">{log.bindingName}</span>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
     );
   };
 
-  // ─── avatars ────────────────────────────────────────────────────────────────
-  const AssistantAvatar = () => (
-    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-kumo-contrast shadow-[0_4px_12px_rgba(82,16,0,0.12)]">
-      <svg
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        className="text-white"
-      >
-        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-      </svg>
-    </div>
-  );
   // ─── sidebar list content (reused in both modes) ──────────────────────────
   const chatListPanel = (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Chat list header */}
+      {/* Chat list header — title doubles as the scope switcher */}
       <div className="flex h-12 flex-shrink-0 items-center border-b border-kumo-line px-4">
-        <span className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-          Conversations
-        </span>
+        <DropdownMenu>
+          <DropdownMenu.Trigger
+            render={
+              <button
+                type="button"
+                className="group flex h-8 -ml-1.5 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-left transition-colors duration-150 ease-out hover:bg-kumo-tint/60 focus-visible:bg-kumo-tint/60 focus-visible:outline-none data-[popup-open]:bg-kumo-tint/60"
+                aria-label="Filter conversations"
+              >
+                <span className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                  {CHAT_LIST_SCOPE_LABELS[chatListScope]}
+                </span>
+                <CaretDown
+                  size={10}
+                  weight="bold"
+                  className="text-kumo-inactive transition-transform duration-150 ease-out group-data-[popup-open]:rotate-180"
+                />
+              </button>
+            }
+          />
+          <DropdownMenu.Content className="!z-[1100] !min-w-[200px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]">
+            {chatListScopes.map((scope) => {
+              const active = chatListScope === scope.value;
+              return (
+                <DropdownMenu.Item
+                  key={scope.value}
+                  onClick={() => setChatListScope(scope.value)}
+                  className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+                >
+                  <span className="mr-2 inline-flex h-3 w-3 items-center justify-center text-kumo-default">
+                    {active ? <Check size={11} weight="bold" /> : null}
+                  </span>
+                  <span className="flex-1">{CHAT_LIST_SCOPE_LABELS[scope.value]}</span>
+                  <span className="ml-3 font-mono text-[11px] text-kumo-inactive">
+                    {scope.count}
+                  </span>
+                </DropdownMenu.Item>
+              );
+            })}
+          </DropdownMenu.Content>
+        </DropdownMenu>
       </div>
       {/* Chat list */}
       <div className="chat-panel flex-1 overflow-y-auto bg-kumo-base p-3">
@@ -3081,135 +3938,151 @@ function ChatInterface({
           </p>
         ) : (
           <div className="flex flex-col gap-1">
-            <p className="mb-2 px-1 text-[11px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">Recent</p>
-            {chatList.map((chat) => (
+            {visibleChatList.length === 0 ? (
+              // Only reachable when a non-"all" scope filters everything out;
+              // the all-empty case is handled by the outer chatList.length check.
+              <div className="py-8 text-center">
+                <p className="text-[13px] leading-[18px] text-kumo-inactive">
+                  No {chatListScope === "agents" ? "agent runs" : "direct conversations"} yet
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setChatListScope("all")}
+                  className="mt-2 cursor-pointer rounded-md px-2 py-1 text-[12px] leading-4 font-medium text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
+                >
+                  Show all conversations
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                {bucketedVisibleChats.map(({ bucket, items }) => (
+                  <section key={bucket} className="flex flex-col gap-0.5">
+                    <p className="mb-1 px-1 text-[11px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+                      {CHAT_TIME_BUCKET_LABELS[bucket]}
+                    </p>
+                    {items.map((chat) => (
               <div key={chat.id} className="relative">
-                {renamingChatId === chat.id ? (
-                  /* ── Inline rename mode ─────────────────────────────── */
+                {(() => {
+                  const isRenaming = renamingChatId === chat.id;
+                  return (
                   <div
-                    className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2.5 ${
-                      chat.spawnerName
-                        ? "border-[var(--color-compute-100)]/30 bg-[var(--color-compute-200)]"
-                        : "border-kumo-brand bg-kumo-elevated"
+                    onClick={isRenaming ? undefined : () => onNavigateToChat(chat.id)}
+                    className={`group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-[background-color] duration-150 ease-out ${
+                      isRenaming
+                        ? "cursor-default bg-kumo-base ring-1 ring-kumo-ring/40"
+                        : sidebarMode && chat.id === selectedChatId
+                          ? "cursor-pointer bg-kumo-recessed"
+                          : "cursor-pointer hover:bg-kumo-tint"
                     }`}
                   >
-                    <input
-                      type="text"
-                      value={renamingInput}
-                      onChange={(e) => setRenamingInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleSaveListRename(chat.id);
-                        if (e.key === "Escape") setRenamingChatId(null);
-                      }}
-                      autoFocus
-                      className="min-w-0 flex-1 rounded-md border border-kumo-brand bg-kumo-tint px-2 py-1 text-[13px] font-medium text-kumo-default focus:outline-none"
-                    />
-                    <WorkshopIconButton
-                      onClick={() => handleSaveListRename(chat.id)}
-                      disabled={!renamingInput.trim()}
-                      className="!h-6 !w-6 disabled:opacity-30"
-                      aria-label="Save conversation title"
-                    >
-                      <Check size={13} />
-                    </WorkshopIconButton>
-                    <WorkshopIconButton
-                      onClick={() => setRenamingChatId(null)}
-                      className="!h-6 !w-6"
-                      aria-label="Cancel conversation rename"
-                    >
-                      <X size={13} />
-                    </WorkshopIconButton>
-                  </div>
-                  ) : (
-                  <div
-                    className={`group flex w-full cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                      sidebarMode && chat.id === selectedChatId
-                        ? "border-kumo-line bg-kumo-base shadow-[0_8px_20px_rgba(82,16,0,0.06)]"
-                        : "border-transparent hover:border-kumo-line hover:bg-kumo-elevated"
-                    }`}
-                  >
-                    <div
-                      className="flex-1 min-w-0"
-                      onClick={() => onNavigateToChat(chat.id)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                          {chat.title}
-                        </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        {isRenaming ? (
+                          <input
+                            type="text"
+                            value={renamingInput}
+                            onChange={(e) => setRenamingInput(e.target.value)}
+                            onClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleSaveListRename(chat.id);
+                              } else if (e.key === "Escape") {
+                                e.preventDefault();
+                                cancelListRename();
+                              }
+                            }}
+                            onBlur={() => handleSaveListRename(chat.id)}
+                            autoFocus
+                            spellCheck={false}
+                            autoCapitalize="off"
+                            autoCorrect="off"
+                            aria-label={`Rename ${chat.title}`}
+                            className="min-w-0 flex-1 bg-transparent text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive"
+                          />
+                        ) : (
+                          <span className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            {chat.title}
+                          </span>
+                        )}
+                        {!isRenaming && chat.activeAgent ? (
+                          <span className="inline-flex flex-shrink-0 cursor-pointer items-center gap-1 text-[11px] leading-4 font-medium text-kumo-brand">
+                            <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-pulse" />
+                            Working
+                          </span>
+                        ) : !isRenaming && chat.hasProposedChanges ? (
+                          <Tooltip content="This conversation has pending changes" asChild>
+                            <span className="inline-flex flex-shrink-0 cursor-pointer items-center gap-1 text-[11px] leading-4 font-medium text-kumo-warning">
+                              <span className="h-1.5 w-1.5 rounded-full bg-kumo-warning" />
+                              Pending
+                            </span>
+                          </Tooltip>
+                        ) : null}
                       </div>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <span className="truncate text-[12px] leading-4 text-kumo-inactive">
-                          {chat.lastActive.toLocaleDateString()}{" "}
-                          {chat.lastActive.toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
+                      <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 text-kumo-inactive">
+                        {chat.spawnerName && (
+                          <>
+                            <span className="truncate">Agent · {chat.spawnerName}</span>
+                            <span className="flex-shrink-0" aria-hidden="true">·</span>
+                          </>
+                        )}
+                        <span className="flex-shrink-0">
+                          {formatChatRowTime(chat.lastActive, bucket, chatListNow)}
                         </span>
                         {chat.totalCost != null && (
-                          <span className="flex-shrink-0 font-mono text-[12px] text-kumo-inactive">
-                            ${chat.totalCost.toFixed(4)}
-                          </span>
+                          <>
+                            <span className="flex-shrink-0" aria-hidden="true">·</span>
+                            <span className="flex-shrink-0 font-mono">
+                              ${chat.totalCost.toFixed(4)}
+                            </span>
+                          </>
                         )}
                       </div>
                     </div>
-                    {chat.activeAgent ? (
-                      <span className="inline-flex items-center gap-1 flex-shrink-0 rounded-full bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium text-kumo-brand">
-                        <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-pulse" />
-                        Working
-                      </span>
-                    ) : chat.hasProposedChanges ? (
-                      <span
-                        className="flex-shrink-0 rounded-full bg-kumo-warning-tint px-2 py-0.5 text-[11px] leading-4 font-medium text-kumo-warning border border-kumo-warning/20"
-                        title="Has pending changes"
-                      >
-                        Pending changes
-                      </span>
-                    ) : chat.spawnerName ? (
-                      <span className="flex-shrink-0 rounded-full border border-kumo-brand/20 bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium text-kumo-brand">
-                        Agent: {chat.spawnerName}
-                      </span>
-                    ) : null}
-                    {/* ··· menu */}
-                    <DropdownMenu>
-                      <DropdownMenu.Trigger
-                        render={
-                          <WorkshopIconButton
-                            aria-label={`Actions for ${chat.title}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="!h-7 !w-7 flex-shrink-0 text-kumo-inactive opacity-0 focus:opacity-100 group-hover:opacity-100 data-[popup-open]:opacity-100"
+                    {!isRenaming && (
+                      <DropdownMenu>
+                        <DropdownMenu.Trigger
+                          render={
+                            <WorkshopIconButton
+                              aria-label={`Actions for ${chat.title}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="!h-7 !w-7 flex-shrink-0 text-kumo-inactive opacity-0 focus:opacity-100 group-hover:opacity-100 data-[popup-open]:opacity-100"
+                            >
+                              <DotsThreeVertical size={14} />
+                            </WorkshopIconButton>
+                          }
+                        />
+                        <DropdownMenu.Content
+                          onClick={(event) => event.stopPropagation()}
+                          className="!z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]"
+                        >
+                          <DropdownMenu.Item
+                            icon={<Pencil size={12} className="mr-2" />}
+                            onClick={() => startListRename(chat.id, chat.title)}
+                            className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
                           >
-                            <DotsThreeVertical size={14} />
-                          </WorkshopIconButton>
-                        }
-                      />
-                      <DropdownMenu.Content
-                        onClick={(event) => event.stopPropagation()}
-                        className="!z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]"
-                      >
-                        <DropdownMenu.Item
-                          icon={<Pencil size={12} className="mr-2" />}
-                          onClick={() => {
-                            setRenamingInput(chat.title);
-                            setRenamingChatId(chat.id);
-                          }}
-                          className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
-                        >
-                          Rename
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                          icon={<Trash size={12} className="mr-2" />}
-                          variant="danger"
-                          onClick={() => handleDeleteChat(chat.id, chat.title)}
-                          className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
-                        >
-                          Delete
-                        </DropdownMenu.Item>
-                      </DropdownMenu.Content>
-                    </DropdownMenu>
+                            Rename
+                          </DropdownMenu.Item>
+                          <DropdownMenu.Item
+                            icon={<Trash size={12} className="mr-2" />}
+                            variant="danger"
+                            onClick={() => handleDeleteChat(chat.id, chat.title)}
+                            className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
+                          >
+                            Delete
+                          </DropdownMenu.Item>
+                        </DropdownMenu.Content>
+                      </DropdownMenu>
+                    )}
                   </div>
-                )}
+                  );
+                })()}
               </div>
-            ))}
+                    ))}
+                  </section>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -3228,8 +4101,13 @@ function ChatInterface({
           models={availableModels}
           selectedModel={selectedModel}
           onModelChange={handleModelChange}
+          showThinkingTraces={showThinkingTraces}
+          onToggleThinkingTraces={toggleShowThinkingTraces}
+          minRows={2}
           newChat
         />
+        {/* Reserve the same height as the token/cost row to avoid layout shift. */}
+        <div aria-hidden className="min-h-[1rem]" />
       </div>
     </div>
   );
@@ -3270,6 +4148,7 @@ function ChatInterface({
           {sidebarMode && (
             <div className="flex h-12 flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
               <button
+                type="button"
                 onClick={() => setSidebarActiveTab("chat")}
                 className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "chat"
@@ -3280,6 +4159,7 @@ function ChatInterface({
                 Chat
               </button>
               <button
+                type="button"
                 onClick={() => setSidebarActiveTab("connections")}
                 className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "connections"
@@ -3303,7 +4183,7 @@ function ChatInterface({
           {(!sidebarMode || sidebarActiveTab === "chat") && (
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
-              {!hideTitleBar && !sidebarMode && (
+              {!sidebarMode && (
                 <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
@@ -3383,53 +4263,59 @@ function ChatInterface({
                   </div>
                 ) : (
                   <div
-                    className={`space-y-4 px-4 pt-5 ${pendingConsoleLogCount > 0 ? "pb-14" : "pb-5"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[760px]" : ""}`}
+                    className={`flex flex-col px-6 pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
                   >
-                    {displayEntries.map((entry) => {
-                      const isAgentContinuation = entry.type === "message" ? entry.isAgentContinuation : false;
-                      if (entry.type === "observationGroup") {
-                        const open = expandedObservationGroups.has(entry.key);
-                        const lastObservation = entry.messages[entry.messages.length - 1];
-
+                    {displayEntries.map((entry, entryIndex) => {
+                      const entryTopClass = entryTopClasses[entryIndex] ?? "";
+                      if (entry.type === "modelChange") {
                         return (
-                          <div key={entry.key} className="ml-10 max-w-[78%] overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated text-[13px] leading-[18px] tracking-[-0.25px]">
-                            <button
-                              onClick={() => toggleObservationGroupExpansion(entry.key)}
-                              className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-kumo-tint/60"
-                            >
-                              <svg
-                                width="12"
-                                height="12"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.5"
-                                className={`flex-shrink-0 transition-transform ${open ? "rotate-90" : ""} text-kumo-subtle`}
-                              >
-                                <polyline points="9 18 15 12 9 6" />
-                              </svg>
-                              <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium text-kumo-subtle">Observations</span>
-                              <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-kumo-subtle">
-                                {entry.messages.length} observations
+                          <div key={entry.key} className={`${entryTopClass} max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
+                            <div className="flex items-center gap-3 px-1.5 py-1">
+                              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                <Swap size={16} />
                               </span>
-                              <Tooltip content={formatFullTimestamp(lastObservation.timestamp)} asChild>
-                                <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                                  {lastObservation.timestamp.toLocaleTimeString([], {
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  })}
-                                </span>
-                              </Tooltip>
-                            </button>
-                            {open && (
-                              <div className="space-y-2 border-t border-kumo-line bg-kumo-base p-2">
-                                {entry.messages.map((observation) => (
-                                  <div key={`${observation.chatId}-${observation.sequence}`}>
-                                    {renderActionCard(observation, { nested: true })}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
+                              <span className="min-w-0 truncate">
+                                Switched to {entry.author.name}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (entry.type === "workRun") {
+                        const pendingChange =
+                          pendingChangeByTurnItemSeq.get(entry.lastMessageSequence) ?? null;
+                        return (
+                          <div key={entry.key} className={`${entryTopClass} group/agent min-w-0 w-full max-w-[860px] space-y-1`}>
+                            {entry.toolCallGroups.map((group) => (
+                              <ToolGroupRow
+                                key={group.key}
+                                group={group}
+                                open={expandedToolCalls.has(group.key)}
+                                expandedKeys={expandedToolCalls}
+                                onToggle={toggleToolCallExpansion}
+                              />
+                            ))}
+                            {pendingChange && (() => {
+                              const label = getDiscardLabel(
+                                pendingChange.sequence === lastDurablePendingChange?.sequence,
+                              );
+                              return (
+                                <div className="mt-1 -ml-1 flex gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/agent:opacity-100 group-focus-within/agent:opacity-100">
+                                  <Tooltip content={label} asChild>
+                                    <button
+                                      type="button"
+                                      disabled={isAgentActive}
+                                      onClick={() => handleRevertChanges(pendingChange.sequence)}
+                                      className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+                                      aria-label={label}
+                                    >
+                                      <ArrowUUpLeft size={15} />
+                                    </button>
+                                  </Tooltip>
+                                </div>
+                              );
+                            })()}
                           </div>
                         );
                       }
@@ -3437,12 +4323,18 @@ function ChatInterface({
                       const msg = entry.message;
 
                       return (
-                        <div key={entry.key}>
+                        <div key={entry.key} className={entryTopClass}>
                         {/* ── user / AI text message ── */}
                         {msg.type === "message" && (
                           msg.author.type === "user" ? (
-                            <div className="flex flex-col items-end">
-                              <div className="mb-1 flex justify-end gap-2 text-[11px] leading-4 text-kumo-inactive">
+                            <div className="group/message relative flex flex-col items-end">
+                              <div className={`w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default shadow-[0_1px_1px_rgba(82,16,0,0.03),inset_0_1px_0_rgba(255,255,255,0.55)] ${styles.markdownContent}`}>
+                                <MarkdownMessage
+                                  message={msg.message}
+                                  capsules={msg.capsules}
+                                />
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
                                 {/* hideOwnUserName implies currentUser is non-null (see memo). */}
                                 {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
                                   <span className="font-medium">{msg.author.name}</span>
@@ -3456,260 +4348,94 @@ function ChatInterface({
                                   </span>
                                 </Tooltip>
                               </div>
-                              <div className={`w-fit max-w-[78%] rounded-2xl rounded-br-md border border-kumo-line bg-kumo-tint px-3.5 py-2.5 text-[14px] leading-[21px] tracking-[-0.25px] text-kumo-default shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] ${styles.markdownContent}`}>
-                                <MarkdownMessage
-                                  message={msg.message}
-                                  capsules={msg.capsules}
-                                />
-                              </div>
                             </div>
-                          ) : (
-                          <div className="flex items-start gap-3">
-                            {isAgentContinuation ? (
-                              <div className="w-7 flex-shrink-0" aria-hidden="true" />
-                            ) : (
-                              <AssistantAvatar />
-                            )}
-                            <div className="min-w-0 w-full max-w-[78%] space-y-1.5 py-0.5">
-                              {(() => {
-                                const key = `${msg.chatId}-${msg.sequence}`;
-                                const reasoningOpen =
-                                  msg.reasoning
-                                    ? expandedReasoning.get(key) ??
-                                      reasoningExpandedByDefault
-                                    : false;
-                                return (
-                                  <>
-                                    {!isAgentContinuation && (
-                                      <div className="mb-1.5 flex items-center gap-2">
-                                        <span className="text-[12px] leading-4 font-semibold tracking-[-0.2px] text-kumo-default">
-                                          {msg.author.name}
-                                        </span>
-                                         <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                           <span className="font-mono text-[11px] text-kumo-inactive">
-                                             {msg.timestamp.toLocaleTimeString([], {
-                                               hour: "2-digit",
-                                               minute: "2-digit",
-                                             })}
-                                           </span>
-                                         </Tooltip>
-                                         {msg.reasoning && (
-                                          <>
-                                            <span className="text-[11px] text-kumo-inactive" aria-hidden="true">·</span>
-                                            <button
-                                              type="button"
-                                              onClick={() => toggleReasoningExpansion(key)}
-                                              className="cursor-pointer text-[11px] italic text-kumo-inactive transition-colors hover:text-kumo-subtle"
-                                              aria-expanded={reasoningOpen}
-                                            >
-                                              {reasoningOpen ? "Hide reasoning" : "Show reasoning"}
-                                            </button>
-                                          </>
-                                        )}
-                                      </div>
-                                    )}
+                          ) : (() => {
+                            const messageToolGroups = entry.toolCallGroups;
+                            const showReasoning = showThinkingTraces && !!msg.reasoning;
+                            const actionMessageSeq = entry.lastMessageSequence ?? msg.sequence;
+                            const pendingChange = pendingChangeByTurnItemSeq.get(
+                              actionMessageSeq,
+                            ) ?? null;
+                            const showActions =
+                              completedAgentTurnMessageSeqs.has(actionMessageSeq) &&
+                              (!!msg.message || !!pendingChange);
+                            return (
+                          <div className="min-w-0 w-full max-w-[860px] space-y-2">
+                            <div className="group/agentMessage relative space-y-1.5">
+                              {showReasoning && (
+                                <ThinkingTraceRow reasoning={msg.reasoning!} />
+                              )}
 
-                                    {msg.reasoning && reasoningOpen && (
-                                      <div
-                                        className={`mb-2 border-l border-kumo-line pl-3 text-[12px] leading-[18px] tracking-[-0.2px] ${styles.markdownContent} ${styles.reasoningMarkdown}`}
+                              {msg.message && (
+                                <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
+                                  <MarkdownMessage
+                                    message={msg.message}
+                                    capsules={msg.capsules}
+                                  />
+                                </div>
+                              )}
+
+                              {showActions && (
+                                <div className="mt-0.5 -ml-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/agentMessage:opacity-100 group-focus-within/agentMessage:opacity-100">
+                                  {msg.message && (
+                                    <Tooltip content="Copy message" asChild>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCopyMessage(msg.message)}
+                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96]"
+                                        aria-label="Copy message"
                                       >
-                                        <MarkdownMessage message={msg.reasoning} />
-                                      </div>
-                                    )}
-                                  </>
-                                );
-                              })()}
-
-                              <div className={`text-[14px] leading-[21px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
-                                <MarkdownMessage
-                                  message={msg.message}
-                                  capsules={msg.capsules}
-                                />
-                              </div>
-
-                              {msg.toolCalls && msg.toolCalls.length > 0 && (
-                                <div className="mt-1.5 space-y-1.5">
-                                  {msg.toolCalls.map((tc, tcIdx) => {
-                                    const open = expandedToolCalls.has(
-                                      tc.toolCallId,
+                                        <Copy size={15} />
+                                      </button>
+                                    </Tooltip>
+                                  )}
+                                  {pendingChange && (() => {
+                                    const label = getDiscardLabel(
+                                      pendingChange.sequence === lastDurablePendingChange?.sequence,
                                     );
-                                    const summary = getToolCallSummary(tc);
                                     return (
-                                      <div
-                                        key={`${msg.chatId}-${msg.sequence}-tc-${tcIdx}`}
-                                        className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-[13px] leading-[18px] tracking-[-0.25px]"
+                                    <Tooltip content={label} asChild>
+                                      <button
+                                        type="button"
+                                        disabled={isAgentActive}
+                                        onClick={() => handleRevertChanges(pendingChange.sequence)}
+                                        className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+                                        aria-label={label}
                                       >
-                                        <button
-                                          onClick={() =>
-                                            toggleToolCallExpansion(
-                                              tc.toolCallId,
-                                            )
-                                          }
-                                          className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-kumo-tint/60"
-                                        >
-                                          <svg
-                                            width="12"
-                                            height="12"
-                                            viewBox="0 0 24 24"
-                                            fill="none"
-                                            stroke="currentColor"
-                                            strokeWidth="2.5"
-                                            className={`flex-shrink-0 transition-transform ${open ? "rotate-90" : ""} text-kumo-subtle`}
-                                          >
-                                            <polyline points="9 18 15 12 9 6" />
-                                          </svg>
-                                          <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle">
-                                            Tool
-                                          </span>
-                                          <span className="min-w-0 flex flex-1 items-baseline gap-2 truncate">
-                                            <span className="flex-shrink-0 font-mono text-[12px] text-kumo-default">
-                                              {summary.verb}
-                                            </span>
-                                            {summary.target && (
-                                              <span className="min-w-0 truncate font-mono text-[12px] text-kumo-subtle">
-                                                {summary.target}
-                                              </span>
-                                            )}
-                                          </span>
-                                          {tc.error && (
-                                            <span className="flex-shrink-0 rounded-full border border-kumo-danger/20 bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-bold text-kumo-danger">
-                                              ERROR
-                                            </span>
-                                          )}
-                                        </button>
-                                        {open && (
-                                          <div className="space-y-2 border-t border-kumo-line bg-kumo-elevated px-3 py-3">
-                                            {tc.error && (
-                                              <pre className="rounded-lg border border-kumo-danger/20 bg-kumo-base p-2 font-mono text-[12px] leading-[18px] text-kumo-danger whitespace-pre-wrap">
-                                                {tc.error}
-                                              </pre>
-                                            )}
-                                            {tc.toolName === "executeCode" ? (
-                                              <>
-                                                <span className="font-mono text-[11px] leading-4 text-kumo-subtle uppercase tracking-[0.04em]">
-                                                  Code
-                                                </span>
-                                                <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-elevated p-2 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                                                  {tc.input.code}
-                                                </pre>
-                                                {tc.output && (
-                                                  <>
-                                                    <span className="font-mono text-[11px] leading-4 text-kumo-subtle uppercase tracking-[0.04em]">
-                                                      Output
-                                                    </span>
-                                                    <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-elevated p-2 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                                                      {tc.output}
-                                                    </pre>
-                                                  </>
-                                                )}
-                                              </>
-                                            ) : (
-                                              <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-elevated p-2 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                                                {JSON.stringify(
-                                                  tc.input,
-                                                  null,
-                                                  2,
-                                                )}
-                                              </pre>
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
+                                        <ArrowUUpLeft size={15} />
+                                      </button>
+                                    </Tooltip>
                                     );
-                                  })}
+                                  })()}
+                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                    <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                                      {msg.timestamp.toLocaleTimeString([], {
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                      })}
+                                    </span>
+                                  </Tooltip>
                                 </div>
                               )}
                             </div>
-                          </div>
-                          )
-                        )}
 
-                        {msg.type === "changes" &&
-                          (() => {
-                            const status =
-                              messageStates.changeStatus.get(msg.sequence) ??
-                              "pending";
-                            const dotClass = status === "merged"
-                              ? "bg-kumo-success/70 border-kumo-success/70"
-                              : status === "reverted"
-                                ? "bg-transparent border-kumo-inactive"
-                                : "bg-kumo-brand border-kumo-brand";
-                            const labelText = status === "merged"
-                              ? "Accepted"
-                              : status === "reverted"
-                                ? "Checkpoint discarded"
-                                : "Checkpoint";
-                            const labelClass = status === "reverted"
-                              ? "text-kumo-inactive line-through"
-                              : "text-kumo-subtle";
-                            // When the checkpoint immediately follows a message from the same
-                            // agent author, the assistant header right above already shows the
-                            // author and timestamp. Suppress them on the checkpoint row to avoid
-                            // redundancy. They remain visible for user-authored ("Save checkpoint")
-                            // rows and detached agent checkpoints.
-                            const showAuthorAndTime =
-                              status === "pending" && !isAgentContinuation;
-                            const authorChunk = showAuthorAndTime
-                              ? msg.author.type === "user"
-                                ? "You"
-                                : msg.author.name
-                              : null;
-                            const timeText = msg.timestamp.toLocaleTimeString(
-                              [],
-                              { hour: "2-digit", minute: "2-digit" },
-                            );
-                            // Always include the time in the accessible label even when it's
-                            // visually suppressed, so screen-reader users keep temporal context.
-                            const ariaLabel = authorChunk
-                              ? `${labelText} by ${authorChunk} at ${timeText}`
-                              : `${labelText} at ${timeText}`;
-                            return (
-                              <div
-                                className="group flex items-center gap-3 py-1.5 text-[12px] leading-4 tracking-[-0.2px]"
-                                aria-label={ariaLabel}
-                              >
-                                <span
-                                  className={`h-1.5 w-1.5 flex-shrink-0 rounded-full border ${dotClass}`}
-                                  aria-hidden="true"
-                                />
-                                <span className={`flex-shrink-0 font-medium ${labelClass}`}>
-                                  {labelText}
-                                </span>
-                                {authorChunk && (
-                                  <>
-                                    <span className="flex-shrink-0 text-kumo-inactive" aria-hidden="true">·</span>
-                                    <span className="flex-shrink-0 truncate text-kumo-subtle">
-                                      {authorChunk}
-                                    </span>
-                                  </>
-                                )}
-                                {showAuthorAndTime && (
-                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                    <span className="font-mono text-[11px] text-kumo-inactive">
-                                      {timeText}
-                                    </span>
-                                  </Tooltip>
-                                )}
-                                <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
-                                {status === "pending" && (
-                                  <Tooltip content="Rewind to this checkpoint, discarding this and all later draft changes." asChild>
-                                    <button
-                                      type="button"
-                                      disabled={isAgentActive}
-                                      onClick={() =>
-                                        handleRevertChanges(msg.sequence)
-                                      }
-                                      className="flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-kumo-inactive transition-all hover:bg-kumo-tint hover:text-kumo-default focus-visible:bg-kumo-tint focus-visible:text-kumo-default group-hover:text-kumo-subtle disabled:cursor-not-allowed disabled:opacity-40"
-                                      aria-label="Rewind to this checkpoint"
-                                    >
-                                      <ArrowCounterClockwise size={11} />
-                                      Rewind
-                                    </button>
-                                  </Tooltip>
-                                )}
+                            {messageToolGroups && messageToolGroups.length > 0 && (
+                              <div className="space-y-1">
+                                {messageToolGroups.map((group) => (
+                                  <ToolGroupRow
+                                    key={group.key}
+                                    group={group}
+                                    open={expandedToolCalls.has(group.key)}
+                                    expandedKeys={expandedToolCalls}
+                                    onToggle={toggleToolCallExpansion}
+                                  />
+                                ))}
                               </div>
+                            )}
+                          </div>
                             );
-                          })()}
+                          })()
+                        )}
 
                         {(msg.type === "merge" || msg.type === "revert") &&
                           (() => {
@@ -3720,26 +4446,27 @@ function ChatInterface({
                                   msg.sequence,
                                 );
                             return (
-                              <div className="flex items-center gap-3 py-1.5 text-[12px] leading-4 tracking-[-0.2px]">
-                                <span
-                                  className={`h-1.5 w-1.5 flex-shrink-0 rounded-full border ${isMerge ? "border-kumo-success/70 bg-kumo-success/70" : "border-kumo-inactive bg-transparent"}`}
-                                  aria-hidden="true"
-                                />
-                                <span className="flex-shrink-0 font-medium text-kumo-subtle">
-                                  {msg.author.name}{" "}
-                                  {isMerge
-                                    ? `accepted through ${ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "earlier"}`
-                                    : `rewound from ${ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "earlier"} onward`}
-                                </span>
-                                <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                  <span className="font-mono text-[11px] text-kumo-inactive">
-                                    {msg.timestamp.toLocaleTimeString([], {
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    })}
+                              <div className="max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+                                <Tooltip
+                                  content={
+                                    isMerge
+                                      ? `Accepted draft changes${ts ? ` through ${formatFullTimestamp(ts)}` : ""}.`
+                                      : `Returned to the gadget state before the prompt sent ${ts ? `at ${ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "earlier"}.`
+                                  }
+                                  asChild
+                                >
+                                  <span className="inline-flex items-center gap-3 px-1.5">
+                                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                      {isMerge ? <Check size={16} /> : <ArrowUUpLeft size={16} />}
+                                    </span>
+                                    <span className="font-medium">
+                                      {msg.author.name}{" "}
+                                      {isMerge
+                                        ? "accepted changes"
+                                        : "restored an earlier draft"}
+                                    </span>
                                   </span>
                                 </Tooltip>
-                                <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
                               </div>
                             );
                           })()}
@@ -3747,15 +4474,13 @@ function ChatInterface({
                         {msg.type === "action" && renderActionCard(msg)}
 
                         {msg.type === "useGadget" && (
-                          <div className="ml-10 max-w-[78%] flex items-center gap-2 rounded-xl border border-kumo-line bg-kumo-elevated px-3 py-2 text-[12px] leading-4 text-kumo-subtle">
-                            <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-kumo-inactive" />
-                            Agent used the Gadget
-                            <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                              <span className="ml-auto font-mono text-[11px] text-kumo-inactive">
-                                {msg.timestamp.toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
+                          <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+                            <Tooltip content={`Used the gadget at ${formatFullTimestamp(msg.timestamp)}`} asChild>
+                              <span className="inline-flex items-center gap-3 px-1.5 py-1">
+                                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                  <Plug size={16} />
+                                </span>
+                                <span>Used the gadget</span>
                               </span>
                             </Tooltip>
                           </div>
@@ -3769,60 +4494,50 @@ function ChatInterface({
                               !isAgentActive;
                             const expanded = expandedErrors.has(key);
                             return (
-                              <div
-                                className={`ml-10 max-w-[78%] overflow-hidden rounded-xl border-l-2 text-[13px] leading-[18px] tracking-[-0.25px] ${
-                                  isLast
-                                    ? "border-l-kumo-danger border-y border-r border-y-kumo-line border-r-kumo-line bg-kumo-danger-tint/40"
-                                    : "border-l-kumo-danger/50 border-y border-r border-y-kumo-line border-r-kumo-line bg-kumo-base"
-                                }`}
-                              >
-                                <div
-                                  role="button"
-                                  tabIndex={0}
-                                  onClick={() => toggleErrorExpansion(key)}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      toggleErrorExpansion(key);
-                                    }
-                                  }}
-                                  className="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-kumo-danger-tint/30 focus-visible:bg-kumo-danger-tint/30 focus-visible:outline-none"
-                                  aria-expanded={expanded}
-                                >
-                                  <div className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
-                                  <span className="flex-shrink-0 rounded-full bg-kumo-danger/10 px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] text-kumo-danger">
-                                    Error
-                                  </span>
-                                  <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-kumo-subtle">
-                                    {msg.message}
-                                  </span>
-                                  </div>
+                              <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+                                <div className="flex w-full items-center gap-2 px-1.5 py-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleErrorExpansion(key)}
+                                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-md text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+                                    aria-expanded={expanded}
+                                  >
+                                    <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                      <span className="flex min-w-0 flex-1 items-center gap-2">
+                                        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-danger" aria-hidden="true">
+                                          <WarningCircle size={16} weight="fill" />
+                                        </span>
+                                        <span className="flex min-w-0 flex-1 items-center gap-1">
+                                          <span className="min-w-0 truncate">
+                                            <span className="font-medium text-kumo-danger">Error: </span>
+                                            <span className="text-kumo-subtle">{msg.message}</span>
+                                          </span>
+                                          <CaretRight
+                                            size={13}
+                                            weight="bold"
+                                            className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${expanded ? "rotate-90" : ""}`}
+                                          />
+                                        </span>
+                                      </span>
+                                    </Tooltip>
+                                  </button>
                                   {isLast && (
-                                    <WorkshopButton
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        handleRetry();
-                                      }}
-                                      disabled={selectedModel === null}
-                                      tone="secondary"
-                                      className="!h-7 gap-1 text-[12px] text-kumo-default"
-                                    >
-                                      <ArrowsClockwise size={12} weight="bold" />
-                                      Retry
-                                    </WorkshopButton>
+                                    <Tooltip content="Retry the last action." asChild>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRetry()}
+                                        disabled={selectedModel === null}
+                                        className="flex flex-shrink-0 cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 text-[13px] leading-4 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                                      >
+                                        <ArrowsClockwise size={12} weight="bold" />
+                                        Retry
+                                      </button>
+                                    </Tooltip>
                                   )}
-                                  <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
-                                    <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                                      {msg.timestamp.toLocaleTimeString([], {
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })}
-                                    </span>
-                                  </Tooltip>
                                 </div>
                                 {expanded && (
-                                  <div className="border-t border-kumo-line px-3 py-2.5">
-                                    <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-base p-2.5 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+                                  <div className="ml-8 mt-1">
+                                    <pre className="max-h-48 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
                                       {msg.message}
                                     </pre>
                                   </div>
@@ -3832,23 +4547,22 @@ function ChatInterface({
                           })()}
 
                         {msg.type === "agentCallback" && (
-                          <div className="ml-10 max-w-[78%] overflow-hidden rounded-xl border border-[#d8c7f3] bg-[#f0eafa] px-3 py-2.5 text-[13px] leading-[18px] tracking-[-0.25px]">
-                            <div className="mb-1 flex items-center gap-1.5 font-medium text-[#6f42c1]">
-                              <svg
-                                width="12"
-                                height="12"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.5"
-                              >
-                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                              </svg>
-                              self.{msg.methodName}() callback
+                          <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+                            <div className="flex items-center gap-3 px-1.5 py-1">
+                              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                <Code size={16} />
+                              </span>
+                              <span className="min-w-0 truncate font-mono text-[13px]">
+                                self.{msg.methodName}()
+                              </span>
                             </div>
-                            <pre className="max-h-24 overflow-auto font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                              {msg.argsSummary}
-                            </pre>
+                            {msg.argsSummary && (
+                              <div className="ml-8 mt-1">
+                                <pre className="max-h-24 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+                                  {msg.argsSummary}
+                                </pre>
+                              </div>
+                            )}
                           </div>
                         )}
                         </div>
@@ -3859,215 +4573,190 @@ function ChatInterface({
                       const latestAuthor = currentDraftState.latestAuthor;
                       const isUserAuthored = latestAuthor?.type === "user";
                       const title = isUserAuthored
-                        ? "Unsaved changes"
+                        ? "Draft changes pending"
                         : "Draft changes in progress";
                       const description = isUserAuthored
                         ? "Your edits are still a live draft."
                         : `${latestAuthor?.name ?? "The agent"} is editing changes for this gadget.`;
+                      const lastDraftEntry =
+                        currentDraftState.entries[
+                          currentDraftState.entries.length - 1
+                        ];
+                      const lastEntry = displayEntries[displayEntries.length - 1] ?? null;
+                      const draftTopClass = !lastEntry
+                        ? ""
+                        : isUserMessageEntry(lastEntry)
+                          ? "mt-6"
+                          : entryEndsInWorkRow(lastEntry)
+                            ? "mt-2"
+                            : "mt-4";
                       return (
-                        <div className="ml-10 max-w-[78%] rounded-xl border border-kumo-line bg-kumo-tint px-3 py-3 text-[13px] leading-[18px] tracking-[-0.25px] shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
-                          <div className="flex items-start gap-2.5">
-                            <span
-                              className="relative mt-1.5 flex h-2 w-2 flex-shrink-0 items-center justify-center"
-                              aria-hidden="true"
-                            >
-                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-kumo-brand/40" />
-                              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-kumo-brand" />
+                        <div className={`${draftTopClass} max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-1.5">
+                            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                              <Pencil size={16} />
                             </span>
-                            <div className="min-w-0 flex-1">
-                              <span className="font-semibold text-kumo-default">
+                            <Tooltip
+                              content={`${description} Last edited ${formatFullTimestamp(lastDraftEntry.timestamp)}`}
+                              asChild
+                            >
+                              <span className="font-medium text-kumo-subtle">
                                 {title}
                               </span>
-                              <p className="mt-0.5 text-[12px] leading-4 text-kumo-subtle">
-                                {description}
-                              </p>
-                            </div>
-                            {(() => {
-                              // Outer condition asserts entries.length > 0, so last is defined.
-                              const lastDraftEntry =
-                                currentDraftState.entries[
-                                  currentDraftState.entries.length - 1
-                                ];
-                              return (
-                                <Tooltip
-                                  content={formatFullTimestamp(lastDraftEntry.timestamp)}
-                                  asChild
+                            </Tooltip>
+                            <div className="flex flex-wrap items-center gap-2 text-[13px] leading-4">
+                              <Tooltip content="Throw away these draft edits." asChild>
+                                <button
+                                  type="button"
+                                  disabled={isAgentActive}
+                                  onClick={handleDiscardDraftChanges}
+                                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
                                 >
-                                  <span className="flex-shrink-0 font-mono text-[11px] text-kumo-inactive">
-                                    {lastDraftEntry.timestamp.toLocaleTimeString([], {
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    })}
-                                  </span>
-                                </Tooltip>
-                              );
-                            })()}
-                          </div>
-                          <div className="mt-3 flex flex-wrap justify-end gap-2">
-                            <Tooltip content="Throw away these draft edits." asChild>
-                              <WorkshopButton
-                                disabled={isAgentActive}
-                                onClick={handleDiscardDraftChanges}
-                                className="!h-8 text-kumo-danger hover:bg-kumo-danger-tint"
-                              >
-                                Discard changes
-                              </WorkshopButton>
-                            </Tooltip>
-                            <Tooltip content="Save these edits as a checkpoint. They won't affect the gadget until you accept changes." asChild>
-                              <WorkshopButton
-                                disabled={isAgentActive}
-                                onClick={handleFinalizeDraftChanges}
-                                tone="primary"
-                                className="!h-8"
-                              >
-                                Save checkpoint
-                              </WorkshopButton>
-                            </Tooltip>
+                                  Discard
+                                </button>
+                              </Tooltip>
+                              <Tooltip content="Save these edits as a draft version. They won't affect the gadget until you accept changes." asChild>
+                                <button
+                                  type="button"
+                                  disabled={isAgentActive}
+                                  onClick={handleFinalizeDraftChanges}
+                                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Save draft
+                                </button>
+                              </Tooltip>
+                            </div>
                           </div>
                         </div>
                       );
                     })()}
 
                     {isAgentActive && activeAgent && (() => {
-                      const lastDisplayEntry =
+                      // Placeholder shown only while the agent is active but hasn't produced
+                      // visible output yet; once real output appears, that speaks for itself.
+                      const hasShownReasoning =
+                        showThinkingTraces && !!currentProvisionalState?.reasoning;
+                      // Only while awaiting the agent's first output this turn; otherwise it
+                      // flashes again in the gap after the last message finalizes but before
+                      // isAgentActive clears.
+                      const lastMessage =
+                        currentMessages.length > 0
+                          ? currentMessages[currentMessages.length - 1]
+                          : null;
+                      const awaitingFirstResponse =
+                        !lastMessage ||
+                        lastMessage.author.type === "user" ||
+                        lastMessage.author.type === "gadget";
+                      const showThinking =
+                        awaitingFirstResponse &&
+                        !currentProvisionalState?.text &&
+                        !hasShownReasoning &&
+                        provisionalToolCalls.length === 0;
+
+                      // Match the spacing this response gets once finalized (see rhythmTopClass)
+                      // so it doesn't shift when streaming completes.
+                      const lastEntry =
                         displayEntries.length > 0
                           ? displayEntries[displayEntries.length - 1]
                           : null;
-                      const lastMessage =
-                        lastDisplayEntry && lastDisplayEntry.type === "message"
-                          ? lastDisplayEntry.message
-                          : null;
-                      const isStreamContinuation =
-                        lastMessage?.type === "message" &&
-                        lastMessage.author.type === "agent" &&
-                        lastMessage.author.id === activeAgent.id;
-                      const messageKey = `stream-${selectedChatId}`;
-                      const reasoningOpen =
-                        expandedReasoning.get(messageKey) ??
-                        reasoningExpandedByDefault;
-                      const hasContent = hasVisibleProvisionalContent && currentProvisionalState;
+                      const provisionalTopClass = !lastEntry
+                        ? ""
+                        : lastEntry.type === "modelChange"
+                          ? "mt-2"
+                          : isUserMessageEntry(lastEntry)
+                            ? "mt-5"
+                            : "mt-4";
+
                       return (
-                        <div className="flex items-start gap-3">
-                          {isStreamContinuation ? (
-                            <div className="w-7 flex-shrink-0" aria-hidden="true" />
-                          ) : (
-                            <AssistantAvatar />
+                        <div className={`group/agent min-w-0 w-full max-w-[860px] space-y-2 ${provisionalTopClass}`}>
+                          {showThinking && (
+                            <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
+                              Thinking
+                            </div>
                           )}
-                          <div className="min-w-0 w-full max-w-[78%] space-y-1.5 py-0.5">
-                            {!isStreamContinuation && (
-                              <div className="mb-1.5 flex items-center gap-2">
-                                <span className="text-[12px] leading-4 font-semibold tracking-[-0.2px] text-kumo-default">
-                                  {activeAgent.name}
-                                </span>
-                                <span className="font-mono text-[11px] text-kumo-inactive">
-                                  Working...
-                                </span>
-                                {hasContent && currentProvisionalState.reasoning && (
-                                  <>
-                                    <span className="text-[11px] text-kumo-inactive" aria-hidden="true">·</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => toggleReasoningExpansion(messageKey)}
-                                      className="cursor-pointer text-[11px] italic text-kumo-inactive transition-colors hover:text-kumo-subtle"
-                                      aria-expanded={reasoningOpen}
-                                    >
-                                      {reasoningOpen ? "Hide reasoning" : "Show reasoning"}
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            )}
 
-                            {hasContent ? (
-                              <>
-                                {currentProvisionalState.reasoning && reasoningOpen && (
-                                  <div className={`mb-2 border-l border-kumo-line pl-3 text-[12px] leading-[18px] tracking-[-0.2px] ${styles.markdownContent} ${styles.reasoningMarkdown}`}>
-                                    <StreamingMarkdownMessage message={currentProvisionalState.reasoning} />
-                                  </div>
-                                )}
+                          {showThinkingTraces && currentProvisionalState?.reasoning && (
+                            <ThinkingTraceRow reasoning={currentProvisionalState.reasoning} />
+                          )}
 
-                                {currentProvisionalState.text && (
-                                  <div className={`text-[14px] leading-[21px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
-                                    <StreamingMarkdownMessage message={currentProvisionalState.text} />
-                                  </div>
-                                )}
+                          {currentProvisionalState?.text && (
+                            <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
+                              <MarkdownMessage message={currentProvisionalState.text} />
+                            </div>
+                          )}
 
-                                {provisionalToolCalls.length > 0 && (
-                                  <div className="mt-1.5 space-y-1.5">
-                                    {provisionalToolCalls.map((toolCall) => {
-                                      const isExpanded = expandedToolCalls.has(toolCall.toolCallId);
-                                      return (
+                          {provisionalToolCalls.length > 0 && (() => {
+                            const first = provisionalToolCalls[0];
+                            const { label, detailLines } =
+                              buildProvisionalToolSummary(provisionalToolCalls);
+                            const previousGroup =
+                              lastEntry?.type === "message" || lastEntry?.type === "workRun"
+                                ? lastEntry.toolCallGroups?.[0]
+                                : undefined;
+                            const expansionKey = previousGroup?.key ?? `group-${first.toolCallId}`;
+                            const isExpanded = expandedToolCalls.has(expansionKey);
+                            const detailCalls = provisionalToolCalls.filter(
+                              (t) => t.code || t.output,
+                            );
+                            return (
+                              <div className="space-y-1">
+                                <div className="group/work -ml-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleToolCallExpansion(expansionKey)}
+                                    className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+                                    aria-expanded={isExpanded}
+                                  >
+                                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+                                      <WorkIcon Icon={getToolIcon(first.toolName)} />
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                      <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
+                                        <span>{label}</span>
+                                        <CaretRight
+                                          size={13}
+                                          weight="bold"
+                                          className={`text-kumo-inactive transition-transform duration-150 ease-out ${isExpanded ? "rotate-90" : ""}`}
+                                        />
+                                      </span>
+                                      {detailLines.length > 1 && (
+                                        <span className="mt-1 block truncate font-mono text-[12px] leading-4 text-kumo-inactive">
+                                          {detailLines.join(" · ")}
+                                        </span>
+                                      )}
+                                    </span>
+                                  </button>
+                                  {isExpanded && detailCalls.length > 0 && (
+                                    <div className="ml-8 mt-1 space-y-1">
+                                      {detailCalls.map((toolCall) => (
                                         <div
                                           key={`stream-tool-${toolCall.toolCallId}`}
-                                          className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-[13px] leading-[18px] tracking-[-0.25px]"
+                                          className="space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]"
                                         >
-                                          <button
-                                            onClick={() => toggleToolCallExpansion(toolCall.toolCallId)}
-                                            className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-kumo-tint/60"
-                                          >
-                                            <svg
-                                              width="12"
-                                              height="12"
-                                              viewBox="0 0 24 24"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              strokeWidth="2.5"
-                                              className={`flex-shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""} text-kumo-subtle`}
-                                            >
-                                              <polyline points="9 18 15 12 9 6" />
-                                            </svg>
-                                            <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle">
-                                              Tool
-                                            </span>
-                                            <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-kumo-default">
-                                              {toolCall.toolName ?? "tool"}
-                                            </span>
-                                            {!toolCall.finished && (
-                                              <span className="flex-shrink-0 text-kumo-brand">
-                                                <span className="block h-3 w-3 rounded-full border border-kumo-brand border-t-transparent animate-spin" />
-                                              </span>
-                                            )}
-                                          </button>
-                                          {isExpanded && (toolCall.code || toolCall.output) && (
-                                            <div className="space-y-2 border-t border-kumo-line bg-kumo-elevated px-3 py-3">
-                                              {toolCall.code && (
-                                                <>
-                                                  <span className="font-mono text-[11px] leading-4 text-kumo-subtle uppercase tracking-[0.04em]">Code</span>
-                                                  <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-base p-2 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                                                    {toolCall.code}
-                                                  </pre>
-                                                </>
-                                              )}
-                                              {toolCall.output && (
-                                                <>
-                                                  <span className="font-mono text-[11px] leading-4 text-kumo-subtle uppercase tracking-[0.04em]">Output</span>
-                                                  <pre className="max-h-48 overflow-auto rounded-lg border border-kumo-line bg-kumo-base p-2 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
-                                                    {toolCall.output}
-                                                  </pre>
-                                                </>
-                                              )}
-                                            </div>
+                                          {toolCall.code && (
+                                            <>
+                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">Code</span>
+                                              <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+                                                {toolCall.code}
+                                              </pre>
+                                            </>
+                                          )}
+                                          {toolCall.output && (
+                                            <>
+                                              <span className="font-mono text-[11px] leading-4 text-kumo-inactive uppercase tracking-[0.08em]">Output</span>
+                                              <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+                                                {toolCall.output}
+                                              </pre>
+                                            </>
                                           )}
                                         </div>
-                                      );
-                                    })}
-                                  </div>
-                                )}
-
-                                {!hasRunningProvisionalToolCall && (
-                                  <div className="mt-2 flex items-center gap-2">
-                                    <span className="block h-3 w-3 rounded-full border-2 border-kumo-brand border-t-transparent animate-spin" />
-                                  </div>
-                                )}
-                              </>
-                            ) : (
-                              <div className="flex items-center gap-1">
-                                <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-bounce [animation-delay:0ms]" />
-                                <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-bounce [animation-delay:150ms]" />
-                                <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-bounce [animation-delay:300ms]" />
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
                               </div>
-                            )}
-                          </div>
+                            );
+                          })()}
                         </div>
                       );
                     })()}
@@ -4077,7 +4766,7 @@ function ChatInterface({
 
               {/* ── Bottom: input, update state, and cost ──────────────── */}
               <div className={`flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
-                <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[760px]" : ""}>
+                <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
                   <ChatInput
                     createCapsuleGatekeeper={(accountId, url) =>
                       overseer.newGatekeeper(accountId, url)
@@ -4094,12 +4783,10 @@ function ChatInterface({
                     onConsumeConsoleLogs={onConsumeConsoleLogs}
                     onDiscardConsoleLogs={onDiscardConsoleLogs}
                     onStop={handleStop}
+                    showThinkingTraces={showThinkingTraces}
+                    onToggleThinkingTraces={toggleShowThinkingTraces}
                     draftUpdateBanner={(() => {
-                      if (
-                        !currentChatMetadata?.hasProposedChanges ||
-                        isAgentActive
-                      )
-                        return null;
+                      if (!currentChatMetadata?.hasProposedChanges) return null;
 
                       const { activeChanges } = messageStates;
                       if (activeChanges.length === 0) return null;
@@ -4108,20 +4795,19 @@ function ChatInterface({
                       return (
                         <div className="relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
-                          <Tooltip content="Accept changes to apply them to the gadget." asChild>
-                            <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                              Accept changes to apply them to the gadget.
-                            </span>
-                          </Tooltip>
-                          <Tooltip content="Accept the current draft update and apply it to your gadget." asChild>
+                          <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                            Accept changes to save them to the gadget.
+                          </span>
+                          <Tooltip content={isAgentActive ? "Wait for the agent to finish before accepting changes." : "Accept the current draft update and save it to your gadget."} asChild>
                             <WorkshopButton
+                              disabled={isAgentActive}
                               onClick={() =>
                                 handleMergeChanges(lastActiveChange.sequence, {
                                   includeDraft: true,
                                 })
                               }
                               tone="primary"
-                              className="!h-7 gap-1 text-[12px]"
+                              className="!h-7 !cursor-pointer gap-1 text-[12px]"
                             >
                               <svg
                                 width="10"
@@ -4141,21 +4827,17 @@ function ChatInterface({
                     })()}
                   />
 
-                  {/* Token / cost summary */}
-                  {(currentChatMetadata?.totalTokens != null ||
-                    currentChatMetadata?.totalCost != null) && (
-                    <div className="flex items-center justify-end gap-4 px-4 pb-2 font-mono text-[11px] text-kumo-inactive">
-                      {currentChatMetadata.totalTokens != null && (
-                        <span>
-                          {currentChatMetadata.totalTokens.toLocaleString()}{" "}
-                          tokens
-                        </span>
-                      )}
-                      {currentChatMetadata.totalCost != null && (
-                        <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
-                      )}
-                    </div>
-                  )}
+                  {/* Token / cost summary. */}
+                  <div className="-mt-1 flex min-h-[1.25rem] items-start justify-end gap-4 px-4 pb-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                    {currentChatMetadata?.totalTokens != null && (
+                      <span>
+                        {currentChatMetadata.totalTokens.toLocaleString()} tokens
+                      </span>
+                    )}
+                    {currentChatMetadata?.totalCost != null && (
+                      <span>${currentChatMetadata.totalCost.toFixed(4)}</span>
+                    )}
+                  </div>
                 </div>
               </div>
             </>

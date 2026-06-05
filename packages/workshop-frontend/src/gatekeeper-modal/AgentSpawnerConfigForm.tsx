@@ -1,4 +1,4 @@
-import { Checkbox, Select } from '@cloudflare/kumo'
+import { Checkbox, Select, type PortalContainer } from '@cloudflare/kumo'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { WorkshopInput } from '../components/WorkshopControls'
 import { ConnectionConfigField } from './ConnectionConfigField'
@@ -14,6 +14,7 @@ export interface AgentSpawnerConfigFormProps {
   onModelIdChange: (id: string | null) => void
   onLimitEnvChange: (checked: boolean) => void
   onEnvChange: (env: string[]) => void
+  selectContainer?: PortalContainer
 }
 
 export function AgentSpawnerConfigForm({
@@ -27,6 +28,7 @@ export function AgentSpawnerConfigForm({
   onModelIdChange,
   onLimitEnvChange,
   onEnvChange,
+  selectContainer,
 }: AgentSpawnerConfigFormProps) {
   return (
     <section className="grid gap-4">
@@ -50,6 +52,7 @@ export function AgentSpawnerConfigForm({
         <Select
           aria-label="Agent model"
           className="w-full text-sm [&_button]:!h-9"
+          container={selectContainer}
           placeholder="Select a model"
           value={modelId}
           onValueChange={(v) => onModelIdChange(v as string | null)}
@@ -86,6 +89,7 @@ export function AgentSpawnerConfigForm({
             <Select
               aria-label="Select bindings to inherit"
               className="w-full text-sm [&_button]:!h-9"
+              container={selectContainer}
               placeholder="Select bindings to inherit"
               multiple
               value={env}
