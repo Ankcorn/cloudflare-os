@@ -11,6 +11,7 @@ import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperMetadata, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
+import { useVendorLogos } from './useVendorLogos'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { EmptyState } from './components/EmptyState'
 import {
@@ -27,8 +28,9 @@ interface ConnectionsProps {
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
 }
 
-export default function Connections({ overseer, authenticatedApi: _authenticatedApi, onConnectionsChange, isVisible: _isVisible, onHasGatekeepersChange }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible: _isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
+  const vendorLogos = useVendorLogos(authenticatedApi)
   const [loading, setLoading] = useState(true)
   const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -203,7 +205,7 @@ export default function Connections({ overseer, authenticatedApi: _authenticated
                       </div>
                     ) : (
                       <div className="flex items-center gap-3">
-                        <GatekeeperIcon vendorId={gk.vendorId} bindingName={gk.bindingName} />
+                        <GatekeeperIcon vendorId={gk.vendorId} bindingName={gk.bindingName} logoUrl={gk.vendorId ? vendorLogos.get(gk.vendorId) : undefined} />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
                             {gk.resourceTitle}

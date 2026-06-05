@@ -250,7 +250,9 @@ export default function GadgetEditor() {
     || streamingProposedChanges !== undefined
   const singleInitialChat = chatCount === 1 && hasChatZero
   const layoutModeReady = chatListReady && (codeStateReady || hasCodeRelatedState)
-  const pinInitialChatSelection = singleInitialChat && hasCode !== true
+  const [userNavigatedToList, setUserNavigatedToList] = useState(false)
+  const pinInitialChatSelection =
+    singleInitialChat && hasCode !== true && !userNavigatedToList
 
   // Simple mode: full-width chat layout for a brand-new gadget whose only
   // conversation is chat 0 and which still has no merged or proposed code.
@@ -404,8 +406,6 @@ export default function GadgetEditor() {
     }
   }, [streamingProposedChanges, hasCode])
 
-  const userNavigatedToListRef = useRef(false)
-
   useEffect(() => {
     setProposedChanges(undefined)
     setDraftProposedChanges(undefined)
@@ -423,14 +423,13 @@ export default function GadgetEditor() {
     hasAutoSwitchedToUiRef.current = false
     hadProposedChangesAtAgentStartRef.current = false
     pendingAutoSwitchToUiRef.current = false
-    userNavigatedToListRef.current = false
+    setUserNavigatedToList(false)
   }, [id])
 
   // ── navigation helper ────────────────────────────────────────────────────────
   const navigateToChat = useCallback(
     (chatId: number | null, options?: { replace?: boolean }) => {
-      if (chatId === null) userNavigatedToListRef.current = true
-      else userNavigatedToListRef.current = false
+      setUserNavigatedToList(chatId === null)
       navigate({
         to: '/gadget/$id',
         params: { id: id! },
@@ -453,7 +452,7 @@ export default function GadgetEditor() {
       return
     }
 
-    if (pinInitialChatSelection && urlChatId === null && !userNavigatedToListRef.current) {
+    if (pinInitialChatSelection && urlChatId === null) {
       navigateToChat(0, { replace: true })
     }
   }, [layoutModeReady, simpleMode, pinInitialChatSelection, urlChatId, navigateToChat, navigate, id])
@@ -820,7 +819,6 @@ export default function GadgetEditor() {
                   }
                   onConsumeConsoleLogs={consumeConsoleLogs}
                    onDiscardConsoleLogs={discardConsoleLogs}
-                   hideTitleBar={simpleMode}
                    constrainChatWidth={simpleMode}
                    onChatCountChange={handleChatCountChange}
                    onAgentActiveChange={handleAgentActiveChange}

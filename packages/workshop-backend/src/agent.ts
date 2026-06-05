@@ -161,6 +161,8 @@ import { StreamingToolInputParser } from './streaming-json-parser.js';
 type CodePreviewEntry = {
   toolName: "writeFile" | "editFile";
   parser: StreamingToolInputParser;
+  // Whether we've already emitted the toolCallTarget event. To avoid emitting multiple times.
+  targetEmitted?: boolean;
   cursor?: {
     ytext: Y.Text;       // the Y.Text entry in #previewDoc being modified
     insertPos: number;    // current cursor position for the next insert
@@ -204,7 +206,7 @@ class CodePreviewManager {
       entry.parser.append(delta);
       if (entry.parser.hasError) throw new Error("Invalid JSON in tool input");
 
-      this.#maybeEmitActiveFile(entry);
+      this.#maybeEmitActiveFile(toolCallId, entry);
 
       if (entry.cursor) {
         this.#appendAtCursor(entry);
@@ -249,12 +251,21 @@ class CodePreviewManager {
     this.emit({type: "codeReset"});
   }
 
-  #maybeEmitActiveFile(entry: CodePreviewEntry) {
+  #maybeEmitActiveFile(toolCallId: string, entry: CodePreviewEntry) {
     let filename = entry.parser.prefixFields?.filename;
-    if (typeof filename !== "string" || filename === this.#activeFile) {
+    if (typeof filename !== "string") {
       return;
     }
 
+    // Tell the UI this call's target file so it can display before it finalizes.
+    if (!entry.targetEmitted) {
+      entry.targetEmitted = true;
+      this.emit({type: "toolCallTarget", toolCallId, target: filename});
+    }
+
+    if (filename === this.#activeFile) {
+      return;
+    }
     this.#activeFile = filename;
     this.emit({type: "setActiveFile", filename});
   }

@@ -40,6 +40,9 @@
   --color-kumo-line: #ebd5c180;
   --color-kumo-ring: #d4b08e;
 
+  /* Chat surface tokens */
+  --color-kumo-bubble-user: #ece4d6;
+
   /* Status tints — keep functional colors, warm the tints */
   --color-kumo-info: oklch(62.3% 0.214 259.815);
   --color-kumo-info-tint: oklch(90% 0.06 250);
@@ -56,6 +59,7 @@
 
   /* Text color tokens — warm tones instead of cold oklch neutrals */
   --text-color-kumo-default: #140400;
+  --text-color-kumo-default-hover: #1f0d06;
   --text-color-kumo-inverse: #fffdfb;
   --text-color-kumo-strong: #521000;
   --text-color-kumo-subtle: oklch(55% 0.027 50);

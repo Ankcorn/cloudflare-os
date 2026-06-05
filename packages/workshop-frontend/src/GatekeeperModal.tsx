@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
+import { Dialog, useKumoToastManager, type PortalContainer } from '@cloudflare/kumo'
 import {
   CaretDown,
   CaretLeft,
@@ -162,6 +162,7 @@ export default function GatekeeperModal({
   const footerRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
+  const [selectPortalContainer, setSelectPortalContainer] = useState<PortalContainer>(null)
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
@@ -172,6 +173,18 @@ export default function GatekeeperModal({
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
+
+  useEffect(() => {
+    const el = document.createElement('div')
+    el.style.position = 'relative'
+    el.style.zIndex = '1100'
+    document.body.appendChild(el)
+    setSelectPortalContainer(el)
+    return () => {
+      setSelectPortalContainer(null)
+      el.remove()
+    }
+  }, [])
 
   const updateConfiguratorFrameState = (next: ConfiguratorFrameState | null) => {
     const previous = configuratorFrameRef.current
@@ -695,6 +708,7 @@ export default function GatekeeperModal({
                     availableModels={availableModels}
                     selectedModelId={selectedModelId}
                     onSelectedModelIdChange={setSelectedModelId}
+                    selectContainer={selectPortalContainer}
                   />
                 )}
 
@@ -713,6 +727,7 @@ export default function GatekeeperModal({
                       if (!checked) setSpawnerEnv([])
                     }}
                     onEnvChange={setSpawnerEnv}
+                    selectContainer={selectPortalContainer}
                   />
                 )}
               </div>

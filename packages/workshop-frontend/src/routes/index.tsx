@@ -158,7 +158,7 @@ function HomePage() {
               onModelChange={handleModelChange}
               newChat
               autoFocus
-              attachLabel="Connect"
+              minRows={3}
             />
           </div>
         </div>
