@@ -417,6 +417,7 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
 type PhosphorIcon = typeof MagnifyingGlass;
 
 type ActionChatMessage = Extract<AiChatMessage, { type: "action" }>;
+type ChangeChatMessage = Extract<AiChatMessage, { type: "changes" }>;
 type ObservationChatMessage = ActionChatMessage & {
   actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
 };
@@ -439,6 +440,10 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function formatTimes(count: number): string {
+  return pluralize(count, "time");
+}
+
 function describeObservationCount(count: number): string {
   return count === 1 ? "Read 1 resource" : `${count} resource reads`;
 }
@@ -454,7 +459,7 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
     case "webFetch":
       return `Fetched ${pluralize(count, "page")}`;
     case "executeCode":
-      return `Ran ${pluralize(count, "code block")}`;
+      return count === 1 ? "Ran code" : `Ran code ${formatTimes(count)}`;
     case "describeBinding":
       return `Inspected ${pluralize(count, "binding")}`;
     case "setBindingHook":
@@ -552,7 +557,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "writeFile": return `Writing ${pluralize(count, "file")}`;
     case "editFile": return `Making ${count} edits`;
     case "webFetch": return `Fetching ${pluralize(count, "page")}`;
-    case "executeCode": return `Running ${pluralize(count, "code block")}`;
+    case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
     case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
@@ -867,10 +872,10 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
         <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
           <WorkIcon Icon={Icon} />
         </span>
-        <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
+        <span className="flex min-w-0 flex-1 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
           <span className="min-w-0 truncate">{label}</span>
           {tc.error && (
-            <span className="rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
+            <span className="flex-shrink-0 rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
               Error
             </span>
           )}
@@ -951,14 +956,27 @@ const ToolGroupRow = memo(function ToolGroupRow({
   open,
   expandedKeys,
   onToggle,
+  footerChangeSequence,
+  footerTimestamp,
+  footerIsTrailing,
+  footerDisabled = false,
+  onFooterRevert,
 }: {
   group: ToolCallGroup;
   open: boolean;
   expandedKeys: ReadonlySet<string>;
   onToggle: (key: string) => void;
+  footerChangeSequence?: number;
+  footerTimestamp?: Date;
+  footerIsTrailing?: boolean;
+  footerDisabled?: boolean;
+  onFooterRevert?: (sequence: number) => void;
 }) {
+  const footerLabel = footerChangeSequence !== undefined
+    ? getDiscardLabel(footerIsTrailing)
+    : null;
   return (
-    <div className="group/work -ml-0.5">
+    <div className="group -ml-0.5">
       <button
         type="button"
         onClick={() => onToggle(group.key)}
@@ -969,17 +987,17 @@ const ToolGroupRow = memo(function ToolGroupRow({
           <WorkIcon Icon={group.Icon} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
-            <span>{group.label}</span>
+          <span className="flex min-w-0 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
+            <span className="min-w-0 truncate">{group.label}</span>
             {group.hasError && (
-              <span className="rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
+              <span className="flex-shrink-0 rounded-full bg-kumo-danger-tint px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-kumo-danger">
                 Error
               </span>
             )}
             <CaretRight
               size={13}
               weight="bold"
-              className={`text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+              className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
             />
           </span>
           {group.detailLines.length > 1 && (
@@ -1024,6 +1042,29 @@ const ToolGroupRow = memo(function ToolGroupRow({
             })}
           </div>
         )
+      )}
+      {footerChangeSequence !== undefined && footerTimestamp && footerLabel && onFooterRevert && (
+        <div className="ml-0 mt-0.5 flex items-center gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover:opacity-100 group-focus-within:opacity-100">
+          <Tooltip content={footerLabel} asChild>
+            <button
+              type="button"
+              disabled={footerDisabled}
+              onClick={() => onFooterRevert(footerChangeSequence)}
+              className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+              aria-label={footerLabel}
+            >
+              <ArrowUUpLeft size={15} />
+            </button>
+          </Tooltip>
+          <Tooltip content={formatFullTimestamp(footerTimestamp)} asChild>
+            <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+              {footerTimestamp.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </Tooltip>
+        </div>
       )}
     </div>
   );
@@ -1943,6 +1984,12 @@ type ChatDisplayEntry =
       observations: ObservationChatMessage[];
       toolCallGroups: ToolCallGroup[];
       lastMessageSequence: number;
+      lastMessageTimestamp: Date;
+    }
+  | {
+      type: "savedChanges";
+      key: string;
+      message: ChangeChatMessage;
     };
 
 function isObservationActionMessage(msg: AiChatMessage): msg is ObservationChatMessage {
@@ -1953,18 +2000,38 @@ type WorkMessageParts = {
   toolCalls: AiToolCall[];
   observations: ObservationChatMessage[];
   lastAgentMessageSequence: number | null;
+  lastWorkSequence: number;
+  lastWorkTimestamp: Date;
 };
 
-function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
-  if (isObservationActionMessage(msg)) {
-    return { toolCalls: [], observations: [msg], lastAgentMessageSequence: null };
-  }
-
-  if (
+function isAssistantMessageWithoutVisibleText(msg: AiChatMessage): msg is Extract<AiChatMessage, { type: "message" }> {
+  return (
     msg.type === "message" &&
     msg.author.type !== "user" &&
     !msg.message.trim() &&
-    !msg.reasoning?.trim() &&
+    !msg.reasoning?.trim()
+  );
+}
+
+// Tool-only turns can leave behind empty assistant messages. Don't render them as transcript rows.
+function isEmptyAssistantMessage(msg: AiChatMessage): boolean {
+  return isAssistantMessageWithoutVisibleText(msg) && (!msg.toolCalls || msg.toolCalls.length === 0);
+}
+
+// Assistant messages with tool calls but no text are displayed as work rows.
+function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
+  if (isObservationActionMessage(msg)) {
+    return {
+      toolCalls: [],
+      observations: [msg],
+      lastAgentMessageSequence: null,
+      lastWorkSequence: msg.sequence,
+      lastWorkTimestamp: msg.timestamp,
+    };
+  }
+
+  if (
+    isAssistantMessageWithoutVisibleText(msg) &&
     !!msg.toolCalls &&
     msg.toolCalls.length > 0
   ) {
@@ -1972,6 +2039,8 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
       toolCalls: msg.toolCalls,
       observations: [],
       lastAgentMessageSequence: msg.sequence,
+      lastWorkSequence: msg.sequence,
+      lastWorkTimestamp: msg.timestamp,
     };
   }
 
@@ -1981,6 +2050,8 @@ function getWorkOnlyMessageParts(msg: AiChatMessage): WorkMessageParts | null {
 function appendWorkParts(target: WorkMessageParts, source: WorkMessageParts) {
   target.toolCalls.push(...source.toolCalls);
   target.observations.push(...source.observations);
+  target.lastWorkSequence = source.lastWorkSequence;
+  target.lastWorkTimestamp = source.lastWorkTimestamp;
   if (source.lastAgentMessageSequence !== null) {
     target.lastAgentMessageSequence = source.lastAgentMessageSequence;
   }
@@ -1993,14 +2064,23 @@ function getDiscardLabel(isTrailing: boolean | undefined): string {
     : "Discard changes from this response and later responses";
 }
 
+function getSavedEditsDiscardLabel(isTrailing: boolean | undefined): string {
+  return isTrailing
+    ? "Discard saved edits"
+    : "Discard saved edits and later changes";
+}
+
 // Collapse adjacent work rows; fold trailing work into the preceding assistant
 // message so one turn reads as one tool/resource run.
-function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] {
+function buildChatDisplayEntries(
+  messages: AiChatMessage[],
+  changeStatus: ReadonlyMap<number, "pending" | "merged" | "reverted">,
+): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
 
   const maybePushModelChange = (msg: AiChatMessage) => {
-    if (msg.type !== "message" || msg.author.type !== "agent") return;
+    if (msg.type !== "message" || msg.author.type !== "agent" || isEmptyAssistantMessage(msg)) return;
     if (lastAgentAuthorId === null) {
       lastAgentAuthorId = msg.author.id;
       return;
@@ -2015,9 +2095,31 @@ function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] 
     });
   };
 
+  const isVisibleSavedChangesMessage = (msg: AiChatMessage): msg is ChangeChatMessage =>
+    msg.type === "changes" &&
+    msg.author.type === "user" &&
+    (changeStatus.get(msg.sequence) ?? "pending") === "pending";
+
   for (let i = 0; i < messages.length; ) {
     const msg = messages[i];
     maybePushModelChange(msg);
+
+    if (msg.type === "changes") {
+      if (isVisibleSavedChangesMessage(msg)) {
+        result.push({
+          type: "savedChanges",
+          key: `saved-changes-${msg.chatId}-${msg.sequence}`,
+          message: msg,
+        });
+      }
+      i++;
+      continue;
+    }
+
+    if (isEmptyAssistantMessage(msg)) {
+      i++;
+      continue;
+    }
 
     const initialWorkParts = getWorkOnlyMessageParts(msg);
     if (initialWorkParts) {
@@ -2025,10 +2127,18 @@ function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] 
         toolCalls: [...initialWorkParts.toolCalls],
         observations: [...initialWorkParts.observations],
         lastAgentMessageSequence: initialWorkParts.lastAgentMessageSequence,
+        lastWorkSequence: initialWorkParts.lastWorkSequence,
+        lastWorkTimestamp: initialWorkParts.lastWorkTimestamp,
       };
       let j = i + 1;
       while (j < messages.length) {
-        const nextWorkParts = getWorkOnlyMessageParts(messages[j]);
+        const nextMsg = messages[j];
+        if (nextMsg.type === "changes") {
+          if (isVisibleSavedChangesMessage(nextMsg)) break;
+          j++;
+          continue;
+        }
+        const nextWorkParts = getWorkOnlyMessageParts(nextMsg);
         if (!nextWorkParts) break;
         appendWorkParts(workParts, nextWorkParts);
         j++;
@@ -2040,7 +2150,8 @@ function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] 
         toolCalls: workParts.toolCalls,
         observations: workParts.observations,
         toolCallGroups: buildToolCallGroups(workParts.toolCalls, workParts.observations),
-        lastMessageSequence: workParts.lastAgentMessageSequence ?? messages[j - 1].sequence,
+        lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
+        lastMessageTimestamp: workParts.lastWorkTimestamp,
       });
 
       i = j;
@@ -2052,10 +2163,18 @@ function buildChatDisplayEntries(messages: AiChatMessage[]): ChatDisplayEntry[] 
         toolCalls: msg.toolCalls ? [...msg.toolCalls] : [],
         observations: [],
         lastAgentMessageSequence: msg.sequence,
+        lastWorkSequence: msg.sequence,
+        lastWorkTimestamp: msg.timestamp,
       };
       let j = i + 1;
       while (j < messages.length) {
-        const nextWorkParts = getWorkOnlyMessageParts(messages[j]);
+        const nextMsg = messages[j];
+        if (nextMsg.type === "changes") {
+          if (isVisibleSavedChangesMessage(nextMsg)) break;
+          j++;
+          continue;
+        }
+        const nextWorkParts = getWorkOnlyMessageParts(nextMsg);
         if (!nextWorkParts) break;
         appendWorkParts(workParts, nextWorkParts);
         j++;
@@ -2661,13 +2780,17 @@ function ChatInterface({
       (msg) => msg !== undefined,
     );
   }, [selectedChatId, updateCounter]);
+  const messageStates = useMemo(
+    () => computeMessageStates(currentMessages),
+    [currentMessages],
+  );
   const displayEntries = useMemo(
     () =>
-      // Hide individual checkpoints; surface pending changes as turn-level discard actions.
-      buildChatDisplayEntries(
-        currentMessages.filter((m) => m.type !== "changes"),
-      ),
-    [currentMessages],
+      // Hide agent checkpoints; surface them as turn-level discard actions. User-saved
+      // checkpoints get their own compact row so the discard action is attached to the
+      // edit that actually created it.
+      buildChatDisplayEntries(currentMessages, messageStates.changeStatus),
+    [currentMessages, messageStates],
   );
 
   const entryTopClasses = useMemo(() => {
@@ -3512,7 +3635,7 @@ function ChatInterface({
   };
 
   // Handle reverting changes from a specific sequence number onward
-  const handleRevertChanges = async (revertFrom: number) => {
+  const handleRevertChanges = useCallback(async (revertFrom: number) => {
     if (selectedChatId === null) return;
 
     try {
@@ -3522,7 +3645,7 @@ function ChatInterface({
       console.error("Failed to rewind draft:", err);
       toasts.add({ title: "Failed to rewind draft", variant: "error" });
     }
-  };
+  }, [overseer, selectedChatId, toasts]);
 
   // Handle approving an action from the chat thread
   const handleApproveAction = async (actionId: number) => {
@@ -3632,11 +3755,6 @@ function ChatInterface({
     });
   }, [toasts]);
 
-  // Compute message states (merged/reverted status)
-  const messageStates = useMemo(
-    () => computeMessageStates(currentMessages),
-    [currentMessages],
-  );
   const lastDurablePendingChange = useMemo(
     () => {
       for (let i = currentMessages.length - 1; i >= 0; i--) {
@@ -3665,7 +3783,7 @@ function ChatInterface({
       if (m.author.type === "user") {
         if (lastAgentMessageSeq !== null) out.add(lastAgentMessageSeq);
         lastAgentMessageSeq = null;
-      } else {
+      } else if (!isEmptyAssistantMessage(m)) {
         lastAgentMessageSeq = m.sequence;
       }
     }
@@ -3687,7 +3805,7 @@ function ChatInterface({
         if (m.author.type === "user") {
           lastAgentMessageSeq = null;
           lastVisibleWorkSeq = null;
-        } else {
+        } else if (!isEmptyAssistantMessage(m)) {
           lastAgentMessageSeq = m.sequence;
           lastVisibleWorkSeq = m.sequence;
         }
@@ -3699,8 +3817,15 @@ function ChatInterface({
         continue;
       }
 
+      if (m.type === "changes" && m.author.type === "user") {
+        lastAgentMessageSeq = null;
+        lastVisibleWorkSeq = null;
+        continue;
+      }
+
       if (
         m.type === "changes" &&
+        m.author.type !== "user" &&
         (lastAgentMessageSeq !== null || lastVisibleWorkSeq !== null) &&
         (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
       ) {
@@ -3739,12 +3864,12 @@ function ChatInterface({
               <WorkIcon Icon={MagnifyingGlass} />
             </span>
             <span className="min-w-0 flex-1">
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span>{log.description.title}</span>
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="min-w-0 truncate">{log.description.title}</span>
                 <CaretRight
                   size={13}
                   weight="bold"
-                  className={`text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
+                  className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${open ? "rotate-90" : ""}`}
                 />
               </span>
               {metadata && (
@@ -4282,40 +4407,80 @@ function ChatInterface({
                         );
                       }
 
+                      if (entry.type === "savedChanges") {
+                        const isOwnChange = entry.message.author.id === currentUser?.id;
+                        const actor = isOwnChange ? "You" : entry.message.author.name;
+                        const label = `${actor} saved edits`;
+                        const discardLabel = getSavedEditsDiscardLabel(
+                          entry.message.sequence === lastDurablePendingChange?.sequence,
+                        );
+                        return (
+                          <div key={entry.key} className={`${entryTopClass} group/savedChanges max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
+                            <div className="flex items-center gap-3 px-1.5 py-1">
+                              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                <PencilSimple size={15} />
+                              </span>
+                              <span className="min-w-0 truncate font-medium">
+                                {label}
+                              </span>
+                              <div className="flex flex-shrink-0 items-center gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/savedChanges:opacity-100 group-focus-within/savedChanges:opacity-100">
+                                <Tooltip content={discardLabel} asChild>
+                                  <button
+                                    type="button"
+                                    disabled={isAgentActive}
+                                    onClick={() => handleRevertChanges(entry.message.sequence)}
+                                    className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
+                                    aria-label={discardLabel}
+                                  >
+                                    <ArrowUUpLeft size={15} />
+                                  </button>
+                                </Tooltip>
+                                <Tooltip content={formatFullTimestamp(entry.message.timestamp)} asChild>
+                                  <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
+                                    {entry.message.timestamp.toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                </Tooltip>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+
                       if (entry.type === "workRun") {
                         const pendingChange =
                           pendingChangeByTurnItemSeq.get(entry.lastMessageSequence) ?? null;
+                        const showFooterOnGroupIndex = pendingChange
+                          ? entry.toolCallGroups.length - 1
+                          : -1;
                         return (
-                          <div key={entry.key} className={`${entryTopClass} group/agent min-w-0 w-full max-w-[860px] space-y-1`}>
-                            {entry.toolCallGroups.map((group) => (
+                          <div key={entry.key} className={`${entryTopClass} min-w-0 w-full max-w-[860px] space-y-1`}>
+                            {entry.toolCallGroups.map((group, groupIndex) => (
                               <ToolGroupRow
                                 key={group.key}
                                 group={group}
                                 open={expandedToolCalls.has(group.key)}
                                 expandedKeys={expandedToolCalls}
                                 onToggle={toggleToolCallExpansion}
+                                footerChangeSequence={
+                                  groupIndex === showFooterOnGroupIndex
+                                    ? pendingChange?.sequence
+                                    : undefined
+                                }
+                                footerTimestamp={
+                                  groupIndex === showFooterOnGroupIndex
+                                    ? entry.lastMessageTimestamp
+                                    : undefined
+                                }
+                                footerIsTrailing={
+                                  pendingChange?.sequence === lastDurablePendingChange?.sequence
+                                }
+                                footerDisabled={isAgentActive}
+                                onFooterRevert={handleRevertChanges}
                               />
                             ))}
-                            {pendingChange && (() => {
-                              const label = getDiscardLabel(
-                                pendingChange.sequence === lastDurablePendingChange?.sequence,
-                              );
-                              return (
-                                <div className="mt-1 -ml-1 flex gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/agent:opacity-100 group-focus-within/agent:opacity-100">
-                                  <Tooltip content={label} asChild>
-                                    <button
-                                      type="button"
-                                      disabled={isAgentActive}
-                                      onClick={() => handleRevertChanges(pendingChange.sequence)}
-                                      className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
-                                      aria-label={label}
-                                    >
-                                      <ArrowUUpLeft size={15} />
-                                    </button>
-                                  </Tooltip>
-                                </div>
-                              );
-                            })()}
                           </div>
                         );
                       }
@@ -4351,14 +4516,23 @@ function ChatInterface({
                             </div>
                           ) : (() => {
                             const messageToolGroups = entry.toolCallGroups;
+                            const hasMessageText = msg.message.trim().length > 0;
                             const showReasoning = showThinkingTraces && !!msg.reasoning;
                             const actionMessageSeq = entry.lastMessageSequence ?? msg.sequence;
                             const pendingChange = pendingChangeByTurnItemSeq.get(
                               actionMessageSeq,
                             ) ?? null;
+                            const attachActionsToToolGroups =
+                              !hasMessageText &&
+                              !!pendingChange &&
+                              !!messageToolGroups &&
+                              messageToolGroups.length > 0;
                             const showActions =
                               completedAgentTurnMessageSeqs.has(actionMessageSeq) &&
-                              (!!msg.message || !!pendingChange);
+                              (hasMessageText || (!!pendingChange && !attachActionsToToolGroups));
+                            const showFooterOnGroupIndex = attachActionsToToolGroups && pendingChange && messageToolGroups
+                              ? messageToolGroups.length - 1
+                              : -1;
                             return (
                           <div className="min-w-0 w-full max-w-[860px] space-y-2">
                             <div className="group/agentMessage relative space-y-1.5">
@@ -4366,7 +4540,7 @@ function ChatInterface({
                                 <ThinkingTraceRow reasoning={msg.reasoning!} />
                               )}
 
-                              {msg.message && (
+                              {hasMessageText && (
                                 <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
                                   <MarkdownMessage
                                     message={msg.message}
@@ -4377,7 +4551,7 @@ function ChatInterface({
 
                               {showActions && (
                                 <div className="mt-0.5 -ml-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/agentMessage:opacity-100 group-focus-within/agentMessage:opacity-100">
-                                  {msg.message && (
+                                  {hasMessageText && (
                                     <Tooltip content="Copy message" asChild>
                                       <button
                                         type="button"
@@ -4421,13 +4595,28 @@ function ChatInterface({
 
                             {messageToolGroups && messageToolGroups.length > 0 && (
                               <div className="space-y-1">
-                                {messageToolGroups.map((group) => (
+                                {messageToolGroups.map((group, groupIndex) => (
                                   <ToolGroupRow
                                     key={group.key}
                                     group={group}
                                     open={expandedToolCalls.has(group.key)}
                                     expandedKeys={expandedToolCalls}
                                     onToggle={toggleToolCallExpansion}
+                                    footerChangeSequence={
+                                      groupIndex === showFooterOnGroupIndex
+                                        ? pendingChange?.sequence
+                                        : undefined
+                                    }
+                                    footerTimestamp={
+                                      groupIndex === showFooterOnGroupIndex
+                                        ? msg.timestamp
+                                        : undefined
+                                    }
+                                    footerIsTrailing={
+                                      pendingChange?.sequence === lastDurablePendingChange?.sequence
+                                    }
+                                    footerDisabled={isAgentActive}
+                                    onFooterRevert={handleRevertChanges}
                                   />
                                 ))}
                               </div>
@@ -4689,11 +4878,7 @@ function ChatInterface({
                             const first = provisionalToolCalls[0];
                             const { label, detailLines } =
                               buildProvisionalToolSummary(provisionalToolCalls);
-                            const previousGroup =
-                              lastEntry?.type === "message" || lastEntry?.type === "workRun"
-                                ? lastEntry.toolCallGroups?.[0]
-                                : undefined;
-                            const expansionKey = previousGroup?.key ?? `group-${first.toolCallId}`;
+                            const expansionKey = `group-${first.toolCallId}`;
                             const isExpanded = expandedToolCalls.has(expansionKey);
                             const detailCalls = provisionalToolCalls.filter(
                               (t) => t.code || t.output,
@@ -4711,12 +4896,12 @@ function ChatInterface({
                                       <WorkIcon Icon={getToolIcon(first.toolName)} />
                                     </span>
                                     <span className="min-w-0 flex-1">
-                                      <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] leading-5 tracking-[-0.25px]">
-                                        <span>{label}</span>
+                                      <span className="flex min-w-0 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">
+                                        <span className="min-w-0 truncate">{label}</span>
                                         <CaretRight
                                           size={13}
                                           weight="bold"
-                                          className={`text-kumo-inactive transition-transform duration-150 ease-out ${isExpanded ? "rotate-90" : ""}`}
+                                          className={`flex-shrink-0 text-kumo-inactive transition-transform duration-150 ease-out ${isExpanded ? "rotate-90" : ""}`}
                                         />
                                       </span>
                                       {detailLines.length > 1 && (
