@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
-import { useNavigate, useParams } from '@tanstack/react-router'
+import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
@@ -28,6 +28,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id ?? ''
   const navigate = useNavigate()
+  const router = useRouter()
   const { isAuthenticated, authenticatedApi, isLoading: authLoading, login } = useAuth(rpcStub)
   const toasts = useKumoToastManager()
 
@@ -729,11 +730,21 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   let meta = blueprint.metadata
   let bindingEntries = Object.entries(meta.bindings)
-  let primaryActionLabel = isAuthenticated ? 'Create Gadget' : 'Log in to create a gadget'
   let activeBinding = activeBindingName ? meta.bindings[activeBindingName] : undefined
   let readyCount = bindingEntries.filter(([name]) => draftAssignments[name]).length
   let unresolvedBindingName = getFirstUnresolvedBindingName()
-  let createDisabled = creating || (isAuthenticated && unresolvedBindingName !== null)
+  let remainingCount = bindingEntries.length - readyCount
+  let primaryActionLabel: string
+  if (!isAuthenticated) {
+    primaryActionLabel = 'Log in to create a gadget'
+  } else if (unresolvedBindingName !== null) {
+    primaryActionLabel = remainingCount > 0
+      ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
+      : 'Configure connections'
+  } else {
+    primaryActionLabel = 'Create Gadget'
+  }
+  let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
 
   return (
@@ -744,8 +755,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         <button
           type="button"
           onClick={() => {
-            if (window.history.length > 1) {
-              window.history.back()
+            if (router.history.canGoBack()) {
+              router.history.back()
             } else {
               navigate({ to: '/explore' })
             }
@@ -789,21 +800,16 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               />
             )}
             <div className="flex items-center gap-2">
-              <Tooltip
-              content={unresolvedBindingName ? 'Configure all required resources before creating this Gadget.' : ''}
-              render={(
-                <span className="min-w-0 flex-1">
-                  <button
-                    type="button"
-                    onClick={handleStartConfigure}
-                    disabled={createDisabled}
-                    className="inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-full bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-white transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-kumo-brand-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
-                  >
-                    {creating ? 'Creating...' : primaryActionLabel}
-                  </button>
-                </span>
-              )}
-            />
+              <span className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={handleStartConfigure}
+                  disabled={createDisabled}
+                  className="inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-full bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-white transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-kumo-brand-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
+                >
+                  {creating ? 'Creating...' : primaryActionLabel}
+                </button>
+              </span>
 
             {!isOwnBlueprint && !loadingOwnBlueprintState && !isInLibrary && (
               <Tooltip content={isAuthenticated ? 'Add to library' : 'Log in to add to library'} asChild>
@@ -978,7 +984,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                     Configure {activeBinding.title || activeBindingName}
                   </Dialog.Title>
                   <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                    Choose the resource or model this new Gadget should use.
+                    {activeBinding.type === 'gatekeeper' && activeBinding.description
+                      ? activeBinding.description
+                      : 'Choose the resource or model this new Gadget should use.'}
                   </Dialog.Description>
                 </div>
                 <Dialog.Close
@@ -1444,6 +1452,15 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
   uiDisposable?.[Symbol.dispose]?.()
 }
 
+function formatSuggestedResource(resourceUrl: string): string {
+  try {
+    const path = new URL(resourceUrl).pathname.replace(/^\/+|\/+$/g, '')
+    return path || resourceUrl
+  } catch {
+    return resourceUrl
+  }
+}
+
 // Renders the connection-wizard-style UI for a single gatekeeper binding: an account chooser
 // scoped to the binding's required resource type, plus the vendor-supplied resource configurator
 // iframe. The URL is collected from the iframe at submit time via `collectResourceUrl()`.
@@ -1611,12 +1628,6 @@ function BlueprintGatekeeperBindingField({
 
   return (
     <div className="space-y-4">
-      {binding.description && (
-        <p className="m-0 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-          {binding.description}
-        </p>
-      )}
-
       <AccountChooser
         accounts={matchingAccounts}
         selectedAccountId={selectedAccountId}
@@ -1630,15 +1641,26 @@ function BlueprintGatekeeperBindingField({
         onReconnect={onReconnectAccount}
       />
 
-      <ResourceConfiguratorHost
-        frame={frameState?.frame ?? null}
-        frameKey={frameState?.key ?? null}
-        loading={frameLoading}
-        error={frameError}
-        disabled={!selectedAccount}
-        onCollectResourceUrlChange={stableOnCollectorChange}
-        onSelectionReadyChange={stableOnReadyChange}
-      />
+      {selectedAccount && (
+        <div className="space-y-2.5">
+          {binding.resourceUrl && (
+            <p className="m-0 pl-[2px] text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+              Blueprint recommends: <span className="break-all text-kumo-default">{formatSuggestedResource(binding.resourceUrl)}</span>
+            </p>
+          )}
+
+          <ResourceConfiguratorHost
+            frame={frameState?.frame ?? null}
+            frameKey={frameState?.key ?? null}
+            loading={frameLoading}
+            error={frameError}
+            disabled={false}
+            topOffset={10}
+            onCollectResourceUrlChange={stableOnCollectorChange}
+            onSelectionReadyChange={stableOnReadyChange}
+          />
+        </div>
+      )}
     </div>
   )
 }

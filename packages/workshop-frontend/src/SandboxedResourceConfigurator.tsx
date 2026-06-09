@@ -111,10 +111,12 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
 
 export default function SandboxedResourceConfigurator({
   frame,
+  topOffset = 0,
   onCollectResourceUrlChange,
   onSelectionReadyChange,
 }: {
   frame: ResourceConfiguratorFrame,
+  topOffset?: number,
   onCollectResourceUrlChange?: (collect: (() => Promise<string>) | null) => void,
   onSelectionReadyChange?: (ready: boolean | null) => void,
 }) {
@@ -138,6 +140,8 @@ export default function SandboxedResourceConfigurator({
   heightRef.current = height
   const layoutHeightRef = useRef(MIN_CONFIGURATOR_HEIGHT)
   layoutHeightRef.current = layoutHeight
+  const topOffsetRef = useRef(topOffset)
+  topOffsetRef.current = topOffset
   configuratorRef.current = frame.ui
 
   // Cached scroll ancestor of the placeholder. We rediscover it lazily because the modal DOM is
@@ -173,7 +177,8 @@ export default function SandboxedResourceConfigurator({
       const rect = placeholder?.getBoundingClientRect()
       if (!placeholder || !rect) return
 
-      const nextRect = { top: rect.top, left: rect.left, width: rect.width }
+      const visualTop = rect.top + topOffsetRef.current
+      const nextRect = { top: visualTop, left: rect.left, width: rect.width }
       const prevRect = lastFrameRectRef.current
       const rectChanged = !prevRect
         || prevRect.top !== nextRect.top
@@ -186,7 +191,7 @@ export default function SandboxedResourceConfigurator({
 
       // Notify the iframe of viewport position so floating popups can clamp their max-height.
       if (rectChanged && iframeConnectedRef.current) {
-        iframeRpcRef.current?.updateViewport(rect.top, window.innerHeight)
+        iframeRpcRef.current?.updateViewport(visualTop, window.innerHeight)
       }
 
       // Clip the iframe to the nearest scrollable ancestor (typically the modal's scroll area).
@@ -201,9 +206,9 @@ export default function SandboxedResourceConfigurator({
         // extend past the modal like native autocomplete behavior.
         const popupOpen = heightRef.current > layoutHeightRef.current + 8
         nextClip = {
-          top: Math.max(0, ancestorRect.top - rect.top),
+          top: Math.max(0, ancestorRect.top - visualTop),
           right: Math.max(0, (rect.left + rect.width) - ancestorRect.right),
-          bottom: popupOpen ? 0 : Math.max(0, (rect.top + heightRef.current) - ancestorRect.bottom),
+          bottom: popupOpen ? 0 : Math.max(0, (visualTop + heightRef.current) - ancestorRect.bottom),
           left: Math.max(0, ancestorRect.left - rect.left),
         }
       }
@@ -258,7 +263,7 @@ export default function SandboxedResourceConfigurator({
     iframeRpcRef.current = iframe.dup()
     const placeholderRect = placeholderRef.current?.getBoundingClientRect()
     if (placeholderRect) {
-      iframe.updateViewport(placeholderRect.top, window.innerHeight)
+      iframe.updateViewport(placeholderRect.top + topOffsetRef.current, window.innerHeight)
     }
     iframeConnectedRef.current = true
   }
@@ -335,7 +340,7 @@ export default function SandboxedResourceConfigurator({
 
   useLayoutEffect(() => {
     updateFrameRect()
-  }, [layoutHeight, height])
+  }, [layoutHeight, height, topOffset])
 
   useEffect(() => {
     updateFrameRect()
@@ -378,7 +383,7 @@ export default function SandboxedResourceConfigurator({
 
   return (
     <>
-      <div ref={placeholderRef} style={{ height: layoutHeight }} />
+      <div ref={placeholderRef} style={{ height: layoutHeight + topOffset }} />
       {frameRect && createPortal(<iframe
         ref={iframeRef}
         srcDoc={frame.iframeHtml}
