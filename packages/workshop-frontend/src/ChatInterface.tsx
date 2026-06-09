@@ -1143,6 +1143,7 @@ export const ChatInput = ({
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
+  const overlayFrameRef = useRef<number | null>(null);
 
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
   const inputValueRef = useRef(inputValue);
@@ -1172,6 +1173,7 @@ export const ChatInput = ({
       mirror.style.border = `${cs.borderWidth} solid transparent`;
       mirror.style.height = `${textarea.offsetHeight}px`;
       mirror.style.width = `${textarea.offsetWidth}px`;
+      mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
     };
 
     // Initial sync.
@@ -1181,6 +1183,61 @@ export const ChatInput = ({
     observer.observe(textarea);
 
     return () => observer.disconnect();
+  }, []);
+
+  const syncMirrorScroll = (textarea: HTMLTextAreaElement) => {
+    const mirror = mirrorRef.current;
+    if (!mirror) return;
+    mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
+  };
+
+  const updateOverlayPosition = useCallback(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper || !activeUrl) {
+      wrapper?.style.removeProperty("--capsule-overlay-left");
+      wrapper?.style.removeProperty("--capsule-overlay-top");
+      wrapper?.style.removeProperty("--capsule-overlay-width");
+      wrapper?.style.setProperty("--capsule-overlay-visibility", "hidden");
+      return;
+    }
+
+    const textarea = wrapper.querySelector("textarea");
+    if (!textarea) {
+      wrapper.style.setProperty("--capsule-overlay-visibility", "hidden");
+      return;
+    }
+
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const textareaRect = textarea.getBoundingClientRect();
+
+    const maxWidth = Math.min(420, wrapperRect.width);
+    const left = 0;
+    const top = textareaRect.bottom - wrapperRect.top + 6;
+
+    wrapper.style.setProperty("--capsule-overlay-left", `${left}px`);
+    wrapper.style.setProperty("--capsule-overlay-top", `${top}px`);
+    wrapper.style.setProperty("--capsule-overlay-width", `${maxWidth}px`);
+    wrapper.style.setProperty("--capsule-overlay-visibility", "visible");
+  }, [activeUrl]);
+
+  const scheduleOverlayPositionUpdate = useCallback(() => {
+    if (overlayFrameRef.current !== null) return;
+    overlayFrameRef.current = requestAnimationFrame(() => {
+      overlayFrameRef.current = null;
+      updateOverlayPosition();
+    });
+  }, [updateOverlayPosition]);
+
+  useEffect(() => {
+    scheduleOverlayPositionUpdate();
+  }, [activeUrl, inputValue, scheduleOverlayPositionUpdate]);
+
+  useEffect(() => {
+    return () => {
+      if (overlayFrameRef.current !== null) {
+        cancelAnimationFrame(overlayFrameRef.current);
+      }
+    };
   }, []);
 
   // Reset overlay selection when the overlay appears or changes URL.
@@ -1628,36 +1685,35 @@ export const ChatInput = ({
 
   // Build the mirror div content: transparent text with highlighted capsule regions.
   const renderMirrorContent = () => {
-    if (capsules.length === 0) {
-      // No capsules — mirror is just invisible text (no highlights needed,
-      // but we still render it so the ResizeObserver can size it).
-      return <span>{inputValue || " "}</span>;
-    }
-
-    const sorted = [...capsules].sort((a, b) => a.start - b.start);
     const segments: React.ReactNode[] = [];
-    let pos = 0;
-
-    for (let i = 0; i < sorted.length; i++) {
-      const c = sorted[i];
-      // Text before this capsule.
-      if (c.start > pos) {
-        segments.push(
-          <span key={`t${i}`}>{inputValue.slice(pos, c.start)}</span>,
-        );
-      }
-      // Capsule highlight.
-      segments.push(
-        <span key={`c${i}`} className={styles.capsuleHighlight}>
-          {inputValue.slice(c.start, c.start + c.length)}
-        </span>,
-      );
-      pos = c.start + c.length;
+    const boundaries = new Set([0, inputValue.length]);
+    for (const capsule of capsules) {
+      boundaries.add(capsule.start);
+      boundaries.add(capsule.start + capsule.length);
     }
 
-    // Remaining text after last capsule.
-    if (pos < inputValue.length) {
-      segments.push(<span key="tail">{inputValue.slice(pos)}</span>);
+    const positions = [...boundaries]
+      .filter((position) => position >= 0 && position <= inputValue.length)
+      .sort((a, b) => a - b);
+
+    for (let i = 0; i < positions.length; i++) {
+      const start = positions[i];
+      const end = positions[i + 1];
+      if (end === undefined || end <= start) continue;
+
+      const text = inputValue.slice(start, end);
+      const capsule = capsules.find(
+        (c) => start >= c.start && end <= c.start + c.length,
+      );
+      if (capsule) {
+        segments.push(
+          <span key={`c${start}`} className={styles.capsuleHighlight}>
+            {text}
+          </span>,
+        );
+      } else {
+        segments.push(<span key={`t${start}`}>{text}</span>);
+      }
     }
 
     // Ensure at least a space so the div has nonzero height when empty.
@@ -1768,10 +1824,16 @@ export const ChatInput = ({
                 requestAnimationFrame(handleCursorChange);
                 // Auto-resize after value change
                 autoResizeTextarea(e.target, minRows, newChat ? 10 : 4);
+                syncMirrorScroll(e.target);
+                scheduleOverlayPositionUpdate();
               }}
               onSelect={handleCursorChange}
               onClick={handleCursorChange}
               onKeyUp={handleCursorChange}
+              onScroll={(e) => {
+                syncMirrorScroll(e.currentTarget);
+                scheduleOverlayPositionUpdate();
+              }}
               placeholder={
                 isAgentActive
                   ? "Waiting for agent…"
@@ -1802,7 +1864,10 @@ export const ChatInput = ({
               }}
               ref={(el) => {
                 // Initial auto-resize on mount
-                if (el) autoResizeTextarea(el, minRows, newChat ? 10 : 4);
+                if (el) {
+                  autoResizeTextarea(el, minRows, newChat ? 10 : 4);
+                  syncMirrorScroll(el);
+                }
               }}
               className="relative z-[1] w-full resize-none border-none bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive disabled:cursor-not-allowed disabled:text-kumo-inactive"
             />
