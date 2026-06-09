@@ -893,6 +893,17 @@ export async function runAgent(
   // side, ugh.
   let toolCallNotes = new Map<string, Partial<AiToolCall>>();
 
+  let flushCapturedYdocChanges = () => {
+    if (capturedYdocChanges.length === 0) {
+      return;
+    }
+
+    let update = Y.mergeUpdatesV2(capturedYdocChanges);
+    capturedYdocChanges = [];
+    hooks.addChatMessages(chatId, author, [{type: "changes", update}]);
+    ++nextChangeId;
+  };
+
   let agentContext = hooks.getChatAgentContext(chatId);
   let emitStreamEvent = (event: AiChatStreamEvent) => {
     hooks.emitChatStreamEvent(chatId, event);
@@ -1385,6 +1396,10 @@ export async function runAgent(
       }),
       execute: async ({code}, {toolCallId}) => {
         try {
+          // Make edits from previous tool steps visible to the gadget before running code
+          // against it. Later edits in this turn will still be batched until the next barrier.
+          flushCapturedYdocChanges();
+
           let output = await hooks.executeCodeMode(
               chatId, code, agentContext, initiator, author.id, capsules,
               delta => emitStreamEvent({
@@ -1630,11 +1645,8 @@ export async function runAgent(
     // Re-throw so errors propagate to the catch block in startAgent().
     await stream.consumeStream({ onError: (e) => { throw e; } });
   } finally {
-    // Flush all of the Y.Doc changes captured during this turn as a single "changes" message.
-    if (capturedYdocChanges.length > 0) {
-      let update = Y.mergeUpdatesV2(capturedYdocChanges);
-      hooks.addChatMessages(chatId, author, [{type: "changes", update}]);
-    }
+    // Flush any remaining Y.Doc changes captured during this turn as a single "changes" message.
+    flushCapturedYdocChanges();
   }
 }
 

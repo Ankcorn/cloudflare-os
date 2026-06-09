@@ -418,6 +418,10 @@ type PhosphorIcon = typeof MagnifyingGlass;
 
 type ActionChatMessage = Extract<AiChatMessage, { type: "action" }>;
 type ChangeChatMessage = Extract<AiChatMessage, { type: "changes" }>;
+type PendingTurnChanges = {
+  revertFrom: number;
+  through: number;
+};
 type ObservationChatMessage = ActionChatMessage & {
   actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
 };
@@ -3796,40 +3800,67 @@ function ChatInterface({
   }, [currentMessages, isAgentActive]);
 
   const pendingChangeByTurnItemSeq = useMemo(() => {
-    const out = new Map<number, Extract<AiChatMessage, { type: "changes" }>>();
+    const out = new Map<number, PendingTurnChanges>();
     let lastAgentMessageSeq: number | null = null;
     let lastVisibleWorkSeq: number | null = null;
+    let pendingTurnChanges: PendingTurnChanges | null = null;
+    let pendingTurnAnchorSeq: number | null = null;
+
+    const currentAnchorSeq = () => lastAgentMessageSeq ?? lastVisibleWorkSeq;
+
+    const attachPendingTurnChanges = () => {
+      if (!pendingTurnChanges) return;
+
+      const anchorSeq = currentAnchorSeq();
+      if (anchorSeq === null) return;
+
+      if (pendingTurnAnchorSeq !== null && pendingTurnAnchorSeq !== anchorSeq) {
+        out.delete(pendingTurnAnchorSeq);
+      }
+
+      out.set(anchorSeq, pendingTurnChanges);
+      pendingTurnAnchorSeq = anchorSeq;
+    };
+
+    const resetTurn = () => {
+      lastAgentMessageSeq = null;
+      lastVisibleWorkSeq = null;
+      pendingTurnChanges = null;
+      pendingTurnAnchorSeq = null;
+    };
 
     for (const m of currentMessages) {
       if (m.type === "message") {
         if (m.author.type === "user") {
-          lastAgentMessageSeq = null;
-          lastVisibleWorkSeq = null;
+          resetTurn();
         } else if (!isEmptyAssistantMessage(m)) {
           lastAgentMessageSeq = m.sequence;
           lastVisibleWorkSeq = m.sequence;
+          attachPendingTurnChanges();
         }
         continue;
       }
 
       if (isObservationActionMessage(m) || m.type === "useGadget") {
         lastVisibleWorkSeq = m.sequence;
+        attachPendingTurnChanges();
         continue;
       }
 
       if (m.type === "changes" && m.author.type === "user") {
-        lastAgentMessageSeq = null;
-        lastVisibleWorkSeq = null;
+        resetTurn();
         continue;
       }
 
       if (
         m.type === "changes" &&
         m.author.type !== "user" &&
-        (lastAgentMessageSeq !== null || lastVisibleWorkSeq !== null) &&
         (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
       ) {
-        out.set(lastAgentMessageSeq ?? lastVisibleWorkSeq!, m);
+        pendingTurnChanges = pendingTurnChanges === null
+          ? { revertFrom: m.sequence, through: m.sequence }
+          : { revertFrom: pendingTurnChanges.revertFrom, through: m.sequence };
+        attachPendingTurnChanges();
       }
     }
 
@@ -4466,7 +4497,7 @@ function ChatInterface({
                                 onToggle={toggleToolCallExpansion}
                                 footerChangeSequence={
                                   groupIndex === showFooterOnGroupIndex
-                                    ? pendingChange?.sequence
+                                    ? pendingChange?.revertFrom
                                     : undefined
                                 }
                                 footerTimestamp={
@@ -4475,7 +4506,7 @@ function ChatInterface({
                                     : undefined
                                 }
                                 footerIsTrailing={
-                                  pendingChange?.sequence === lastDurablePendingChange?.sequence
+                                  pendingChange?.through === lastDurablePendingChange?.sequence
                                 }
                                 footerDisabled={isAgentActive}
                                 onFooterRevert={handleRevertChanges}
@@ -4565,14 +4596,14 @@ function ChatInterface({
                                   )}
                                   {pendingChange && (() => {
                                     const label = getDiscardLabel(
-                                      pendingChange.sequence === lastDurablePendingChange?.sequence,
+                                      pendingChange.through === lastDurablePendingChange?.sequence,
                                     );
                                     return (
                                     <Tooltip content={label} asChild>
                                       <button
                                         type="button"
                                         disabled={isAgentActive}
-                                        onClick={() => handleRevertChanges(pendingChange.sequence)}
+                                        onClick={() => handleRevertChanges(pendingChange.revertFrom)}
                                         className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
                                         aria-label={label}
                                       >
@@ -4604,7 +4635,7 @@ function ChatInterface({
                                     onToggle={toggleToolCallExpansion}
                                     footerChangeSequence={
                                       groupIndex === showFooterOnGroupIndex
-                                        ? pendingChange?.sequence
+                                        ? pendingChange?.revertFrom
                                         : undefined
                                     }
                                     footerTimestamp={
@@ -4613,7 +4644,7 @@ function ChatInterface({
                                         : undefined
                                     }
                                     footerIsTrailing={
-                                      pendingChange?.sequence === lastDurablePendingChange?.sequence
+                                      pendingChange?.through === lastDurablePendingChange?.sequence
                                     }
                                     footerDisabled={isAgentActive}
                                     onFooterRevert={handleRevertChanges}
