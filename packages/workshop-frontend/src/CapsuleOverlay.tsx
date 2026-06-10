@@ -46,7 +46,10 @@ export default function CapsuleOverlay({ url, onSelectAccount, onRefine, onDismi
   }
 
   return (
-    <div ref={overlayRef} className={below ? styles.capsuleOverlayBelow : styles.capsuleOverlay}>
+    <div
+      ref={overlayRef}
+      className={below ? styles.capsuleOverlayBelow : styles.capsuleOverlay}
+    >
       <Text variant="secondary" as="span" DANGEROUS_className={styles.capsuleOverlayHeader}>
         Grant agent access to this resource
       </Text>

@@ -157,12 +157,13 @@
 .capsuleInputWrapper {
   position: relative;
   flex: 1;
+  overflow: hidden;
 }
 .capsuleMirror {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
   pointer-events: none;
-  overflow: hidden;
+  overflow: visible;
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: break-word;
@@ -170,11 +171,12 @@
   color: transparent;
   z-index: 0;
 }
+
 .capsuleHighlight {
   background-color: var(--color-selection-bg);
   border: 1px solid var(--color-kumo-brand);
   border-radius: 10px;
-  padding: 0 2px;
+  padding: 0 0.5px;
   margin: 0 -3px;
   color: transparent;
 }
