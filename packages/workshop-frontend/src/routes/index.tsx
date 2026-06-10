@@ -136,17 +136,23 @@ function HomePage() {
         />
         <MeshBackground />
         <div className="max-w-lg xl:max-w-xl w-full relative">
-          <div className="mb-8">
-            <h1 className="text-4xl sm:text-5xl font-semibold tracking-tight leading-tight text-kumo-default">
-              What do you want to create?
+          <div className="relative mb-8">
+            <Hexagon
+              aria-hidden="true"
+              className="pointer-events-none absolute -right-2 -top-8 rotate-12 text-kumo-brand opacity-[0.08] sm:right-2 sm:top-[-2.75rem]"
+              size={112}
+              weight="bold"
+            />
+            <h1 className="relative text-4xl sm:text-5xl font-semibold tracking-tight leading-tight text-kumo-default">
+              What are we working on?
             </h1>
             <p className="mt-3 text-base text-kumo-subtle max-w-md">
-              Describe your gadget, connect your data sources, and we&apos;ll
-              build it on Cloudflare Workers.
+              Ask a question, build an app, or create an agent that works with
+              your tools and data.
             </p>
           </div>
 
-          <div className="relative isolate w-full max-w-2xl mx-auto group/prompt">
+          <div className="relative isolate -mx-4 w-[calc(100%+2rem)] max-w-2xl group/prompt">
             <div className="prompt-glow group-focus-within/prompt:opacity-0 transition-opacity" />
             <ChatInput
               createCapsuleGatekeeper={createCapsuleGatekeeper}
