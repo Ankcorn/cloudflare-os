@@ -1522,6 +1522,9 @@ export async function runAgent(
     maxOutputTokens,
     providerOptions: {
       anthropic: { thinking: { type: 'adaptive' } },
+      // Keep OpenAI requests stateless because Zero Data Retention organizations cannot reuse
+      // stored response item IDs. The provider carries encrypted reasoning between tool steps.
+      openai: { store: false },
     },
 
     // streamText swallows API errors by default — it enqueues them as stream
