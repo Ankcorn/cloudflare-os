@@ -12,6 +12,8 @@ import type { GitHubRepoConfiguratorRpc } from "./configurator/github-repo-confi
 type ConfiguratorOption = { value: string; title: string; subtitle?: string; meta?: string };
 
 const AUTOCOMPLETE_OPTION_LIMIT = 100;
+const GITHUB_OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+const GITHUB_REPO_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 const githubTokenGetters = new WeakMap<object, () => Promise<string>>();
 // Per-instance cache of the authenticated user's login. Used to scope `searchRepos` to repos
@@ -46,9 +48,23 @@ function repoToOption(repo: GitHubRepoResponse): ConfiguratorOption {
   };
 }
 
-function splitRepoFullName(fullName: string): { owner: string; repo: string } | null {
-  const [owner, repo, ...rest] = fullName.split("/");
-  if (!owner || !repo || rest.length > 0) return null;
+function splitRepoFullName(input: string): { owner: string; repo: string } | null {
+  let fullName = input.trim();
+
+  if (/^https?:\/\//i.test(fullName)) {
+    try {
+      const url = new URL(fullName);
+      if (url.hostname.toLowerCase() !== "github.com") return null;
+      fullName = url.pathname.replace(/^\/+|\/+$/g, "");
+    } catch {
+      return null;
+    }
+  }
+
+  const [owner, rawRepo, ...rest] = fullName.split("/");
+  if (!owner || !rawRepo || rest.length > 0) return null;
+  const repo = rawRepo.replace(/\.git$/i, "");
+  if (!GITHUB_OWNER_PATTERN.test(owner) || !GITHUB_REPO_PATTERN.test(repo)) return null;
   return { owner, repo };
 }
 
@@ -124,9 +140,11 @@ export class GitHubRepoConfiguratorUI extends RpcTarget implements GitHubRepoCon
     }
 
     // Query: hit GitHub's /search/repositories scoped to the authenticated user.
+    const exactRepo = splitRepoFullName(trimmedQuery);
+    const normalizedQuery = exactRepo ? `${exactRepo.owner}/${exactRepo.repo}` : trimmedQuery;
     const login = await viewerLogin(this);
     const repos = await api.searchRepos({
-      q: `${trimmedQuery} user:${login} fork:true`,
+      q: `${normalizedQuery} user:${login} fork:true`,
       per_page: AUTOCOMPLETE_OPTION_LIMIT,
       page: 1,
       sort: "updated",
@@ -134,9 +152,8 @@ export class GitHubRepoConfiguratorUI extends RpcTarget implements GitHubRepoCon
     });
     const matches = repos.map(repoToOption);
 
-    // Fall back to a direct lookup for exact "owner/repo" inputs that search didn't return.
-    const exactRepo = splitRepoFullName(trimmedQuery);
-    if (exactRepo && !matches.some(option => option.value.toLowerCase() === trimmedQuery.toLowerCase())) {
+    // Fall back to a direct lookup for exact names or URLs that scoped search didn't return.
+    if (exactRepo && !matches.some(option => option.value.toLowerCase() === normalizedQuery.toLowerCase())) {
       try {
         const repo = await api.getRepo(exactRepo.owner, exactRepo.repo);
         matches.unshift(repoToOption(repo));

@@ -15,11 +15,11 @@ export default {
 
   render({ values, setValues, ui }) {
     return <Section>
-      <Field label="Repository" description="Search repositories you can access.">
+      <Field label="Repository" description="Search your repositories, or enter a GitHub URL.">
         <Autocomplete
           name="repoFullName"
           value={values.repoFullName}
-          placeholder="Search repositories..."
+          placeholder="Search or paste a repository URL..."
           loadOptions={query => ui.listRepos(query)}
           onChange={repoFullName => setValues({ repoFullName, pullNumber: null })}
         />
