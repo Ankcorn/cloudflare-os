@@ -1,10 +1,9 @@
 /* Floating overlay that appears above the textarea when cursor is in a URL */
 .capsuleOverlay {
   position: absolute;
-  left: var(--capsule-overlay-left, 0);
-  top: var(--capsule-overlay-top, 0);
-  width: var(--capsule-overlay-width, min(420px, 100%));
-  visibility: var(--capsule-overlay-visibility, hidden);
+  bottom: calc(100% + 4px);
+  left: 0;
+  width: min(420px, 100%);
   z-index: 1000;
   background: white;
   border: 1px solid #e8e8e8;
@@ -16,10 +15,9 @@
 
 .capsuleOverlayBelow {
   position: absolute;
-  left: var(--capsule-overlay-left, 0);
-  top: var(--capsule-overlay-top, 0);
-  width: var(--capsule-overlay-width, min(420px, 100%));
-  visibility: var(--capsule-overlay-visibility, hidden);
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(420px, 100%);
   z-index: 1000;
   background: white;
   border: 1px solid #e8e8e8;

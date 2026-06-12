@@ -157,7 +157,13 @@
 .capsuleInputWrapper {
   position: relative;
   flex: 1;
+}
+.capsuleMirrorClip {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
   overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
 }
 .capsuleMirror {
   position: absolute;
@@ -169,7 +175,6 @@
   overflow-wrap: break-word;
   box-sizing: border-box;
   color: transparent;
-  z-index: 0;
 }
 
 .capsuleHighlight {
