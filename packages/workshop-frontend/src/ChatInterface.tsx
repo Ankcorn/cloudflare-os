@@ -1147,7 +1147,6 @@ export const ChatInput = ({
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
-  const overlayFrameRef = useRef<number | null>(null);
 
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
   const inputValueRef = useRef(inputValue);
@@ -1194,55 +1193,6 @@ export const ChatInput = ({
     if (!mirror) return;
     mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
   };
-
-  const updateOverlayPosition = useCallback(() => {
-    const wrapper = wrapperRef.current;
-    if (!wrapper || !activeUrl) {
-      wrapper?.style.removeProperty("--capsule-overlay-left");
-      wrapper?.style.removeProperty("--capsule-overlay-top");
-      wrapper?.style.removeProperty("--capsule-overlay-width");
-      wrapper?.style.setProperty("--capsule-overlay-visibility", "hidden");
-      return;
-    }
-
-    const textarea = wrapper.querySelector("textarea");
-    if (!textarea) {
-      wrapper.style.setProperty("--capsule-overlay-visibility", "hidden");
-      return;
-    }
-
-    const wrapperRect = wrapper.getBoundingClientRect();
-    const textareaRect = textarea.getBoundingClientRect();
-
-    const maxWidth = Math.min(420, wrapperRect.width);
-    const left = 0;
-    const top = textareaRect.bottom - wrapperRect.top + 6;
-
-    wrapper.style.setProperty("--capsule-overlay-left", `${left}px`);
-    wrapper.style.setProperty("--capsule-overlay-top", `${top}px`);
-    wrapper.style.setProperty("--capsule-overlay-width", `${maxWidth}px`);
-    wrapper.style.setProperty("--capsule-overlay-visibility", "visible");
-  }, [activeUrl]);
-
-  const scheduleOverlayPositionUpdate = useCallback(() => {
-    if (overlayFrameRef.current !== null) return;
-    overlayFrameRef.current = requestAnimationFrame(() => {
-      overlayFrameRef.current = null;
-      updateOverlayPosition();
-    });
-  }, [updateOverlayPosition]);
-
-  useEffect(() => {
-    scheduleOverlayPositionUpdate();
-  }, [activeUrl, inputValue, scheduleOverlayPositionUpdate]);
-
-  useEffect(() => {
-    return () => {
-      if (overlayFrameRef.current !== null) {
-        cancelAnimationFrame(overlayFrameRef.current);
-      }
-    };
-  }, []);
 
   // Reset overlay selection when the overlay appears or changes URL.
   useEffect(() => {
@@ -1814,12 +1764,13 @@ export const ChatInput = ({
                 activateRef={overlayActivateRef}
               />
             )}
-            <div
-              ref={mirrorRef}
-              className={styles.capsuleMirror}
-              aria-hidden="true"
-            >
-              {renderMirrorContent()}
+            <div className={styles.capsuleMirrorClip} aria-hidden="true">
+              <div
+                ref={mirrorRef}
+                className={styles.capsuleMirror}
+              >
+                {renderMirrorContent()}
+              </div>
             </div>
             <textarea
               value={inputValue}
@@ -1829,14 +1780,12 @@ export const ChatInput = ({
                 // Auto-resize after value change
                 autoResizeTextarea(e.target, minRows, newChat ? 10 : 4);
                 syncMirrorScroll(e.target);
-                scheduleOverlayPositionUpdate();
               }}
               onSelect={handleCursorChange}
               onClick={handleCursorChange}
               onKeyUp={handleCursorChange}
               onScroll={(e) => {
                 syncMirrorScroll(e.currentTarget);
-                scheduleOverlayPositionUpdate();
               }}
               placeholder={
                 isAgentActive

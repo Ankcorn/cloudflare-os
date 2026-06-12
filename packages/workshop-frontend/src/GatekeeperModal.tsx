@@ -26,6 +26,7 @@ import ResourceConfiguratorHost from './ResourceConfiguratorHost'
 import { AgentSpawnerConfigForm } from './gatekeeper-modal/AgentSpawnerConfigForm'
 import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionConfig'
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
+import { matchesResourceUrl } from './resourceMatching'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -381,7 +382,12 @@ export default function GatekeeperModal({
         connection.vendor,
         connection.description,
       ].join(' ').toLowerCase()
-      return query.split(/\s+/).every(token => haystack.includes(token))
+      const matchesText = query.split(/\s+/).every(token => haystack.includes(token))
+      const matchesUrl = query.length >= 3 &&
+        connection.resourceUrlPattern !== undefined &&
+        connection.resourceUrlPattern !== 'https://*' &&
+        matchesResourceUrl(query, connection.resourceUrlPattern)
+      return matchesText || matchesUrl
     })
   }, [allConnections, searchText])
 
