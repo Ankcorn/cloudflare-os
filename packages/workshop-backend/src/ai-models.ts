@@ -131,7 +131,7 @@ export type LanguageModelGatekeeperProps = {
 
 export class LanguageModelGatekeeper
     extends DurableObject<Cloudflare.Env, LanguageModelGatekeeperProps>
-    implements Gatekeeper<LanguageModelBinding, number, undefined> {
+    implements Gatekeeper<LanguageModelBinding> {
   async describe(): Promise<ResourceDescription> {
     let modelConfig = this.ctx.props.config;
     let displayName = this.ctx.props.displayName;
@@ -153,7 +153,7 @@ export class LanguageModelGatekeeper
     return AI_MODEL_BINDING_TYPES;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator);
     return new LanguageModelBindingImpl(model);
@@ -165,7 +165,7 @@ export class LanguageModelGatekeeper
   rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: number, revertInfo: undefined):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }

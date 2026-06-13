@@ -1037,10 +1037,21 @@ type PendingActionRow = {
   submittedAt: number;
 };
 
+// Internal storage row for actions that have been applied. Retained so that revertAction() can
+// look up the information needed to undo the action. The overseer only passes back the action ID,
+// so all revert information lives here in DO storage rather than being round-tripped through the
+// overseer.
+type AppliedActionRow = {
+  id: number;
+  action: HomeAssistantAction;
+  revertInfo: HomeAssistantRevertInfo;
+  appliedAt: number;
+};
+
 @validateRpc()
 export class HomeAssistantGatekeeperImpl
   extends DurableObject<Env, HomeAssistantGatekeeperImplProps>
-  implements Gatekeeper<HomeAssistantSession | Area | Label | Device | Entity, HomeAssistantAction, HomeAssistantRevertInfo>
+  implements Gatekeeper<HomeAssistantSession | Area | Label | Device | Entity>
 {
   #userAccount() {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
@@ -1126,7 +1137,7 @@ export class HomeAssistantGatekeeperImpl
   }
 
   async startSession(
-    approvalQueue: RpcStub<ApprovalQueue<HomeAssistantAction>>,
+    approvalQueue: RpcStub<ApprovalQueue>,
   ): Promise<HomeAssistantSession | Area | Label | Device | Entity> {
     const ctx = await this.#sessionContext(approvalQueue.dup());
     const { resourceKind, resourceId } = this.ctx.props;
@@ -1144,9 +1155,13 @@ export class HomeAssistantGatekeeperImpl
     }
   }
 
-  async applyAction(
-    action: HomeAssistantAction,
-  ): Promise<void | { revertInfo?: HomeAssistantRevertInfo }> {
+  async applyAction(actionId: number): Promise<void> {
+    // The overseer only knows the numeric action ID; the full action lives in DO storage.
+    const pending = this.#getPending(actionId);
+    if (!pending) {
+      throw new Error(`No queued Home Assistant action exists with id ${actionId}.`);
+    }
+    const action = pending.action;
     const creds = await this.#getCreds();
 
     let revertInfo: HomeAssistantRevertInfo;
@@ -1164,26 +1179,31 @@ export class HomeAssistantGatekeeperImpl
         await this.#userAccount().noteCredentialsExpired();
       }
       throw e;
-    } finally {
-      this.#deletePending(action.id);
     }
 
-    return { revertInfo };
+    // Action succeeded: move the row from "pending" to "applied", storing the revert info so a
+    // later revertAction() can find it (the overseer passes back only the action ID).
+    this.#storeApplied(action, revertInfo);
+    this.#deletePending(actionId);
   }
 
-  async rejectAction(action: HomeAssistantAction): Promise<void | { restart?: boolean }> {
-    this.#deletePending(action.id);
+  async rejectAction(actionId: number): Promise<void | { restart?: boolean }> {
+    this.#deletePending(actionId);
     // No simulation state to clean up yet; once Phase 2 (caching/simulation) lands this may
     // need to invalidate overlays. For now, rejection is a no-op apart from clearing storage.
   }
 
   async revertAction(
-    _action: HomeAssistantAction,
-    revertInfo: HomeAssistantRevertInfo,
+    actionId: number,
   ): Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
-    // The original action is preserved inside `revertInfo` (stateSnapshot.originalAction or
-    // dashboardSnapshot) for every branch that needs it, so we don't reference the parameter
-    // directly here.
+    // The overseer passes back only the action ID; we stored everything we need (including the
+    // original action, inside `stateSnapshot.originalAction` / `dashboardSnapshot`) under
+    // `applied:<id>` when the action was applied.
+    const applied = this.#getApplied(actionId);
+    if (!applied) {
+      throw new Error(`No applied Home Assistant action exists with id ${actionId}.`);
+    }
+    const revertInfo = applied.revertInfo;
     const creds = await this.#getCreds();
     switch (revertInfo.type) {
       case "noRevert":
@@ -1232,7 +1252,7 @@ export class HomeAssistantGatekeeperImpl
   // Internal helpers
 
   async #sessionContext(
-    approvalQueue: RpcStub<ApprovalQueue<HomeAssistantAction>>,
+    approvalQueue: RpcStub<ApprovalQueue>,
   ): Promise<SessionContext> {
     const creds = await this.#getCreds();
     return this.#buildSessionContext(creds, approvalQueue);
@@ -1242,7 +1262,7 @@ export class HomeAssistantGatekeeperImpl
    * SessionContext given already-resolved credentials and an already-dup'd approvalQueue. */
   #buildSessionContext(
     creds: HomeAssistantCredentials,
-    approvalQueue: RpcStub<ApprovalQueue<HomeAssistantAction>>,
+    approvalQueue: RpcStub<ApprovalQueue>,
   ): SessionContext {
     const self = this;
     let disposed = false;
@@ -1291,7 +1311,7 @@ export class HomeAssistantGatekeeperImpl
         }
 
         try {
-          await approvalQueue.submitAction(action, description);
+          await approvalQueue.submitAction(id, description);
         } catch (e) {
           // The submit failed (e.g., the approval queue stub is gone). Drop the pending row.
           self.#deletePending(id);
@@ -1359,9 +1379,10 @@ export class HomeAssistantGatekeeperImpl
       .sort((a, b) => a.id - b.id);
   }
 
-  // Pending-action storage (KV layout):
+  // Action storage (KV layout):
   //   counter:nextActionId  → number
-  //   pending:<id>          → PendingActionRow
+  //   pending:<id>          → PendingActionRow  (submitted, awaiting approval)
+  //   applied:<id>          → AppliedActionRow  (approved + applied; retains revert info)
 
   #nextActionId(): number {
     const v = (this.ctx.storage.kv.get<number>("counter:nextActionId") ?? 0) + 1;
@@ -1369,8 +1390,28 @@ export class HomeAssistantGatekeeperImpl
     return v;
   }
 
+  #getPending(id: number): PendingActionRow | undefined {
+    return this.ctx.storage.kv.get<PendingActionRow>(`pending:${id}`);
+  }
+
   #deletePending(id: number): void {
     this.ctx.storage.kv.delete(`pending:${id}`);
+  }
+
+  /** Record an applied action along with the info needed to revert it later. Keyed by the
+   * action's numeric ID so revertAction() can look it up (the overseer passes back only the ID). */
+  #storeApplied(action: HomeAssistantAction, revertInfo: HomeAssistantRevertInfo): void {
+    const row: AppliedActionRow = {
+      id: action.id,
+      action,
+      revertInfo,
+      appliedAt: Date.now(),
+    };
+    this.ctx.storage.kv.put<AppliedActionRow>(`applied:${action.id}`, row);
+  }
+
+  #getApplied(id: number): AppliedActionRow | undefined {
+    return this.ctx.storage.kv.get<AppliedActionRow>(`applied:${id}`);
   }
 
   async #snapshotForRevert(
@@ -1442,7 +1483,7 @@ export class HomeAssistantGatekeeperImpl
 
 interface SessionContext {
   creds: HomeAssistantCredentials;
-  approvalQueue: RpcStub<ApprovalQueue<HomeAssistantAction>>;
+  approvalQueue: RpcStub<ApprovalQueue>;
   noteAuthError: () => Promise<void>;
 
   /** Dispose the dup'd approvalQueue RpcStub held in this context. Idempotent: safe to call

@@ -295,18 +295,6 @@ class MyConfiguratorUI extends RpcTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Action types — use `never` if the gatekeeper has no side-effecting actions
-
-type MyAction = {
-  type: "myActionType";
-  // ... fields fully describing the action
-};
-
-type MyRevertInfo = {
-  // ... data needed to undo the action
-};
-
-// ---------------------------------------------------------------------------
 // Hook type — remove this section if the gatekeeper doesn't support hooks.
 // Intersect the hook interface from types.d.ts with WorkerEntrypoint so it satisfies the
 // Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
@@ -322,7 +310,7 @@ type MyGatekeeperImplProps = {
 };
 
 export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
-    implements Gatekeeper<MySession, MyAction, MyRevertInfo, MyHook> {
+    implements Gatekeeper<MySession, MyHook> {
 
   async describe(): Promise<ResourceDescription> {
     return {
@@ -339,35 +327,32 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
     return TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<MyAction>>): Promise<MySession> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<MySession> {
     return new MySessionImpl(
       approvalQueue.dup(),  // Always dup() before storing
       // ... API client, props, etc.
     );
   }
 
-  async applyAction(action: MyAction): Promise<void | { revertInfo?: MyRevertInfo }> {
-    switch (action.type) {
-      case "myActionType":
-        // TODO: Perform the action against the external service
-        return { revertInfo: { /* ... */ } };
-      default:
-        throw new Error(`Unknown action type: ${(action as any).type}`);
-    }
+  async applyAction(actionId: number): Promise<void> {
+    // Look up the action by ID from this gatekeeper's own storage, then perform it
+    // against the external service.
+    // TODO: Implement action lookup and execution.
+    throw new Error(`Unknown action: ${actionId}`);
   }
 
-  async rejectAction(action: MyAction): Promise<void | { restart?: boolean }> {
+  async rejectAction(actionId: number): Promise<void | { restart?: boolean }> {
     // Clean up simulation state for this action.
     // Return { restart: true } if the session can't recover from rejection.
   }
 
-  revertAction(action: MyAction, revertInfo: MyRevertInfo):
+  revertAction(actionId: number):
       Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
-    // TODO: Undo the action using revertInfo
+    // TODO: Undo the action (look up what was done from own storage)
     throw new Error("Revert not implemented");
   }
 
-  async setHook(hook: Fetcher<HookInitiator<MyHook, MyAction>> | null): Promise<void> {
+  async setHook(hook: Fetcher<HookInitiator<MyHook>> | null): Promise<void> {
     // Remove the Hook type parameter from Gatekeeper<> above if hooks are not supported.
     // If hooks are supported, store the HookInitiator Fetcher and call its startHook()
     // method when an event arrives. startHook() returns {hook, approvalQueue} -- use the
@@ -379,9 +364,9 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
 // SessionImpl — the RPC interface exposed to the Gadget
 
 class MySessionImpl extends RpcTarget implements MySession {
-  #approvalQueue: ApprovalQueue<MyAction>;
+  #approvalQueue: ApprovalQueue;
 
-  constructor(approvalQueue: ApprovalQueue<MyAction>) {
+  constructor(approvalQueue: ApprovalQueue) {
     super();
     this.#approvalQueue = approvalQueue;
   }
@@ -399,10 +384,12 @@ class MySessionImpl extends RpcTarget implements MySession {
   }
 
   // Example: action (side effect). Submit for approval; do NOT perform here.
+  // Assign a sequential action ID, store the action details in the gatekeeper's
+  // own storage, then submit the ID to the approval queue.
   async updateData(newValue: string): Promise<void> {
-    let action: MyAction = { type: "myActionType" };
+    let actionId = /* assign next sequential ID and store action details */ 0;
 
-    await this.#approvalQueue.submitAction(action, {
+    await this.#approvalQueue.submitAction(actionId, {
       title: "Update data",
       description: `Update value to: ${newValue}`,
       implementsRevert: true,

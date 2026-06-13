@@ -324,8 +324,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 //
 // The Gatekeeper executes as a Durable Object Facet, where it is a child of the Overseer. This
 // interface is exposed to the Overseer, not directly to the Gadget.
-export interface Gatekeeper<
-    Session, Action = any, RevertInfo = any, Hook extends WorkerEntrypoint = WorkerEntrypoint>
+export interface Gatekeeper<Session, Hook extends WorkerEntrypoint = WorkerEntrypoint>
     extends DurableObject {
   // Get more info on the specific resource without actually granting access. This information is
   // to be presented to the user in the UI, before the user actually confirms they want to grant
@@ -351,21 +350,15 @@ export interface Gatekeeper<
   // dependent actions. That said, there is no strict requirement that a gatekeeper does such
   // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
   // particular API.
-  startSession(approvalQueue: RpcStub<ApprovalQueue<Action>>): Promise<Session>;
+  startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<Session>;
 
   // ---------------------------------------------------------------------------
   // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
-  // for approval via the ApprovalCallback.
+  // for approval via the ApprovalQueue.
   //
-  // The type `Action` is an arbitrary type defined by the gatekeeper to represent the actions
-  // it has queued for approval. It is passed to the Overseer via the ApprovalCallback, and will
-  // be passed back verbatim to these methods. The gatekeeper might choose to define `Action` to
-  // fully describe the action, or it might simply be an ID pointing into the gatekeeper's own
-  // storage; this is entirely up to the gatekeeper to decide.
-  //
-  // TODO(someday): If we make it possible to persist RPC stubs, then `Action` could become an
-  //   RPC interface, and these methods could be methods on that interface instead of on
-  //   `Gatekeeper`.
+  // Each action is identified by a sequential integer action ID, assigned by the gatekeeper when
+  // it submits the action for approval. The action ID is passed back to these methods so the
+  // gatekeeper can look up the action details in its own storage.
 
   // Action was approved. This call should apply the action (or schedule it to be applied).
   //
@@ -375,10 +368,7 @@ export interface Gatekeeper<
   // Depending on policy conditions, an action may be approved and applied automatically. However,
   // the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode
   // in which it's OK to skip the check.
-  //
-  // If `revertInfo` is provided, this is an arbitrary value which the overseer should pass back to
-  // the gatekeeper if `revertAction()` is later called to attempt to revert this action.
-  applyAction(action: Action): Promise<void | {revertInfo?: RevertInfo}>;
+  applyAction(action: number): Promise<void>;
 
   // Indicates that an action was rejected by the user. The gatekeeper should clean up any
   // associated storage.
@@ -387,7 +377,7 @@ export interface Gatekeeper<
   // This is sometimes needed by gatekeepers that simulate actions as if they had been approved --
   // the session may be in a state that is difficult to roll back without confusing the Gadget.
   // The Overseer will take care of the restart, possibly after rejecting other actions.
-  rejectAction(action: Action): Promise<void | {restart?: boolean}>;
+  rejectAction(action: number): Promise<void | {restart?: boolean}>;
 
   // Attempts to revert an action that was already applied.
   //
@@ -407,20 +397,20 @@ export interface Gatekeeper<
   // option to revert.
   //
   // `restart` has the same meaning as for `rejectAction()`.
-  revertAction(action: Action, revertInfo: RevertInfo):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}>;
 
   // If the gatekeeper offers a hook, set the hook. Setting to `null` disables the hook.
   //
   // If the gatekeeper doesn't offer a hook, this does nothing.
-  setHook(hook: Fetcher<HookInitiator<Hook, Action>> | null): Promise<void>;
+  setHook(hook: Fetcher<HookInitiator<Hook>> | null): Promise<void>;
 }
 
 // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
 // action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
-export interface ApprovalQueue<Action> extends RpcTarget {
+export interface ApprovalQueue extends RpcTarget {
   // TODO: Method to indicate that the gadget tried to perform an action that the gatekeeper itself
   //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
   //   system should direct the user to the right UI to authorize the action.
@@ -444,28 +434,28 @@ export interface ApprovalQueue<Action> extends RpcTarget {
   // be carried out until much later. It's intended that the user might not approve actions until
   // hours or days later, but this shouldn't cause any problems.
   //
-  // `Action` is an arbitrary type defined by the gatekeeper, which describes the action to be
-  // performed. The value `action` will be passed back to the Gatekeeper's applyAction() or
-  // rejectAction() when the action is later approved or rejected.
+  // `action` is a sequential integer action ID assigned by the gatekeeper. It will be passed back
+  // to the Gatekeeper's applyAction() or rejectAction() when the action is later approved or
+  // rejected.
   //
   // `description` describes the action in a way that can direct UI representation and policy
   // enforcement details.
   //
   // TODO: It would be nice if we can link this with the output gate so that if the submission
   //   does not complete, any SQL writes performed just before submit() are rolled back...
-  submitAction(action: Action, description: ActionDescription): Promise<void>;
+  submitAction(action: number, description: ActionDescription): Promise<void>;
 }
 
 // Callback the Gatekeeper uses to invoke a hook when the corresponding event arrives, including
 // recording the actions / observations.
-export interface HookInitiator<Hook extends WorkerEntrypoint, Action> extends WorkerEntrypoint {
+export interface HookInitiator<Hook extends WorkerEntrypoint> extends WorkerEntrypoint {
   // Indicates that the hook is about to be invoked.
   //
   // This returns an ApprovalQueue which the gatekeeper may use to register observations and
   // actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
   // observation. Some hooks may pass callbacks or interpret the return value in a way that causes
   // side effects, which should be registered as actions.
-  startHook(): Promise<{hook: Fetcher<Hook>, approvalQueue: ApprovalQueue<Action>}>;
+  startHook(): Promise<{hook: Fetcher<Hook>, approvalQueue: ApprovalQueue}>;
 }
 
 export type ObservationDescription = {

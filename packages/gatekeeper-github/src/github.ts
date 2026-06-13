@@ -1304,7 +1304,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
 @validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
-  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest, number, undefined> {
+  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -3126,7 +3126,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async submitActionForApproval(
-    approvalQueue: ApprovalQueue<number>,
+    approvalQueue: ApprovalQueue,
     action: GitHubAction,
     description: ActionDescription,
   ): Promise<void> {
@@ -3143,7 +3143,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     this.#clearCaches();
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>): Promise<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
     const queue = approvalQueue.dup();
     switch (this.ctx.props.resourceKind) {
       case "repo":
@@ -3407,7 +3407,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return;
   }
 
-  async revertAction(actionId: number, _revertInfo: undefined): Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
+  async revertAction(actionId: number): Promise<void | { message?: string; canRetry?: boolean; restart?: boolean }> {
     const record = this.#requireActionRecord(actionId);
     const action = record.action;
     const revertInfo = record.revertInfo;
@@ -3684,16 +3684,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 @validateRpc()
 class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
   #gatekeeper: GitHubGatekeeperImpl;
-  #approvalQueue: RpcStub<ApprovalQueue<number>>;
+  #approvalQueue: RpcStub<ApprovalQueue>;
 
-  constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue<number>>) {
+  constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>) {
     super();
     this.#gatekeeper = gatekeeper;
     this.#approvalQueue = approvalQueue;
   }
 
   [Symbol.dispose](): void {
-    (this.#approvalQueue as RpcStub<ApprovalQueue<number>> & { [Symbol.dispose](): void })[Symbol.dispose]();
+    (this.#approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
   }
 
   async getMetadata(): Promise<GitHubRepoMetadata> {
@@ -3779,13 +3779,13 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
 @validateRpc()
 class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
   protected gatekeeper: GitHubGatekeeperImpl;
-  protected approvalQueue: RpcStub<ApprovalQueue<number>>;
+  protected approvalQueue: RpcStub<ApprovalQueue>;
   protected logicalId: string;
   protected kind: EntityKind;
 
   constructor(
     gatekeeper: GitHubGatekeeperImpl,
-    approvalQueue: RpcStub<ApprovalQueue<number>>,
+    approvalQueue: RpcStub<ApprovalQueue>,
     logicalId: string,
     kind: EntityKind,
   ) {
@@ -3797,7 +3797,7 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
   }
 
   [Symbol.dispose](): void {
-    (this.approvalQueue as RpcStub<ApprovalQueue<number>> & { [Symbol.dispose](): void })[Symbol.dispose]();
+    (this.approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
   }
 
   protected async authorizeMutationPreparation(action: string): Promise<void> {
@@ -3896,7 +3896,7 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
 
 @validateRpc()
 class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest {
-  constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue<number>>, logicalId: string) {
+  constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>, logicalId: string) {
     super(gatekeeper, approvalQueue, logicalId, "pull");
   }
 

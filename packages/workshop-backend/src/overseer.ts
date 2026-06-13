@@ -217,7 +217,7 @@ type ActionRecord = {
 } & ({
   type: "action";
   appliedAt?: Date;
-  action: any;
+  action: number;  // action key assigned by the gatekeeper, passed back on apply/reject/revert
   description: ActionDescription;
 } | {
   type: "observation";
@@ -1283,7 +1283,7 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
-  async submitAction(gatekeeperId: number, action: any,
+  async submitAction(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
       : Promise<void> {
     if (this.storage.prohibitAllSharing.get()) {
@@ -2700,7 +2700,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  createHookApprovalQueue(gatekeeperId: number): ApprovalQueueImpl<any> {
+  createHookApprovalQueue(gatekeeperId: number): ApprovalQueueImpl {
     return new ApprovalQueueImpl(this.impl, gatekeeperId, {from: "hook"});
   }
 
@@ -2865,7 +2865,7 @@ type GatekeeperHookLoopbackProps = {
 // the dynamic worker back up again without the overseer's help).
 export class GatekeeperHookLoopback
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
-    implements HookInitiator<WorkerEntrypoint, any> {
+    implements HookInitiator<WorkerEntrypoint> {
   async startHook() {
     let ns = this.ctx.exports.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
@@ -3500,7 +3500,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
-    // TODO: Store `revertInfo`.
     await gatekeeper.applyAction(action.action);
 
     action.state = "approved";
@@ -3524,7 +3523,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
-    // TODO: Store `revertInfo`.
     await gatekeeper.rejectAction(action.action);
 
     action.state = "rejected";
@@ -4655,7 +4653,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 }
 
 @validateRpc()
-class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Action> {
+class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   constructor(private impl: OverseerImpl, private gatekeeperId: number,
               private caller: GatekeeperCaller) {
     super();
@@ -4665,7 +4663,7 @@ class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Actio
     return this.impl.authorizeObservation(this.gatekeeperId, description, this.caller);
   }
 
-  submitAction(action: Action, description: ActionDescription): Promise<void> {
+  submitAction(action: number, description: ActionDescription): Promise<void> {
     return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
   }
 }
@@ -4688,7 +4686,7 @@ import AGENT_SPAWNER_BINDING_TYPES from "./agent-spawner-binding.txt";
 
 export class AgentSpawnerGatekeeper
     extends DurableObject<Cloudflare.Env, AgentSpawnerBindingProps>
-    implements Gatekeeper<AgentSpawnerBinding, number, undefined> {
+    implements Gatekeeper<AgentSpawnerBinding> {
   async describe(): Promise<ResourceDescription> {
     return {
       // TODO: Decide if we need real URLs or if `url` should stop being part of the description.
@@ -4707,7 +4705,7 @@ export class AgentSpawnerGatekeeper
     return AGENT_SPAWNER_BINDING_TYPES;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<AgentSpawnerBinding> {
     return new AgentSpawnerBindingImpl(this.ctx);
   }
@@ -4718,7 +4716,7 @@ export class AgentSpawnerGatekeeper
   rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: number, revertInfo: undefined):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }

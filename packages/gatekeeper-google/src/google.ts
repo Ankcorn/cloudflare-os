@@ -656,7 +656,7 @@ class PendingActionStore<Action> {
 @validateRpc()
 class GmailSessionImpl extends RpcTarget implements GmailSession {
   #gmailApi: GmailApi;
-  #approvalQueue: ApprovalQueue<number>;
+  #approvalQueue: ApprovalQueue;
   #pendingActions: PendingActionStore<GmailAction>;
   #searchQuery: string | undefined;
 
@@ -669,7 +669,7 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
 
   constructor(
     gmailApi: GmailApi,
-    approvalQueue: ApprovalQueue<number>,
+    approvalQueue: ApprovalQueue,
     pendingActions: PendingActionStore<GmailAction>,
     searchQuery: string | undefined,
     recordAllowedThread: (threadId: string) => void,
@@ -767,7 +767,7 @@ const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabe
 
 @validateRpc()
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
-    implements Gatekeeper<GmailSession, number, undefined> {
+    implements Gatekeeper<GmailSession> {
   #accessToken: GoogleAccessToken | undefined;
 
   async #getAccessToken(): Promise<string> {
@@ -824,7 +824,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     return TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GmailSession> {
     let gmailApi = new GmailApi(() => this.#getAccessToken());
     let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
@@ -878,7 +878,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     pendingActions.remove(actionId);
   }
 
-  revertAction(action: number, revertInfo: undefined):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
@@ -1087,7 +1087,7 @@ type GoogleDocGatekeeperImplProps = {
 @validateRpc()
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
-    implements Gatekeeper<GoogleDocSession, number, undefined> {
+    implements Gatekeeper<GoogleDocSession> {
   #accessToken: GoogleAccessToken | undefined;
   #simulationCache: GoogleDocSimulationCacheHolder = {};
 
@@ -1119,7 +1119,7 @@ export class GoogleDocGatekeeperImpl
     return DOCS_TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>)
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GoogleDocSession> {
     let api = new GoogleDocsApi(() => this.#getAccessToken());
     let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
@@ -1215,7 +1215,7 @@ export class GoogleDocGatekeeperImpl
     }
   }
 
-  revertAction(action: number, revertInfo: undefined):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
@@ -1229,7 +1229,7 @@ export class GoogleDocGatekeeperImpl
 class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   #docsApi: GoogleDocsApi;
   #documentId: string;
-  #approvalQueue: ApprovalQueue<number>;
+  #approvalQueue: ApprovalQueue;
   #pendingActions: PendingActionStore<GoogleDocAction>;
   #storage: DurableObjectStorage;
   #simulationCache: GoogleDocSimulationCacheHolder;
@@ -1237,7 +1237,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   constructor(
     docsApi: GoogleDocsApi,
     documentId: string,
-    approvalQueue: ApprovalQueue<number>,
+    approvalQueue: ApprovalQueue,
     pendingActions: PendingActionStore<GoogleDocAction>,
     storage: DurableObjectStorage,
     simulationCache: GoogleDocSimulationCacheHolder,
@@ -1427,7 +1427,7 @@ type BigQueryGatekeeperImplProps = {
 @validateRpc()
 export class BigQueryGatekeeperImpl
     extends DurableObject<Env, BigQueryGatekeeperImplProps>
-    implements Gatekeeper<BigQuerySession, number, undefined> {
+    implements Gatekeeper<BigQuerySession> {
   #accessToken: GoogleAccessToken | undefined;
 
   async #getAccessToken(): Promise<string> {
@@ -1462,7 +1462,7 @@ export class BigQueryGatekeeperImpl
     return BIGQUERY_TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>): Promise<BigQuerySession> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<BigQuerySession> {
     let api = new BigQueryApi(() => this.#getAccessToken());
     return new BigQuerySessionImpl(
       api,
@@ -1476,7 +1476,7 @@ export class BigQueryGatekeeperImpl
   // Read-only — no side-effecting actions.
   async applyAction(_action: number): Promise<void> {}
   async rejectAction(_action: number): Promise<void> {}
-  revertAction(_action: number, _revertInfo: undefined): Promise<void> {
+  revertAction(_action: number): Promise<void> {
     throw new Error("BigQuery gatekeeper has no writable actions to revert");
   }
 
@@ -1488,14 +1488,14 @@ export class BigQueryGatekeeperImpl
 @validateRpc()
 class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
   #api: BigQueryApi;
-  #approvalQueue: ApprovalQueue<number>;
+  #approvalQueue: ApprovalQueue;
   #scopedProjectId?: string;
   #scopedDatasetId?: string;
   #scopedTableId?: string;
 
   constructor(
     api: BigQueryApi,
-    approvalQueue: ApprovalQueue<number>,
+    approvalQueue: ApprovalQueue,
     scopedProjectId?: string,
     scopedDatasetId?: string,
     scopedTableId?: string,
