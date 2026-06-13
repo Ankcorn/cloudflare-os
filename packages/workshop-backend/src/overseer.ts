@@ -1,4 +1,5 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
+import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
@@ -1138,9 +1139,7 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.gatekeepers.put(gatekeeperRecord);
 
-    // LSP reports an error here, but tsc does not.
-    // The LSP error is due to bugs that need to be fixed in Cap'n Web.
-    return new GatekeeperClientImpl(this, id!, facet);
+    return new GatekeeperClientImpl<any>(this, id!, facet);
   }
 
   removeGatekeeper(id: number) {
@@ -1157,7 +1156,7 @@ class OverseerImpl implements AgentHooks {
       let chatId = "chatId" in caller ? caller.chatId : undefined;
       return this.getGadgetFacet(chatId);
     } else {
-      let client = new GatekeeperClientImpl(this, id, this.getGatekeeperFacet(id), caller);
+      let client = new GatekeeperClientImpl<any>(this, id, this.getGatekeeperFacet(id), caller);
       return client.openSession();
     }
   }
@@ -3102,6 +3101,7 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
   }
 }
 
+@validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
 
@@ -4545,6 +4545,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 }
 
+@validateRpc()
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     extends RpcTarget implements GatekeeperClient<Session> {
   constructor(private impl: OverseerImpl, private id: number,
@@ -4653,6 +4654,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 }
 
+@validateRpc()
 class ApprovalQueueImpl<Action> extends RpcTarget implements ApprovalQueue<Action> {
   constructor(private impl: OverseerImpl, private gatekeeperId: number,
               private caller: GatekeeperCaller) {
@@ -4726,6 +4728,7 @@ export class AgentSpawnerGatekeeper
   }
 }
 
+@validateRpc()
 class AgentSpawnerBindingImpl extends RpcTarget implements AgentSpawnerBinding {
   constructor(private ctx: DurableObjectState<AgentSpawnerBindingProps>) {
     super();

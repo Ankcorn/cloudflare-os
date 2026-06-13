@@ -1,4 +1,5 @@
 import { RpcTarget } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import { BigQueryApi } from "./bigquery-api";
 import { GoogleAccessToken } from "./google-api";
 import type { BigQueryConfiguratorRpc } from "./configurator/bigquery-configurator-types";
@@ -56,9 +57,11 @@ function optionMatches(parts: (string | undefined)[], query: string): boolean {
 }
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
 export class GmailConfiguratorUI extends RpcTarget implements GmailConfiguratorRpc {}
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
 export class BigQueryConfiguratorUI extends RpcTarget implements BigQueryConfiguratorRpc {
   constructor(getToken: () => Promise<GoogleAccessToken>) {
     super();
@@ -115,6 +118,7 @@ export class BigQueryConfiguratorUI extends RpcTarget implements BigQueryConfigu
 }
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
 export class GoogleDocConfiguratorUI extends RpcTarget implements GoogleDocConfiguratorRpc {
   constructor(getToken: () => Promise<GoogleAccessToken>) {
     super();

@@ -1,4 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   type ActionDescription,
@@ -813,6 +814,7 @@ function parsePatch(patch: string): GitHubPullRequestDiffHunk[] {
   return hunks;
 }
 
+@validateRpc()
 class ArrayCursor<T> extends RpcTarget implements Cursor<T> {
   #items: T[];
   #pageSize: number;
@@ -842,6 +844,7 @@ class ArrayCursor<T> extends RpcTarget implements Cursor<T> {
  * This avoids the need to fetch ALL pages upfront before returning any results, which is
  * critical for repos with large issue/PR histories.
  */
+@validateRpc()
 class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
   /** Fetches one page of already-normalized items from the remote API (or cache). */
   #fetchPage: (page: number, perPage: number) => Promise<T[]>;
@@ -1008,6 +1011,7 @@ export default {
   },
 };
 
+@validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   async describe(): Promise<VendorDescription> {
     return {
@@ -1177,6 +1181,7 @@ type GatekeeperUserImplProps = {
   userObjectId: string;
 };
 
+@validateRpc()
 export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps> implements GatekeeperUser {
   async #withApi<T>(fn: (api: GitHubApi, scopes: string[]) => Promise<T>): Promise<T> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
@@ -1297,6 +1302,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 }
 
+@validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
   implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest, number, undefined> {
 
@@ -3675,6 +3681,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 }
 
+@validateRpc()
 class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
   #gatekeeper: GitHubGatekeeperImpl;
   #approvalQueue: RpcStub<ApprovalQueue<number>>;
@@ -3769,6 +3776,7 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
   }
 }
 
+@validateRpc()
 class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
   protected gatekeeper: GitHubGatekeeperImpl;
   protected approvalQueue: RpcStub<ApprovalQueue<number>>;
@@ -3886,6 +3894,7 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
   }
 }
 
+@validateRpc()
 class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest {
   constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue<number>>, logicalId: string) {
     super(gatekeeper, approvalQueue, logicalId, "pull");

@@ -1,4 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
@@ -277,6 +278,7 @@ export default {
 // =======================================================================================
 
 // Top-level API exposed to the Workshop.
+@validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   status() {
     return "Google Gatekeeper";
@@ -477,6 +479,7 @@ type GatekeeperUserImplProps = {
   userObjectId: string;
 }
 
+@validateRpc()
 export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
                                 implements GatekeeperUser {
   async describe(): Promise<AccountDescription> {
@@ -650,6 +653,7 @@ class PendingActionStore<Action> {
   }
 }
 
+@validateRpc()
 class GmailSessionImpl extends RpcTarget implements GmailSession {
   #gmailApi: GmailApi;
   #approvalQueue: ApprovalQueue<number>;
@@ -761,6 +765,7 @@ type GmailGatekeeperImplProps = {
 
 const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabel"];
 
+@validateRpc()
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
     implements Gatekeeper<GmailSession, number, undefined> {
   #accessToken: GoogleAccessToken | undefined;
@@ -1079,6 +1084,7 @@ type GoogleDocGatekeeperImplProps = {
   documentId: string;
 }
 
+@validateRpc()
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
     implements Gatekeeper<GoogleDocSession, number, undefined> {
@@ -1219,6 +1225,7 @@ export class GoogleDocGatekeeperImpl
   }
 }
 
+@validateRpc()
 class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   #docsApi: GoogleDocsApi;
   #documentId: string;
@@ -1417,6 +1424,7 @@ type BigQueryGatekeeperImplProps = {
   scopedTableId?: string;
 };
 
+@validateRpc()
 export class BigQueryGatekeeperImpl
     extends DurableObject<Env, BigQueryGatekeeperImplProps>
     implements Gatekeeper<BigQuerySession, number, undefined> {
@@ -1477,6 +1485,7 @@ export class BigQueryGatekeeperImpl
   }
 }
 
+@validateRpc()
 class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
   #api: BigQueryApi;
   #approvalQueue: ApprovalQueue<number>;

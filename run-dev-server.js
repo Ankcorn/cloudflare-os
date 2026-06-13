@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-// Generates wrangler.dev.jsonc files for the dev-router and workshop-backend
-// workers (with dynamically-discovered gatekeeper service bindings), then
-// launches `wrangler dev` with all discovered workers.
+// Generates dev-only wrangler.dev.jsonc files for dynamic service bindings,
+// then launches `wrangler dev` with all discovered workers.
 //
 // Flags:
 //   --use-workers-ai-binding   Include the Workers AI binding in
@@ -112,6 +111,21 @@ function bindingName(gk) {
 }
 
 // ---------------------------------------------------------------------------
+// Generate gatekeeper wrangler.dev.jsonc files. The checked-in wrangler.jsonc
+// already points at the capnweb-validate output; dev only needs an explicit cwd
+// because this script starts a multi-config Wrangler process from the repo root.
+// ---------------------------------------------------------------------------
+for (const gk of gatekeepers) {
+  const srcPath = join(gk.dir, "wrangler.jsonc");
+  const config = parse(readFileSync(srcPath, "utf8"));
+  config.build = { ...config.build, cwd: gk.dir };
+
+  const outPath = join(gk.dir, "wrangler.dev.jsonc");
+  writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
+  console.log(`generated: ${outPath}`);
+}
+
+// ---------------------------------------------------------------------------
 // Generate packages/workshop-backend/wrangler.dev.jsonc (with gatekeeper
 // service bindings using the GatekeeperVendor entrypoint).
 // ---------------------------------------------------------------------------
@@ -137,6 +151,9 @@ function bindingName(gk) {
     config.ai = { binding: "WORKERS_AI" };
   }
 
+  const backendDir = join(ROOT, "packages", "workshop-backend");
+  config.build = { ...config.build, cwd: backendDir };
+
   const outPath = join(ROOT, "packages", "workshop-backend", "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
   console.log(`generated: ${outPath}`);
@@ -149,7 +166,7 @@ function bindingName(gk) {
 const configs = [
   "wrangler.dev.jsonc",
   join("packages", "workshop-backend", "wrangler.dev.jsonc"),
-  ...gatekeepers.map(gk => join(gk.dir, "wrangler.jsonc")),
+  ...gatekeepers.map(gk => join(gk.dir, "wrangler.dev.jsonc")),
 ];
 
 const args = configs.flatMap(c => ["-c", c]);

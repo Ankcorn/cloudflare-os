@@ -1,4 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import {
   GatekeeperUser,
   GatekeeperVendor as GatekeeperVendorIface,
@@ -100,6 +101,7 @@ function validateEmailName(value: string | undefined): { ok: true, emailName: st
 const emailConfiguratorEnvs = new WeakMap<object, Env>();
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
 class EmailMailboxConfiguratorUI extends RpcTarget implements EmailMailboxConfiguratorRpc {
   constructor(env: Env) {
     super();
@@ -238,6 +240,7 @@ export default {
 // =======================================================================================
 // Top-level API exposed to the Workshop.
 
+@validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   status() {
     return "Email Gatekeeper";
@@ -342,6 +345,7 @@ type GatekeeperUserImplProps = {
   userAccountId: string;
 };
 
+@validateRpc()
 export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
                                 implements GatekeeperUser {
   async describe(): Promise<AccountDescription> {
@@ -440,6 +444,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
 // =======================================================================================
 
+@validateRpc()
 class EmailSessionImpl extends RpcTarget implements EmailSession {
   #emailName: string;
   #emailHost: string;
@@ -466,6 +471,7 @@ type EmailGatekeeperImplProps = {
 // the Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
 type EmailHookEntrypoint = WorkerEntrypoint & EmailHook;
 
+@validateRpc()
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
     implements Gatekeeper<EmailSession, number, undefined, EmailHookEntrypoint> {
 

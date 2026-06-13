@@ -35,6 +35,9 @@ importers:
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
+      capnweb-validate:
+        specifier: 0.2.1
+        version: 0.2.1(capnweb@0.8.0)(typescript@5.9.3)
       postal-mime:
         specifier: ^2.7.4
         version: 2.7.4
@@ -57,6 +60,9 @@ importers:
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
+      capnweb-validate:
+        specifier: 0.2.1
+        version: 0.2.1(capnweb@0.8.0)(typescript@5.9.3)
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -76,6 +82,9 @@ importers:
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
+      capnweb-validate:
+        specifier: 0.2.1
+        version: 0.2.1(capnweb@0.8.0)(typescript@5.9.3)
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -95,6 +104,9 @@ importers:
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
+      capnweb-validate:
+        specifier: 0.2.1
+        version: 0.2.1(capnweb@0.8.0)(typescript@5.9.3)
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -138,6 +150,9 @@ importers:
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
+      capnweb-validate:
+        specifier: 0.2.1
+        version: 0.2.1(capnweb@0.8.0)(typescript@5.9.3)
       diff:
         specifier: ^8.0.4
         version: 8.0.4
@@ -1655,6 +1670,16 @@ packages:
 
   caniuse-lite@1.0.30001792:
     resolution: {integrity: sha512-hVLMUZFgR4JJ6ACt1uEESvQN1/dBVqPAKY0hgrV70eN3391K6juAfTjKZLKvOMsx8PxA7gsY1/tLMMTcfFLLpw==}
+
+  capnweb-validate@0.2.1:
+    resolution: {integrity: sha512-u9IG7JPYFemnyC5NwOwHi428wIlY3Pqbb0nrjjTNfdWRlZOKuQrmZJ9cel11O73b+MPdYWN6+FWR5IWzO7uEjw==}
+    hasBin: true
+    peerDependencies:
+      capnweb: '>=0.7.0'
+      typescript: '>=5.7.0'
+    peerDependenciesMeta:
+      capnweb:
+        optional: true
 
   capnweb@0.8.0:
     resolution: {integrity: sha512-BK/TuXUiyfLSKsmjojn70yN7oYG/JJzoURZ3tckjg5Zj2KcygPm0A5jyOlswK7SYB4f0Gh9tt+RZ132b80iLfA==}
@@ -3928,6 +3953,13 @@ snapshots:
   cac@6.7.14: {}
 
   caniuse-lite@1.0.30001792: {}
+
+  capnweb-validate@0.2.1(capnweb@0.8.0)(typescript@5.9.3):
+    dependencies:
+      typescript: 5.9.3
+      unplugin: 3.0.0
+    optionalDependencies:
+      capnweb: 0.8.0
 
   capnweb@0.8.0: {}
 
