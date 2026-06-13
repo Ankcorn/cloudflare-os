@@ -473,7 +473,7 @@ type EmailHookEntrypoint = WorkerEntrypoint & EmailHook;
 
 @validateRpc()
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
-    implements Gatekeeper<EmailSession, number, undefined, EmailHookEntrypoint> {
+    implements Gatekeeper<EmailSession, EmailHookEntrypoint> {
 
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;
@@ -492,7 +492,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     return TYPES_CODE;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue<number>>): Promise<EmailSession> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
     return new EmailSessionImpl(emailName, host);
@@ -508,12 +508,12 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     // No actions to reject.
   }
 
-  revertAction(action: number, revertInfo: undefined):
+  revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("Email gatekeeper has no actions to revert");
   }
 
-  async setHook(hook: Fetcher<HookInitiator<EmailHookEntrypoint, number>> | null): Promise<void> {
+  async setHook(hook: Fetcher<HookInitiator<EmailHookEntrypoint>> | null): Promise<void> {
     // Forward the hook initiator to the EmailAddress DO for this email name.
     let emailName = this.ctx.props.emailName;
     let userAccountId = this.ctx.props.userAccountId;
@@ -554,7 +554,7 @@ export class EmailAddress extends DurableObject<Env> {
   }
 
   async setHook(
-      hook: Fetcher<HookInitiator<EmailHookEntrypoint, number>> | null,
+      hook: Fetcher<HookInitiator<EmailHookEntrypoint>> | null,
       userAccountId: string): Promise<void> {
     let owner = this.ctx.storage.kv.get<string>("owner");
     if (owner !== userAccountId) {
@@ -570,7 +570,7 @@ export class EmailAddress extends DurableObject<Env> {
 
   async receiveEmail(email: IncomingEmail): Promise<void> {
     let hookInitiator =
-        this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookEntrypoint, number>>>("hook");
+        this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookEntrypoint>>>("hook");
     if (!hookInitiator) {
       throw new Error("No hook configured for this email address");
     }

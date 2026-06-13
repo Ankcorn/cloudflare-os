@@ -9,7 +9,7 @@ A Gatekeeper is a Cloudflare Worker that mediates all access between a Gadget an
 
 - **Vendor** (`GatekeeperVendor`, a `WorkerEntrypoint`) — top-level entry for the service. One per service.
 - **User** (`GatekeeperUser`, a `WorkerEntrypoint` with `ctx.props`) — a human user's authenticated connection.
-- **Instance** (`Gatekeeper<Session, Action, RevertInfo, Hook>`, a DO facet of the Overseer) — per-resource, per-Gadget binding that provides the Session API.
+- **Instance** (`Gatekeeper<Session, Hook>`, a DO facet of the Overseer) — per-resource, per-Gadget binding that provides the Session API.
 
 Read `packages/workshop-shared/src/gatekeeper.ts` for the canonical interfaces and detailed JSDoc.
 
@@ -164,7 +164,7 @@ For concrete examples, see the Google gatekeeper's Google Docs simulation/cache 
 - `types.txt` must be a **symlink** to `types.d.ts`, never a copy.
 - Call `.dup()` on `approvalQueue` stubs before storing in a session, since Cap'n Web automatically disposes all stubs in parameters to an RPC call when the call returns.
 - `suggestedBindingName` in `describe()` reflects the resource **type** (e.g. `"GMAIL_INBOX"`), not the specific instance.
-- For read-only or push-only gatekeepers, use `never` for `Action` and `RevertInfo` type parameters.
+- For read-only or push-only gatekeepers, `applyAction()` / `rejectAction()` / `revertAction()` can simply throw (they'll never be called since the gatekeeper never submits actions).
 - For `WorkerEntrypoint` and `DurableObject` subclasses, pass credentials and resource IDs via `ctx.props`, not constructor arguments. RPC stubs pointing to these types can be stored in long-term storage and restored later, creating a new instance based on the same `props`.
 - If the gatekeeper implements multiple unrelated resource types with disjoint APIs, each may have its own `.d.ts` file, so that the `getTypeScriptTypes()` method of the specific `Gatekeeper` implementation only returns the types that matter for it. The `getTypeScriptTypes()` method on the top-level `GatekeeperVendor` should return the concatenation of all of these.
 - All DO classes must appear in `wrangler.jsonc` under `migrations[].new_sqlite_classes`.
@@ -174,5 +174,5 @@ For concrete examples, see the Google gatekeeper's Google Docs simulation/cache 
 ## Reference implementations
 
 - `packages/gatekeeper-google/` — OAuth, multiple resource types (Gmail, Google Docs, BigQuery), actions, caching/simulation examples, multiple Session types.
-- `packages/gatekeeper-email/` — Hook-based push notifications, no actions (`Action = never`), email address claiming.
+- `packages/gatekeeper-email/` — Hook-based push notifications, no actions, email address claiming.
 - `packages/workshop-shared/src/gatekeeper.ts` — Canonical interfaces with detailed JSDoc.
