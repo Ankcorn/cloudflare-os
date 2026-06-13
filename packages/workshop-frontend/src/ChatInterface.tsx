@@ -2562,6 +2562,10 @@ function ChatInterface({
   });
   const provisionalRef = useRef<Map<number, ProvisionalChatState>>(new Map());
   const draftRef = useRef<Map<number, DraftChatState>>(new Map());
+  // Last server-instance generation seen (survives reconnects). Used to detect a full DO restart,
+  // in which case in-flight provisional streams were lost and must be discarded. See
+  // AiChatSubscriber.streamGeneration.
+  const lastStreamGenerationRef = useRef<number | undefined>(undefined);
 
   // UI state
   const [_isSubscribed, setIsSubscribed] = useState(false);
@@ -3026,6 +3030,21 @@ function ChatInterface({
   // This is necessary so the server receives a single stub for the object,
   // not separate stubs for each method
   class ChatSubscriberImpl extends RpcTarget implements AiChatSubscriber {
+    streamGeneration(generation: number) {
+      if (
+        lastStreamGenerationRef.current !== undefined &&
+        lastStreamGenerationRef.current !== generation
+      ) {
+        // The DO fully restarted since our last subscription; any in-flight provisional streams
+        // were lost and will be re-streamed from scratch. Discard stale provisional state so the
+        // re-streamed content isn't appended to it. Clearing all chats is safe: provisional state
+        // is purely ephemeral display state, and idle chats already have none.
+        provisionalRef.current.clear();
+        forceUpdate();
+      }
+      lastStreamGenerationRef.current = generation;
+    }
+
     metadata(chat: AiChatMetadata) {
       // When the agent stops running (activeAgent becomes unset), do a final full clear of this
       // chat's provisional streaming state. This generally shouldn't be necessary because chat

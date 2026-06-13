@@ -1038,8 +1038,8 @@ export type CapsuleSpecifier = {
 //
 // At most one provisional stream is active per chat at a time. The client should not persist
 // these events. Instead, it should display them temporarily and discard them as soon as the
-// corresponding durable `message()` and/or `changes` message arrives, or when a `clear` event is
-// delivered.
+// corresponding durable `message()` and/or `changes` message arrives, or when the agent stops
+// running (`activeAgent` becomes unset in the chat metadata).
 export type AiChatStreamEvent = {
   type: "textDelta";
   delta: string;
@@ -1093,6 +1093,14 @@ export interface ActionsSubscriber {
 // Interface implemented by the client to receive callback notifications whenever there is new
 // chat activity. Use Overseer.subscribeToChat() to register a subscriber.
 export interface AiChatSubscriber {
+  // Sent exactly once, at the start of a subscription, before any other callbacks. Carries an
+  // opaque value identifying the current server (Overseer DO) instance. If a resubscribing client
+  // sees a different value than on its previous subscription, the DO has fully restarted since
+  // then, meaning any in-flight provisional stream content was lost and will be re-streamed from
+  // scratch; the client should discard its provisional streaming state. An unchanged value (a
+  // plain network reconnect to the same live instance) means provisional state should be kept.
+  streamGeneration(generation: number): void;
+
   // Metadata for the given chat thread has changed, or a new chat thread was created.
   metadata(chat: AiChatMetadata): void;
 

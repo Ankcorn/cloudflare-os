@@ -86,7 +86,7 @@ export async function shareKeyId(rawKey: string): Promise<string> {
 // Per-chat in-memory state, used while an agent is running or agent callbacks are pending.
 type LiveChatContext = {
   // Abort controller for the running agent (if any).
-  cancelController?: AbortController;
+  cancelController: AbortController;
 
   // Callbacks queued while the agent is running, to be delivered once it finishes.
   pendingAgentCallbacks: QueuedAgentCallback[];
@@ -230,6 +230,26 @@ type ChatDraftUpdateRecord = {
   update: Uint8Array;
 };
 
+// Server-only record describing an in-progress agent turn, enabling resumption after a server
+// restart. Keyed by chatId. A record is present (mirroring `chatMeta.activeAgent`) for exactly as
+// long as an agent turn is, or should be, running. On startup, the set of these records identifies
+// which agents were interrupted by a restart and need to be resumed.
+//
+// Note we deliberately do NOT store the resolved `AiModelConfig` here, because it contains a secret
+// API token. Instead we store enough to re-fetch it from the initiator's user DO on resume.
+type ActiveAgentRecord = {
+  chatId: number;
+  // Hex durable object ID of the initiator's user DO, used to re-resolve the model config and for
+  // billing.
+  initiatorUserId: string;
+  // Model ID, used to re-resolve the model config (matches `chatMeta.activeAgent.id`).
+  modelId: string;
+  // Who initiated this turn (a user, or a gadget for spawner/callback turns).
+  initiator: AiChatAuthorInfo;
+  // Whether this turn was initiated by a gadget callback (vs. a chat message).
+  callbackInitiated: boolean;
+};
+
 const CHAT_DRAFT_AUTHOR_SPLIT_MS = 60_000;
 const CHAT_DRAFT_COMPACT_THRESHOLD = 128;
 
@@ -352,6 +372,12 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: "chatId"
       }),
 
+      // Tracks in-progress agent turns so they can be resumed after a server restart. See
+      // `ActiveAgentRecord`.
+      activeAgents: collection<ActiveAgentRecord>()({
+        primaryKey: "chatId"
+      }),
+
       chats: collection<AiChatMessage>()({
         primaryKey(msg: AiChatMessage) {
           return `${keyString(msg.chatId)}.${keyString(msg.sequence)}`;
@@ -405,6 +431,11 @@ const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
 
+  // Identifies this DO instance. Sent to chat subscribers so they can detect a full server
+  // restart (see AiChatSubscriber.streamGeneration). A timestamp suffices since a DO won't
+  // restart and begin serving requests twice within the same millisecond.
+  readonly streamGeneration = Date.now();
+
   // If not set, this gadget doesn't exist yet.
   ownerId?: string;
   // The owner's profile.id (username/email). Cached in memory (not persisted) for use
@@ -422,6 +453,21 @@ class OverseerImpl implements AgentHooks {
   #liveChats = new Map<number, LiveChatContext>();
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
 
+  // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
+  // while any agent runs) and to let `alarm()` wait for all agents to finish.
+  #runningAgents = new Set<number>();
+
+  // If `alarm()` is currently waiting for all agents to finish, this resolves its wait. Invoked
+  // when the running-agent count drops to zero.
+  #allAgentsIdleWaiters: (() => void)[] = [];
+
+  // How long to set the keep-alive alarm into the future. Whenever the agent count goes from zero
+  // to one, we schedule an alarm this far out; whenever it drops back to zero, we clear it. The
+  // alarm guarantees the DO is restarted (and the agents resumed) after a server restart, even if
+  // no client reconnects. While an agent is actively running and the DO is alive, the agent itself
+  // keeps the DO alive, so the alarm typically never fires.
+  static #AGENT_KEEPALIVE_ALARM_MS = 60_000;
+
   addChatSubscriber(subscriber: RpcStub<AiChatSubscriber>) {
     this.#chatSubscribers.add(subscriber);
   }
@@ -434,6 +480,7 @@ class OverseerImpl implements AgentHooks {
     let ctx = this.#liveChats.get(chatId);
     if (!ctx) {
       ctx = {
+        cancelController: new AbortController(),
         pendingAgentCallbacks: [],
         activeAgentCallbacks: new Map(),
       };
@@ -468,14 +515,108 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Register a newly-started (or resumed) agent turn. Called at the start of `startAgent` /
+  // `#resumeAgent`, in the same synchronous step that sets `chatMeta.activeAgent` and writes the
+  // `activeAgents` record, so that the three representations of "an agent is running for this chat"
+  // stay consistent. `#unregisterRunningAgent` performs the matching teardown.
+  #registerRunningAgent(chatId: number) {
+    let wasEmpty = this.#runningAgents.size === 0;
+    this.#runningAgents.add(chatId);
+    if (wasEmpty) {
+      // Zero -> one running agents: schedule the keep-alive alarm.
+      this.ctx.storage.setAlarm(Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS);
+    }
+  }
+
+  // Tear down all bookkeeping for a finished agent turn: remove it from the in-memory registry,
+  // delete its persistent `activeAgents` record, and clear the keep-alive alarm if no agents remain.
+  // MUST be called synchronously together with clearing `chatMeta.activeAgent`, so that the moment
+  // the chat is observably idle, no stale records of the previous agent remain (which would
+  // otherwise interfere if the user immediately starts a new agent).
+  #unregisterRunningAgent(chatId: number) {
+    this.#runningAgents.delete(chatId);
+    this.storage.activeAgents.delete(chatId);
+    if (this.#runningAgents.size === 0) {
+      // One -> zero running agents: cancel the keep-alive alarm and wake any `alarm()` waiter.
+      this.ctx.storage.deleteAlarm();
+      for (let waiter of this.#allAgentsIdleWaiters) {
+        waiter();
+      }
+      this.#allAgentsIdleWaiters = [];
+    }
+  }
+
+  // Resolves once no agents are running. Used by `alarm()` to keep the DO alive until all running
+  // agents complete.
+  async waitForAllAgentsToComplete(): Promise<void> {
+    if (this.#runningAgents.size === 0) return;
+
+    await new Promise<void>(resolve => { this.#allAgentsIdleWaiters.push(resolve); });
+  }
+
+  // Resume a single interrupted agent turn. Re-resolves the model config from the initiator's user
+  // DO (we don't persist the secret API token), then runs the agent loop, which rebuilds its state
+  // by replaying the persisted chat log.
+  async #resumeAgent(record: ActiveAgentRecord, liveChat: LiveChatContext) {
+    let aiModel: UserAiModelRecord | undefined;
+    try {
+      let user = this.users.get(this.users.idFromString(record.initiatorUserId));
+      let userMeta = await user.getChatContext(record.modelId);
+      aiModel = userMeta.aiModel;
+    } catch (err) {
+      console.error("error resolving model while resuming agent:", err);
+    }
+
+    if (!aiModel) {
+      // The model is no longer available; we can't resume. Post an error and clear state. Clear
+      // `activeAgent` and tear down the registry/record atomically (matching `#runAgentTurn`'s
+      // finally).
+      this.postAgentErrorMessage(record.chatId, record.initiator,
+          "Agent interrupted due to server restart and could not be resumed because its AI " +
+          "model is no longer available.");
+      let meta = this.storage.chatMeta.get(record.chatId);
+      if (meta) {
+        delete meta.activeAgent;
+        meta.lastActive = this.getChatTimestamp();
+        this.storage.chatMeta.put(meta);
+      }
+      this.#unregisterRunningAgent(record.chatId);
+      return;
+    }
+
+    await this.#runAgentTurn(
+        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
+  }
+
   constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
 
-    // If any chat agents were left running by the last instance of this DO, cancel them.
+    // Resume any agent turns that were left running by a previous instance of this DO (i.e. were
+    // interrupted by a server restart).
+    for (let record of [...this.storage.activeAgents.list()]) {
+      // Make sure to register the running agent synchronously so that if we were called at the
+      // start of the alarm handler, it'll recognize that agents are running and wait for them.
+      this.#registerRunningAgent(record.chatId);
+
+      // Also create the LiveChatContext synchronously, so that cancellations are immediately
+      // respected.
+      let liveChat = this.#getLiveChat(record.chatId);
+
+      this.#resumeAgent(record, liveChat);
+    }
+
+    // Backwards compatibility: Prior to the introduction of the `activeAgents` table, we could
+    // only detect abandoned agents by the presence of `activeAgent` in the `AiChatMetadata` for
+    // the chat thread. On the first app update after `activeAgents` is introduced, we could still
+    // have such threads with no record in `activeAgents`. We can't resume these threads, but at
+    // the very least, we should properly cancel them.
+    //
+    // After this change has been deployed, we could plausibly remove this block, though it might
+    // be nice to keep for consistency purposes.
     for (let thread of [...this.storage.chatMeta.list()]) {
-      if (thread.activeAgent) {
+      if (thread.activeAgent && !this.#runningAgents.has(thread.id)) {
         this.postAgentErrorMessage(thread.id, thread.activeAgent,
             "Agent interrupted due to server restart.");
         delete thread.activeAgent;
@@ -771,6 +912,11 @@ class OverseerImpl implements AgentHooks {
       if (!meta) {
         return;
       }
+    }
+
+    // Defensive check; nobody should call this when the agent is active.
+    if (meta.activeAgent) {
+      throw new Error("Agent is running, wait for it to finish.");
     }
 
     let timestamp = this.getChatTimestamp();
@@ -1320,7 +1466,7 @@ class OverseerImpl implements AgentHooks {
 
   cancelAgent(chatId: number) {
     let ctx = this.#liveChats.get(chatId);
-    if (ctx?.cancelController) {
+    if (ctx) {
       ctx.cancelController.abort(new Error("User requested to stop agent."));
     }
   }
@@ -1433,16 +1579,38 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  async startAgent(chatId: number, aiModel: UserAiModelRecord,
-                   initiator: AiChatAuthorInfo,
-                   callbackInitiated: boolean = false): Promise<void> {
+  // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
+  // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
+  // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
+  // needed to re-resolve the model config on resume.
+  startAgent(chatId: number, aiModel: UserAiModelRecord,
+             initiator: AiChatAuthorInfo, initiatorUserId: string,
+             callbackInitiated: boolean = false): void {
+    // Register before starting the turn so registration always precedes the turn's teardown
+    // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
+    this.#registerRunningAgent(chatId);
+    this.storage.activeAgents.put({
+      chatId,
+      initiatorUserId,
+      modelId: aiModel.profile.id,
+      initiator,
+      callbackInitiated,
+    });
+
     let liveChat = this.#getLiveChat(chatId);
+    this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
+  }
+
+  async #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
+                      initiator: AiChatAuthorInfo,
+                      callbackInitiated: boolean,
+                      liveChat: LiveChatContext): Promise<void> {
     try {
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
       let chosenModel = getModel(this.env, aiModel.config, initiator, sessionAffinity);
 
-      let controller = new AbortController();
-      liveChat.cancelController = controller;
+      let controller = liveChat.cancelController;
+      controller.signal.throwIfAborted();
 
       let hasBeenNudged = false;
       while (true) {
@@ -1534,7 +1702,6 @@ class OverseerImpl implements AgentHooks {
       // Note: We no longer emit a stream "clear" event here. The client performs a full clear of
       // provisional streaming state when it observes that the agent is no longer running (i.e. when
       // chat metadata's activeAgent becomes unset, which happens just below).
-      liveChat.cancelController = undefined;
 
       let meta = this.storage.chatMeta.get(chatId);
       if (meta) {
@@ -1542,6 +1709,12 @@ class OverseerImpl implements AgentHooks {
         meta.lastActive = this.getChatTimestamp();
         this.storage.chatMeta.put(meta);
       }
+
+      // Tear down the registry entry, persistent `activeAgents` record, and keep-alive alarm in the
+      // same synchronous step as clearing `activeAgent` above, so the chat never appears idle while
+      // stale records of this agent linger. If pending callbacks below restart the agent, they'll
+      // re-register everything consistently.
+      this.#unregisterRunningAgent(chatId);
 
       // Resolve any agent callback returns that weren't explicitly returned (they get undefined).
       for (let [, cb] of liveChat.activeAgentCallbacks) {
@@ -1728,7 +1901,8 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
-      this.startAgent(chatId, userMeta.aiModel, author, /* callbackInitiated */ true);
+      this.startAgent(chatId, userMeta.aiModel, author, callbacks[0].initiatorUserId,
+                      /* callbackInitiated */ true);
     } catch (err) {
       // Failure to set up the agent. Make sure to reject all callbacks.
       liveChat.pendingAgentCallbacks = [];
@@ -2359,6 +2533,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl = new OverseerImpl(ctx, env);
   }
 
+  // The alarm handler kicks in when we've had running agents that haven't completed for at least a
+  // minute. This serves a few purposes:
+  // - If the DO is still running when this is called, but the client has closed their browser and
+  //   so isn't holding the DO alive anymore, the alarm handler will take over and hold the DO
+  //   open until it's done.
+  // - If the DO somehow died since the agents were scheduled, the alarm will wake it up (and the
+  //   DO constructor will have rescheduled the agents, before alarm() itself runs).
+  // - If the DO dies *while* the alarm is running, the system will retry the alarm, thus resuming
+  //   the agents yet again.
+  async alarm() {
+    await this.impl.waitForAllAgentsToComplete();
+  }
+
   // `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
   // by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
   async open(userId: string, profileId: string,
@@ -2606,7 +2793,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       }}) as any;
     } else if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel, author);
+      this.impl.startAgent(chatId, userMeta.aiModel, author,
+                           this.impl.users.idFromString(resolveUserId).toString());
     } else {
       // TODO: Flag as needing user attention.
     }
@@ -3105,14 +3293,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return;
     }
 
-    let meta = this.#getChatMetaOrThrow(chatId);
     let author = await this.#getClientProfile();
+    let meta = this.#getChatMetaOrThrow(chatId);
+
+    // Decide if we want to materialize existing drafts due to changing users. If two users are
+    // typing at the same time we just attribute the edits to both of them, but if the previous
+    // user hasn't typed for a while and a new user starts typing then we materialize the previous
+    // user's changes. That said, we cannot materialize anything while an agent is active because
+    // it'll confuse the agent.
     let existingUpdates = this.impl.listChatDraftUpdates(chatId);
     if (existingUpdates.length > 0) {
       let latest = existingUpdates[existingUpdates.length - 1];
       if (!this.impl.sameChatAuthor(latest.author, author)) {
         let elapsed = Date.now() - latest.timestamp.getTime();
-        if (elapsed > CHAT_DRAFT_AUTHOR_SPLIT_MS) {
+        if (!meta.activeAgent && elapsed > CHAT_DRAFT_AUTHOR_SPLIT_MS) {
           let result = this.impl.materializeChatDraft(chatId, meta);
           if (result) {
             meta = result.meta;
@@ -3424,6 +3618,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.addChatSubscriber(subscriber);
     subscriber.onRpcBroken(_ => unsubscribe());
 
+    // Send the server-instance generation first, before any catch-up callbacks, so the client can
+    // detect a full DO restart and discard stale provisional stream state.
+    subscriber.streamGeneration(this.impl.streamGeneration).catch(unsubscribe);
+
     let metaSubscriber = {
       add(record: AiChatMetadata) {
         subscriber.metadata(record).catch(unsubscribe);
@@ -3569,7 +3767,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
+      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                           this.clientUser.id.toString());
     }
 
     // Also fire off a second LLM call to generate a title based on the first message.
@@ -3613,7 +3812,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
 
     if (userMeta.aiModel) {
-      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
+      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                           this.clientUser.id.toString());
     }
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -3754,6 +3954,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           `${keyString(entry.chatId)}.${keyString(entry.sequence)}`);
     }
 
+    // Defensively drop any resume record so a deleted chat is never resumed. (Aborting the agent
+    // below also clears this via the tracked promise's finally, but the chat may have no live
+    // agent in memory, e.g. after a restart before resumption ran.)
+    this.impl.storage.activeAgents.delete(chatId);
+
     // Clean up all in-memory live state for this chat.
     this.impl.destroyLiveChat(chatId);
   }
@@ -3777,7 +3982,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     meta.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(meta);
 
-    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile);
+    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                         this.clientUser.id.toString());
   }
 
   async finalizeChatDraft(chatId: number): Promise<void> {
