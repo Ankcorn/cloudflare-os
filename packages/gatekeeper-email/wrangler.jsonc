@@ -1,6 +1,10 @@
 {
   "name": "gatekeeper-email",
-  "main": "src/email.ts",
+  "main": ".wrangler/validate/src/email.ts",
+  "build": {
+    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "watch_dir": "src"
+  },
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["experimental", "allow_irrevocable_stub_storage"],
   "rules": [

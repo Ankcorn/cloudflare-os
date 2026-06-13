@@ -1,4 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import { generateText, LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -174,6 +175,7 @@ export class LanguageModelGatekeeper
   }
 }
 
+@validateRpc()
 class LanguageModelBindingImpl extends RpcTarget implements LanguageModelBinding {
   constructor(private model: LanguageModel) {
     super();

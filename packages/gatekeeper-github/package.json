@@ -13,7 +13,8 @@
   "dependencies": {
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "^0.8.0"
+    "capnweb": "^0.8.0",
+    "capnweb-validate": "0.2.1"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

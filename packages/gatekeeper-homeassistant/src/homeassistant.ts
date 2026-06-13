@@ -1,4 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   type AccountDescription,
@@ -386,6 +387,7 @@ const SCOPE_CATALOG: VendorScope[] = [
   },
 ];
 
+@validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   async describe(): Promise<VendorDescription> {
     return {
@@ -559,6 +561,7 @@ type HomeAssistantUserImplProps = {
   userObjectId: string;
 };
 
+@validateRpc()
 export class HomeAssistantUserImpl
   extends WorkerEntrypoint<Env, HomeAssistantUserImplProps>
   implements GatekeeperUser
@@ -729,6 +732,7 @@ const instanceConfiguratorGetters = new WeakMap<
   () => Promise<HomeAssistantCredentials>
 >();
 
+@validateRpc()
 class InstanceConfiguratorUI extends RpcTarget implements HomeAssistantInstanceConfiguratorRpc {
   constructor(getCredentials: () => Promise<HomeAssistantCredentials>) {
     super();
@@ -796,6 +800,7 @@ function buildEntityUrl(entityId: string): string {
   return `${ENTITY_RESOURCE.urlPattern.replace(":entityId", encodeURIComponent(entityId))}`;
 }
 
+@validateRpc()
 class AreaConfiguratorUI extends RpcTarget implements HomeAssistantAreaConfiguratorRpc {
   constructor(getCredentials: () => Promise<HomeAssistantCredentials>) {
     super();
@@ -824,6 +829,7 @@ class AreaConfiguratorUI extends RpcTarget implements HomeAssistantAreaConfigura
   }
 }
 
+@validateRpc()
 class LabelConfiguratorUI extends RpcTarget implements HomeAssistantLabelConfiguratorRpc {
   constructor(getCredentials: () => Promise<HomeAssistantCredentials>) {
     super();
@@ -856,6 +862,7 @@ class LabelConfiguratorUI extends RpcTarget implements HomeAssistantLabelConfigu
   }
 }
 
+@validateRpc()
 class DeviceConfiguratorUI extends RpcTarget implements HomeAssistantDeviceConfiguratorRpc {
   constructor(getCredentials: () => Promise<HomeAssistantCredentials>) {
     super();
@@ -891,6 +898,7 @@ class DeviceConfiguratorUI extends RpcTarget implements HomeAssistantDeviceConfi
   }
 }
 
+@validateRpc()
 class EntityConfiguratorUI extends RpcTarget implements HomeAssistantEntityConfiguratorRpc {
   constructor(getCredentials: () => Promise<HomeAssistantCredentials>) {
     super();
@@ -1029,6 +1037,7 @@ type PendingActionRow = {
   submittedAt: number;
 };
 
+@validateRpc()
 export class HomeAssistantGatekeeperImpl
   extends DurableObject<Env, HomeAssistantGatekeeperImplProps>
   implements Gatekeeper<HomeAssistantSession | Area | Label | Device | Entity, HomeAssistantAction, HomeAssistantRevertInfo>
@@ -1929,6 +1938,7 @@ function buildTarget(target?: ServiceCallTarget): HATarget | undefined {
 // ---------------------------------------------------------------------------
 // Whole-instance Session
 
+@validateRpc()
 class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession {
   #ctx: SessionContext;
 
@@ -2231,6 +2241,7 @@ class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession
 // ---------------------------------------------------------------------------
 // Area session/capability
 
+@validateRpc()
 class AreaImpl extends RpcTarget implements Area {
   #ctx: SessionContext;
   #areaId: string;
@@ -2397,6 +2408,7 @@ class AreaImpl extends RpcTarget implements Area {
 // ---------------------------------------------------------------------------
 // Label session/capability
 
+@validateRpc()
 class LabelImpl extends RpcTarget implements Label {
   #ctx: SessionContext;
   #labelId: string;
@@ -2503,6 +2515,7 @@ class LabelImpl extends RpcTarget implements Label {
 // ---------------------------------------------------------------------------
 // Device session/capability
 
+@validateRpc()
 class DeviceImpl extends RpcTarget implements Device {
   #ctx: SessionContext;
   #deviceId: string;
@@ -2625,6 +2638,7 @@ class DeviceImpl extends RpcTarget implements Device {
 // ---------------------------------------------------------------------------
 // Entity session/capability
 
+@validateRpc()
 class EntityImpl extends RpcTarget implements Entity {
   #ctx: SessionContext;
   #entityId: string;
@@ -2995,6 +3009,7 @@ function mapLightTurnOnData(data?: LightTurnOnData | Record<string, unknown>): R
 // ---------------------------------------------------------------------------
 // Dashboard
 
+@validateRpc()
 class DashboardImpl extends RpcTarget implements Dashboard {
   #ctx: SessionContext;
   #urlPath: string;

@@ -1,6 +1,10 @@
 packages:
   - packages/*
 
+minimumReleaseAgeExclude:
+  - capnweb
+  - capnweb-validate
+
 allowBuilds:
   esbuild: true
   sharp: true
