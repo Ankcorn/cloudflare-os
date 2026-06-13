@@ -170,6 +170,87 @@ type CodePreviewEntry = {
   };
 };
 
+// Description of a file-editing tool call which we may need to replay.
+type ReplayPendingEdit = {
+  toolName: "writeFile";
+  filename: string;
+  content: string;
+} | {
+  toolName: "editFile";
+  filename: string;
+  textToReplace: string;
+  replacement: string;
+};
+
+// Apply pending edit to a Y.Doc.
+function applyPendingEditToYdoc(ydoc: Y.Doc, edit: ReplayPendingEdit) {
+  switch (edit.toolName) {
+    case "writeFile":
+      ydoc.transact(tr => {
+        let txt = new Y.Text();
+        txt.insert(0, edit.content);
+        ydoc.getMap<Y.Text>().set(edit.filename, txt);
+      });
+      break;
+
+    case "editFile": {
+      let text = ydoc.getMap<Y.Text>().get(edit.filename);
+      if (!text) {
+        throw new Error("File does not exist.");
+      }
+
+      let content = text.toString();
+      let pos = content.indexOf(edit.textToReplace);
+      if (pos < 0) {
+        throw new Error("No matching text was found in the file.");
+      }
+      if (content.indexOf(edit.textToReplace, pos + 1) >= 0) {
+        throw new Error("Multiple matches were found. The text to match must be unique.");
+      }
+
+      ydoc.transact(tr => {
+        text.delete(pos, edit.textToReplace.length);
+        text.insert(pos, edit.replacement);
+      });
+      break;
+    }
+
+    default:
+      edit satisfies never;
+      throw new Error("Unknown edit.");
+  }
+}
+
+// Apply pending edit to file content as a string.
+//
+// This is used to replay pending edits to handle readFile-after-edit-in-same-turn correctly.
+function applyPendingEditToText(content: string | null, edit: ReplayPendingEdit): string | null {
+  switch (edit.toolName) {
+    case "writeFile":
+      return edit.content;
+
+    case "editFile": {
+      if (content === null) {
+        throw new Error("File does not exist.");
+      }
+
+      let pos = content.indexOf(edit.textToReplace);
+      if (pos < 0) {
+        throw new Error("No matching text was found in the file.");
+      }
+      if (content.indexOf(edit.textToReplace, pos + 1) >= 0) {
+        throw new Error("Multiple matches were found. The text to match must be unique.");
+      }
+      return content.slice(0, pos) + edit.replacement +
+          content.slice(pos + edit.textToReplace.length);
+    }
+
+    default:
+      edit satisfies never;
+      throw new Error("Unknown edit.");
+  }
+}
+
 // Manages live code previews for writeFile and editFile tool calls while the LLM is still
 // streaming.  As tool-call input tokens arrive, the streaming JSON parser extracts the
 // filename and content/replacement incrementally.  Once enough is known, a cursor is
@@ -502,6 +583,12 @@ export async function runAgent(
     }
   };
 
+  // As we replay the chat history, when we see tool calls that make edits, we add them to this
+  // array, and when we see "changes" messages that represent those edits being flushed, we
+  // clear this array. Thus, it continuously contains the list of edits for which we haven't seen
+  // a "changes" message yet. This is needed for a few tricky cases.
+  let pendingReplayEdits: ReplayPendingEdit[] = [];
+
   // Track which files have been read in this session. Edits aren't allowed before reading.
   let filesRead = new Set<string>();
 
@@ -651,18 +738,38 @@ export async function runAgent(
                     };
                   } else {
                     let text = getSessionYDoc().getMap<Y.Text>().get(toolCall.input.filename);
-                    if (!text) {
+
+                    // If we have pending edits, the replay of the readFile needs to reflect those
+                    // edits. But we can't apply pending edits directly to the Y.Doc because we
+                    // might get slightly different results from what we get by applying the
+                    // binary-encoded Y.Doc changes in "changes" messages. We don't want to clone
+                    // the Y.Doc at every "changes" as that's expensive. So instead we bite the
+                    // bullet here and replay any pending edits directly against the file content
+                    // as a string. Oh well.
+                    let value = text?.toString() ?? null;
+                    for (let edit of pendingReplayEdits) {
+                      if (edit.filename === toolCall.input.filename) {
+                        value = applyPendingEditToText(value, edit);
+                      }
+                    }
+                    if (value === null) {
                       throw new Error("File does not exist.");
                     }
+
                     toolOutput = {
                       type: "text",
-                      value: text.toString()
+                      value
                     };
                     filesRead.add(toolCall.input.filename);
                   }
                   break;
                 }
                 case "writeFile":
+                  pendingReplayEdits.push({
+                    toolName: "writeFile",
+                    filename: toolCall.input.filename,
+                    content: toolCall.input.content,
+                  });
                   toolOutput = {
                     type: "json",
                     value: {success: true, changeId: nextChangeId},
@@ -670,6 +777,12 @@ export async function runAgent(
                   filesRead.add(toolCall.input.filename);
                   break;
                 case "editFile":
+                  pendingReplayEdits.push({
+                    toolName: "editFile",
+                    filename: toolCall.input.filename,
+                    textToReplace: toolCall.input.textToReplace,
+                    replacement: toolCall.input.replacement,
+                  });
                   toolOutput = {
                     type: "json",
                     value: {success: true, changeId: nextChangeId},
@@ -810,6 +923,7 @@ export async function runAgent(
             });
           }
         }
+        pendingReplayEdits = [];
         changeIdMap.set(msg.sequence, nextChangeId);
         ++nextChangeId;
         break;
@@ -881,6 +995,18 @@ export async function runAgent(
         msg satisfies never;
         break;
     }
+  }
+
+  // If the previous agent was aborted by a server restart, it could have left edits in the
+  // log that were never actually flushed to a "changes" message. We should materialize those
+  // edits into the `Y.Doc` now so that they can be flushed with the rest of the resumed turn.
+  if (pendingReplayEdits.length > 0) {
+    let ydoc = getSessionYDoc();
+    for (let edit of pendingReplayEdits) {
+      applyPendingEditToYdoc(ydoc, edit);
+    }
+
+    pendingReplayEdits = [];
   }
 
   // Additional information noted during execution of tool calls which we want to merge into
@@ -1033,12 +1159,10 @@ export async function runAgent(
       }),
       execute: ({filename, content}, {toolCallId}) => {
         try {
-          let ydoc = getSessionYDoc();
-
-          ydoc.transact(tr => {
-            let txt = new Y.Text();
-            txt.insert(0, content);
-            ydoc.getMap<Y.Text>().set(filename, txt);
+          applyPendingEditToYdoc(getSessionYDoc(), {
+            toolName: "writeFile",
+            filename,
+            content,
           });
 
           // The agent knows exactly what's in the file, so add it to the `filesRead` set so
@@ -1086,24 +1210,11 @@ export async function runAgent(
             throw new Error("You must read a file before you can edit it.");
           }
 
-          let ydoc = getSessionYDoc();
-          let text = ydoc.getMap<Y.Text>().get(filename);
-          if (!text) {
-            throw new Error("File does not exist.");
-          }
-
-          let content = text.toString();
-          let pos = content.indexOf(textToReplace);
-          if (pos < 0) {
-            throw new Error("No matching text was found in the file.");
-          }
-          if (content.indexOf(textToReplace, pos + 1) >= 0) {
-            throw new Error("Multiple matches were found. The text to match must be unique.");
-          }
-
-          ydoc.transact(tr => {
-            text.delete(pos, textToReplace.length);
-            text.insert(pos, replacement);
+          applyPendingEditToYdoc(getSessionYDoc(), {
+            toolName: "editFile",
+            filename,
+            textToReplace,
+            replacement,
           });
 
           return {success: true, changeId: nextChangeId};
@@ -1398,6 +1509,14 @@ export async function runAgent(
         try {
           // Make edits from previous tool steps visible to the gadget before running code
           // against it. Later edits in this turn will still be batched until the next barrier.
+          // TODO: If an agent emits a file edit followed by an executeCode in a *single step*,
+          //   this will corrupt the chat: the "changes" message gets inserted prior to the step's
+          //   message, even though it includes edits from within this step. If the agent attempts
+          //   to read back the same file before the next "change" message lands, the edit will
+          //   be replayed on a Y.Doc that already contains it and will probably fail. In practice
+          //   I've never seen an agent generate a file edit and executeCode on the same step,
+          //   though, and fixing this seems like it requires a broader refactor, so I'm leaving
+          //   it for now.
           flushCapturedYdocChanges();
 
           let output = await hooks.executeCodeMode(
