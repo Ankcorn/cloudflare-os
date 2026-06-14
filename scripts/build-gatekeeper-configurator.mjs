@@ -412,6 +412,62 @@ class ResourceConfiguratorIframe extends RpcTarget {
   }
 }
 
+// Fallback URL -> values mapping: extract URLPattern named groups from the resource's pattern and
+// seed any values whose keys match a group name (e.g. ".../area/:areaId" -> { areaId }). Used when
+// the spec doesn't define initialValuesFromResourceUrl. Numeric/wildcard groups (e.g. "0") are
+// ignored.
+function defaultValuesFromResourceUrl(resourceUrl, resourceUrlPattern) {
+  if (!resourceUrlPattern || resourceUrlPattern === "https://*") return null;
+  if (typeof URLPattern === "undefined") return null;
+  try {
+    const match = new URLPattern(resourceUrlPattern).exec(resourceUrl);
+    const groups = match?.pathname?.groups ?? {};
+    const out = {};
+    for (const [key, value] of Object.entries(groups)) {
+      if (typeof value === "string" && value.length > 0 && !/^[0-9]+$/.test(key)) {
+        out[key] = decodeURIComponent(value);
+      }
+    }
+    return out;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Seed initial form values from a concrete resource URL provided by the host (e.g. an AI agent's
+// connection request), so the form opens pre-filled and editable.
+async function seedInitialValues() {
+  let initialResource = null;
+  try {
+    initialResource = await host.getInitialResource();
+  } catch (error) {
+    return;
+  }
+  if (!initialResource || !initialResource.resourceUrl) return;
+
+  let seeded;
+  try {
+    seeded = typeof spec.initialValuesFromResourceUrl === "function"
+      ? await spec.initialValuesFromResourceUrl({
+          resourceUrl: initialResource.resourceUrl,
+          resourceUrlPattern: initialResource.resourceUrlPattern,
+          ui,
+        })
+      : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
+  } catch (error) {
+    return;
+  }
+  if (!seeded || typeof seeded !== "object") return;
+
+  for (const [key, value] of Object.entries(seeded)) {
+    if (value === undefined) continue;
+    values[key] = value;
+    // Autocomplete inputs display the typed query (queryByName), not the value, so seed it too;
+    // TextInput/RadioCards read \`values\` directly and ignore queryByName.
+    if (typeof value === "string" && value.length > 0) queryByName[key] = value;
+  }
+}
+
 async function main() {
   const { port1, port2 } = new MessageChannel();
   window.parent.postMessage({ type: "handshake" }, "*", [port2]);
@@ -424,6 +480,7 @@ async function main() {
   spec = globalThis.__configuratorUISpec;
   if (!spec) throw new Error("Configurator UI module did not define a configurator UI.");
   values = { ...(spec.initial || {}) };
+  await seedInitialValues();
   postSelectionState();
   render();
 }

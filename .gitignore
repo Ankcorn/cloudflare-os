@@ -23,3 +23,9 @@ wrangler.dev.jsonc
 
 # macOS
 .DS_Store
+
+# Wrangler local dev secrets (never commit). Matches root and per-package .dev.vars files.
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+**/.dev.vars.*

@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
@@ -1166,6 +1166,11 @@ class OverseerImpl implements AgentHooks {
   // Maps chat ID to action numbers that were recently performed by that chat's agent. These are
   // added to the chat log after the tool call returns.
   #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean}>();
+
+  // Maps chat ID to connectionRequest message bodies created by that chat's agent during the
+  // current step. Spliced into the chat log after the tool call returns (see
+  // consumeCapturedConnectionRequests), so they appear after the assistant's tool-call message.
+  #capturedConnectionRequests = new Map<number, AiChatMessageBody[]>();
 
   #getOrCreateCapturedActions(chatId: number) {
     let result = this.#capturedActions.get(chatId);
@@ -2492,6 +2497,127 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
+  // --- Connection-request hooks ---
+
+  #ownerUserStub() {
+    if (!this.ownerId) throw new Error("Gadget has been deleted.");
+    return this.users.get(this.users.idFromString(this.ownerId));
+  }
+
+  // Short-TTL cache for the gatekeeper vendor list. The list is derived from static
+  // GATEKEEPER_* bindings, so it barely changes, but the connection hooks below (and the agent's
+  // system prompt) call it on every turn — caching avoids hammering the user DO each time.
+  #vendorsCache: {
+    expires: number;
+    promise: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]>;
+  } | null = null;
+  static readonly #VENDORS_CACHE_TTL_MS = 60_000;
+
+  #listGatekeeperVendorsCached() {
+    let now = Date.now();
+    if (this.#vendorsCache && this.#vendorsCache.expires > now) {
+      return this.#vendorsCache.promise;
+    }
+    let promise = this.#ownerUserStub().listGatekeeperVendors();
+    // Don't cache failures: drop the entry so the next call retries.
+    promise.catch(() => {
+      if (this.#vendorsCache?.promise === promise) this.#vendorsCache = null;
+    });
+    this.#vendorsCache = { expires: now + OverseerImpl.#VENDORS_CACHE_TTL_MS, promise };
+    return promise;
+  }
+
+  async listConnectableVendors(): Promise<{id: string, displayName: string}[]> {
+    try {
+      let vendors = await this.#listGatekeeperVendorsCached();
+      return vendors.map(v => ({id: v.id, displayName: v.description.displayName}));
+    } catch (err) {
+      console.error("Failed to list connectable vendors:", err);
+      return [];
+    }
+  }
+
+  async listConnectableResources(vendorId: string): Promise<string> {
+    let vendors = await this.#listGatekeeperVendorsCached();
+    let vendor = vendors.find(v => v.id === vendorId);
+    if (!vendor) {
+      return `Unknown vendor "${vendorId}". Available vendors: ` +
+          `${vendors.map(v => v.id).join(", ") || "(none)"}.`;
+    }
+    if (vendor.supportedResources.length === 0) {
+      return `Vendor "${vendorId}" (${vendor.description.displayName}) offers no connectable ` +
+          `resources.`;
+    }
+    let lines = [`Resource types offered by "${vendorId}" (${vendor.description.displayName}):`];
+    for (let r of vendor.supportedResources) {
+      lines.push(`* ${r.title} — urlPattern: ${r.urlPattern}\n  ${r.description}`);
+    }
+    lines.push(
+        `\nTo request one, call requestConnection with vendorId="${vendorId}" and a resourceUrl ` +
+        `matching one of the patterns above (or omit resourceUrl to let the user pick).`);
+    return lines.join("\n");
+  }
+
+  // Records a pending connection request. `requested` is true only when a request was actually
+  // created (and an accept/deny card will appear); when false, the request was rejected for the
+  // reason in `message` and the agent should fix it and retry — the turn must NOT end (see the
+  // `connectionRequested` flag in agent.ts).
+  async requestConnection(chatId: number, input: {
+    vendorId: string;
+    resourceUrl?: string;
+    reason: string;
+  }): Promise<{ requested: boolean; message: string }> {
+    // Resolve the vendor's display name (and validate it exists).
+    let vendors = await this.#listGatekeeperVendorsCached();
+    let vendor = vendors.find(v => v.id === input.vendorId);
+    if (!vendor) {
+      return { requested: false, message:
+          `Cannot request a connection: unknown vendor "${input.vendorId}". ` +
+          `Available vendors: ${vendors.map(v => v.id).join(", ") || "(none)"}.` };
+    }
+
+    // Resolve the exact resource this request maps to, using the same precedence the accept modal
+    // uses. If it can't be resolved, REJECT the request: otherwise the user would get an accept
+    // card that opens a blank "create new connection" picker. The agent is told what to fix.
+    let resolved = resolveRequestedResource(vendor.supportedResources, input.resourceUrl);
+    if (!resolved.ok) {
+      return { requested: false, message:
+          `Cannot request a connection for "${vendor.description.displayName}": ${resolved.reason}` };
+    }
+
+    let requestId = `${chatId}:${crypto.randomUUID()}`;
+    let body: AiChatMessageBody = {
+      type: "connectionRequest",
+      requestId,
+      vendorId: input.vendorId,
+      vendorName: vendor.description.displayName,
+      vendorLogoUrl: vendor.description.logo?.url,
+      resourceTitle: resolved.resource.title,
+      resourceUrl: input.resourceUrl,
+      resourceUrlPattern: resolved.resource.urlPattern,
+      reason: input.reason,
+      state: "pending",
+    };
+
+    let list = this.#capturedConnectionRequests.get(chatId);
+    if (!list) {
+      list = [];
+      this.#capturedConnectionRequests.set(chatId, list);
+    }
+    list.push(body);
+
+    return { requested: true, message:
+        `Connection request sent to the user for "${vendor.description.displayName}". ` +
+        `Awaiting their decision; your turn will end now. If they accept, you'll be resumed with ` +
+        `access to the resource; if they deny, your turn stays ended until the user messages you.` };
+  }
+
+  consumeCapturedConnectionRequests(chatId: number): AiChatMessageBody[] {
+    let result = this.#capturedConnectionRequests.get(chatId) ?? [];
+    this.#capturedConnectionRequests.delete(chatId);
+    return result;
+  }
+
   #tailSubscribers: Set<RpcStub<ConsoleLogSubscriber>> = new Set();
 
   async deliverGadgetLogs(chatId: number | null, logs: ConsoleLogEvent[]) {
@@ -3569,6 +3695,92 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.storage.actions.put(action);
   }
 
+  // Find a pending connectionRequest message by id. The request id encodes the chat id as a prefix
+  // (`${chatId}:...`) so we only scan that thread's messages.
+  #findConnectionRequest(requestId: string): AiChatMessage & {type: "connectionRequest"} {
+    let colonIdx = requestId.indexOf(":");
+    if (colonIdx < 0) throw new Error(`Malformed connection request id: ${requestId}`);
+    let chatId = Number(requestId.slice(0, colonIdx));
+    if (!Number.isFinite(chatId)) throw new Error(`Malformed connection request id: ${requestId}`);
+
+    for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+      if (msg.type === "connectionRequest" && msg.requestId === requestId) {
+        return msg as AiChatMessage & {type: "connectionRequest"};
+      }
+    }
+    throw new Error(`No such connection request: ${requestId}`);
+  }
+
+  // Resume the agent on the given chat so it can react to an accepted connection request (only
+  // accept resumes; deny leaves the turn ended). Modeled on sendChatMessage: the accepted
+  // connectionRequest message itself (read from history) supplies the outcome the agent sees, so we
+  // don't append a separate user message here.
+  async #resumeAgentAfterConnection(chatId: number): Promise<void> {
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) return;  // Chat deleted.
+    if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
+
+    // Recover the model this thread was using. getChatContext(null) does NOT resolve a model, so we
+    // find the id from the most recent agent-authored message (its author.id is the model id).
+    let modelId: string | null = null;
+    for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true})) {
+      if (msg.author.type === "agent") {
+        modelId = msg.author.id;
+        break;
+      }
+    }
+
+    let userMeta = await this.clientUser.getChatContext(modelId);
+    if (!userMeta.aiModel) return;  // No model resolved; nothing to resume.
+
+    // Re-read after the await: another concurrent accept may have started the agent in the
+    // meantime. Avoid starting a second agent loop for the same chat.
+    let fresh = this.impl.storage.chatMeta.get(chatId);
+    if (!fresh || fresh.activeAgent) return;
+
+    fresh.activeAgent = userMeta.aiModel.profile;
+    fresh.lastActive = this.impl.getChatTimestamp();
+    this.impl.storage.chatMeta.put(fresh);
+
+    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                         this.clientUser.id.toString());
+  }
+
+  async acceptConnectionRequest(
+      requestId: string, result: {gatekeeperId: number}): Promise<void> {
+    let msg = this.#findConnectionRequest(requestId);
+    if (msg.state !== "pending") {
+      throw new Error(`Connection request is not pending: ${requestId}`);
+    }
+
+    msg.state = "accepted";
+    // The gatekeeper is surfaced to the agent as a chat-scoped capsule (see the connectionRequest
+    // history case in agent.ts); the agent promotes it to a named binding itself if needed.
+    msg.gatekeeperId = result.gatekeeperId;
+    // Bump the timestamp so clients that were offline during the decision still receive the
+    // mutated card on reconnect (the catch-up scan is ordered by timestamp).
+    msg.timestamp = this.impl.getChatTimestamp();
+    this.impl.storage.chats.put(msg);  // fires the subscriber update() → re-delivers the card
+
+    await this.#resumeAgentAfterConnection(msg.chatId);
+  }
+
+  async denyConnectionRequest(requestId: string): Promise<void> {
+    let msg = this.#findConnectionRequest(requestId);
+    if (msg.state !== "pending") {
+      throw new Error(`Connection request is not pending: ${requestId}`);
+    }
+
+    msg.state = "denied";
+    msg.timestamp = this.impl.getChatTimestamp();
+    this.impl.storage.chats.put(msg);  // fires the subscriber update() → re-delivers the card
+
+    // Intentionally do NOT resume the agent on deny. The agent's turn already ended when it made the
+    // request; leaving it ended lets the user say what they want done instead, rather than forcing
+    // the agent to guess from a bare "denied" signal. The denial is recorded in history and the
+    // agent sees it the next time the user sends a message (see the connectionRequest history case).
+  }
+
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
     let actions = this.impl.storage.actions;
@@ -3684,7 +3896,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         subscriber.message(record).catch(unsubscribe);
       },
       update(oldRecord: AiChatMessage, newRecord: AiChatMessage): void {
-        // Never happens.
+        // Chat messages are normally immutable, but connectionRequest messages are mutated in
+        // place when the user accepts/denies. Re-deliver so the client (which indexes by
+        // sequence) replaces the cached message and re-renders the card.
+        subscriber.message(newRecord).catch(unsubscribe);
       },
       remove(record: AiChatMessage): void {
         // Never happens.

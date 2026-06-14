@@ -67,6 +67,7 @@ import { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
+import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
@@ -410,6 +411,10 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
     }
     case "observeUserChanges":
       return { verb: "Observed user changes" };
+    case "listConnectableResources":
+      return { verb: "Listed connectable resources", target: tc.input.vendorId };
+    case "requestConnection":
+      return { verb: "Requested connection", target: tc.input.vendorId };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -476,6 +481,10 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Observed ${pluralize(count, "change set")}`;
     case "giveUp":
       return count === 1 ? "Stopped" : `Stopped ${count} times`;
+    case "listConnectableResources":
+      return `Listed connectable resources`;
+    case "requestConnection":
+      return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -550,6 +559,8 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
     case "giveUp": return "Stopping";
+    case "listConnectableResources": return "Listing connectable resources";
+    case "requestConnection": return "Requesting a connection";
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -569,6 +580,8 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
     case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
     case "giveUp": return "Stopping";
+    case "listConnectableResources": return "Listing connectable resources";
+    case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -1094,6 +1107,7 @@ export const ChatInput = ({
   minRows = 2,
   attachLabel,
   draftUpdateBanner,
+  blockedReason,
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
@@ -1126,6 +1140,9 @@ export const ChatInput = ({
   /** Optional label for the attach menu item. */
   attachLabel?: string;
   draftUpdateBanner?: ReactNode;
+  /** When set, the composer is disabled and shows this message — the user must resolve something
+   * (e.g. accept/deny a pending connection request) before they can type or send. */
+  blockedReason?: string;
   onStop?: () => void;
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
@@ -1201,7 +1218,10 @@ export const ChatInput = ({
     setOverlayIndex(0);
   }, [activeUrl]);
 
+  const isBlocked = !!blockedReason;
+
   const handleSend = () => {
+    if (isBlocked) return;
     if (!inputValue.trim()) return;
 
     if (capsules.length === 0) {
@@ -1789,12 +1809,15 @@ export const ChatInput = ({
               onScroll={(e) => {
                 syncMirrorScroll(e.currentTarget);
               }}
+              disabled={isBlocked}
               placeholder={
-                isAgentActive
-                  ? "Waiting for agent…"
-                  : newChat
-                    ? "Start a new conversation…"
-                    : "Ask a follow-up…"
+                isBlocked
+                  ? blockedReason
+                  : isAgentActive
+                    ? "Waiting for agent…"
+                    : newChat
+                      ? "Start a new conversation…"
+                      : "Ask a follow-up…"
               }
               autoFocus={autoFocus}
               rows={minRows}
@@ -1802,7 +1825,7 @@ export const ChatInput = ({
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (!isAgentActive) handleSend();
+                  if (!isAgentActive && !isBlocked) handleSend();
                   return;
                 }
                 if (activeUrl) {
@@ -1936,7 +1959,7 @@ export const ChatInput = ({
               ) : (
                 <WorkshopIconButton
                   onClick={handleSend}
-                  disabled={!inputValue.trim() || isAgentActive}
+                  disabled={!inputValue.trim() || isAgentActive || isBlocked}
                   tone="primary"
                   className="!h-8 !w-8 disabled:cursor-not-allowed disabled:opacity-30"
                   aria-label="Send message"
@@ -2607,6 +2630,22 @@ function ChatInterface({
   const [processingActions, setProcessingActions] = useState<Set<number>>(
     new Set(),
   );
+  // Connection-request (agent requestConnection) accept flow. When set, the GatekeeperModal opens
+  // pre-seeded with the agent's vendor/resource; on creation we finalize acceptConnectionRequest.
+  const [connectionAccept, setConnectionAccept] = useState<{
+    requestId: string;
+    vendorId: string;
+    resourceUrl?: string;
+    resourceUrlPattern?: string;
+  } | null>(null);
+  // Read via this ref inside handleConnectionCreated to avoid a stale closure: that callback is
+  // passed as the `onCreated` prop to GatekeeperModal, so it would otherwise capture an outdated
+  // `connectionAccept`.
+  const connectionAcceptRef = useRef<typeof connectionAccept>(null);
+  connectionAcceptRef.current = connectionAccept;
+  const [processingConnections, setProcessingConnections] = useState<Set<string>>(
+    new Set(),
+  );
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>(
     [],
   );
@@ -2810,6 +2849,14 @@ function ChatInterface({
   }, [selectedChatId, updateCounter]);
   const messageStates = useMemo(
     () => computeMessageStates(currentMessages),
+    [currentMessages],
+  );
+  // A pending agent connection request blocks the composer: the user must accept ("Set up") or deny
+  // it before continuing the conversation.
+  const hasPendingConnectionRequest = useMemo(
+    () => currentMessages.some(
+      (msg) => msg.type === "connectionRequest" && msg.state === "pending",
+    ),
     [currentMessages],
   );
   const displayEntries = useMemo(
@@ -3740,6 +3787,65 @@ function ChatInterface({
     }
   };
 
+  // Open the gatekeeper modal pre-seeded with the agent's requested vendor/resource.
+  const handleAcceptConnection = (msg: AiChatMessage & { type: "connectionRequest" }) => {
+    setConnectionAccept({
+      requestId: msg.requestId,
+      vendorId: msg.vendorId,
+      resourceUrl: msg.resourceUrl,
+      resourceUrlPattern: msg.resourceUrlPattern,
+    });
+  };
+
+  // Invoked by the accept-flow GatekeeperModal once the user has connected + configured a resource.
+  // The gatekeeper is left unnamed; finalizing the request surfaces it to the agent as a chat-scoped
+  // capsule (the agent promotes it to a named binding itself if its gadget code needs it).
+  const handleConnectionCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
+    const accept = connectionAcceptRef.current;
+    if (!accept) {
+      gk[Symbol.dispose]();
+      return;
+    }
+    setProcessingConnections((prev) => new Set(prev).add(accept.requestId));
+    try {
+      const id = await gk.getId();
+      await overseer.acceptConnectionRequest(accept.requestId, {
+        gatekeeperId: id,
+      });
+      setConnectionAccept(null);
+    } catch (err) {
+      console.error("Failed to finalize connection:", err);
+      toasts.add({ title: "Failed to add connection", variant: "error" });
+    } finally {
+      gk[Symbol.dispose]();
+      setProcessingConnections((prev) => {
+        const next = new Set(prev);
+        next.delete(accept.requestId);
+        return next;
+      });
+    }
+  };
+
+  const handleDenyConnection = async (requestId: string) => {
+    setProcessingConnections((prev) => new Set(prev).add(requestId));
+    try {
+      await overseer.denyConnectionRequest(requestId);
+      // If the accept modal happens to be open for this same request, close it.
+      if (connectionAcceptRef.current?.requestId === requestId) {
+        setConnectionAccept(null);
+      }
+    } catch (err) {
+      console.error("Failed to deny connection:", err);
+      toasts.add({ title: "Failed to deny connection", variant: "error" });
+    } finally {
+      setProcessingConnections((prev) => {
+        const next = new Set(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }
+  };
+
   const toggleToolCallExpansion = useCallback((expansionKey: string) => {
     setExpandedToolCalls((prev) => {
       const next = new Set(prev);
@@ -3919,6 +4025,75 @@ function ChatInterface({
 
     return out;
   }, [currentMessages, messageStates]);
+
+  const renderConnectionRequestCard = (
+    msg: AiChatMessage & { type: "connectionRequest" },
+  ) => {
+    const isPending = msg.state === "pending";
+    const isAccepted = msg.state === "accepted";
+    const isDenied = msg.state === "denied";
+    const isProc = processingConnections.has(msg.requestId);
+
+    const stateLabel = isAccepted ? "Connected" : isDenied ? "Denied" : null;
+    const stateLabelCls = isDenied ? "text-kumo-danger" : "text-green-600 dark:text-green-400";
+    const scope = msg.resourceTitle ?? msg.resourceUrl;
+
+    return (
+      <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+        <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+          <div className="flex items-start gap-3">
+            <GatekeeperIcon
+              vendorId={msg.vendorId}
+              logoUrl={msg.vendorLogoUrl}
+              className="h-9 w-9 flex-shrink-0 rounded-lg"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="font-medium text-kumo-default">
+                  Connect {msg.vendorName}
+                </span>
+                {scope && (
+                  <span className="rounded-full bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 text-kumo-subtle">
+                    {scope}
+                  </span>
+                )}
+                {stateLabel && (
+                  <span className={`text-[12px] font-medium ${stateLabelCls}`}>
+                    {stateLabel}
+                  </span>
+                )}
+              </div>
+              {msg.reason && (
+                <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
+                  {msg.reason}
+                </p>
+              )}
+            </div>
+            {isPending && (
+              <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
+                <button
+                  type="button"
+                  onClick={() => handleDenyConnection(msg.requestId)}
+                  disabled={isProc}
+                  className="cursor-pointer rounded-md px-2 py-1 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAcceptConnection(msg)}
+                  disabled={isProc}
+                  className="cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Set up
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const renderActionCard = (msg: ActionChatMessage) => {
     const log = msg.actionLog;
@@ -4746,6 +4921,8 @@ function ChatInterface({
 
                         {msg.type === "action" && renderActionCard(msg)}
 
+                        {msg.type === "connectionRequest" && renderConnectionRequestCard(msg)}
+
                         {msg.type === "useGadget" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
                             <Tooltip content={`Used the gadget at ${formatFullTimestamp(msg.timestamp)}`} asChild>
@@ -5066,6 +5243,11 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
+                    blockedReason={
+                      hasPendingConnectionRequest
+                        ? "Set up or deny the connection request above to continue."
+                        : undefined
+                    }
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata?.hasProposedChanges) return null;
 
@@ -5137,6 +5319,17 @@ function ChatInterface({
         onConfirm={handleDeleteConfirm}
       />
 
+      {/* Accept flow for an agent connection request: pre-seeds the gatekeeper modal and, on
+          creation, finalizes the request so the agent resumes. */}
+      <GatekeeperModal
+        open={connectionAccept !== null}
+        onClose={() => setConnectionAccept(null)}
+        getOverseer={() => overseer}
+        onCreated={handleConnectionCreated}
+        initialVendorId={connectionAccept?.vendorId}
+        initialResourceUrl={connectionAccept?.resourceUrl}
+        initialResourceUrlPattern={connectionAccept?.resourceUrlPattern}
+      />
       <OutOfCreditsModal
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}

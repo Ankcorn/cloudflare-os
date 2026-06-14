@@ -42,6 +42,25 @@ export type ConfiguratorUISpec<
   // Initial form values shown before the user makes any changes.
   initial: TValues;
 
+  // Optional: derive initial form values from a concrete resource URL, so the form opens
+  // pre-filled and editable. This is used when something (e.g. an AI agent's connection request)
+  // already knows the exact resource — the configurator opens populated rather than blank.
+  //
+  // `resourceUrl` is the concrete URL; `resourceUrlPattern` is this resource's URLPattern; `ui` is
+  // the gatekeeper capability (in case resolving display values requires an RPC). Return the form
+  // values that represent the URL (partial is fine).
+  //
+  // If omitted, the runtime falls back to extracting URLPattern named groups from
+  // `resourceUrlPattern` and seeding any values whose keys match a group name. So a configurator
+  // whose value keys already match its pattern groups (e.g. `:areaId` -> `areaId`) needs nothing
+  // here; implement this only when the mapping differs (e.g. GitHub's `:owner/:repo` ->
+  // `repoFullName`).
+  initialValuesFromResourceUrl?(context: {
+    resourceUrl: string;
+    resourceUrlPattern: string;
+    ui: TUI;
+  }): Partial<TValues> | Promise<Partial<TValues>>;
+
   // Return if the current iframe-owned state is ready to submit.
   isReady?(context: { values: TValues }): boolean;
 

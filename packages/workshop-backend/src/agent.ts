@@ -1,7 +1,7 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
 import { ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import * as Y from "yjs";
-import { streamText, hasToolCall, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
+import { streamText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
@@ -62,6 +62,33 @@ export interface AgentHooks {
   // to Workers AI. Exposed as a narrow interface (rather than handing over the whole `env`)
   // so the dependency surface stays explicit.
   getWebFetchEnv(): WebFetchEnv;
+
+  // Connection-request hooks for the agent.
+  //
+  // List the gatekeeper vendors the user could connect (id + display name). Used to populate the
+  // system prompt so the agent knows what it can request; resource patterns are fetched on demand
+  // via listConnectableResources().
+  listConnectableVendors(): Promise<{id: string, displayName: string}[]>;
+
+  // Describe the resource types a given vendor offers (urlPattern + title + description), so the
+  // agent can construct a resourceUrl for requestConnection. Returns formatted text.
+  listConnectableResources(vendorId: string): Promise<string>;
+
+  // Record a pending connection request for the given chat. `message` is the tool output text; when
+  // `requested` is true a request was created (captured and spliced into the chat as a
+  // "connectionRequest" message by the agent loop, see consumeCapturedConnectionRequests) and the
+  // turn should end so the agent waits for the user. When `requested` is false the request was
+  // rejected (e.g. it wouldn't resolve to a connectable resource); `message` explains what to fix
+  // and the agent should be allowed to retry within the same turn.
+  requestConnection(chatId: number, input: {
+    vendorId: string;
+    resourceUrl?: string;
+    reason: string;
+  }): Promise<{ requested: boolean; message: string }>;
+
+  // Drain connection requests captured during the current step so they can be appended to the chat
+  // (analogous to consumeCapturedActions).
+  consumeCapturedConnectionRequests(chatId: number): AiChatMessageBody[];
 }
 
 let SYSTEM_PROMPT = `
@@ -855,6 +882,13 @@ export async function runAgent(
                     value: {},
                   };
                   break;
+                case "listConnectableResources":
+                case "requestConnection":
+                  toolOutput = {
+                    type: "text",
+                    value: toolCall.output ?? "",
+                  };
+                  break;
                 default:
                   toolCall satisfies never;
                   throw new Error("Unknown tool.");
@@ -985,6 +1019,53 @@ export async function runAgent(
         modelMessages.push({ role: "user", content: msg.text });
         break;
 
+      case "connectionRequest": {
+        // Surface the outcome of a connection request to the agent. While pending, there is
+        // nothing actionable to report (the agent already saw the tool's "awaiting" output and
+        // ended its turn). On accept the agent is resumed and reads this as a user message
+        // describing the result; on deny it isn't resumed, but the note is still surfaced here so
+        // the agent sees the outcome the next time the user messages it.
+        if (msg.state === "accepted") {
+          if (msg.gatekeeperId !== undefined) {
+            // Surface the accepted resource as a chat-scoped capsule (env[N]), reusing the same
+            // index if its gatekeeper was already seen.
+            capsules = capsules ?? [];
+            let idx = seenCapsuleGatekeeperIds.get(msg.gatekeeperId);
+            if (idx === undefined) {
+              idx = capsules.length;
+              capsules.push({ type: "gatekeeper", gatekeeperId: msg.gatekeeperId });
+              seenCapsuleGatekeeperIds.set(msg.gatekeeperId, idx);
+            }
+            modelMessages.push({
+              role: "user",
+              content:
+                  `The user accepted your connection request for "${msg.vendorName}". ` +
+                  `The resource is available as the capsule \`env[${idx}]\` for use in executeCode ` +
+                  `in this conversation. Use describeBinding(${idx}) to learn its API, then use it. ` +
+                  `If the Gadget's code needs it permanently, use saveCapsuleAsBinding to promote it.`,
+            });
+          } else {
+            // Defensive: accept always records a gatekeeperId, so this shouldn't happen — but never
+            // leave a resumed agent with no context about the outcome.
+            modelMessages.push({
+              role: "user",
+              content:
+                  `The user accepted your connection request for "${msg.vendorName}", but the ` +
+                  `connected resource isn't available to you right now. Ask the user to try again ` +
+                  `or proceed without it.`,
+            });
+          }
+        } else if (msg.state === "denied") {
+          modelMessages.push({
+            role: "user",
+            content:
+                `The user denied your connection request for "${msg.vendorName}". ` +
+                `Do not retry the same request; wait for the user to tell you how to proceed.`,
+          });
+        }
+        break;
+      }
+
       case "action":
       case "useGadget":
       case "error":
@@ -1018,6 +1099,12 @@ export async function runAgent(
   // parameter schema, seemingly. So we have to catch our own errors and log them to the
   // side, ugh.
   let toolCallNotes = new Map<string, Partial<AiToolCall>>();
+
+  // Set to true once the agent has successfully created a connection request this turn. Used by
+  // stopWhen to end the turn (the agent must wait for the user to accept/deny). A *rejected*
+  // requestConnection call leaves this false so the agent can fix the request and retry without the
+  // turn ending (which would strand it, since there'd be no card to accept/deny and thus no resume).
+  let connectionRequested = false;
 
   let flushCapturedYdocChanges = () => {
     if (capturedYdocChanges.length === 0) {
@@ -1093,9 +1180,26 @@ export async function runAgent(
           `${bindingInfo.map(info => `* ${info.name}: ${info.title}`).join("\n")}`
     }
 
+    // Build connectable-vendors section. We only list vendor names here; the agent fetches a
+    // vendor's resource URL patterns on demand via listConnectableResources.
+    let connectableVendors = await hooks.listConnectableVendors();
+    let systemPromptConnections: string;
+    if (connectableVendors.length == 0) {
+      systemPromptConnections = "";
+    } else {
+      systemPromptConnections =
+          `\n\nIf you need access to an external resource that isn't already a binding, you can ask ` +
+          `the user to connect one with the requestConnection tool (pre-configure it as much as you ` +
+          `can; use listConnectableResources to learn a vendor's resource URL patterns first). The ` +
+          `user accepts or denies in the chat. If they accept, you'll be resumed and the resource ` +
+          `becomes available as a capsule; if they deny, your turn ends and you wait for the user's ` +
+          `next message. Connectable vendors:\n` +
+          `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
+    }
+
     // Split the system prompt into static and dynamic parts for better caching.
     modelMessages[0].content = SYSTEM_PROMPT;
-    modelMessages[1].content = `${systemPromptFiles}\n\n${systemPromptBindings}`;
+    modelMessages[1].content = `${systemPromptFiles}\n\n${systemPromptBindings}${systemPromptConnections}`;
   }
 
   let maxOutputTokens: number | undefined;
@@ -1538,6 +1642,63 @@ export async function runAgent(
         }
       }
     }),
+
+    listConnectableResources: tool({
+      description:
+          "List the resource types a gatekeeper vendor offers, so you can construct a resourceUrl " +
+          "for requestConnection. The system prompt lists which vendors exist; call this to learn a " +
+          "specific vendor's resource URL patterns before requesting a connection.",
+      inputSchema: z.object({
+        vendorId: z.string().describe("Vendor id, as listed in the system prompt (e.g. 'github')."),
+      }),
+      execute: async ({vendorId}, {toolCallId}) => {
+        try {
+          let output = await hooks.listConnectableResources(vendorId);
+          toolCallNotes.set(toolCallId, { output });
+          return output;
+        } catch (error) {
+          toolCallNotes.set(toolCallId, { error: `${error}` });
+          throw error;
+        }
+      }
+    }),
+
+    requestConnection: tool({
+      description:
+          "Ask the user to connect a gatekeeper resource (e.g. a ClickHouse cluster, a GitHub repo). " +
+          "Pre-configure as much as you can: always pass vendorId, and pass resourceUrl when you can " +
+          "infer it (use listConnectableResources to learn the URL patterns). The request must " +
+          "resolve to a specific resource: if you pass a resourceUrl it must match one of the " +
+          "vendor's patterns, and if the vendor offers multiple resource types with no whole-instance " +
+          "option you MUST pass a matching resourceUrl. Otherwise the call is rejected with guidance " +
+          "and no card is shown — fix the resourceUrl and try again. On success this shows the user " +
+          "an accept/deny card in the chat. It does NOT block: your turn ends after a successful " +
+          "call, and you will be resumed once the user accepts (the resource becomes available as a " +
+          "chat-scoped capsule env[N], which you can describeBinding and use from executeCode; " +
+          "promote it to a permanent gadget binding with saveCapsuleAsBinding only if your Gadget " +
+          "code needs it) or denies (your turn simply ends; wait for the user's next message).",
+      inputSchema: z.object({
+        vendorId: z.string().describe("Vendor id, as listed in the system prompt (e.g. 'github')."),
+        resourceUrl: z.string().optional().describe(
+            "The specific resource URL, if known (matching a pattern from listConnectableResources). " +
+            "Omit if you don't know the exact resource; the user will pick it."),
+        reason: z.string().describe(
+            "A short explanation of why you need this connection, shown to the user."),
+      }),
+      execute: async (input, {toolCallId}) => {
+        try {
+          let result = await hooks.requestConnection(chatId, input);
+          // Only end the turn if a request was actually created; a rejected request must let the
+          // agent retry within the same turn (see the connectionRequested flag / stopWhen).
+          if (result.requested) connectionRequested = true;
+          toolCallNotes.set(toolCallId, { output: result.message });
+          return result.message;
+        } catch (error) {
+          toolCallNotes.set(toolCallId, { error: `${error}` });
+          throw error;
+        }
+      }
+    }),
   };
 
   // When the agent was started to handle callbacks, add the giveUp tool so it can bail out.
@@ -1704,6 +1865,11 @@ export async function runAgent(
     //   you want to support multiple steps at all? What if you don't want to set a limit?
     stopWhen: [
       stepCountIs(30),
+      // End the turn once the agent has successfully requested a connection: it must wait for the
+      // user to respond, not keep reasoning in the meantime. (Accept resumes it on a fresh turn;
+      // deny just leaves the turn ended.) A rejected requestConnection (e.g. unresolvable resource)
+      // leaves this false so the agent can fix the request and retry in the same turn.
+      () => connectionRequested,
       // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
       ...(callbackInitiated ? [() => hooks.activeAgentCallbackCount(chatId) === 0] : []),
     ],
@@ -1751,6 +1917,12 @@ export async function runAgent(
         if (capturedActions.accessedGadget) {
           msgs.push({type: "useGadget"});
         }
+      }
+
+      // Append any connection requests the agent made this step, after the assistant message that
+      // contains the requestConnection tool call (so ordering reads correctly).
+      for (let cr of hooks.consumeCapturedConnectionRequests(chatId)) {
+        msgs.push(cr);
       }
 
       // TODO: Figure out where to get cf-aig-log-id when using the Workers AI binding.

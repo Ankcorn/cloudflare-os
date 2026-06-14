@@ -8,6 +8,15 @@ export default {
     return typeof values.projectId === "string" && values.projectId.length > 0;
   },
 
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const [projectId, datasetId, tableId] = new URL(resourceUrl).pathname.split("/").filter(Boolean);
+    const values: { projectId?: string; datasetId?: string; tableId?: string } = {};
+    if (projectId) values.projectId = decodeURIComponent(projectId);
+    if (datasetId) values.datasetId = decodeURIComponent(datasetId);
+    if (tableId) values.tableId = decodeURIComponent(tableId);
+    return values;
+  },
+
   resourceUrl({ values }) {
     const path = [values.projectId, values.datasetId, values.tableId]
       .filter((value): value is string => !!value)

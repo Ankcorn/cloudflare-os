@@ -9,6 +9,12 @@ export default {
       typeof values.pullNumber === "string" && values.pullNumber.length > 0;
   },
 
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const [owner, repo, , number] = new URL(resourceUrl).pathname.split("/").filter(Boolean);
+    if (!owner || !repo) return {};
+    return { repoFullName: `${owner}/${repo}`, pullNumber: number ?? null };
+  },
+
   resourceUrl({ values }) {
     return `https://github.com/${values.repoFullName}/pull/${values.pullNumber}`;
   },

@@ -87,6 +87,7 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
     private readonly onResize: (height: number, layoutHeight: number) => void,
     private readonly onSelectionReady: (ready: boolean) => void,
     private readonly onScroll: (deltaX: number, deltaY: number) => void,
+    private readonly getInitialResourceImpl: () => { resourceUrl: string; resourceUrlPattern: string } | null,
   ) {
     super()
     this.#gatekeeper = createRateLimitedConfigurator(configurator)
@@ -94,6 +95,10 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
 
   get gatekeeper(): RpcStub<RpcTarget> {
     return this.#gatekeeper
+  }
+
+  async getInitialResource(): Promise<{ resourceUrl: string; resourceUrlPattern: string } | null> {
+    return this.getInitialResourceImpl()
   }
 
   resize(height: number, layoutHeight: number): void {
@@ -114,11 +119,18 @@ export default function SandboxedResourceConfigurator({
   topOffset = 0,
   onCollectResourceUrlChange,
   onSelectionReadyChange,
+  initialResourceUrl,
+  resourceUrlPattern,
 }: {
   frame: ResourceConfiguratorFrame,
   topOffset?: number,
   onCollectResourceUrlChange?: (collect: (() => Promise<string>) | null) => void,
   onSelectionReadyChange?: (ready: boolean | null) => void,
+  // When set, the configurator opens pre-filled to this concrete resource URL (e.g. supplied by an
+  // AI agent's connection request). `resourceUrlPattern` is this resource's pattern, used by the
+  // iframe runtime's fallback URL->values extraction.
+  initialResourceUrl?: string,
+  resourceUrlPattern?: string,
 }) {
   const placeholderRef = useRef<HTMLDivElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -143,6 +155,11 @@ export default function SandboxedResourceConfigurator({
   const topOffsetRef = useRef(topOffset)
   topOffsetRef.current = topOffset
   configuratorRef.current = frame.ui
+  // Resource to pre-fill the configurator with, read lazily when the iframe connects.
+  const initialResourceRef = useRef<{ resourceUrl: string; resourceUrlPattern: string } | null>(null)
+  initialResourceRef.current = (initialResourceUrl && resourceUrlPattern)
+    ? { resourceUrl: initialResourceUrl, resourceUrlPattern }
+    : null
 
   // Cached scroll ancestor of the placeholder. We rediscover it lazily because the modal DOM is
   // stable for the lifetime of the configurator, so walking up via getComputedStyle on every event is
@@ -257,6 +274,7 @@ export default function SandboxedResourceConfigurator({
         clamp(Number(deltaX) || 0, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA),
         clamp(Number(deltaY) || 0, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA),
       ),
+      () => initialResourceRef.current,
     ))
     rpcSessionRef.current = iframe
     iframeRpcRef.current?.[Symbol.dispose]?.()
@@ -358,6 +376,34 @@ export default function SandboxedResourceConfigurator({
       window.removeEventListener('scroll', update, true)
     }
   }, [])
+
+  // Track the placeholder geometry while the modal finishes opening. The iframe is portaled with a
+  // fixed width/left measured from the placeholder via getBoundingClientRect. When the configurator
+  // mounts while the modal is still playing its open animation (e.g. the agent accept flow opens it
+  // pre-seeded), getBoundingClientRect reflects the modal's transient transform (scale-in), so the
+  // iframe is sized too narrow and would stay that way until something re-measures (a window resize
+  // fixes it). A ResizeObserver can't catch this because CSS transforms don't change the observed
+  // box size. Instead we re-measure each frame until the geometry is stable for a few frames (the
+  // animation has settled) or a 1s cap elapses — which also makes the iframe track the modal as it
+  // animates in.
+  useEffect(() => {
+    let raf = 0
+    let stableFrames = 0
+    let lastKey = ''
+    const start = performance.now()
+    const tick = () => {
+      const rect = placeholderRef.current?.getBoundingClientRect()
+      const key = rect ? `${Math.round(rect.width)}x${Math.round(rect.left)}x${Math.round(rect.top)}` : ''
+      if (key && key === lastKey) stableFrames++
+      else { stableFrames = 0; lastKey = key }
+      updateFrameRect()
+      if (stableFrames < 3 && performance.now() - start < 1000) {
+        raf = requestAnimationFrame(tick)
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [frame.iframeHtml])
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
