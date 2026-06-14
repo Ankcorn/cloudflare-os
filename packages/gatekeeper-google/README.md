@@ -1,6 +1,17 @@
 # Gatekeeper Google
 
-This package provides Google OAuth integration for Gadgets, enabling gadgets to access Google APIs on behalf of users.
+This package provides Google OAuth integration for Gadgets. It serves two purposes:
+
+- **Sign-in:** when `google` is in the deployment's `AUTH_GATEKEEPERS` allowlist, "Continue with
+  Google" appears on the login page. Sign-in requests only minimal scopes (`openid`,
+  `userinfo.email`, `userinfo.profile`) to read the account's **verified email** (`email_verified`),
+  which becomes the user's identity.
+  The sign-in grant is transient (discarded right after the email is read).
+- **Connections:** when a user connects Google (or signs in and later connects it), the full scopes
+  (Gmail, Docs, Drive metadata, BigQuery — see below) are requested so gadgets can access those
+  APIs on the user's behalf.
+
+A single Google OAuth client is used for both. Set it up as follows.
 
 ## Setting Up Google OAuth Credentials
 
@@ -49,7 +60,9 @@ Before creating credentials, you must configure how the consent screen appears t
    - Click **Save and Continue**
 5. On the Scopes page, you can just click **Save and Continue** without adding anything. The scopes are specified by the OAuth request itself, not the console configuration. (The console's scope UI is only relevant if you later want to publish your app for Google's verification review.)
 
-The OAuth request currently asks for:
+The scopes requested depend on what the user is doing. **Sign-in** requests only the identity
+scopes (`openid`, `userinfo.email`, `userinfo.profile`). **Connecting** Google for capabilities
+requests the full set below. The full request asks for:
 
 - `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
 - `gmail.labels` and `gmail.modify` for Gmail thread reads and label changes.
@@ -88,11 +101,24 @@ CLIENT_ID=your-client-id-here.apps.googleusercontent.com
 CLIENT_SECRET=your-client-secret-here
 ```
 
-Replace the values with the credentials from Step 4.
+Replace the values with the credentials from Step 5.
 
 > **Note**: The `.env` file is gitignored and should never be committed.
 
-### Step 7: Verify Setup
+### Step 7: (Optional) Enable Google sign-in
+
+To offer "Continue with Google" on the login page, add `google` to the deployment's
+`AUTH_GATEKEEPERS` allowlist (e.g. in the root `.dev.vars`):
+
+```
+AUTH_GATEKEEPERS=cloudflare,google,github
+```
+
+Sign-in only needs the identity scopes, which are always available, so no extra Google setup is
+required. (While the app is in Testing mode, the signing-in user must still be listed as a Test
+User — see Step 4.)
+
+### Step 8: Verify Setup
 
 1. Start the application in dev mode (see instructions in the root README.md).
 2. Create or open a gadget.

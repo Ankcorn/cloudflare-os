@@ -5,12 +5,17 @@ import { PublicApi } from "@gadgets/workshop-shared/api";
 import { Hexagon } from "@phosphor-icons/react";
 import { Input, Button, Banner } from "@cloudflare/kumo";
 import { hashPassword } from "./passwordHash";
+import { useServerConfig } from "./ServerConfigContext";
+import OAuthButtons from "./components/auth/OAuthButtons";
 
 interface SignupPageProps {
   rpcStub: RpcStub<PublicApi>;
 }
 
 export default function SignupPage({ rpcStub }: SignupPageProps) {
+  const serverConfig = useServerConfig();
+  const authVendors = serverConfig?.authVendors ?? [];
+  const passwordAuthEnabled = serverConfig?.passwordAuthEnabled ?? true;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -95,60 +100,80 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
           <p className="text-sm text-kumo-subtle mt-1">Create your account</p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Input
-            label="Username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoFocus
-            autoComplete="username"
-            disabled={loading}
-            placeholder="your-username"
-            error={usernameError}
-          />
+        {passwordAuthEnabled && (
+          <>
+            {/* Form */}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <Input
+                label="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoFocus
+                autoComplete="username"
+                disabled={loading}
+                placeholder="your-username"
+                error={usernameError}
+              />
 
-          <Input
-            type="password"
-            label="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            disabled={loading}
-            placeholder="••••••••"
-            error={passwordError}
-          />
+              <Input
+                type="password"
+                label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                disabled={loading}
+                placeholder="••••••••"
+                error={passwordError}
+              />
 
-          <Input
-            type="password"
-            label="Confirm Password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            autoComplete="new-password"
-            disabled={loading}
-            placeholder="••••••••"
-            error={confirmError}
-          />
+              <Input
+                type="password"
+                label="Confirm Password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                autoComplete="new-password"
+                disabled={loading}
+                placeholder="••••••••"
+                error={confirmError}
+              />
 
-          {error && <Banner variant="error" title={error} />}
+              {error && <Banner variant="error" title={error} />}
 
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={!canSubmit}
-            loading={loading}
-            className="w-full justify-center"
-          >
-            Create account
-          </Button>
-        </form>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!canSubmit}
+                loading={loading}
+                className="w-full justify-center"
+              >
+                Create account
+              </Button>
+            </form>
+          </>
+        )}
 
-        <p className="text-center text-sm text-kumo-subtle mt-6">
-          Already have an account?{" "}
-          <Link to="/" className="text-kumo-brand hover:underline font-medium">
-            Sign in
-          </Link>
-        </p>
+        {/* Gatekeeper sign-in options, shown whenever any auth vendor is configured. */}
+        {authVendors.length > 0 && (
+          <div className={passwordAuthEnabled ? "mt-6" : ""}>
+            {passwordAuthEnabled && (
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-px flex-1 bg-kumo-line" />
+                <span className="text-xs text-kumo-subtle">or</span>
+                <div className="h-px flex-1 bg-kumo-line" />
+              </div>
+            )}
+            <OAuthButtons rpcStub={rpcStub} vendors={authVendors} />
+          </div>
+        )}
+
+        {passwordAuthEnabled && (
+          <p className="text-center text-sm text-kumo-subtle mt-6">
+            Already have an account?{" "}
+            <Link to="/" className="text-kumo-brand hover:underline font-medium">
+              Sign in
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   );

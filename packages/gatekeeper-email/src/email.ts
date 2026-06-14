@@ -356,6 +356,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     };
   }
 
+  // This gatekeeper does not provide sign-in.
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return null;
+  }
+
   async getSupportedResources(): Promise<SupportedResource[]> {
     return getSupportedResourcesList(this.env);
   }

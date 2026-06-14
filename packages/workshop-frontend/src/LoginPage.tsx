@@ -3,8 +3,11 @@ import { Link } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { PublicApi } from '@gadgets/workshop-shared/api'
 import { Hexagon } from '@phosphor-icons/react'
-import { Input, Button, Banner } from '@cloudflare/kumo'
+import { Input, Button, Banner, Loader } from '@cloudflare/kumo'
 import { hashPassword } from './passwordHash'
+import { useServerConfig } from './ServerConfigContext'
+import { useConnectionLost } from './RpcContext'
+import OAuthButtons from './components/auth/OAuthButtons'
 
 
 interface LoginPageProps {
@@ -17,6 +20,8 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const serverConfig = useServerConfig()
+  const connectionLost = useConnectionLost()
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -44,6 +49,24 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
     }
   }
 
+  // Until the deployment config loads we don't know which auth methods are enabled, so don't guess:
+  // defaulting to the password form would show it even where it's disabled (and hide configured
+  // OAuth providers). This is especially important when the server is unreachable — serverConfig
+  // stays null — so render a loading / connection state instead of a misconfigured form.
+  if (!serverConfig) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-kumo-base px-4">
+        <Loader size="lg" />
+        <p className="text-sm text-kumo-subtle text-center">
+          {connectionLost ? "Can't reach the server. Retrying…" : 'Loading…'}
+        </p>
+      </div>
+    )
+  }
+
+  const authVendors = serverConfig.authVendors ?? []
+  const passwordAuthEnabled = serverConfig.passwordAuthEnabled
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-kumo-base px-4 relative overflow-hidden">
       {/* Dot grid — fades from top to bottom */}
@@ -67,49 +90,70 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           <p className="text-sm text-kumo-subtle mt-1">Sign in to your account</p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Input
-            label="Username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoFocus
-            autoComplete="username"
-            disabled={loading}
-            placeholder="your-username"
-          />
+        {passwordAuthEnabled && (
+          <>
+            {/* Username / password form */}
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <Input
+                label="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoFocus
+                autoComplete="username"
+                disabled={loading}
+                placeholder="your-username"
+              />
 
-          <Input
-            type="password"
-            label="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            disabled={loading}
-            placeholder="••••••••"
-          />
+              <Input
+                type="password"
+                label="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                disabled={loading}
+                placeholder="••••••••"
+              />
 
-          {error && (
-            <Banner variant="error" title={error} />
-          )}
+              {error && (
+                <Banner variant="error" title={error} />
+              )}
 
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={!username || !password}
-            loading={loading}
-            className="w-full justify-center"
-          >
-            Sign in
-          </Button>
-        </form>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!username || !password}
+                loading={loading}
+                className="w-full justify-center"
+              >
+                Sign in
+              </Button>
+            </form>
 
-        <p className="text-center text-sm text-kumo-subtle mt-6">
-          Don't have an account?{' '}
-          <Link to="/signup" className="text-kumo-brand hover:underline font-medium">
-            Create one
-          </Link>
-        </p>
+            <p className="text-center text-sm text-kumo-subtle mt-6">
+              Don't have an account?{' '}
+              <Link to="/signup" className="text-kumo-brand hover:underline font-medium">
+                Create one
+              </Link>
+            </p>
+          </>
+        )}
+
+        {/* Gatekeeper sign-in options, shown whenever any auth vendor is configured. */}
+        {authVendors.length > 0 && (
+          <div className={passwordAuthEnabled ? 'mt-6' : ''}>
+            {passwordAuthEnabled && (
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-px flex-1 bg-kumo-line" />
+                <span className="text-xs text-kumo-subtle">or</span>
+                <div className="h-px flex-1 bg-kumo-line" />
+              </div>
+            )}
+            {!passwordAuthEnabled && error && (
+              <Banner variant="error" title={error} className="mb-4" />
+            )}
+            <OAuthButtons rpcStub={rpcStub} vendors={authVendors} onSuccess={onLoginSuccess} />
+          </div>
+        )}
       </div>
     </div>
   )

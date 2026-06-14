@@ -464,6 +464,18 @@ export class GitHubApi {
     return await this.#conditionalGet<GitHubSimpleUser>("/user", undefined, options);
   }
 
+  // Returns the account's primary, verified email (for use as a sign-in identity), or null if the
+  // account has no verified email. Requires the `user:email` scope.
+  async getPrimaryVerifiedEmail(): Promise<string | null> {
+    const result = await this.#request<Array<{
+      email: string; primary: boolean; verified: boolean;
+    }>>("GET", "/user/emails", {});
+    const emails = result.data ?? [];
+    const primary = emails.find(e => e.primary && e.verified);
+    const verified = primary ?? emails.find(e => e.verified);
+    return verified?.email ?? null;
+  }
+
   async getRepo(owner: string, repo: string): Promise<GitHubRepoResponse> {
     const result = await this.getRepoConditional(owner, repo);
     if (result.status === 304) {

@@ -10,6 +10,7 @@ import { AuthProvider } from '../AuthContext'
 import Header from '../components/Header'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
+import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -173,6 +174,7 @@ function AuthenticatedShell({
     <>
       {connectionLost && <ConnectionLostBanner />}
       {!isChat && !isGadgetEditor && <Header />}
+      <AccountSelectionModal />
       <main className={!isChat && !isGadgetEditor ? 'dotted-bg' : ''}>
         <Outlet />
       </main>

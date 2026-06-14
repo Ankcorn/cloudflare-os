@@ -16,6 +16,28 @@ import { parse } from "jsonc-parser";
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(ROOT, "packages");
 
+// Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
+// shell environment values take precedence. This file is gitignored and may hold local secrets.
+function loadDevVars() {
+  const path = join(ROOT, ".dev.vars");
+  if (!existsSync(path)) return;
+  for (const rawLine of readFileSync(path, "utf8").split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    // Strip surrounding single or double quotes.
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+loadDevVars();
+
 const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
 
 // ---------------------------------------------------------------------------
@@ -112,13 +134,31 @@ function bindingName(gk) {
 
 // ---------------------------------------------------------------------------
 // Generate gatekeeper wrangler.dev.jsonc files. The checked-in wrangler.jsonc
-// already points at the capnweb-validate output; dev only needs an explicit cwd
+// already points at the capnweb-validate output; dev needs an explicit cwd
 // because this script starts a multi-config Wrangler process from the repo root.
+// We also inject OAuth credentials shared with the sign-in flow, so a single
+// OAuth app can drive both; gatekeepers without shared creds keep their raw config,
+// and any creds already defined in the gatekeeper's own config still win.
 // ---------------------------------------------------------------------------
+
+// Maps a gatekeeper name to the shared env vars whose values seed its CLIENT_ID / CLIENT_SECRET.
+const SHARED_GATEKEEPER_CREDS = {
+  "gatekeeper-github": { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" },
+  "gatekeeper-google": { id: "GOOGLE_CLIENT_ID", secret: "GOOGLE_CLIENT_SECRET" },
+  "gatekeeper-cloudflare": { id: "CLOUDFLARE_OAUTH_CLIENT_ID", secret: "CLOUDFLARE_OAUTH_CLIENT_SECRET" },
+};
+
 for (const gk of gatekeepers) {
   const srcPath = join(gk.dir, "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = { ...config.build, cwd: gk.dir };
+
+  const shared = SHARED_GATEKEEPER_CREDS[gk.name];
+  if (shared && process.env[shared.id] && process.env[shared.secret]) {
+    config.vars = config.vars || {};
+    if (config.vars.CLIENT_ID === undefined) config.vars.CLIENT_ID = process.env[shared.id];
+    if (config.vars.CLIENT_SECRET === undefined) config.vars.CLIENT_SECRET = process.env[shared.secret];
+  }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");
@@ -138,6 +178,23 @@ for (const gk of gatekeepers) {
   // For local testing, create an account named "admin" to test admin features.
   config.vars = config.vars || {};
   config.vars.ADMINS = ["admin"];
+
+  // Pass through the optional OAuth sign-in / AI Gateway billing env vars from the shell
+  // environment, so you can run e.g.
+  //   ENABLE_CLOUDFLARE_LIMITS=true DAILY_LLM_CALL_LIMIT=1 pnpm dev-server
+  // without editing any config files.
+  const OPTIONAL_FEATURE_VARS = [
+    "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
+    "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
+    // Platform AI Gateway — makes the cross-provider model catalog available.
+    "CF_AI_GATEWAY", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_ACCOUNT_ID",
+    "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_WAI",
+  ];
+  // OAuth app credentials (GOOGLE_/GITHUB_/CLOUDFLARE_OAUTH_*) are NOT passed to the backend anymore;
+  // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
+  for (const name of OPTIONAL_FEATURE_VARS) {
+    if (process.env[name] !== undefined) config.vars[name] = process.env[name];
+  }
 
   for (const gk of gatekeepers) {
     config.services.push({

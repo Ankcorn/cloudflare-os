@@ -40,3 +40,56 @@ To enable support for external APIs, you must do further configuration to regist
 * [Email Workers](packages/gatekeeper-email/README.md)
 * [Home Assistant](packages/gatekeeper-homeassistant/README.md)
 
+# Running as a public, multi-user service
+
+By default the Workshop uses built-in username/password accounts (or Cloudflare Access) and gives
+every user unlimited AI usage — ideal for self-hosting. It can optionally run as a public,
+multi-user service instead: users sign in with Google, GitHub, or Cloudflare, every account gets a
+free daily allowance of AI usage, and once that runs out they connect their own Cloudflare account
+and top up credits in the Cloudflare dashboard (their account is then billed for further usage).
+
+Sign-in is provided by **authentication gatekeepers**: each auth-capable gatekeeper (Google, GitHub,
+Cloudflare) uses its single OAuth app both to authenticate the user (by verified email) and to
+connect the account's capabilities. There's no single switch — the pieces turn on independently:
+
+| Configure | Effect |
+| --- | --- |
+| `AUTH_GATEKEEPERS=cloudflare,google,github` | Allowlists which connected gatekeepers may be used to sign in. Each shows a "Continue with …" button alongside username/password. |
+| Each gatekeeper's OAuth credentials (on the gatekeeper Worker) | Required for that gatekeeper to actually authenticate. In dev, seeded from `GOOGLE_*` / `GITHUB_*` / `CLOUDFLARE_OAUTH_*` shell vars (see `run-dev-server.js`). |
+| `ENABLE_CLOUDFLARE_LIMITS=true` | Enables the free daily limit + Cloudflare-credits top-up flow. Billing reads a token from the connected Cloudflare gatekeeper. |
+| `DISABLE_PASSWORD_AUTH=true` | Hides username/password, leaving gatekeeper sign-in only (ignored unless `AUTH_GATEKEEPERS` is non-empty, to avoid lockout). |
+
+The primary account key is always the user's **verified email**: signing in with any allowlisted
+gatekeeper that yields the same verified email maps to the same account.
+
+For local development, set the required variables in a root `.dev.vars` file (gitignored,
+`KEY=VALUE` per line); `pnpm run dev-server` loads it automatically. A minimal example:
+
+```
+ENABLE_CLOUDFLARE_LIMITS=true
+PUBLIC_BASE_URL=http://localhost:8787
+AUTH_GATEKEEPERS=cloudflare,google,github
+
+# Each gatekeeper's OAuth app (client id/secret). In dev these seed the gatekeeper Workers:
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+CLOUDFLARE_OAUTH_CLIENT_ID=...
+CLOUDFLARE_OAUTH_CLIENT_SECRET=...
+
+# Platform AI Gateway used for the free tier:
+CF_AI_GATEWAY=...
+CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
+```
+
+Each gatekeeper's OAuth app must be registered with that gatekeeper's redirect URI (replace the host
+with `PUBLIC_BASE_URL`):
+
+- GitHub: `${PUBLIC_BASE_URL}/gatekeeper/github/oauth`
+- Google: `${PUBLIC_BASE_URL}/gatekeeper/google/oauth`
+- Cloudflare: `${PUBLIC_BASE_URL}/gatekeeper/cloudflare/oauth`
+
+See [docs/oauth-signin.md](docs/oauth-signin.md) and [docs/ai-gateway-billing.md](docs/ai-gateway-billing.md)
+for the full list of options, the free-tier / top-up behavior, and the storage bindings involved.
+
