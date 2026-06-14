@@ -11,6 +11,8 @@ export default function ResourceConfiguratorHost({
   onCollectResourceUrlChange,
   onSelectionReadyChange,
   topOffset = 0,
+  initialResourceUrl,
+  resourceUrlPattern,
 }: {
   frame: ResourceConfiguratorFrame | null
   frameKey: number | null
@@ -20,6 +22,8 @@ export default function ResourceConfiguratorHost({
   onCollectResourceUrlChange?: (collect: (() => Promise<string>) | null) => void
   onSelectionReadyChange?: (ready: boolean | null) => void
   topOffset?: number
+  initialResourceUrl?: string
+  resourceUrlPattern?: string
 }) {
   if (disabled) return <Placeholder>Choose an account before selecting a resource.</Placeholder>
   if (loading) return <Placeholder>Loading configurator...</Placeholder>
@@ -32,6 +36,8 @@ export default function ResourceConfiguratorHost({
     topOffset={topOffset}
     onCollectResourceUrlChange={onCollectResourceUrlChange}
     onSelectionReadyChange={onSelectionReadyChange}
+    initialResourceUrl={initialResourceUrl}
+    resourceUrlPattern={resourceUrlPattern}
   />
 }
 

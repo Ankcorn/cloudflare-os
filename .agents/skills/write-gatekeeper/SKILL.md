@@ -111,6 +111,22 @@ If you use this:
 - `scripts/build-gatekeeper-configurator.mjs` generates `src/generated/*.txt`.
 - Package `build` / `deploy` scripts should run `pnpm run build:configurator`.
 
+##### Pre-filling the form from a known resource URL
+
+When something already knows the exact resource — most importantly an AI agent's `requestConnection` (which passes a concrete `resourceUrl`) — the configurator should open **pre-filled and editable**, not blank. The runtime handles this for you:
+
+- If your value keys already match the `urlPattern`'s named groups (e.g. pattern `.../area/:areaId` with a value key `areaId`), prefill works automatically — no code needed.
+- Otherwise, implement the optional `initialValuesFromResourceUrl({ resourceUrl, resourceUrlPattern, ui })` on your spec to map a concrete URL back to your form values. Keep it pure where possible (parse the URL); it may use `ui` and may be async. Example (GitHub, whose value is `repoFullName` but pattern is `:owner/:repo`):
+
+  ```ts
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const [owner, repo] = new URL(resourceUrl).pathname.split("/").filter(Boolean);
+    return owner && repo ? { repoFullName: `${owner}/${repo}` } : {};
+  },
+  ```
+
+  The runtime seeds these values before first render and reflects them in `Autocomplete`/`TextInput`/`RadioCards` inputs. Make sure your `resourceUrl(values)` and `initialValuesFromResourceUrl(url)` are inverses so a prefilled form round-trips to the same URL. **Every gatekeeper with selectable resources should support this** so agents can fully pre-configure a connection.
+
 ### Step 7: STOP — Ask operator whether to proceed to phase 2
 
 The operator may prefer to implement phase 2 later, perhaps in a new context. Stop here and ask the operator whether to proceed.

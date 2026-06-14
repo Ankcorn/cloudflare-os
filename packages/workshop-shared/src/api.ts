@@ -703,6 +703,17 @@ export interface Overseer extends RpcTarget {
   // be approved in the future.
   rejectAction(id: number): Promise<void>;
 
+  // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
+  // is responsible for having actually created the gatekeeper (via newGatekeeper()) and passes the
+  // resulting gatekeeper id. The gatekeeper is surfaced to the agent as a chat-scoped capsule (the
+  // agent can promote it to a permanent binding via saveCapsuleAsBinding if needed). This marks the
+  // request accepted, updates the inline card, and resumes the agent so it can use the resource.
+  acceptConnectionRequest(requestId: string, result: {gatekeeperId: number}): Promise<void>;
+
+  // Deny an agent's pending connection request. Updates the inline card. Does NOT resume the agent:
+  // the turn stays ended so the user can decide what to tell the agent to do instead.
+  denyConnectionRequest(requestId: string): Promise<void>;
+
   // Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
   // If `startAfter` is set, replay actions changed after that timestamp.
   subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
@@ -1028,6 +1039,49 @@ export type AiChatMessageBody = {
   // so it can be prompted to continue.
   type: "agentNudge";
   text: string;
+} | {
+  // The agent requested that the user connect a gatekeeper (e.g. "I need ClickHouse cluster X").
+  // Rendered inline in the chat as an accept/deny card. State is mutated in-place when the user
+  // accepts or denies; the message is re-delivered to subscribers so the card updates. On accept the
+  // agent is resumed with the outcome (see the history builder in agent.ts); on deny the agent is
+  // not resumed (the user drives what happens next).
+  type: "connectionRequest";
+
+  // Unique id used by acceptConnectionRequest()/denyConnectionRequest().
+  requestId: string;
+
+  // The gatekeeper vendor the agent is requesting (id + denormalized display name).
+  vendorId: string;
+  vendorName: string;
+
+  // Denormalized vendor logo URL, for the connection card icon.
+  vendorLogoUrl?: string;
+
+  // Denormalized human-readable resource type/scope being requested (e.g. "Home Assistant
+  // Instance", "Gmail Mailbox"), resolved from the vendor's supported resources at request time.
+  resourceTitle?: string;
+
+  // A fully- or partially-specified resource URL, if the agent could infer one. When absent (or
+  // incomplete) the accept flow opens the vendor's resource configurator to fill in the gaps.
+  resourceUrl?: string;
+
+  // The urlPattern of the supported resource this request resolved to at request time (one of the
+  // vendor's SupportedResource.urlPattern values, e.g. "https://github.com/:owner/:repo" or the
+  // whole-instance "https://*"). The backend guarantees every connection request resolves to a
+  // concrete resource (see resolveRequestedResource), and the accept modal pre-selects exactly this
+  // resource — so accepting never opens a blank "create new connection" picker.
+  resourceUrlPattern?: string;
+
+  // Why the agent wants this connection. Shown to the user to inform their decision.
+  reason: string;
+
+  // Lifecycle state. Starts "pending"; set by the user's accept/deny.
+  state: "pending" | "accepted" | "denied";
+
+  // Once accepted, the id of the created gatekeeper. The resource is surfaced to the agent as a
+  // chat-scoped capsule (env[N]); the agent can promote it to a permanent binding via
+  // saveCapsuleAsBinding if its gadget code needs it.
+  gatekeeperId?: number;
 };
 
 // Describes a tool call performed by an AI agent as part of a message.
@@ -1105,6 +1159,25 @@ export type AiToolCall = {
   // This actually shouldn't ever appear in logs unless the agent misunderstands the tool.
   toolName: "observeUserChanges";
   input: {};
+} | {
+  // List the resource types a gatekeeper vendor offers, so the agent can construct a resourceUrl
+  // for requestConnection. Resource patterns are only surfaced on demand (not in the system prompt).
+  toolName: "listConnectableResources";
+  input: {
+    vendorId: string;
+  };
+  output?: string;
+} | {
+  // Ask the user to connect a gatekeeper, pre-configured as much as the agent can manage. Renders
+  // an accept/deny card in the chat; non-blocking (the turn ends, and the agent is resumed if the
+  // user accepts; on deny the agent is not resumed).
+  toolName: "requestConnection";
+  input: {
+    vendorId: string;
+    resourceUrl?: string;
+    reason: string;
+  };
+  output?: string;
 });
 
 // TODO: Extend AiToolCall for code-mode tool calls.

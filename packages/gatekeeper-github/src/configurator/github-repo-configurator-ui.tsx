@@ -8,6 +8,11 @@ export default {
     return typeof values.repoFullName === "string" && values.repoFullName.length > 0;
   },
 
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const [owner, repo] = new URL(resourceUrl).pathname.split("/").filter(Boolean);
+    return owner && repo ? { repoFullName: `${owner}/${repo}` } : {};
+  },
+
   resourceUrl({ values }) {
     return `https://github.com/${values.repoFullName}`;
   },

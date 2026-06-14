@@ -135,6 +135,83 @@ export type SupportedResource = {
   icon?: AvatarImage;
 }
 
+// Tests whether a resource URL matches a SupportedResource `urlPattern` (a URLPattern string).
+//
+// This is deliberately tolerant of trivial URL variations that a strict URLPattern test would
+// reject but that humans and LLMs routinely produce — most importantly a trailing slash, since
+// URLPattern treats "/owner/repo" and "/owner/repo/" as different paths. Without this, an agent
+// asking to connect "https://github.com/owner/repo/" would match no resource and the accept modal
+// would open with nothing pre-selected.
+//
+// Callers are responsible for handling the whole-instance catch-all ("https://*") separately
+// (e.g. as a fallback) — this function does not special-case it.
+//
+// Returns false if URLPattern is unavailable in the current runtime or the pattern is invalid.
+export function matchesResourceUrlPattern(pattern: string, url: string): boolean {
+  const URLPatternCtor = (globalThis as { URLPattern?: new (p: string) => { test(u: string): boolean } }).URLPattern;
+  if (!URLPatternCtor) return false;
+  let compiled: { test(u: string): boolean };
+  try {
+    compiled = new URLPatternCtor(pattern);
+  } catch {
+    return false;
+  }
+  // Try the URL as given plus the trailing-slash-toggled variant, since URLPattern distinguishes
+  // them and we don't know which form the pattern expects.
+  const candidates = url.endsWith('/') ? [url, url.replace(/\/+$/, '')] : [url, url + '/'];
+  return candidates.some(candidate => {
+    try {
+      return compiled.test(candidate);
+    } catch {
+      return false;
+    }
+  });
+}
+
+export type ResolveRequestedResourceResult =
+  | { ok: true; resource: SupportedResource }
+  | { ok: false; reason: string };
+
+// Determines which SupportedResource an agent connection request would pre-select in the accept
+// modal, using the exact same precedence the modal uses:
+//   1. the resource whose urlPattern matches `resourceUrl` (ignoring the catch-all), else
+//   2. the whole-instance catch-all ("https://*") if the vendor offers one, else
+//   3. the sole resource, if the vendor offers exactly one.
+//
+// If none of those apply, the modal would open with nothing pre-selected (a bare "create new
+// connection" screen). Rather than let that happen, this returns { ok: false } with a
+// human-readable `reason` the backend surfaces to the agent so it can correct the request (e.g.
+// supply a resourceUrl matching one of the listed patterns) and retry.
+//
+// This is the single source of truth shared by the backend (which enforces it at request time)
+// and the frontend (which pre-seeds from the resolved resource), so the two cannot diverge.
+export function resolveRequestedResource(
+    supportedResources: SupportedResource[],
+    resourceUrl: string | undefined): ResolveRequestedResourceResult {
+  if (resourceUrl) {
+    const matched = supportedResources.find(
+      r => r.urlPattern !== 'https://*' && matchesResourceUrlPattern(r.urlPattern, resourceUrl));
+    if (matched) return { ok: true, resource: matched };
+  }
+  const catchAll = supportedResources.find(r => r.urlPattern === 'https://*');
+  if (catchAll) return { ok: true, resource: catchAll };
+  if (supportedResources.length === 1) return { ok: true, resource: supportedResources[0] };
+
+  const available = supportedResources.length > 0
+    ? supportedResources.map(r => `  * ${r.title} — urlPattern: ${r.urlPattern}`).join('\n')
+    : '  (this vendor offers no connectable resources)';
+  const lead = resourceUrl
+    ? `resourceUrl "${resourceUrl}" does not match any resource type this vendor offers, ` +
+      `and the vendor has no whole-instance ("https://*") option.`
+    : `this vendor offers multiple resource types and has no whole-instance ("https://*") ` +
+      `option, so a resourceUrl is required to identify which one.`;
+  return {
+    ok: false,
+    reason: `${lead} Call listConnectableResources to see the patterns, then retry with a ` +
+      `resourceUrl matching one of:\n${available}`,
+  };
+}
+
 // RPC interface exposed by the resource selection/configuration iframe to Workshop.
 export interface ResourceConfiguratorIframe extends RpcTarget {
   // Return the resource URL chosen by iframe. Workshop calls this when user selects
@@ -156,6 +233,12 @@ export interface ResourceConfiguratorIframe extends RpcTarget {
 // RPC interface exposed by Workshop to the selection/configuration iframe.
 export interface ResourceConfiguratorHost extends RpcTarget {
   gatekeeper: RpcStub<RpcTarget>;
+
+  // The concrete resource URL the configurator should pre-fill to (e.g. supplied by an AI agent's
+  // connection request), together with this resource's urlPattern, or null for a fresh/manual
+  // configuration. The iframe runtime uses this to seed the form's initial values so it opens
+  // pre-filled and editable.
+  getInitialResource(): Promise<{ resourceUrl: string; resourceUrlPattern: string } | null>;
 
   // Update the parent's iframe sizing to match content in selection/configuration UI.
   // This lets iframe behave like part of the modal while still rendering floating UI naturally.

@@ -8,6 +8,12 @@ export default {
     return typeof values.emailName === "string" && values.emailName.trim().length > 0;
   },
 
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const segments = new URL(resourceUrl).pathname.split("/").filter(Boolean);
+    const user = segments[segments.length - 1];
+    return user ? { emailName: decodeURIComponent(user) } : {};
+  },
+
   resourceUrl({ values, ui }) {
     return ui.resourceUrl(values.emailName);
   },

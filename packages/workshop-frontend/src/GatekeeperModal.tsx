@@ -18,7 +18,7 @@ import {
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
-import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import { AccountDescription, SupportedResource, VendorDescription, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
@@ -40,6 +40,14 @@ export interface GatekeeperModalProps {
   onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
   // Existing binding names, used for the Agent Spawner's "Limit inherited bindings" feature.
   existingBindings?: string[]
+  // Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor.
+  // Used by the agent's requestConnection accept flow so the user lands on the right connection with
+  // minimal clicks. `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the
+  // backend resolved the request to (authoritative); `initialResourceUrl` is the raw URL the agent
+  // supplied (used only as a fallback if the resolved pattern isn't present in the current list).
+  initialVendorId?: string
+  initialResourceUrl?: string
+  initialResourceUrlPattern?: string
 }
 
 type ConnectionTypeId =
@@ -137,6 +145,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, existingBindings = [],
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -213,6 +222,40 @@ export default function GatekeeperModal({
     [allConnections, selectedConnectionId],
   )
 
+  // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
+  // vendors load and nothing is selected yet.
+  //
+  // The backend authoritatively resolved the request to a specific resource and passes its
+  // urlPattern as initialResourceUrlPattern, so we select that exact resource — this can't diverge
+  // from the backend's validation, which guarantees the request resolved to something. The
+  // initialResourceUrl / catch-all / sole-resource branches are defensive fallbacks (e.g. an older
+  // message without a resolved pattern, or the resource list having shifted since the request).
+  useEffect(() => {
+    if (!open || !initialVendorId || selectedConnectionId !== null) return
+    const vendorConnections = allConnections.filter(c => c.vendorId === initialVendorId)
+    if (vendorConnections.length === 0) return  // vendors may not be loaded yet
+
+    let match: ConnectionType | undefined
+    if (initialResourceUrlPattern) {
+      // Authoritative: select the exact resource the backend resolved to.
+      match = vendorConnections.find(c => c.resourceUrlPattern === initialResourceUrlPattern)
+    }
+    if (!match && initialResourceUrl) {
+      // Fallback: match the raw URL. Skip the catch-all here so a specific resource type wins
+      // (mirrors the backend); matchesResourceUrlPattern tolerates trailing-slash differences.
+      match = vendorConnections.find(c =>
+        !!c.resourceUrlPattern &&
+        c.resourceUrlPattern !== 'https://*' &&
+        matchesResourceUrlPattern(c.resourceUrlPattern, initialResourceUrl))
+    }
+    // Still nothing: prefer the whole-instance catch-all ("https://*") if offered (e.g. Home
+    // Assistant), else the sole resource type if there's just one.
+    match = match
+      ?? vendorConnections.find(c => c.resourceUrlPattern === 'https://*')
+      ?? (vendorConnections.length === 1 ? vendorConnections[0] : undefined)
+    if (match) setSelectedConnectionId(match.id)
+  }, [open, initialVendorId, initialResourceUrl, initialResourceUrlPattern, allConnections, selectedConnectionId])
+
   useEffect(() => {
     return () => {
       disposeConfiguratorFrame(configuratorFrameRef.current?.frame ?? null)
@@ -258,6 +301,9 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     if (!open) {
+      // Reset the selection on close so reopening (e.g. for a different connection request) starts
+      // clean and the pre-seed effect below can run again.
+      setSelectedConnectionId(null)
       updateConfiguratorFrameState(null)
       setConfiguratorLoading(false)
       setConfiguratorError(null)
@@ -428,6 +474,17 @@ export default function GatekeeperModal({
     account => account.id === selectedAccountId && account.credentialsValid,
   ) ?? null
   const needsAccount = Boolean(selectedConnection?.vendorId)
+
+  // When the agent's request supplied a concrete resource URL that matches the selected resource
+  // type's pattern, pass it to the configurator so its form opens pre-filled (and editable). This
+  // is general across gatekeepers: the iframe runtime seeds the form from the URL (via the
+  // configurator's initialValuesFromResourceUrl hook, or a URLPattern-group fallback). Excludes the
+  // whole-instance catch-all, which has no per-resource inputs.
+  const prefilledResourceUrl = useMemo(() => {
+    const pattern = selectedConnection?.resourceUrlPattern
+    if (!pattern || pattern === 'https://*' || !initialResourceUrl) return null
+    return matchesResourceUrlPattern(pattern, initialResourceUrl) ? initialResourceUrl : null
+  }, [selectedConnection?.resourceUrlPattern, initialResourceUrl])
 
   useEffect(() => {
     if (!selectedConnection?.vendorId) return
@@ -706,6 +763,8 @@ export default function GatekeeperModal({
                     disabled={needsAccount && !selectedAccount}
                     onCollectResourceUrlChange={handleConfiguratorCollectResourceUrlChange}
                     onSelectionReadyChange={setConfiguratorSelectionReady}
+                    initialResourceUrl={prefilledResourceUrl ?? undefined}
+                    resourceUrlPattern={selectedConnection.resourceUrlPattern}
                   />
                 )}
 

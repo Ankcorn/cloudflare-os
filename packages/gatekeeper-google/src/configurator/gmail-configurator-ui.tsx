@@ -12,6 +12,17 @@ export default {
     return false;
   },
 
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    const hash = new URL(resourceUrl).hash.replace(/^#/, "");
+    if (hash.startsWith("search/")) {
+      return { mode: "search", query: decodeURIComponent(hash.slice("search/".length)) };
+    }
+    if (hash.startsWith("label/")) {
+      return { mode: "label", label: decodeURIComponent(hash.slice("label/".length)) };
+    }
+    return { mode: "all" };
+  },
+
   resourceUrl({ values }) {
     const mode = values.mode ?? "all";
     if (mode === "search") {
