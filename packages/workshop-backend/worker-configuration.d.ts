@@ -13,11 +13,12 @@ interface __BaseEnv_Env {
 	GATEKEEPER_EMAIL: Service /* entrypoint GatekeeperVendor from gatekeeper-email */;
 	GATEKEEPER_GITHUB: Service /* entrypoint GatekeeperVendor from gatekeeper-github */;
 	GATEKEEPER_GOOGLE: Service /* entrypoint GatekeeperVendor from gatekeeper-google */;
+	GATEKEEPER_CLOUDFLARE: Service /* entrypoint GatekeeperVendor from gatekeeper-cloudflare */;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/server");
-		durableNamespaces: "UserDurableObject" | "OverseerDurableObject" | "AdminSettings";
+		durableNamespaces: "UserDurableObject" | "OverseerDurableObject" | "AdminSettings" | "PendingLogin";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

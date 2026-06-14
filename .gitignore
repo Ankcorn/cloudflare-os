@@ -12,6 +12,9 @@ packages/gatekeeper-*/src/generated/
 .wrangler/
 .env
 
+# Local dev secrets (loaded by run-dev-server.js)
+.dev.vars*
+
 # Site-specific production deployment configs.
 wrangler.prod.jsonc
 

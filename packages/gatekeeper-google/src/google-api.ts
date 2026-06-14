@@ -131,6 +131,28 @@ export async function getGoogleAccountDescription(accessToken: string)
   };
 }
 
+// Fetch the account's email for use as a sign-in identity, but only if Google reports it as
+// verified (`email_verified`). Returns null otherwise, so the Workshop never keys an account by an
+// unverified address.
+export async function getGoogleVerifiedEmail(accessToken: string): Promise<string | null> {
+  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Accept': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    response.body?.cancel();
+    throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
+  }
+
+  let data: any = await response.json();
+  if (!data.email || data.email_verified !== true) return null;
+  return data.email;
+}
+
 export async function revokeGoogleToken(refreshToken: string): Promise<void> {
   // Although we are revoking the token anyway, it's nice to avoid ever putting tokens in the
   // URL, so we instead use the format where the URL is in the POST body.

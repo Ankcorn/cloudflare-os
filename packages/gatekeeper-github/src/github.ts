@@ -6,6 +6,7 @@ import {
   type AccountDescription,
   type Gatekeeper,
   type GatekeeperConnectCallback,
+  type GatekeeperConnectOptions,
   type GatekeeperUser,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ResourceConfiguratorFrame,
@@ -278,7 +279,12 @@ const SCOPE_CATALOG: VendorScope[] = [
 
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
-const OAUTH_SCOPES = ["repo", "read:user"];
+// `user:email` lets us read the account's primary verified email for sign-in (getAuthenticatedEmail).
+const OAUTH_SCOPES = ["repo", "read:user", "user:email"];
+
+// Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
+// the resulting grant is transient.
+const AUTH_SCOPES = ["read:user", "user:email"];
 
 const REPO_RESOURCE: SupportedResource = {
   urlPattern: "https://github.com/:owner/:repo",
@@ -957,8 +963,8 @@ export default {
       const doId = path[0];
       const initiationNonce = path[1];
       const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
-      const oauthNonce = await stub.beginOAuthFlow(initiationNonce);
-      if (oauthNonce === null) {
+      const begun = await stub.beginOAuthFlow(initiationNonce);
+      if (begun === null) {
         return new Response(INVALID_LINK_HTML, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
@@ -967,8 +973,8 @@ export default {
       const redirectUrl = new URL("https://github.com/login/oauth/authorize");
       redirectUrl.searchParams.set("client_id", env.CLIENT_ID);
       redirectUrl.searchParams.set("redirect_uri", `${getBaseUrl(env)}/oauth`);
-      redirectUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
-      redirectUrl.searchParams.set("state", `${doId}:${oauthNonce}`);
+      redirectUrl.searchParams.set("scope", begun.scopes.join(" "));
+      redirectUrl.searchParams.set("state", `${doId}:${begun.oauthNonce}`);
 
       return Response.redirect(redirectUrl.toString(), 302);
     }
@@ -1023,6 +1029,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       description:
           "Connect your GitHub account so Gadgets can read and update issues, pull requests, " +
           "and reviews on the repositories you choose.",
+      providesAuth: true,
     };
   }
 
@@ -1030,10 +1037,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return SCOPE_CATALOG;
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
+                       options?: GatekeeperConnectOptions): Promise<{ url: string }> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
+    const authOnly = options?.scopes === "auth";
+    const scopes = authOnly ? AUTH_SCOPES : OAUTH_SCOPES;
+    await this.ctx.exports.UserAccount.get(userObjectId)
+        .setCallback(callback, initiationNonce, scopes, authOnly);
 
     return {
       url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`,
@@ -1050,12 +1061,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string): Promise<void> {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
+                    requestedScopes?: string[], ephemeral?: boolean): Promise<void> {
     if (!this.ctx.storage.kv.get<string>("accessToken")) {
       await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
 
     this.ctx.storage.kv.put("callback", callback);
+    // Scopes to request in the authorize URL (auth-only for sign-in, or the full set).
+    if (requestedScopes) this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
+    // Auth-only sign-in grants are transient: dropped shortly after the email is read.
+    this.ctx.storage.kv.put<boolean>("ephemeral", ephemeral ?? false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -1073,7 +1089,7 @@ export class UserAccount extends DurableObject<Env> {
     });
   }
 
-  async beginOAuthFlow(initiationNonce: string): Promise<string | null> {
+  async beginOAuthFlow(initiationNonce: string): Promise<{ oauthNonce: string; scopes: string[] } | null> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "initiation" || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, initiationNonce)) {
       return null;
@@ -1085,7 +1101,8 @@ export class UserAccount extends DurableObject<Env> {
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
     });
-    return oauthNonce;
+    const scopes = this.ctx.storage.kv.get<string[]>("requestedScopes") ?? OAUTH_SCOPES;
+    return { oauthNonce, scopes };
   }
 
   async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
@@ -1126,6 +1143,13 @@ export class UserAccount extends DurableObject<Env> {
         this.ctx.storage.kv.delete("scopes");
         throw error;
       }
+      // Auth-only sign-in grants are transient: the caller read the email via complete(), so
+      // schedule a prompt self-destruct. We do NOT call the provider revoke endpoint (it could
+      // invalidate the user's other grants for this OAuth app); we just drop our local copy.
+      if (this.ctx.storage.kv.get<boolean>("ephemeral")) {
+        await this.ctx.storage.setAlarm(Date.now() + 2 * 60 * 1000);
+        return true;
+      }
     }
 
     await this.ctx.storage.deleteAlarm();
@@ -1157,7 +1181,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    if (!this.ctx.storage.kv.get<string>("accessToken")) {
+    // Drop the account if the flow never completed, or if this was a transient auth-only sign-in
+    // grant (used once to read the email for login).
+    if (!this.ctx.storage.kv.get<string>("accessToken") || this.ctx.storage.kv.get<boolean>("ephemeral")) {
       await this.ctx.storage.deleteAll();
     }
   }
@@ -1209,6 +1235,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         scope: SCOPE_CATALOG.map(entry => entry.displayName),
       };
     });
+  }
+
+  async getAuthenticatedEmail(): Promise<string | null> {
+    // GitHub's primary email is verified by GitHub, so it's safe as a sign-in identity.
+    return await this.#withApi(api => api.getPrimaryVerifiedEmail());
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

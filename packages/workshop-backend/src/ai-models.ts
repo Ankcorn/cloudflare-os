@@ -15,12 +15,46 @@ import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { AiGatewayConfig, getAiGatewayConfig } from "./ai-gateway.js";
 import { AiGateway, createAiGateway } from 'ai-gateway-provider';
+import { createUnified } from "ai-gateway-provider/providers/unified";
+
+ // Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
+ // exhausted). Defined here to avoid a backend->ai-gateway-billing type import cycle at runtime.
+ // Inference is routed through the account's "default" AI Gateway.
+ export interface UserGatewayRouting {
+   accountId: string;
+   apiKey: string;
+ }
+
+// Maps our internal provider id to the prefix used by the AI Gateway unified-billing (OpenAI-compat)
+// model ids (e.g. "google" -> "google-ai-studio/gemini-...", "cloudflare" -> "workers-ai/@cf/...").
+const UNIFIED_BILLING_PROVIDER_PATH: Record<string, string> = {
+  anthropic: "anthropic",
+  openai: "openai",
+  google: "google-ai-studio",
+  cloudflare: "workers-ai",
+};
+
+type GatewayMetadata = Record<string, string | number | bigint | boolean | null>;
+
+function buildMetadata(initiator: AiChatAuthorInfo): GatewayMetadata {
+  const metadata: GatewayMetadata = { user: initiator.id };
+  if (initiator.type === "gadget") metadata.automated = true;
+  return metadata;
+}
 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
-                         sessionAffinity?: string): LanguageModel {
-  // When AI Gateway mode is active, all models are routed through the gateway.
-  // The config's apiToken and apiUrl are ignored; we use the gateway URL and CF API token instead.
+                         sessionAffinity?: string,
+                         userGateway?: UserGatewayRouting): LanguageModel {
+  // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
+  // Workers AI), routed through the AI Gateway unified-billing endpoint. Honored regardless of
+  // whether a platform AI Gateway is configured, so connected users are always billed correctly.
+  if (userGateway) {
+    return getModelViaUserGateway(config, buildMetadata(initiator), userGateway);
+  }
+
+  // Otherwise: when a platform AI Gateway is configured, route through it (platform-funded free
+  // tier). The config's apiToken/apiUrl are ignored in that mode.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
     return getModelViaGateway(env, gwConfig, config, initiator, sessionAffinity);
@@ -29,6 +63,34 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
   return getModelDirect(env, config, sessionAffinity);
 }
 
+// Route inference through the user's own account (unified billing) via their account's default AI
+// Gateway. Supports every provider, including Workers AI (`workers-ai/@cf/...`). Billed to the
+// user's Cloudflare credits; no provider API key required.
+function getModelViaUserGateway(
+  config: AiModelConfig,
+  metadata: GatewayMetadata,
+  userGateway: UserGatewayRouting,
+): LanguageModel {
+  const providerPath = UNIFIED_BILLING_PROVIDER_PATH[config.provider];
+  if (!providerPath) {
+    throw new Error(`Provider "${config.provider}" is not supported via unified billing.`);
+  }
+  // Route through the user's AI Gateway data plane (universal endpoint). Auth is the connected
+  // user's Cloudflare token via `cf-aig-authorization` (authorized by its `aig.run` scope); the
+  // account-level `/ai/v1` REST endpoint rejects that token. We always use the account's
+  // auto-created "default" gateway. Unified billing draws down the user's credits across every
+  // provider, including Workers AI (`workers-ai/@cf/...`).
+  const gateway = createAiGateway({
+    accountId: userGateway.accountId,
+    gateway: "default",
+    apiKey: userGateway.apiKey,
+    options: { metadata },
+  });
+  return gateway(createUnified()(`${providerPath}/${config.model}`));
+}
+
+// Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
+// Used only for requests that are NOT billed to a connected user's account.
 function getModelViaGateway(
   env: Cloudflare.Env,
   gwConfig: AiGatewayConfig,
@@ -36,12 +98,7 @@ function getModelViaGateway(
   initiator: AiChatAuthorInfo,
   sessionAffinity?: string,
 ): LanguageModel {
-  let metadata: any = {
-    user: initiator.id,
-  };
-  if (initiator.type === "gadget") {
-    metadata.automated = true;
-  }
+  const metadata = buildMetadata(initiator);
 
   if (config.provider === "cloudflare") {
     return createWorkersAI({

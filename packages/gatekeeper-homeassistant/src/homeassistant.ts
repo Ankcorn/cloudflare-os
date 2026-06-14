@@ -600,6 +600,11 @@ export class HomeAssistantUserImpl
     };
   }
 
+  // This gatekeeper does not provide sign-in.
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return null;
+  }
+
   async getSupportedResources(): Promise<SupportedResource[]> {
     return SUPPORTED_RESOURCES;
   }

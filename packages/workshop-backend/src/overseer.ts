@@ -6,7 +6,7 @@ import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloud
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
-import { LanguageModelGatekeeperProps, getModel } from "./ai-models";
+import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
 import { WebFetchEnv } from "./web-fetch";
@@ -14,6 +14,8 @@ import { UserDurableObject, UserAiModelRecord } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
+import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 
 let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
 `;
@@ -1604,9 +1606,37 @@ class OverseerImpl implements AgentHooks {
                       initiator: AiChatAuthorInfo,
                       callbackInitiated: boolean,
                       liveChat: LiveChatContext): Promise<void> {
+    // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
+    // balance once the turn completes (see the `finally` below) so the next billing decision
+    // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
+    let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
+
     try {
+      // Enforce the optional free-tier usage limit before starting a user-initiated turn. Callback-
+      // initiated continuations are exempt so outstanding callbacks are never stranded mid-flow.
+      // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
+      // (This runs inside the try so the `finally` below still clears the active-agent state and
+      // emits a stream "clear" — otherwise the UI would spin forever on a block.)
+      let byokRouting: UserGatewayRouting | undefined;
+      if (!callbackInitiated && this.ownerId) {
+        let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
+        let usage = await checkUsageAndBalance(this.env, ownerStub);
+        if (!usage.allowed) {
+          this.postAgentErrorMessage(chatId, aiModel.profile,
+              usage.reason ?? "Usage limit reached.", "usage_limit");
+          return;
+        }
+        // Free tier exhausted but the user can continue via their own Cloudflare gateway: route
+        // inference through it so the usage bills their account. checkUsageAndBalance already
+        // resolved the routing (reusing its connection lookup), so we don't decrypt the token again.
+        if (usage.shouldUseByok) {
+          byokRouting = usage.byokRouting;
+          if (byokRouting) byokOwnerStub = ownerStub;
+        }
+      }
+
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
-      let chosenModel = getModel(this.env, aiModel.config, initiator, sessionAffinity);
+      let chosenModel = getModel(this.env, aiModel.config, initiator, sessionAffinity, byokRouting);
 
       let controller = liveChat.cancelController;
       controller.signal.throwIfAborted();
@@ -1698,6 +1728,14 @@ class OverseerImpl implements AgentHooks {
       }
       liveChat.activeAgentCallbacks.clear();
     } finally {
+      // If this turn billed the user's own Cloudflare account, refresh their cached balance now (in
+      // the background) so the next turn's billing decision reflects the spend just incurred. Runs
+      // on both the success and error paths — an "insufficient funds" failure is exactly when an
+      // up-to-date balance matters most.
+      if (byokOwnerStub) {
+        this.ctx.waitUntil(refreshCachedBalance(this.env, byokOwnerStub));
+      }
+
       // Note: We no longer emit a stream "clear" event here. The client performs a full clear of
       // provisional streaming state when it observes that the agent is no longer running (i.e. when
       // chat metadata's activeAgent becomes unset, which happens just below).
@@ -2131,7 +2169,7 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  postAgentErrorMessage(chatId: number, author: AiChatAuthorInfo, message: string) {
+  postAgentErrorMessage(chatId: number, author: AiChatAuthorInfo, message: string, code?: string) {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -2145,7 +2183,8 @@ class OverseerImpl implements AgentHooks {
       timestamp,
       author,
       type: "error",
-      message
+      message,
+      ...(code ? { code } : {}),
     });
   }
 

@@ -46,6 +46,11 @@ export type VendorDescription = {
   // E.g. "Connect your Google account to give Gadgets access to Gmail, Google Docs, and BigQuery.
   // Build agents that triage email, draft and edit documents, or run analytics queries on your data."
   description?: string;
+
+  // True if this vendor can authenticate a user for sign-in: i.e. its connect flow yields a
+  // provider-verified email (via GatekeeperUser.getAuthenticatedEmail()). The Workshop may offer
+  // such a vendor as a login method, subject to its own auth allowlist. Defaults to false.
+  providesAuth?: boolean;
 }
 
 // Describes a single permission/scope that a gatekeeper will request during the connect flow.
@@ -182,6 +187,11 @@ export type ResourceConfiguratorFrame = {
 //
 // An installation of the Gadget Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
+// Options for GatekeeperVendor.connectAccount(). `scopes` selects the access tier (see that method).
+export type GatekeeperConnectOptions = {
+  scopes?: "auth" | "full";
+};
+
 export interface GatekeeperVendor extends WorkerEntrypoint {
   // Get display info for the service, suitable for display to a user.
   describe(): Promise<VendorDescription>;
@@ -201,7 +211,15 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // SECURITY: The returned URL must include a cryptographic nonce (in addition to the DO ID) to
   // prevent replay attacks. The nonce should be stored in the DO and verified when the user visits
   // the URL. See gatekeeper-google for a reference implementation.
-  connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
+  //
+  // `options.scopes` selects how much access to request (default "full"):
+  //   - "full": the gatekeeper's full capability scopes (repos, docs, etc.). The resulting
+  //     connection is persisted as a usable connected account.
+  //   - "auth": only the minimal scopes needed to verify the user's email for sign-in. The grant is
+  //     transient — after `complete()` lets the caller read getAuthenticatedEmail(), the gatekeeper
+  //     discards it. Vendors without `providesAuth` ignore this and always use their full scopes.
+  connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
+                 options?: GatekeeperConnectOptions): Promise<{url: string}>;
 
   // Get the list of resource types this vendor supports. Each entry describes a category of
   // resource the vendor can provide access to, along with a URL pattern for matching.
@@ -314,6 +332,13 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // SECURITY: As with connectAccount(), the returned URL must include a cryptographic nonce to
   // prevent replay attacks.
   reconnect(): Promise<{url: string}>;
+
+  // For vendors that advertise `providesAuth`, returns the account's email address for use as the
+  // user's sign-in identity. The email MUST be verified by the provider (e.g. Google
+  // `email_verified`, a GitHub primary+verified email, or a Cloudflare account email) — the
+  // Workshop keys accounts by email, so an unverified address would allow account takeover.
+  // Returns null when the account has no verified email or the vendor does not support auth.
+  getAuthenticatedEmail(): Promise<string | null>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

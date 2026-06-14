@@ -39,8 +39,17 @@
     {
       "tag": "v1",
       "new_sqlite_classes": [ "AdminSettings" ]
+    },
+    {
+      // Sign-in via authentication gatekeepers: a short-lived PendingLogin DO bridges each gatekeeper
+      // login back to the waiting browser.
+      "tag": "v2",
+      "new_sqlite_classes": [ "PendingLogin" ]
     }
   ],
+
+  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, ...) are
+  // reached via ctx.exports and need no explicit durable_objects binding.
   "kv_namespaces": [
     {
       "binding": "BLUEPRINTS",

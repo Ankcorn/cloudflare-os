@@ -24,14 +24,36 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
 ]);
 
+// A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
+// stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
+export interface LoginAttempt extends RpcTarget {
+  // Resolves with a session token (to store and pass to `authenticate()`, same format as `login()`)
+  // once the gatekeeper popup completes, or rejects if the attempt fails or is abandoned. Safe to
+  // call immediately after `startGatekeeperLogin()`.
+  wait(): Promise<string>;
+}
+
 // Public API exposed to the internet.
 export interface PublicApi extends RpcTarget {
+  // Returns deployment-level configuration the client needs at boot (auth mode, available sign-in
+  // vendors, whether the Cloudflare limits flow is enabled). Contains no secrets.
+  getServerConfig(): Promise<ServerConfig>;
+
+  // Begin a sign-in via an authentication gatekeeper (e.g. "google", "github", "cloudflare").
+  // Returns a `url` the client opens in a new tab (the gatekeeper's OAuth popup, which self-closes)
+  // and an `attempt` stub whose `wait()` resolves once the popup completes. The vendor must be
+  // auth-capable and allowlisted (see ServerConfig.authVendors); throws otherwise.
+  //
+  // Dispose `attempt` to abandon the sign-in (e.g. the user closed the popup); this cancels the wait
+  // server-side.
+  startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
+
   // Authenticates the user using an auth token (typically stored in localStorage).
   authenticate(token: string): Promise<AuthenticatedApi>;
 
@@ -119,6 +141,10 @@ export interface AuthenticatedApi extends RpcTarget {
   // See `PublicApi.login()` for an explanation of the hashing algorithm.
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void>;
 
+  // Whether this account has a password set. False for accounts created via an OAuth provider, in
+  // which case the change-password UI should be hidden.
+  hasPasswordLogin(): Promise<boolean>;
+
   // List the user's configured AI models.
   //
   // Note that the list returned here could be different from a particular gadget's Overseer,
@@ -155,6 +181,20 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Mark the onboarding wizard as completed.
   completeOnboarding(): Promise<void>;
+
+  // --- Optional Cloudflare limits / top-up flow (only meaningful when enabled server-side) ---
+
+  // Get the user's current free-tier usage and connected-account balance.
+  getCloudflareUsage(): Promise<CloudflareUsageInfo>;
+
+  // List the Cloudflare accounts the connected grant can access. Used to prompt account selection
+  // when the user has more than one. Returns an empty array if not connected. Connecting Cloudflare
+  // is done via the Cloudflare gatekeeper (connectAccount("cloudflare")) or by signing in with it.
+  listCloudflareAccounts(): Promise<CloudflareAccountOption[]>;
+
+  // Select which Cloudflare account to bill. Persists the choice. Throws if the account isn't
+  // accessible.
+  selectCloudflareAccount(accountId: string): Promise<void>;
 
   // Upload a user avatar image. The data should be a compressed image (JPEG/PNG), ideally under
   // 50 KB. Pass null to remove the avatar.
@@ -302,6 +342,67 @@ export interface AuthenticatedApi extends RpcTarget {
   // TODO:
   // - Edit permissions on a connected account.
 }
+
+// A gatekeeper vendor offered as a sign-in method. The login/signup pages render a "Continue with
+// ..." button per entry, alongside (never replacing) username/password. Built from auth-capable
+// gatekeepers (VendorDescription.providesAuth) that are in the deployment's auth allowlist.
+export type AuthVendorInfo = {
+  // The gatekeeper vendor id (the GATEKEEPER_<NAME> binding suffix, lowercased), e.g. "google".
+  vendorId: string;
+  // Display name, logo, and brand color from the gatekeeper's VendorDescription.
+  displayName: string;
+  logo?: AvatarImage;
+  color?: string;
+};
+
+// Deployment-level configuration that the client needs at boot to decide what UI to render.
+// Returned by `PublicApi.getServerConfig()`. Contains no secrets.
+export type ServerConfig = {
+  // Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
+  // configured (password-only).
+  authVendors: AuthVendorInfo[];
+
+  // Whether username/password login + signup is available. Defaults to true; an installation can
+  // disable it (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true if no auth vendor is
+  // configured, to avoid locking everyone out.
+  passwordAuthEnabled: boolean;
+
+  // Whether the optional Cloudflare free-tier limits + top-up flow is enabled. When false (the
+  // default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
+  cloudflareLimitsEnabled: boolean;
+};
+
+// Usage + Cloudflare-connection status for the optional limits flow. Returned by
+// `AuthenticatedApi.getCloudflareUsage()`.
+export type CloudflareUsageInfo = {
+  // Whether the limits flow is enabled at all. When false, the rest is informational only.
+  cloudflareLimitsEnabled: boolean;
+  // When true, the user has unlimited access (limits disabled) and counters are not tracked.
+  unlimited: boolean;
+
+  // Free-tier daily usage.
+  dailyUsed: number;
+  dailyLimit: number;
+  remaining: number;
+  // ISO timestamp when the daily window resets.
+  resetAt?: string;
+
+  // Whether the user has connected a Cloudflare account.
+  connected: boolean;
+  // The connected account's AI Gateway credit balance (USD), or null if unknown/not connected.
+  balance: number | null;
+  accountId?: string;
+  accountName?: string;
+  // True when connected but the user has multiple Cloudflare accounts and must pick which one to
+  // bill before usage can proceed. The client should prompt with selectCloudflareAccount().
+  needsAccountSelection?: boolean;
+};
+
+// A Cloudflare account available to a connected user. Returned by `listCloudflareAccounts()`.
+export type CloudflareAccountOption = {
+  accountId: string;
+  accountName: string;
+};
 
 // Supported AI providers.
 export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
@@ -906,6 +1007,9 @@ export type AiChatMessageBody = {
   // chat log sent to the LLM so the agent does not react to it.
   type: "error";
   message: string;
+  // Optional machine-readable code so the client can react specially (e.g. "usage_limit" opens
+  // the "connect Cloudflare / add credits" modal instead of a generic error + retry).
+  code?: string;
 } | {
   // Indicates that a callback was received on the agent's `self` object. When the agent uses
   // `executeCode`, the executed code receives a `self` parameter. Calling any method on `self`

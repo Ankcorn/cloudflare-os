@@ -2,8 +2,9 @@ import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
-import { PublicApi } from '@gadgets/workshop-shared/api'
+import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
+import { ServerConfigContext } from './ServerConfigContext'
 import { createRouter } from './router'
 import './styles.css'
 
@@ -110,6 +111,7 @@ function AppWithConnection() {
     stub: currentStub,
     connectionLost: isConnectionLost,
   });
+  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
 
   useEffect(() => {
     let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
@@ -117,9 +119,21 @@ function AppWithConnection() {
     return () => { notifyCurrentStubUpdated.delete(cb); };
   }, []);
 
+  // Fetch deployment config once the (re)connected stub is available. Re-fetch on reconnect so a
+  // server restart with changed config is picked up.
+  useEffect(() => {
+    let cancelled = false;
+    rpcState.stub.getServerConfig()
+      .then((cfg) => { if (!cancelled) setServerConfig(cfg); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [rpcState.stub]);
+
   return (
     <RpcContext.Provider value={rpcState}>
-      <RouterProvider router={router} />
+      <ServerConfigContext.Provider value={serverConfig}>
+        <RouterProvider router={router} />
+      </ServerConfigContext.Provider>
     </RpcContext.Provider>
   );
 }

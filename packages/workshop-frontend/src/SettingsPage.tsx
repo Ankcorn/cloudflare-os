@@ -7,6 +7,7 @@ import { CF_ACCESS_MODE } from './useAuth'
 import { User, Pencil, Check, X, Lock, Camera } from '@phosphor-icons/react'
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
+import UsageSettings from './components/billing/UsageSettings'
 
 export default function SettingsPage() {
   const { authenticatedApi } = useAuthenticatedApi()
@@ -34,8 +35,19 @@ export default function SettingsPage() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [passwordLoading, setPasswordLoading] = useState(false)
   const [passwordError, setPasswordError] = useState<string | null>(null)
+  // Whether this account has a password (false for OAuth-created accounts). Null while loading.
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null)
 
   const avatarUrl = useAvatar(authenticatedApi, userInfo?.id)
+
+  // Determine whether to show the change-password section.
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi.hasPasswordLogin()
+      .then((v: boolean) => { if (!cancelled) setHasPassword(v) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [authenticatedApi])
 
   // Fetch user info
   useEffect(() => {
@@ -245,8 +257,11 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Change Password — only in password-auth mode, not CF Access */}
-      {!CF_ACCESS_MODE && (
+      {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
+      <UsageSettings />
+
+      {/* Change Password — only for password accounts (hidden under CF Access or gatekeeper sign-in) */}
+      {!CF_ACCESS_MODE && hasPassword === true && (
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
           <h2 className="text-lg font-semibold text-kumo-strong mb-6">Change Password</h2>
 

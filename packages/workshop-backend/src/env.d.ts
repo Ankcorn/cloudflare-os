@@ -28,6 +28,40 @@ declare global {
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
       PRODUCT_ANALYTICS?: import("cloudflare:pipelines").Pipeline<ProductAnalyticsRecord>;
+
+      // ---------------------------------------------------------------------------------------------
+      // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier
+      // limits / top-up). All OFF by default; existing password / Cloudflare Access deployments are
+      // unaffected. OAuth app credentials live on the gatekeeper Workers, not here.
+      // ---------------------------------------------------------------------------------------------
+
+      // Cloudflare Access configuration. When CF_ACCESS_AUD is set, the deployment authenticates via
+      // Cloudflare Access (SSO). (Also referenced via a local Env extension in server.ts.)
+      CF_ACCESS_AUD?: string;   // audience
+      CF_ACCESS_ISS?: string;   // team URL, e.g. https://<team>.cloudflareaccess.com
+
+      // Comma-separated allowlist of gatekeeper vendor ids permitted to drive sign-in (e.g.
+      // "google,github,cloudflare"). A listed gatekeeper must also advertise providesAuth. Empty =
+      // no gatekeeper sign-in (password / CF Access only).
+      AUTH_GATEKEEPERS?: string;
+
+      // Set to "true" to disable username/password login + signup (gatekeeper sign-in only). Only
+      // takes effect when at least one auth gatekeeper is allowlisted (otherwise password auth stays
+      // on to avoid locking everyone out).
+      DISABLE_PASSWORD_AUTH?: string;
+
+      // Enables the Cloudflare free-tier limits + top-up flow when set to "true".
+      ENABLE_CLOUDFLARE_LIMITS?: string;
+
+      // Public base URL of the deployment.
+      PUBLIC_BASE_URL?: string;
+
+      // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
+      DAILY_LLM_CALL_LIMIT?: string;
+
+      // Minimum connected-account balance (USD) to proceed via BYOK. Defaults to
+      // MINIMUM_CLOUDFLARE_BALANCE.
+      MINIMUM_CLOUDFLARE_BALANCE?: string;
     }
   }
 }

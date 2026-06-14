@@ -22,6 +22,9 @@ export default {
       return env.WORKSHOP_BACKEND.fetch(req);
     }
 
+    // Note: gatekeeper OAuth redirects land on the gatekeeper Workers themselves, at
+    // `/gatekeeper/<name>/oauth` (handled by the loop above) — there are no backend /auth callbacks.
+
     // Redirect to Vite dev server for frontend.
     //
     // Note that unfortunately when viewing this way, the frontend will refresh whenever

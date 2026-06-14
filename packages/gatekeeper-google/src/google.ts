@@ -1,7 +1,7 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
-import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
+import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
 import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
@@ -172,6 +172,14 @@ const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/bigquery",
 ];
 
+// Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
+// the resulting grant is transient.
+const AUTH_SCOPES = [
+  "openid",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+];
+
 const GMAIL_RESOURCE: SupportedResource = {
   urlPattern: "https://mail.google.com/*",
   title: "Gmail Mailbox",
@@ -220,18 +228,19 @@ export default {
       let doId = path[0];
       let initiationNonce = path[1];
       let stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
-      let oauthNonce = await stub.beginOAuthFlow(initiationNonce);
-      if (oauthNonce === null) {
+      let begun = await stub.beginOAuthFlow(initiationNonce);
+      if (begun === null) {
         return new Response(INVALID_LINK_HTML, {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
+      let oauthNonce = begun.oauthNonce;
 
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       newUrl.searchParams.set("client_id", env.CLIENT_ID);
       newUrl.searchParams.set("redirect_uri", getBaseUrl(env) + "/oauth");
       newUrl.searchParams.set("response_type", "code");
-      newUrl.searchParams.set("scope", OAUTH_SCOPES.join(" "));
+      newUrl.searchParams.set("scope", begun.scopes.join(" "));
       newUrl.searchParams.set("access_type", "offline");
       newUrl.searchParams.set("prompt", "consent");
       newUrl.searchParams.set("state", `${doId}:${oauthNonce}`);
@@ -295,6 +304,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your Google account to give Gadgets access to Gmail, Google Docs, and " +
           "BigQuery. Build agents that triage email, draft and edit documents, or run analytics " +
           "queries on your data.",
+      providesAuth: true,
     };
   }
 
@@ -302,11 +312,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return SCOPE_CATALOG;
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
+                       options?: GatekeeperConnectOptions): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let initiationNonce = generateNonce();
 
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
+    let authOnly = options?.scopes === "auth";
+    let scopes = authOnly ? AUTH_SCOPES : OAUTH_SCOPES;
+    await this.ctx.exports.UserAccount.get(userObjectId)
+        .setCallback(callback, initiationNonce, scopes, authOnly);
 
     return {
       url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`
@@ -329,13 +343,18 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string) {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
+                    scopes?: string[], ephemeral?: boolean) {
     // If we have no API key in 1 hour, delete this object.
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
 
     this.ctx.storage.kv.put("callback", callback);
+    // The scopes to request (auth-only for sign-in, or the full capability set). Reused on reconnect.
+    if (scopes) this.ctx.storage.kv.put<string[]>("scopes", scopes);
+    // Auth-only sign-in grants are transient: dropped shortly after the email is read.
+    this.ctx.storage.kv.put<boolean>("ephemeral", ephemeral ?? false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -355,9 +374,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   // Called by the fetch handler when the user visits the initiation URL. Verifies the initiation
-  // nonce, consumes it, and returns a fresh OAuth nonce to use as the `state` parameter.
-  // Returns null if the nonce is invalid or expired.
-  async beginOAuthFlow(initiationNonce: string): Promise<string | null> {
+  // nonce, consumes it, and returns a fresh OAuth nonce plus the scopes to request. Returns null if
+  // the nonce is invalid or expired.
+  async beginOAuthFlow(initiationNonce: string): Promise<{ oauthNonce: string; scopes: string[] } | null> {
     let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "initiation" ||
         Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, initiationNonce)) {
@@ -371,7 +390,8 @@ export class UserAccount extends DurableObject<Env> {
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
     });
-    return oauthNonce;
+    let scopes = this.ctx.storage.kv.get<string[]>("scopes") ?? OAUTH_SCOPES;
+    return { oauthNonce, scopes };
   }
 
   // Returns false if the OAuth nonce is invalid or expired.
@@ -418,6 +438,12 @@ export class UserAccount extends DurableObject<Env> {
         this.ctx.storage.kv.delete("refreshToken");
         throw err;
       }
+      // Auth-only sign-in grants are transient: the caller has read the email via complete(), so
+      // schedule a prompt self-destruct. We do NOT call the provider's revoke endpoint (that could
+      // invalidate the user's other grants for this OAuth client); we just drop our local copy.
+      if (this.ctx.storage.kv.get<boolean>("ephemeral")) {
+        this.ctx.storage.setAlarm(Date.now() + 2 * 60 * 1000);
+      }
     }
 
     return true;
@@ -460,7 +486,9 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
-    if (!this.hasRefreshToken()) {
+    // Drop the account if the flow never completed, or if this was a transient auth-only sign-in
+    // grant (used once to read the email for login).
+    if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("ephemeral")) {
       this.ctx.storage.deleteAll();
     }
   }
@@ -487,6 +515,21 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     let obj = this.ctx.exports.UserAccount.get(id);
     let token = await obj.getAccessToken();
     return getGoogleAccountDescription(token.token);
+  }
+
+  async getAuthenticatedEmail(): Promise<string | null> {
+    // Contract is Promise<string | null>: never throw. The access token fetch can throw if the
+    // (possibly transient sign-in) grant has been cleaned up, and the userinfo call can throw on a
+    // non-2xx response — treat any failure as "no email available".
+    try {
+      let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+      let obj = this.ctx.exports.UserAccount.get(id);
+      let token = await obj.getAccessToken();
+      if (!token) return null;
+      return await getGoogleVerifiedEmail(token.token);
+    } catch {
+      return null;
+    }
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
