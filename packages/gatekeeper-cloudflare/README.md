@@ -71,7 +71,7 @@ AUTH_GATEKEEPERS=cloudflare,google,github
 The order controls the order of the login buttons. For the AI Gateway billing / top-up flow, also
 set `ENABLE_CLOUDFLARE_LIMITS=true` (see [AI Gateway billing](../../docs/ai-gateway-billing.md)); a
 user enables billing by connecting Cloudflare, which requests the full scopes
-(`offline_access aig.read aig.run aig.write user-details.read account-settings.read`).
+(`offline_access aig.read aig.run user-details.read account-settings.read`).
 
 ### Step 4: Verify Setup
 
