@@ -1078,6 +1078,11 @@ export async function runAgent(
     }
   }
 
+  // The update listener above may have captured historical `changes` messages while replaying the
+  // chat into the session Y.Doc. Those are already durable chat history, not new edits from this
+  // run, so don't let executeCode or end-of-turn flushing re-emit them as proposed changes.
+  capturedYdocChanges = [];
+
   // If the previous agent was aborted by a server restart, it could have left edits in the
   // log that were never actually flushed to a "changes" message. We should materialize those
   // edits into the `Y.Doc` now so that they can be flushed with the rest of the resumed turn.
