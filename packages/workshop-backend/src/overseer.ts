@@ -3037,7 +3037,7 @@ export class GatekeeperHookLoopback
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
     // Get an ApprovalQueue for this hook invocation from the overseer.
-    let approvalQueue = overseer.createHookApprovalQueue(this.ctx.props.gatekeeperId);
+    let approvalQueue = await overseer.createHookApprovalQueue(this.ctx.props.gatekeeperId);
 
     // Create a serializable Fetcher that proxies to the gadget's hook entrypoint.
     let hook = this.ctx.exports.GatekeeperHookProxy({props: this.ctx.props});
