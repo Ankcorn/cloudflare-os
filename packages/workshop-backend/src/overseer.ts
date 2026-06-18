@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, PermissionEdge, CollaboratorInfo, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -16,6 +16,7 @@ import { recordAnalytics } from "./analytics";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
+import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 
 let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
 `;
@@ -62,26 +63,6 @@ interface CodeModeEntrypoint extends WorkerEntrypoint {
         resolve: NativeRpcStub<(v: unknown) => void>,
         reject: NativeRpcStub<(e: unknown) => void>
       }>): Promise<void>;
-}
-
-// =======================================================================================
-
-// Fixed 256-bit key used to domain-separate share key hashes from other hashes in the system.
-// Not secret -- it only provides personalization.
-const SHARE_KEY_HMAC_KEY = new Uint8Array([
-  0x09, 0x2a, 0x64, 0x37, 0xae, 0x8a, 0xce, 0x43,
-  0x03, 0x81, 0x17, 0xed, 0x5b, 0x0c, 0x4a, 0xca,
-  0x82, 0x23, 0x41, 0x11, 0x0b, 0x28, 0x48, 0x8f,
-  0x57, 0x53, 0x25, 0x2a, 0xda, 0xa0, 0xbf, 0xd7,
-]);
-
-export async function shareKeyId(rawKey: string): Promise<string> {
-  let hmacKey = await crypto.subtle.importKey(
-      "raw", SHARE_KEY_HMAC_KEY, { name: "HMAC", hash: "SHA-256" },
-      false, ["sign"]);
-  let sig = new Uint8Array(await crypto.subtle.sign(
-      "HMAC", hmacKey, Uint8Array.fromHex(rawKey)));
-  return sig.toHex();
 }
 
 // =======================================================================================
@@ -152,15 +133,6 @@ function connectionTypeFromCreationSpec(
   }
 }
 
-// Each gadget stores its collaborator list.
-type CollaboratorRecord = {
-  // Denormalized profile snapshot for display without hitting the user's DO.
-  profile: AiChatAuthorInfo;
-
-  // How this collaborator got access. Multiple edges are possible.
-  addedBy: PermissionEdge[];
-};
-
 // Blueprint record stored in the Overseer DO's `blueprints` collection.
 type BlueprintGadgetRecord = {
   id: string;
@@ -191,14 +163,6 @@ function validateBlueprintScreenshotUpload(screenshot: BlueprintScreenshotUpload
   }
   return screenshot;
 }
-
-// Share keys table. The actual key is never stored server-side; only its HMAC hash.
-type ShareKeyRecord = {
-  id: string;        // HMAC-SHA-256 hex of the raw key
-  note?: string;
-  created: Date;
-  createdBy: string; // profile.id of the creator
-};
 
 // Sentinel gatekeeperId used on ActionRecords that originated from built-in agent tools
 // (e.g. webFetch) rather than from a real gatekeeper. Real gatekeeper IDs are assigned
@@ -1205,9 +1169,7 @@ class OverseerImpl implements AgentHooks {
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
     if (description.prohibitAllSharing) {
-      let hasCollaborators = [...this.storage.collaborators.list({limit: 1})].length > 0;
-      let hasShareKeys = [...this.storage.shareKeys.list({limit: 1})].length > 0;
-      if (hasCollaborators || hasShareKeys) {
+      if ((await this.getSharingManager()).hasAnyShares()) {
         throw new Error(
             "This observation was blocked because it contains sensitive data that must only be " +
             "shown to the account owner, but this Gadget is shared with other users. Try again " +
@@ -1391,6 +1353,32 @@ class OverseerImpl implements AgentHooks {
     this.ctx.facets.abort("gadget", new Error("Gadget restarted due to code update."));
     this.bumpLastActive();
     return codeVersion;
+  }
+
+  // Force every client to disconnect and re-authenticate after a collaborator has been removed or
+  // downgraded, so that someone who just lost access can't keep using a session that's already
+  // open. Authorization is only checked at open() (see the sharing docs), so without this a stale
+  // session would survive until something else happened to disconnect it.
+  //
+  // We restart by aborting the whole DO. Aborting propagates to clients: the `notifyClosed` stub
+  // handed to each session is disposed without being called, which AuthenticatedApiImpl detects
+  // and reacts to by killing the browser WebSocket, forcing a reconnect that re-runs open() and
+  // re-checks the (now-changed) permission graph. Removing/downgrading collaborators is rare, so
+  // the disruption is acceptable -- and DOs restart unpredictably anyway, so reconnects need to
+  // be made as painless as possible regardless.
+  //
+  // Two precautions before the abort:
+  // - `ctx.abort()` does not respect the output gate, so we explicitly flush the severed edge to
+  //   disk with `ctx.storage.sync()`. Otherwise a restart could come back with the change lost,
+  //   leaving the removed user still authorized.
+  // - We delay the abort briefly so the triggering RPC's response can reach the caller (typically
+  //   the owner, who is also connected and will be disconnected) before their connection drops.
+  //   Without the delay their own removeCollaborator()/revokeShareKey() call might reject with a
+  //   connection error even though it succeeded.
+  async scheduleRevocationRestart(): Promise<void> {
+    await this.ctx.storage.sync();
+    await scheduler.wait(100);
+    this.ctx.abort("Gadget restarted to revoke access for a removed collaborator.");
   }
 
   // Last timestamp generated by getChatTimestamp(), if it has been called during this session.
@@ -2687,6 +2675,17 @@ class OverseerImpl implements AgentHooks {
     this.ownerProfileId = ownerProfile.id;
     return ownerProfile.id;
   }
+
+  #sharingManager?: SharingManager;
+
+  // Collaborator authorization / sharing / permission logic. Memoized for the DO instance.
+  // Resolving the owner's profile ID may require an RPC on first use; thereafter it's cached.
+  async getSharingManager(): Promise<SharingManager> {
+    if (!this.#sharingManager) {
+      this.#sharingManager = new SharingManager(this.storage, await this.getOwnerProfileId());
+    }
+    return this.#sharingManager;
+  }
 }
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
@@ -2764,49 +2763,41 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         ? owner
         : this.impl.users.get(this.impl.users.idFromString(userId));
 
+    // The caller's effective role. The owner always has "build".
+    let role: CollaboratorRole = "build";
+
     if (!isOwner) {
       if (this.impl.storage.prohibitAllSharing.get()) {
-        throw new Error("This gadget can no longer be shared because it observed sensitive data.");
+        // `prohibitAllSharing` can only have been set when the gadget had no shares (see
+        // `authorizeObservation`), and no new shares can be created while it's set, so any
+        // non-owner reaching here is necessarily unauthorized. Throw "Not Found" rather than a
+        // descriptive error so we don't acknowledge the gadget's existence to them (see below).
+        throw new Error("Not Found");
       }
 
-      // If a share key was provided, compute its HMAC hash and redeem it.
-      // The owner already has full access and should not appear in the collaborators table.
+      let sharing = await this.impl.getSharingManager();
+
+      // If a share key was provided, redeem it. The owner already has full access and should not
+      // appear in the collaborators table.
       if (shareKey) {
-        let keyId = await shareKeyId(shareKey);
-        let keyRecord = this.impl.storage.shareKeys.get(keyId);
-        if (keyRecord) {
-          let existing = this.impl.storage.collaborators.get(profileId);
-          if (existing) {
-            // User is already a collaborator. Only add an edge if they don't already have one
-            // for this exact key.
-            let alreadyHasEdge = existing.addedBy.some(
-                e => e.type === "shareKey" && e.keyId === keyId);
-            if (!alreadyHasEdge) {
-              existing.addedBy.push({
-                type: "shareKey",
-                keyId,
-                created: new Date(),
-              });
-              this.impl.storage.collaborators.put(existing);
-            }
-          } else {
-            // New collaborator -- need full profile from their user DO.
-            let profile = await clientUser.whoami();
-            this.impl.storage.collaborators.put({
-              profile,
-              addedBy: [{
-                type: "shareKey",
-                keyId,
-                created: new Date(),
-              }],
-            });
-          }
-        }
+        await sharing.redeemShareKey({
+          rawKey: shareKey,
+          profileId,
+          fetchProfile: () => clientUser.whoami(),
+        });
       }
 
-      // Check authorization.
-      let collab = this.impl.storage.collaborators.get(profileId);
-      if (!collab) throw new Error("Unauthorized");
+      // Check authorization. Compute the caller's effective role from the permission graph; this
+      // both authorizes the session and determines which capability we hand back.
+      //
+      // An unauthorized caller (no effective role -- never had access, or was removed) is rejected
+      // with the same "Not Found" error as a gadget that genuinely doesn't exist, so that we never
+      // acknowledge the existence of a gadget to someone not allowed to see it. A removed
+      // collaborator who reconnects after their session is force-restarted lands here and sees the
+      // generic load-failure page, indistinguishable from a deleted/nonexistent gadget.
+      let effectiveRole = sharing.getEffectiveRole(profileId);
+      if (!effectiveRole) throw new Error("Not Found");
+      role = effectiveRole;
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
@@ -2820,6 +2811,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           console.error(err);
         }
       })();
+    }
+
+    if (role === "use") {
+      // "use" collaborators get a restricted capability exposing only the gadget UI.
+      return new UseOverseerInterface(
+          this.impl, owner, clientUser, profileId, notifyClosed.dup());
     }
 
     return new OverseerClientInterface(
@@ -3284,6 +3281,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.notifyClosed[Symbol.dispose]();
   }
 
+  // Per-session caller identity for the SharingManager.
+  #sharingCaller(): SharingCaller {
+    return { profileId: this.clientProfileId, isOwner: this.isOwner };
+  }
+
   async #getClientProfile(): Promise<AiChatAuthorInfo> {
     if (!this.#clientProfilePromise) {
       this.#clientProfilePromise = this.clientUser.whoami().catch((err: unknown) => {
@@ -3318,6 +3320,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      role: "build",
     };
     if (!this.isOwner) {
       result.owner = await this.owner.whoami();
@@ -3335,6 +3338,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      role: "build",
     };
 
     // For collaborators, include owner info.
@@ -3407,6 +3411,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
+      this.impl.scheduleRevocationRestart();
       this.impl.ownerId = undefined;
     });
   }
@@ -4412,16 +4417,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   // --- Collaborator management ---
+  //
+  // The sharing/permission logic lives in SharingManager (./sharing). These methods handle only
+  // the RPC-bound pieces (resolving profiles via User DOs, the `prohibitAllSharing` policy) and
+  // delegate the rest.
 
   async listCollaborators(): Promise<CollaboratorInfo[]> {
-    let result: CollaboratorInfo[] = [];
-    for (let record of this.impl.storage.collaborators.list()) {
-      result.push({ profile: record.profile, addedBy: record.addedBy });
-    }
-    return result;
+    return (await this.impl.getSharingManager()).listCollaborators();
   }
 
-  async addCollaborator(username: string, note?: string): Promise<CollaboratorInfo | null> {
+  async addCollaborator(username: string, role: CollaboratorRole, note?: string)
+      : Promise<CollaboratorInfo | null> {
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
@@ -4430,321 +4436,72 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
-    // Don't add the owner as a collaborator.
-    if (userDoId.toString() === this.impl.ownerId) {
-      throw new Error("Cannot add the gadget owner as a collaborator.");
-    }
-
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
           "shared.");
     }
 
-    let existing = this.impl.storage.collaborators.get(profile.id);
-    let edge: PermissionEdge = {
-      type: "user",
-      sharer: this.clientProfileId,
-      created: new Date(),
-      note,
-    };
-
-    if (existing) {
-      // Already a collaborator -- add an edge if they don't have one from this sharer.
-      let alreadyHasEdge = existing.addedBy.some(
-          e => e.type === "user" && e.sharer === this.clientProfileId);
-      if (!alreadyHasEdge) {
-        existing.addedBy.push(edge);
-        this.impl.storage.collaborators.put(existing);
-      }
-      return { profile: existing.profile, addedBy: existing.addedBy };
-    }
-
-    let record: CollaboratorRecord = {
+    return (await this.impl.getSharingManager()).addCollaborator({
+      caller: this.#sharingCaller(),
       profile,
-      addedBy: [edge],
-    };
-    this.impl.storage.collaborators.put(record);
-    return { profile: record.profile, addedBy: record.addedBy };
+      role,
+      note,
+    });
   }
 
-  async previewRemoveCollaborator(profileId: string): Promise<CollaboratorInfo[]> {
-    let target = this.impl.storage.collaborators.get(profileId);
-    if (!target) return [];
-
-    if (!this.isOwner) {
-      // Non-owner: simulate removing only the caller's edges. If the target would still
-      // have remaining edges, no one will actually be removed.
-      let remaining = target.addedBy.filter(
-          e => !(e.type === "user" && e.sharer === this.clientProfileId));
-      if (remaining.length > 0) return [];
-    }
-
-    // The target would be fully removed. Find transitively dependent users.
-    return await this.#findDependentUsers(profileId, null, new Set());
+  async previewRemoveCollaborator(profileId: string): Promise<AffectedCollaborator[]> {
+    return (await this.impl.getSharingManager())
+        .previewRemoveCollaborator(this.#sharingCaller(), profileId);
   }
 
-  async removeCollaborator(profileId: string, keepUsers: string[]): Promise<CollaboratorInfo[]> {
-    let target = this.impl.storage.collaborators.get(profileId);
-    if (!target) {
-      throw new Error("User is not a collaborator.");
+  async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    let affected = (await this.impl.getSharingManager())
+        .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+    // Only restart if someone actually lost access or was downgraded (kept users are already
+    // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
+    // disconnect everyone.
+    if (affected.length > 0) {
+      this.impl.scheduleRevocationRestart();
     }
-
-    // Permission check: owner can remove anyone; collaborators can only remove users
-    // they themselves added.
-    if (!this.isOwner) {
-      let hasEdgeFromCaller = target.addedBy.some(
-          e => e.type === "user" && e.sharer === this.clientProfileId);
-      if (!hasEdgeFromCaller) {
-        throw new Error("You can only remove users that you added.");
-      }
-
-      // Non-owner: remove only the caller's edges from the target.
-      target.addedBy = target.addedBy.filter(
-          e => !(e.type === "user" && e.sharer === this.clientProfileId));
-
-      if (target.addedBy.length > 0) {
-        // Target still has edges from other sources — they keep access.
-        this.impl.storage.collaborators.put(target);
-        return [];
-      }
-
-      // Target has no remaining edges — fall through to full removal below.
-    }
-
-    // Full removal of the target plus transitive cleanup.
-    // The walk returns exactly the users to remove (accounting for keepUsers).
-    let keepSet = new Set(keepUsers);
-    let dependents = await this.#findDependentUsers(profileId, null, keepSet);
-
-    return this.#applyRemoval(profileId, dependents, keepSet);
+    return affected;
   }
 
-  async previewRevokeShareKey(keyId: string): Promise<CollaboratorInfo[]> {
-    let keyRecord = this.impl.storage.shareKeys.get(keyId);
-    if (!keyRecord) return [];
-
-    // Permission check: owner can revoke any key; collaborators can only revoke
-    // keys they themselves created.
-    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
-      throw new Error("You can only revoke share keys that you created.");
-    }
-
-    return await this.#findDependentUsers(null, keyId, new Set());
+  async previewRevokeShareKey(keyId: string): Promise<AffectedCollaborator[]> {
+    return (await this.impl.getSharingManager())
+        .previewRevokeShareKey(this.#sharingCaller(), keyId);
   }
 
-  async revokeShareKey(keyId: string, keepUsers: string[]): Promise<CollaboratorInfo[]> {
-    let keyRecord = this.impl.storage.shareKeys.get(keyId);
-    if (!keyRecord) {
-      throw new Error("Share key not found.");
+  async revokeShareKey(keyId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    let affected = (await this.impl.getSharingManager())
+        .revokeShareKey(this.#sharingCaller(), keyId, keepUsers);
+    // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
+    if (affected.length > 0) {
+      this.impl.scheduleRevocationRestart();
     }
-
-    // Permission check: owner can revoke any key; collaborators can only revoke
-    // keys they themselves created.
-    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
-      throw new Error("You can only revoke share keys that you created.");
-    }
-
-    let keepSet = new Set(keepUsers);
-    let dependents = await this.#findDependentUsers(null, keyId, keepSet);
-
-    // Revoke the key itself.
-    this.impl.storage.shareKeys.delete(keyId);
-
-    // Apply transitive removal (no primary target user to remove).
-    return this.#applyRemoval(null, dependents, keepSet, keyId);
-  }
-
-  // Apply removal of dependent users, clean up edges and share keys.
-  // `primaryTarget` is the profileId of the user being directly removed (if any).
-  // `dependents` is the list from #findDependentUsers (all users to delete).
-  // `keepUsers` are users that should be retained with fresh edges from the caller.
-  // `explicitlyRevokedKeyId` is a key that was explicitly revoked (by revokeShareKey),
-  //   whose edges also need to be cleaned from retained/remaining users.
-  #applyRemoval(
-      primaryTarget: string | null,
-      dependents: CollaboratorInfo[],
-      keepUsers: Set<string>,
-      explicitlyRevokedKeyId?: string): CollaboratorInfo[] {
-    // Collect all removed profileIds.
-    let removedSet = new Set<string>();
-    if (primaryTarget) removedSet.add(primaryTarget);
-    for (let dep of dependents) {
-      removedSet.add(dep.profile.id);
-    }
-
-    // Collect all share key IDs that will be revoked (created by removed users,
-    // plus any explicitly revoked key).
-    let revokedKeyIds = new Set<string>();
-    if (explicitlyRevokedKeyId) revokedKeyIds.add(explicitlyRevokedKeyId);
-    for (let keyRecord of this.impl.storage.shareKeys.list()) {
-      if (removedSet.has(keyRecord.createdBy)) {
-        revokedKeyIds.add(keyRecord.id);
-      }
-    }
-
-    // Build the removed list (primary target first, if any).
-    let removed: CollaboratorInfo[] = [];
-    if (primaryTarget) {
-      let targetRecord = this.impl.storage.collaborators.get(primaryTarget);
-      if (targetRecord) {
-        removed.push({ profile: targetRecord.profile, addedBy: targetRecord.addedBy });
-        this.impl.storage.collaborators.delete(primaryTarget);
-      }
-    }
-
-    // Delete dependent users.
-    for (let dep of dependents) {
-      this.impl.storage.collaborators.delete(dep.profile.id);
-      removed.push(dep);
-    }
-
-    // Fix up kept users: clean stale edges and add fresh edge from the caller.
-    for (let profileId of keepUsers) {
-      let record = this.impl.storage.collaborators.get(profileId);
-      if (!record) continue;
-      let before = record.addedBy.length;
-      record.addedBy = record.addedBy.filter(e => {
-        if (e.type === "user" && removedSet.has(e.sharer)) return false;
-        if (e.type === "shareKey" && revokedKeyIds.has(e.keyId)) return false;
-        return true;
-      });
-      if (record.addedBy.length !== before) {
-        // Some edges were cleaned — add a fresh edge from the caller.
-        record.addedBy.push({
-          type: "user",
-          sharer: this.clientProfileId,
-          created: new Date(),
-        });
-        this.impl.storage.collaborators.put(record);
-      }
-    }
-
-    // Clean stale edges from all remaining collaborators (those not kept or removed).
-    for (let record of this.impl.storage.collaborators.list()) {
-      if (keepUsers.has(record.profile.id)) continue;  // already handled above
-      let filtered = record.addedBy.filter(e => {
-        if (e.type === "user" && removedSet.has(e.sharer)) return false;
-        if (e.type === "shareKey" && revokedKeyIds.has(e.keyId)) return false;
-        return true;
-      });
-      if (filtered.length !== record.addedBy.length) {
-        record.addedBy = filtered;
-        this.impl.storage.collaborators.put(record);
-      }
-    }
-
-    // Revoke share keys created by removed users.
-    for (let keyId of revokedKeyIds) {
-      this.impl.storage.shareKeys.delete(keyId);
-    }
-
-    return removed;
-  }
-
-  // Find collaborators who would lose access given a user removal or key revocation.
-  //
-  // - `removedUser`: a profileId to treat as removed (excluded from the graph).
-  // - `revokedKeyId`: a keyId to treat as explicitly revoked.
-  // - `keepUsers`: profileIds to pre-mark as supported regardless of their edges.
-  //
-  // A collaborator is "supported" if they have at least one valid edge:
-  //   - A "user" edge is valid if the sharer is the owner or a supported collaborator.
-  //   - A "shareKey" edge is valid if the key is not revoked and the key's creator is
-  //     the owner or a supported collaborator.
-  //
-  // Returns all collaborators who are NOT supported (i.e., would lose access).
-  async #findDependentUsers(
-      removedUser: string | null,
-      revokedKeyId: string | null,
-      keepUsers: Set<string>): Promise<CollaboratorInfo[]> {
-    let ownerProfileId = await this.impl.getOwnerProfileId();
-
-    // Build a map of keyId → creatorProfileId for share key support checks.
-    let keyCreators = new Map<string, string>();
-    for (let keyRecord of this.impl.storage.shareKeys.list()) {
-      keyCreators.set(keyRecord.id, keyRecord.createdBy);
-    }
-
-    // Build the set of all collaborators except the removed user.
-    let allCollabs = new Map<string, CollaboratorRecord>();
-    for (let record of this.impl.storage.collaborators.list()) {
-      if (record.profile.id !== removedUser) {
-        allCollabs.set(record.profile.id, record);
-      }
-    }
-
-    // Fixed-point iteration: mark users as supported if they have at least one valid edge.
-    // Users in keepUsers are pre-marked as supported.
-    let supported = new Set<string>(keepUsers);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (let [id, record] of allCollabs) {
-        if (supported.has(id)) continue;
-        for (let edge of record.addedBy) {
-          if (edge.type === "shareKey") {
-            // Share key edge: valid if the key is not explicitly revoked and the
-            // key's creator is the owner or a supported collaborator.
-            if (edge.keyId === revokedKeyId) continue;
-            let creator = keyCreators.get(edge.keyId);
-            if (!creator) continue;  // key no longer exists
-            if (creator === ownerProfileId || supported.has(creator)) {
-              supported.add(id);
-              changed = true;
-              break;
-            }
-          } else {
-            // User edge: valid if the sharer is the owner or a supported collaborator.
-            if (edge.sharer === removedUser) continue;
-            if (edge.sharer === ownerProfileId || supported.has(edge.sharer)) {
-              supported.add(id);
-              changed = true;
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    // Users not in the supported set would lose access.
-    let result: CollaboratorInfo[] = [];
-    for (let [id, record] of allCollabs) {
-      if (!supported.has(id)) {
-        result.push({ profile: record.profile, addedBy: record.addedBy });
-      }
-    }
-    return result;
+    return affected;
   }
 
   // --- Share key management ---
 
-  async createShareKey(note?: string): Promise<{ key: string }> {
-    let rawBytes = new Uint8Array(16);
-    crypto.getRandomValues(rawBytes);
-    let key = rawBytes.toHex();
-    let keyId = await shareKeyId(key);
-
+  async createShareKey(role: CollaboratorRole, note?: string): Promise<{ key: string }> {
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
           "shared.");
     }
 
-    this.impl.storage.shareKeys.put({
-      id: keyId,
-      note,
-      created: new Date(),
-      createdBy: this.clientProfileId,
-    });
-    return { key };
+    return (await this.impl.getSharingManager())
+        .createShareKey({ caller: this.#sharingCaller(), role, note });
   }
 
   async listShareKeys(): Promise<ShareKeyInfo[]> {
+    let sharing = await this.impl.getSharingManager();
+
     // Collect all records synchronously to release the kv.list() iterator before any await
     // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
     // calls (e.g. listCollaborators) may start their own.
-    let records = [...this.impl.storage.shareKeys.list()];
+    let records = sharing.listShareKeyRecords();
 
     let result: ShareKeyInfo[] = [];
     // Cache profile lookups.
@@ -4753,17 +4510,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     for (let record of records) {
       let createdBy = profileCache.get(record.createdBy);
       if (!createdBy) {
-        // Check if the creator is the owner.
+        // Check if the creator is the owner (requires an RPC to the owner's DO).
         let ownerProfileId = await this.impl.getOwnerProfileId();
         if (ownerProfileId === record.createdBy) {
           createdBy = await this.owner.whoami();
         }
-        // Check if the creator is a collaborator.
+        // Check if the creator is a collaborator (resolved locally).
         if (!createdBy) {
-          let collab = this.impl.storage.collaborators.get(record.createdBy);
-          if (collab) {
-            createdBy = collab.profile;
-          }
+          createdBy = sharing.getCreatorProfile(record.createdBy);
         }
         // Fallback.
         if (!createdBy) {
@@ -4776,25 +4530,217 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         note: record.note,
         created: record.created,
         createdBy,
+        role: record.role ?? "build",
       });
     }
     return result;
   }
 
   async updateShareKey(keyId: string, note?: string): Promise<void> {
-    let keyRecord = this.impl.storage.shareKeys.get(keyId);
-    if (!keyRecord) {
-      throw new Error("Share key not found.");
-    }
-
-    // Permission check: owner can edit any key; collaborators can only edit keys they created.
-    if (!this.isOwner && keyRecord.createdBy !== this.clientProfileId) {
-      throw new Error("You can only edit share keys that you created.");
-    }
-
-    keyRecord.note = note === undefined ? undefined : note.slice(0, 500);
-    this.impl.storage.shareKeys.put(keyRecord);
+    (await this.impl.getSharingManager())
+        .updateShareKey(this.#sharingCaller(), keyId, note);
   }
+}
+
+// Restricted capability handed to "use"-role collaborators. It implements the full `Overseer`
+// interface but permits only the handful of methods needed to render and interact with the
+// gadget's deployed UI: getMetadata() (restricted to id/title/owner), a restricted
+// subscribeToMetadata(), getUiBundle() and connectToGadget() (both mainline-only). Every other
+// method throws "Unauthorized", with two exceptions: subscribeToConsoleLogs() and
+// subscribeToActions() return inert subscriptions (they never deliver data) rather than denying.
+// The editor subscribes to both speculatively from its top-level hooks, before it has switched to
+// the use-only view; an inert subscription lets those calls resolve quietly instead of surfacing
+// as spurious client-side errors, while still revealing nothing to the "use" collaborator.
+//
+// Default-deny is enforced at compile time: because this class `implements Overseer`, adding any
+// new method to the interface will fail to compile here until a developer consciously decides
+// whether "use" callers may invoke it.
+@validateRpc()
+class UseOverseerInterface extends RpcTarget implements Overseer {
+  constructor(private impl: OverseerImpl,
+              private owner: DurableObjectStub<UserDurableObject>,
+              private clientUser: DurableObjectStub<UserDurableObject>,
+              private clientProfileId: string,
+              private notifyClosed: NativeRpcStub<() => void>) {
+    super();
+  }
+
+  [Symbol.dispose]() {
+    this.notifyClosed();
+    this.notifyClosed[Symbol.dispose]();
+  }
+
+  // Throws "Unauthorized" for any method not available to "use" collaborators.
+  #deny(): never {
+    throw new Error("Unauthorized: this collaborator only has permission to use the gadget's UI.");
+  }
+
+  // --- Allowed methods ---
+
+  async getMetadata(): Promise<GadgetMetadata> {
+    return {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      owner: await this.owner.whoami(),
+      role: "use",
+    };
+  }
+
+  async subscribeToMetadata(
+      callback: RpcStub<(metadata: GadgetMetadata) => void>)
+      : Promise<RpcStub<{}>> {
+    callback = callback.dup();  // keep stub after return
+
+    let metadata: GadgetMetadata = {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      owner: await this.owner.whoami(),
+      role: "use",
+    };
+
+    let titleSubscriber = {
+      update(value: string) {
+        metadata.title = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+
+    let unsubscribe = () => {
+      this.impl.storage.title.unsubscribe(titleSubscriber);
+      callback[Symbol.dispose]();
+    };
+
+    this.impl.storage.title.subscribe(titleSubscriber);
+
+    callback(metadata).catch(unsubscribe);
+
+    // @ts-expect-error Bugs in native RPC types make this not work currently.
+    return new NativeRpcStub<{}>({
+      [Symbol.dispose]() {
+        unsubscribe();
+      }
+    });
+  }
+
+  async getUiBundle(chatId?: number): Promise<UiBundle | null> {
+    if (chatId !== undefined) {
+      this.#deny();
+    }
+
+    let {ydoc} = this.impl.buildYDoc("current");
+    let file = ydoc.getMap<Y.Text>().get("client.js");
+    return file ? { jsCode: file.toString() } : null;
+  }
+
+  async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
+    if (chatId !== undefined) {
+      this.#deny();
+    }
+
+    this.impl.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: this.clientUser.id.toString(),
+      interaction_type: "gadget_ui_connected",
+    });
+    return this.impl.getGadgetFacet(undefined);
+  }
+
+  // --- Denied methods (build-only) ---
+
+  async setTitle(_title: string): Promise<void> { this.#deny(); }
+  async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
+  async deleteSelf(): Promise<void> { this.#deny(); }
+  async subscribeToCode(
+      _subscriber: RpcStub<CodeSubscriber>, _fromVersion?: number): Promise<RpcStub<{}>> {
+    this.#deny();
+  }
+  async updateCode(_update: Uint8Array, _chatId?: number): Promise<void> { this.#deny(); }
+  async listGatekeepers(): Promise<GatekeeperMetadata[]> { this.#deny(); }
+  async getGatekeeper(_bindingName: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
+  async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async newGatekeeper(_accountId: number, _resourceUrl: string)
+      : Promise<GatekeeperClient<any> | null> { this.#deny(); }
+  async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
+    this.#deny();
+  }
+  async listActions(): Promise<ActionLogEntry[]> { this.#deny(); }
+  async approveAction(_id: number): Promise<void> { this.#deny(); }
+  async rejectAction(_id: number): Promise<void> { this.#deny(); }
+  async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
+  async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
+  async subscribeToActions(
+      subscriber: RpcStub<ActionsSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
+    // Inert: "use" sessions have no visibility into the action log. Signal a settled, empty log
+    // (so the client doesn't sit in a perpetual "loading" state) and never deliver entries.
+    let sub = subscriber.dup();
+    sub.ready().catch(() => {});
+    // @ts-expect-error Bugs in native RPC types make this not work currently.
+    return new NativeRpcStub<{}>({
+      [Symbol.dispose]() {
+        sub[Symbol.dispose]();
+      }
+    });
+  }
+  async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
+  async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
+  async getChatHistory(_chatId: number): Promise<AiChatMessage[]> { this.#deny(); }
+  async subscribeToChat(
+      _subscriber: RpcStub<AiChatSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
+    this.#deny();
+  }
+  async newChat(_initialMessage: string, _modelId: string | null,
+                _capsules?: CapsuleSpecifier[]): Promise<number> { this.#deny(); }
+  async sendChatMessage(_chatId: number, _message: string, _modelId: string | null,
+                        _capsules?: CapsuleSpecifier[]): Promise<void> { this.#deny(); }
+  async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
+  async mergeChanges(_chatId: number, _mergeThrough: number | null,
+                     _options?: { includeDraft?: boolean }): Promise<void> { this.#deny(); }
+  async revertChanges(_chatId: number, _revertFrom: number): Promise<void> { this.#deny(); }
+  async finalizeChatDraft(_chatId: number): Promise<void> { this.#deny(); }
+  async discardChatDraftChanges(_chatId: number): Promise<void> { this.#deny(); }
+  async deleteChat(_chatId: number): Promise<void> { this.#deny(); }
+  async stopAgent(_chatId: number): Promise<void> { this.#deny(); }
+  async retryAgent(_chatId: number, _modelId: string): Promise<void> { this.#deny(); }
+  async subscribeToConsoleLogs(_subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
+    // Inert: "use" sessions never receive console logs. The inbound subscriber stub is left
+    // undup'd, so the RPC system disposes it when this call returns.
+    // @ts-expect-error Bugs in native RPC types make this not work currently.
+    return new NativeRpcStub<{}>({
+      [Symbol.dispose]() {}
+    });
+  }
+  async listBlueprints(): Promise<BlueprintGadgetSummary[]> { this.#deny(); }
+  async createBlueprint(_title?: string, _description?: string,
+                        _screenshot?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary> {
+    this.#deny();
+  }
+  async updateBlueprint(_blueprintId: string, _options: {
+    title?: string;
+    description?: string;
+    updateCode?: boolean;
+    updateBindings?: boolean;
+    screenshot?: BlueprintScreenshotUpload | null;
+  }): Promise<void> { this.#deny(); }
+  async deleteBlueprint(_blueprintId: string): Promise<void> { this.#deny(); }
+  async retryBlueprintPublish(_blueprintId: string): Promise<void> { this.#deny(); }
+  async listCollaborators(): Promise<CollaboratorInfo[]> { this.#deny(); }
+  async addCollaborator(_username: string, _role: CollaboratorRole, _note?: string)
+      : Promise<CollaboratorInfo | null> { this.#deny(); }
+  async removeCollaborator(_profileId: string, _keepUsers: string[])
+      : Promise<AffectedCollaborator[]> { this.#deny(); }
+  async previewRemoveCollaborator(_profileId: string): Promise<AffectedCollaborator[]> {
+    this.#deny();
+  }
+  async createShareKey(_role: CollaboratorRole, _note?: string): Promise<{ key: string }> {
+    this.#deny();
+  }
+  async listShareKeys(): Promise<ShareKeyInfo[]> { this.#deny(); }
+  async updateShareKey(_keyId: string, _note?: string): Promise<void> { this.#deny(); }
+  async revokeShareKey(_keyId: string, _keepUsers: string[]): Promise<AffectedCollaborator[]> {
+    this.#deny();
+  }
+  async previewRevokeShareKey(_keyId: string): Promise<AffectedCollaborator[]> { this.#deny(); }
 }
 
 @validateRpc()

@@ -9,12 +9,25 @@ This document describes the collaborator system.
 
 ## Collaborators
 
-A collaborator is a user who has direct access to a gadget they do not own. Currently all collaborators receive full access: they can edit code, use the AI chat, manage bindings, and interact with the gadget UI -- the same as the owner, with a few exceptions:
+A collaborator is a user who has direct access to a gadget they do not own. Each collaborator has a **role** that determines their level of access:
+
+- **`build`** -- full access: edit code, use the AI chat, manage bindings, and interact with the gadget UI -- the same as the owner, modulo the owner-only exceptions below.
+- **`use`** -- may only render and interact with the gadget's deployed UI. Concretely, a `use` collaborator may call `getUiBundle()` and `connectToGadget()` against the mainline code (`chatId` must be omitted), read basic metadata via `getMetadata()`/`subscribeToMetadata()` (restricted to `id`/`title`/`owner`/`role`), and nothing else. Every other `Overseer` method throws `Unauthorized`, with two exceptions: `subscribeToConsoleLogs()` and `subscribeToActions()` return inert subscriptions that never deliver data (no console logs; an empty, immediately-`ready()` action log). The editor opens both speculatively from top-level hooks before switching to the use-only view, so resolving them quietly avoids spurious client-side errors while still revealing nothing.
+
+Roles are totally ordered: `build` > `use`.
+
+`build` collaborators differ from the owner in a few ways:
 
 - **Cannot delete the gadget.** Only the owner can do this.
 - **Use their own AI models.** When a collaborator engages AI chat, the model is resolved from their own account (BYOK billing goes to whoever prompted the AI, not the gadget owner).
 - **Use their own connected accounts for bindings.** When a collaborator adds a gatekeeper binding, it connects through that collaborator's third-party accounts, not the owner's. This prevents collaborators from gaining access to the owner's accounts beyond what the gadget's existing bindings already expose.
 - **Limited revocation authority.** A collaborator can only remove users that they themselves added (see "Permission graph" below).
+
+A caller may never grant a role higher than their own effective role. Today only the owner and `build` collaborators can share at all (sharing methods are not in the `use` allowlist), so in practice `use` access is granted by the owner or a `build` collaborator. The permission graph nevertheless models roles generally, so allowing `use` collaborators to reshare `use` access in the future requires no algorithmic changes.
+
+### Restricted capability
+
+Authorization is capability-based: `open()` computes the caller's effective role from the permission graph and hands back a different object depending on the result. `build`/owner sessions get the full `OverseerClientInterface`; `use` sessions get a `UseOverseerInterface` that implements the entire `Overseer` interface but throws `Unauthorized` for everything outside the `use` allowlist (except the two inert telemetry subscriptions noted above). Because that class `implements Overseer`, any newly-added interface method fails to compile until a developer consciously decides whether `use` callers may invoke it (default-deny).
 
 ### Adding collaborators
 
@@ -34,7 +47,7 @@ A shared gadget does not appear on a collaborator's home page until they first o
 
 Shared gadgets appear in the same list as owned gadgets on the home page, distinguished by showing the owner's name in the "Owner" column. Collaborators can dismiss a shared gadget from their home page (removing the record from their user account), but this does not revoke their access -- if they open the gadget again via its URL, it reappears.
 
-When a collaborator's access is revoked, the gadget intentionally remains on their home page. The next time they try to open it, the authorization check fails with "Unauthorized", clearly communicating that access was revoked. They can then dismiss it manually. This avoids confusing disappearances.
+When a collaborator's access is revoked, the stale record remains on their home page (we don't proactively reach into their account to remove it). The next time they try to open it, `open()` fails with a generic "Not Found" -- the same result as a gadget that never existed -- and the client shows its generic load-failure page. We deliberately do *not* tell them "access was revoked", because doing so would acknowledge the gadget's continued existence to someone no longer permitted to see it (see "Authorization model" below). They can dismiss the dead entry manually.
 
 ## Permission graph
 
@@ -44,10 +57,16 @@ The sharing system tracks *how* each collaborator gained access, forming a direc
 
 Each collaborator has one or more **permission edges** explaining how they got access. There are two edge types:
 
-- **User edge**: records that a specific sharer (identified by `profile.id`) directly added this collaborator. Includes a timestamp and optional note.
-- **Share key edge**: records that this collaborator redeemed a specific share key (identified by `keyId`, the HMAC hash). Includes a timestamp.
+- **User edge**: records that a specific sharer (identified by `profile.id`) directly added this collaborator. Includes a timestamp, the granted role, and an optional note.
+- **Share key edge**: records that this collaborator redeemed a specific share key (identified by `keyId`, the HMAC hash). Includes a timestamp and the granted role (snapshotted from the key's role at redemption).
 
 A collaborator can accumulate multiple edges -- for example, if they were added directly by Alice and also redeemed a share link created by Bob. The collaborator retains access as long as they have at least one valid edge.
+
+(Edges and share keys created before roles were introduced have no `role` field; they are treated as `build` for backwards compatibility.)
+
+### Effective role
+
+A collaborator's **effective role** is the maximum role reachable from the owner through their valid edges. Each edge grants `min(edge role, sharer's effective role)`: the owner is the implicit root at `build`, a user edge's sharer is the owner or another collaborator, and a share key edge's "sharer" is the key's creator. A collaborator's effective role is the maximum granted role across all their valid edges. Effective role is computed live (it is never denormalized into storage), so it is always consistent with the current graph -- which also means a session's access is recomputed from scratch at each `open()`.
 
 ### Share keys in the graph
 
@@ -59,54 +78,60 @@ Concretely, revoking a share key or removing its creator triggers the same trans
 
 The owner is the implicit root of the permission graph. The owner is never stored in the collaborators table and cannot be removed. All permission chains must ultimately trace back to the owner (or to someone the owner added, or someone *they* added, etc.) for access to be valid.
 
-## Transitive revocation
+## Lazy revocation
 
-When a collaborator is removed or a share key is revoked, the system must determine whether any other collaborators lose access as a consequence. For example: if Alice added Bob, and Bob added Carol, then removing Bob should also remove Carol -- unless the person performing the removal explicitly chooses to keep Carol.
+Access is determined by **reachability from the owner**, recomputed live at every `open()` (see "Authorization model" below). Revocation exploits this: rather than eagerly cascading and deleting records, the system only **severs the edges that grant the removed party access** and lets reachability do the rest.
 
-### Algorithm
+- **Removing a collaborator** deletes the edges that grant *them* access. The owner severs *all* incoming edges to the target; a non-owner severs only their own `user` edge. The target's record is retained even if it becomes empty, and crucially the edges where the target is the *sharer* of access to others are left untouched.
+- **Revoking a share key** sets the key's `revoked` flag instead of deleting it. A revoked key contributes nothing to the permission graph and can no longer be redeemed, but its record and all `shareKey` edges referencing it stay intact (no dangling references).
 
-The transitive revocation algorithm is a **fixed-point reachability computation** implemented in `OverseerClientInterface.#findDependentUsers()`. It determines which collaborators would retain access (are "supported") and which would not, given a hypothetical removal.
+Nothing cascades. A dependent who loses their only path to the owner (e.g. Carol, reachable only via the removed Bob) simply becomes unreachable -- they are denied at `open()` time, not pruned from storage. This is the example from the introduction: removing Bob makes Carol unreachable automatically, with no separate cleanup step.
 
-Inputs:
-- `removedUser` -- a profile ID to treat as removed (excluded from the graph), or null.
-- `revokedKeyId` -- a share key ID to treat as revoked, or null.
-- `keepUsers` -- a set of profile IDs that are pre-marked as supported regardless of their edges (these are users the caller has chosen to retain).
+### Restoring access (undo)
+
+Because the graph is never destructively pruned, revocation is reversible. If you accidentally remove someone who had in turn shared with five other people, you can **undo** simply by re-adding them: their record and their five outgoing grants were never deleted, so re-adding an edge from the owner restores their reachability and, transitively, all five downstream collaborators. (Share-key revocation is likewise non-destructive via the `revoked` flag, though there is no UI to un-revoke a key yet -- see Future work.)
+
+This does mean removed collaborators and revoked keys accumulate in storage. Listing RPCs (`listCollaborators`, `listShareKeys`) return only currently-active entries, so removed users disappear from the UI; a future GC could reclaim long-dead records.
+
+### Effective-role algorithm
+
+The core is a **fixed-point role-propagation computation** implemented in `SharingManager.computeEffectiveRoles()`. It computes the effective role of every collaborator (given an optional hypothetical change), returning a map from profile ID to effective role (absence from the map means no access). It is the single source of truth: `open()`, `hasAnyShares()`, the listing RPCs, and the preview methods all derive from it.
+
+Inputs (all optional; used to model a hypothetical change in preview):
+- `removedUser` -- a profile ID to treat as removed (excluded from the graph).
+- `removedEdge` -- a single user edge (`{target, sharer}`) to treat as removed. Used to preview a non-owner removing only their own edge.
+- `revokedKeyId` -- a share key ID to treat as revoked.
+- `overrides` -- profile IDs pinned to at least a given role regardless of their edges.
 
 The algorithm:
 
-1. **Build the candidate set.** Load all collaborators except the removed user.
-2. **Collect share key metadata.** Build a map from key ID to creator profile ID, for evaluating share key edges.
-3. **Initialize the supported set** with `keepUsers`.
-4. **Iterate to fixed point.** Repeatedly scan all unsupported collaborators. A collaborator becomes supported if they have at least one valid edge:
-   - A **user edge** is valid if the sharer is the owner or is already in the supported set. Edges pointing to the removed user are skipped.
-   - A **share key edge** is valid if the key is not the one being revoked, the key still exists, and the key's creator is the owner or is in the supported set.
-   - Once a collaborator is marked supported, that may unlock other collaborators on the next pass (since someone they added now has a valid supporter).
-5. **Converge.** The loop terminates when a full pass adds no new members to the supported set.
-6. **Return the unsupported set.** Collaborators not in the supported set after convergence are the ones who would lose access.
+1. **Build the candidate set.** Load all collaborators except the (hypothetically) removed user.
+2. **Collect share key metadata.** Build a map from key ID to `{creator, role}`, skipping keys that are `revoked` (or the hypothetical `revokedKeyId`).
+3. **Initialize** the role map with any `overrides`.
+4. **Iterate to fixed point.** Repeatedly scan all collaborators. For each edge, compute the role it grants -- `min(edge role, sharer's effective role)`, where the sharer (or share key creator) is the owner (always `build`) or another collaborator's current effective role -- and raise the collaborator's role to the maximum across their valid edges. Raising one collaborator's role may unlock or raise others on the next pass.
+5. **Converge.** Roles only ever increase, so the loop terminates when a full pass changes nothing.
+6. **Return the role map.** Collaborators absent from the map have no access; collaborators present with a lower role than before have been downgraded.
 
-This algorithm correctly handles arbitrary graph shapes: diamonds (a user reachable via two independent paths), cycles (mutual adds), and deep chains.
+This handles arbitrary graph shapes: diamonds (a user reachable via two independent paths), cycles (mutual adds), and deep chains.
+
+### Removals and downgrades
+
+Because edges carry roles, severing an upstream edge or revoking a key may either remove a user (they lose all access) or merely **downgrade** them (they keep access via another path, but at a lower role). `removeCollaborator`/`revokeShareKey` return the affected set by diffing the effective-role map captured before the change against the map recomputed after: each entry is an `AffectedCollaborator` carrying `oldRole` and `newRole` (with `newRole === null` meaning full removal).
 
 ### Preview and confirm
 
 Revocation is a two-phase process in the UI:
 
-1. **Preview.** Before actually removing anyone, the frontend calls `previewRemoveCollaborator()` or `previewRevokeShareKey()`, which runs the reachability algorithm and returns the list of users who would lose access. If the list is non-empty, the UI shows a dialog with checkboxes for each affected user.
-2. **Confirm.** The user decides which dependents to keep (checked) and which to also remove (unchecked). The frontend then calls `removeCollaborator(profileId, keepUsers)` or `revokeShareKey(keyId, keepUsers)`.
+1. **Preview.** Before changing anything, the frontend calls `previewRemoveCollaborator()` or `previewRevokeShareKey()`, which runs the effective-role computation with the corresponding hypothetical input and returns the `AffectedCollaborator`s whose access would change. If non-empty, the UI can warn the user (e.g. "removing Bob will also cut off Carol").
+2. **Confirm.** The frontend calls `removeCollaborator(profileId, keepUsers)` or `revokeShareKey(keyId, keepUsers)`. Both perform the lazy edge-severance described above and return the actually-affected set.
 
-### Applying the removal
+### keepUsers (optional re-rooting)
 
-Once the caller confirms, `#applyRemoval()` carries out the following steps:
-
-1. **Identify all removed users** (the primary target plus unsupported dependents).
-2. **Identify revoked share keys** -- any share key created by a removed user is also revoked, since its creator is no longer a valid supporter.
-3. **Delete collaborator records** for all removed users.
-4. **Fix up kept users.** For each user in `keepUsers`, remove any edges that pointed through removed users or revoked keys, and add a fresh user edge from the caller.
-5. **Clean stale edges** from all remaining collaborators who are not being removed or kept (they may have had secondary edges through a removed user that need pruning, even though they retain access via other edges).
-6. **Delete revoked share key records.**
+`keepUsers` lets the caller spare specific dependents from a removal/revocation. After the edge is severed, `#reRootKeptUsers` recomputes effective roles and, for each listed user who would otherwise lose access or be downgraded, appends a fresh `user` edge from the caller at their prior role (bounded by what the caller can grant). This is pure convenience layered on top of the lazy model -- the same effect is achievable by re-adding the intermediary, or by granting the dependent access directly.
 
 ### Non-owner removal
 
-When a non-owner collaborator removes someone they added, the behavior is slightly different. The caller can only remove their own edges from the target. If the target has edges from other sources (e.g., also added by someone else), those edges remain and the target keeps access. Only if removing the caller's edges leaves the target with no remaining edges does full removal (with transitive cleanup) proceed.
+A non-owner can only sever their own `user` edge to the target (and only if such an edge exists -- otherwise the call is rejected). If the target still has edges from other sources, they retain access, though possibly at a lower role; if the caller's edge was their only support, the target becomes unreachable like any other lazily-removed user.
 
 ## Resource isolation between collaborators
 
@@ -119,14 +144,24 @@ This means no collaborator implicitly gains access to another user's connected t
 
 ## Authorization model
 
-Authorization is currently enforced eagerly: the `open()` method on the Overseer checks whether the caller is the owner or has a record in the collaborators table. The transitive revocation logic in `removeCollaborator()` and `revokeShareKey()` is responsible for eagerly removing anyone who becomes unreachable in the permission graph.
+Authorization is enforced at `open()`: the method computes the caller's effective role from the permission graph (`getEffectiveRole()`), treating the owner as the implicit `build` root. A caller with no effective role is rejected with a generic `Not Found` error -- the exact same error as a gadget that genuinely doesn't exist (and the same one used for an uninitialized or deleted gadget) -- so that we never acknowledge a gadget's existence to someone not allowed to see it. Otherwise the role selects which capability is returned (full `OverseerClientInterface` for `build`/owner, restricted `UseOverseerInterface` for `use`). (Note: `UseOverseerInterface` still throws `Unauthorized` when a *valid* `use` collaborator calls a `build`-only method -- that's a different case, where existence is already known and only the operation is denied.)
 
-This means correctness depends on the graph cleanup logic being bug-free. A potential future hardening step would be to also compute reachability from the owner at `open()` time as defense-in-depth, ensuring that even if the cleanup has a bug, unreachable users cannot access the gadget.
+Because the role is recomputed from the graph on every `open()`, the live computation is the *sole* source of truth for access -- there is no eager cleanup whose bugs could grant access to an unreachable user. This is what makes lazy revocation safe: severing an edge is enough to deny access, even though the unreachable records linger in storage.
+
+### Terminating live sessions on revocation
+
+Authorization is only checked at `open()`, so a session that is *already* open is not re-checked per message. Without intervention, a collaborator who was just removed or downgraded could keep using their live session until something else disconnected them. To close this gap, `removeCollaborator`/`revokeShareKey` proactively restart the gadget's Overseer DO via `ctx.abort()` whenever the change actually removed or downgraded someone (i.e. the returned `AffectedCollaborator[]` is non-empty; pure no-op removals don't restart). Aborting forcibly disconnects every client; each reconnects and re-runs `open()`, which re-evaluates the now-changed permission graph -- denying removed users (who get the generic `Not Found`, surfaced by the client as its generic load-failure page) and handing downgraded users their reduced capability (the editor swaps to the `use` view automatically based on `metadata.role`). Since removals are rare (and DOs restart unpredictably anyway, so reconnects are already cheap), the disruption is acceptable.
+
+Two precautions surround the abort (`OverseerImpl.scheduleRevocationRestart`): the severed edge is flushed with `ctx.storage.sync()` first (because `ctx.abort()` does not respect the output gate, a restart could otherwise come back with the change lost), and the abort is delayed ~100ms so the triggering RPC's response reaches the caller -- typically the owner, who is also connected -- before their own connection drops. The disconnect reaches the browser through the existing `notifyClosed` plumbing: when the Overseer DO aborts, the per-session `notifyClosed` stub is disposed without being called, which `AuthenticatedApiImpl` treats as a lost connection and reacts to by killing the browser WebSocket, forcing a reconnect.
+
+Note this is only needed for removals/downgrades. Granting or raising access never strands anyone, and `prohibitAllSharing` cannot strand a session either: an observation that would set that flag is *blocked* (rather than applied) if the gadget is already shared, so the flag only ever flips to true on a gadget with no other sessions to evict.
 
 ## Future work
 
-- **Permission levels.** Currently all collaborators get full access. Planned levels include: chat-only (can create chats but not merge to mainline), read-only, UI-only, and UI-read-only.
+- **More permission levels.** Beyond `build` and `use`, planned levels include: chat-only (can create chats but not merge to mainline) and read-only.
+- **Resharing of `use` access.** Allow `use` collaborators to grant `use` access to others. The permission graph already supports this; it only requires adding the relevant sharing methods to the `use` allowlist.
 - **Binding-aware access control.** Prohibit adding collaborators when the gadget holds binding permissions that the collaborator lacks, and conversely prohibit adding sensitive bindings when existing collaborators lack the required permissions.
 - **Share key expiration and usage limits.** Including single-use keys.
-- **Reachability check in `open()`.** Defense-in-depth against bugs in transitive revocation (also needed if group-based access is added, since group membership changes are external events).
+- **Un-revoking share keys.** Revocation is non-destructive (the `revoked` flag), but there is no UI or RPC to list revoked keys or clear the flag, so key revocation is currently one-way in practice.
+- **Garbage-collecting dead records.** Removed collaborators and revoked keys accumulate in storage under the lazy model; a background sweep could reclaim entries that have been unreachable for a long time.
 - **Notifications.** Currently there are no in-product notifications for access grants or revocations.
