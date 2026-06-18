@@ -24,6 +24,7 @@ import {
 } from '@gadgets/workshop-shared/api'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
+import GadgetUseView from './GadgetUseView'
 import Connections from './Connections'
 import Activity from './Activity'
 import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
@@ -135,6 +136,15 @@ export default function GadgetEditor() {
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+
+  // ── role gating ────────────────────────────────────────────────────────────────
+  // "use"-role collaborators receive a restricted overseer that only permits rendering and
+  // interacting with the gadget's deployed UI. We render the minimal use-only view for them (see
+  // the early return below). Editor-only RPCs are fired speculatively regardless of role: the
+  // restricted overseer denies the ones that matter and returns inert results for the two
+  // telemetry subscriptions this component opens, so no client-side gating is needed here.
+  const isUseOnly = metadata?.role === 'use'
+
   // ── title editing ────────────────────────────────────────────────────────────
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const isEditingTitleRef = useRef(false)
@@ -535,7 +545,11 @@ export default function GadgetEditor() {
         if (err?.message?.includes('Invalid or expired share key')) {
           toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
         }
-        if (isInitialLoad) setError('Failed to load gadget')
+        // "Not Found" is terminal — the gadget doesn't exist or we're no longer authorized
+        // (deliberately indistinguishable). Show the generic error page rather than looping on
+        // the reconnecting banner, even mid-session (e.g. after a removed collaborator's session
+        // is force-restarted by the backend and they reconnect).
+        if (isInitialLoad || err?.message?.includes('Not Found')) setError('Failed to load gadget')
         else if (!connectionLost) setConnectionLost(true)
       }
     }
@@ -627,7 +641,7 @@ export default function GadgetEditor() {
     )
   }
 
-  if (!metadata) {
+  if (!metadata || !overseer) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-kumo-base">
         <div className="flex flex-col items-center gap-3">
@@ -636,6 +650,11 @@ export default function GadgetEditor() {
         </div>
       </div>
     )
+  }
+
+  // ── "use"-role collaborators get the minimal UI: top bar + gadget iframe only ──
+  if (isUseOnly) {
+    return <GadgetUseView overseer={overseer.stub} metadata={metadata} />
   }
 
   // ── always render the full two-pane edit layout; preview overlays on top ──────

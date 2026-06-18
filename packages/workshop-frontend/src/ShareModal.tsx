@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Checkbox, Dialog, useKumoToastManager } from '@cloudflare/kumo'
+import { Checkbox, Dialog, Select, useKumoToastManager } from '@cloudflare/kumo'
+import type { PortalContainer } from '@cloudflare/kumo'
 import { Check, Copy, Link, Trash, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, CollaboratorInfo, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { Overseer, CollaboratorInfo, AffectedCollaborator, ShareKeyInfo, GadgetMetadata, AiChatAuthorInfo, CollaboratorRole } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { TabButton } from './components/TabButton'
 import { copyToClipboard } from './clipboard'
@@ -38,12 +39,64 @@ function initials(name: string) {
   return name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()
 }
 
+// Roles default to "build" for backwards compatibility when absent. The label is just the role
+// name with its first letter capitalized, so new roles render sensibly without further changes.
+function roleLabel(role: CollaboratorRole | undefined): string {
+  const r = role ?? 'build'
+  return r.charAt(0).toUpperCase() + r.slice(1)
+}
+
+function RoleBadge({ role }: { role: CollaboratorRole | undefined }) {
+  return (
+    <span className="shrink-0 rounded-md bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] text-kumo-strong">
+      {roleLabel(role)}
+    </span>
+  )
+}
+
+// All grantable roles, in descending order of access. Add new roles here as they are introduced.
+const ROLE_OPTIONS: CollaboratorRole[] = ['build', 'use']
+
+// Selector for the role to grant when adding a user or creating a share link.
+function RoleSelect({
+  value,
+  onValueChange,
+  disabled,
+  ariaLabel,
+  container,
+}: {
+  value: CollaboratorRole
+  onValueChange: (role: CollaboratorRole) => void
+  disabled?: boolean
+  ariaLabel: string
+  // Portal target for the popup. The ShareModal dialog is rendered with a transform and a high
+  // z-index, which would otherwise trap/hide the popup behind the dialog; portaling into a
+  // higher-stacked container at the document root keeps the popup visible and correctly positioned.
+  container?: PortalContainer
+}) {
+  return (
+    <Select
+      aria-label={ariaLabel}
+      className="text-sm"
+      value={value}
+      onValueChange={(v) => onValueChange(v as CollaboratorRole)}
+      disabled={disabled}
+      container={container}
+      renderValue={(v) => roleLabel(v as CollaboratorRole)}
+    >
+      {ROLE_OPTIONS.map(role => (
+        <Select.Option key={role} value={role}>{roleLabel(role)}</Select.Option>
+      ))}
+    </Select>
+  )
+}
+
 function DependentKeepList({
   dependents,
   keepSet,
   onKeepSetChange,
 }: {
-  dependents: CollaboratorInfo[]
+  dependents: AffectedCollaborator[]
   keepSet: Set<string>
   onKeepSetChange: (next: Set<string>) => void
 }) {
@@ -82,9 +135,11 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareKeys, setShareKeys] = useState<ShareKeyInfo[]>([])
   const [addUsername, setAddUsername] = useState('')
+  const [addRole, setAddRole] = useState<CollaboratorRole>('use')
   const [adding, setAdding] = useState(false)
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
   const [newShareLinkCopied, setNewShareLinkCopied] = useState<boolean | null>(null)
+  const [newLinkRole, setNewLinkRole] = useState<CollaboratorRole>('use')
   const [creatingKey, setCreatingKey] = useState(false)
   const [tabKey, setTabKey] = useState<'people' | 'links'>('people')
   const [editingShareKeyId, setEditingShareKeyId] = useState<string | null>(null)
@@ -92,17 +147,34 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [savingShareKeyNote, setSavingShareKeyNote] = useState(false)
   const [revokeTarget, setRevokeTarget] = useState<{
     keyId: string
-    dependents: CollaboratorInfo[]
+    dependents: AffectedCollaborator[]
   } | null>(null)
   const [revokeLoadingKeyId, setRevokeLoadingKeyId] = useState<string | null>(null)
   const [removeTarget, setRemoveTarget] = useState<{
     profileId: string
-    dependents: CollaboratorInfo[]
+    dependents: AffectedCollaborator[]
   } | null>(null)
   const [removeLoadingProfileId, setRemoveLoadingProfileId] = useState<string | null>(null)
   const [removeKeepSet, setRemoveKeepSet] = useState<Set<string>>(new Set())
   const [revokeKeepSet, setRevokeKeepSet] = useState<Set<string>>(new Set())
   const wasOpenRef = useRef(false)
+
+  // Portal target for role-select popups. The dialog content is rendered with a CSS transform and
+  // a high z-index, which traps the popup behind it. Mounting the popup into a body-level container
+  // with a higher stacking context keeps it visible and correctly positioned. (Same approach as
+  // GatekeeperModal.)
+  const [selectContainer, setSelectContainer] = useState<PortalContainer>(null)
+  useEffect(() => {
+    const el = document.createElement('div')
+    el.style.position = 'relative'
+    el.style.zIndex = '1100'
+    document.body.appendChild(el)
+    setSelectContainer(el)
+    return () => {
+      setSelectContainer(null)
+      el.remove()
+    }
+  }, [])
 
   const isOwner = !metadata.owner
   const sharingProhibited = metadata.sharingProhibited === true
@@ -149,7 +221,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (!addUsername.trim() || sharingProhibited) return
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(addUsername.trim(), undefined)
+      const result = await overseer.addCollaborator(addUsername.trim(), addRole, undefined)
       if (result === null) {
         toasts.add({ title: 'No account found for that username.', variant: 'error' })
       } else {
@@ -202,7 +274,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     if (sharingProhibited) return
     setCreatingKey(true)
     try {
-      const { key } = await overseer.createShareKey(undefined)
+      const { key } = await overseer.createShareKey(newLinkRole, undefined)
       const url = `${window.location.origin}/gadget/${metadata.id}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
@@ -345,6 +417,13 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                       className="flex-1"
                       disabled={sharingProhibited}
                     />
+                    <RoleSelect
+                      ariaLabel="Role to grant"
+                      value={addRole}
+                      onValueChange={setAddRole}
+                      disabled={sharingProhibited}
+                      container={selectContainer}
+                    />
                     <WorkshopButton
                       tone="primary"
                       className="min-w-[64px]"
@@ -427,6 +506,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                             <span className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
                               {row.kind === 'owner' ? 'Owner' : describeEdge(row.info)}
                             </span>
+                            <RoleBadge role={row.kind === 'owner' ? 'build' : row.info.role} />
                             {row.kind === 'collaborator' && (
                               <WorkshopIconButton
                                 danger
@@ -462,22 +542,31 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                       </p>
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={handleCreateShareKey}
-                    disabled={creatingKey || sharingProhibited}
-                    className="flex w-full items-center justify-between rounded-xl border border-kumo-line bg-kumo-base px-4 py-3 text-left transition-colors hover:bg-kumo-elevated"
-                  >
-                    <span>
-                      <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                        {creatingKey ? 'Creating share link...' : 'Create share link'}
+                  <div className="flex items-center gap-2 rounded-xl border border-kumo-line bg-kumo-base px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={handleCreateShareKey}
+                      disabled={creatingKey || sharingProhibited}
+                      className="-mx-4 -my-3 flex flex-1 items-center justify-between rounded-l-xl px-4 py-3 text-left transition-colors enabled:hover:bg-kumo-elevated disabled:cursor-not-allowed"
+                    >
+                      <span>
+                        <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {creatingKey ? 'Creating share link...' : 'Create share link'}
+                        </span>
+                        <span className="mt-0.5 block text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                          {sharingProhibited ? 'New invite links cannot be created.' : 'Creates a reusable invite link.'}
+                        </span>
                       </span>
-                      <span className="mt-0.5 block text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                        {sharingProhibited ? 'New invite links cannot be created.' : 'Creates a reusable invite link.'}
-                      </span>
-                    </span>
-                    <Link size={16} className="mr-1 text-kumo-subtle" />
-                  </button>
+                      <Link size={16} className="ml-2 mr-1 text-kumo-subtle" />
+                    </button>
+                    <RoleSelect
+                      ariaLabel="Role to grant via share link"
+                      value={newLinkRole}
+                      onValueChange={setNewLinkRole}
+                      disabled={creatingKey || sharingProhibited}
+                      container={selectContainer}
+                    />
+                  </div>
 
                   {newShareLink && (
                   <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-3">
@@ -623,6 +712,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                           </div>
                           {editingShareKeyId !== sk.keyId && (
                             <>
+                              <RoleBadge role={sk.role} />
                               <button
                                 type="button"
                                 onClick={() => startEditingShareKeyNote(sk)}

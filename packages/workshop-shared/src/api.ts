@@ -479,6 +479,11 @@ export type GadgetMetadata = {
   // user is a collaborator, not the owner.
   owner?: AiChatAuthorInfo;
 
+  // The viewing user's effective role for this gadget. The owner is always "build". Used by the
+  // frontend to decide whether to render the full editor ("build") or the UI-only shell ("use").
+  // Absent implies "build" for backwards compatibility.
+  role?: CollaboratorRole;
+
   // True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
   // be shared with additional users or links.
   sharingProhibited?: boolean;
@@ -858,9 +863,11 @@ export interface Overseer extends RpcTarget {
   listCollaborators(): Promise<CollaboratorInfo[]>;
 
   // Add a collaborator by username/email. The caller must be the owner or an existing
-  // collaborator. Returns the new collaborator's info, or null if the username doesn't
-  // correspond to an existing account.
-  addCollaborator(username: string, note?: string): Promise<CollaboratorInfo | null>;
+  // collaborator. `role` is the access level to grant; the caller may not grant a role higher
+  // than their own effective role. Returns the new collaborator's info, or null if the username
+  // doesn't correspond to an existing account.
+  addCollaborator(username: string, role: CollaboratorRole,
+                  note?: string): Promise<CollaboratorInfo | null>;
 
   // Remove a collaborator (identified by profile.id).
   //
@@ -873,24 +880,25 @@ export interface Overseer extends RpcTarget {
   // removed user are replaced with new edges from the caller. Users reachable only through
   // the removed user who are NOT in `keepUsers` are also removed.
   //
-  // Returns the list of users who were actually removed (including the primary target).
-  // An empty array means the caller's edge was removed but the target retained access
-  // through other edges.
-  removeCollaborator(profileId: string, keepUsers: string[]): Promise<CollaboratorInfo[]>;
+  // Returns the list of users whose access actually changed (removed or downgraded), including
+  // the primary target. An empty array means the caller's edge was removed but no one's effective
+  // access changed (the target retained their role through other edges).
+  removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]>;
 
   // Preview what would happen if a collaborator were removed. For a non-owner caller,
   // if the target has edges from other sources that would survive, returns an empty array
-  // (the target would not actually be removed). Otherwise, returns the list of users whose
-  // only path to access runs through the given user, so the caller can present checkboxes
-  // for which to keep vs. remove.
-  previewRemoveCollaborator(profileId: string): Promise<CollaboratorInfo[]>;
+  // (the target would not actually be affected). Otherwise, returns the list of users whose
+  // access would change (lose access or be downgraded to a lower role) as a consequence, so the
+  // caller can present checkboxes for which to keep vs. remove.
+  previewRemoveCollaborator(profileId: string): Promise<AffectedCollaborator[]>;
 
   // --- Share key management ---
 
   // Create a share key. The server generates a random 128-bit key, stores its HMAC-SHA-256
   // hash, and returns the raw key (hex-encoded). The caller constructs a URL from it. The
-  // raw key is never stored server-side.
-  createShareKey(note?: string): Promise<{ key: string }>;
+  // raw key is never stored server-side. `role` is the access level granted to anyone who
+  // redeems the key; the caller may not grant a role higher than their own effective role.
+  createShareKey(role: CollaboratorRole, note?: string): Promise<{ key: string }>;
 
   // List active share keys (for management UI).
   listShareKeys(): Promise<ShareKeyInfo[]>;
@@ -899,16 +907,16 @@ export interface Overseer extends RpcTarget {
   // this only edits the stored note used by the management UI.
   updateShareKey(keyId: string, note?: string): Promise<void>;
 
-  // Revoke a share key by its ID (the HMAC hash). Users who gained access solely through
-  // this key (and have no other edges) will be transitively removed. `keepUsers` lists
-  // profile.ids of users who should be retained with fresh edges from the caller.
-  // Returns the list of users who were actually removed.
-  revokeShareKey(keyId: string, keepUsers: string[]): Promise<CollaboratorInfo[]>;
+  // Revoke a share key by its ID (the HMAC hash). Users who gained access through this key may be
+  // transitively removed or downgraded. `keepUsers` lists profile.ids of users who should be
+  // retained at their prior role with fresh edges from the caller. Returns the list of users
+  // whose access actually changed (removed or downgraded).
+  revokeShareKey(keyId: string, keepUsers: string[]): Promise<AffectedCollaborator[]>;
 
-  // Preview what would happen if a share key were revoked. Returns the list of users who
-  // would lose access (those whose only path to access runs through this key), so the
-  // caller can present checkboxes for which to keep vs. remove.
-  previewRevokeShareKey(keyId: string): Promise<CollaboratorInfo[]>;
+  // Preview what would happen if a share key were revoked. Returns the list of users whose access
+  // would change (lose access or be downgraded to a lower role) as a consequence, so the caller
+  // can present checkboxes for which to keep vs. remove.
+  previewRevokeShareKey(keyId: string): Promise<AffectedCollaborator[]>;
 }
 
 export type AiChatMetadata = {
@@ -1541,9 +1549,25 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
   // TODO: Get/set permissions.
 }
 
+// The level of access a collaborator (or share key) grants.
+//
+// - "build": full access -- edit code, use and participate in chats, manage bindings, etc. (the
+//   same access the owner has, modulo the owner-only exceptions documented in sharing.md).
+// - "use": may only render and interact with the gadget's deployed UI (getUiBundle() and
+//   connectToGadget() on the mainline code), plus read basic metadata.
+//
+// Roles are ordered build > use. A collaborator's effective role is the maximum role reachable
+// from the owner through their valid permission edges, where each edge grants
+// min(edge role, sharer's effective role). The owner is the implicit root at "build".
+export type CollaboratorRole = "build" | "use";
+
 // Describes how one user came to have collaborator access.
 export type PermissionEdge = {
   created: Date;
+
+  // The role granted by this edge. Absent on edges created before roles were introduced; such
+  // edges are treated as "build" for backwards compatibility.
+  role?: CollaboratorRole;
 } & ({
   // Granted directly by another user.
   type: "user";
@@ -1559,6 +1583,24 @@ export type PermissionEdge = {
 export type CollaboratorInfo = {
   profile: AiChatAuthorInfo;
   addedBy: PermissionEdge[];
+
+  // The collaborator's effective role (the maximum role reachable from the owner). Absent implies
+  // "build" for backwards compatibility.
+  role?: CollaboratorRole;
+};
+
+// Describes a collaborator whose access would change (or did change) as a result of a removal or
+// share key revocation. Used by the preview/confirm flow, which must surface not only users who
+// lose access entirely but also users who would be downgraded to a lower role.
+export type AffectedCollaborator = {
+  profile: AiChatAuthorInfo;
+  addedBy: PermissionEdge[];
+
+  // The effective role before the change.
+  oldRole: CollaboratorRole;
+
+  // The effective role after the change, or null if the user loses access entirely.
+  newRole: CollaboratorRole | null;
 };
 
 // Information about a share key, for the management UI.
@@ -1567,4 +1609,8 @@ export type ShareKeyInfo = {
   note?: string;
   created: Date;
   createdBy: AiChatAuthorInfo;
+
+  // The role granted to anyone who redeems this key. Absent implies "build" for keys created
+  // before roles were introduced.
+  role?: CollaboratorRole;
 };
