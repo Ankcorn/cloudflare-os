@@ -89,6 +89,7 @@ const RIGHT_TABS: { value: RightTab; label: string }[] = [
 ]
 
 const CHAT_WIDTH_STORAGE_KEY = 'gadgets:workshop:chatWidth'
+const WORKSPACE_VISIBILITY_STORAGE_KEY_PREFIX = 'gadgets:workshop:workspaceVisibility:'
 const MIN_CHAT_WIDTH = 280
 const MIN_WORKSPACE_WIDTH = 400
 const DEFAULT_CHAT_WIDTH = 420
@@ -112,6 +113,22 @@ function getInitialChatWidth() {
     // private mode / sandboxed iframes
   }
   return clampChatWidth(Number.isFinite(parsed) ? parsed : fallback)
+}
+
+function workspaceVisibilityStorageKey(gadgetId: string) {
+  // Per-gadget keys may outlive deleted gadgets, but each entry is tiny and bounded by gadgets
+  // created or opened.
+  return `${WORKSPACE_VISIBILITY_STORAGE_KEY_PREFIX}${gadgetId}`
+}
+
+function getStoredWorkspaceOverride(gadgetId: string | undefined): WorkspaceOverride {
+  if (!isBrowser || !gadgetId) return null
+  try {
+    const stored = window.localStorage.getItem(workspaceVisibilityStorageKey(gadgetId))
+    return stored === 'open' || stored === 'closed' ? stored : null
+  } catch {
+    return null
+  }
 }
 
 // ─── component ────────────────────────────────────────────────────────────────
@@ -156,7 +173,9 @@ export default function GadgetEditor() {
   const chatWidthRef = useRef(chatWidth)
   const [isResizing, setIsResizing] = useState(false)
   const [activeTab, setActiveTab] = useState<RightTab>('app')
-  const [workspaceOverride, setWorkspaceOverride] = useState<WorkspaceOverride>(null)
+  const [workspaceOverride, setWorkspaceOverride] = useState<WorkspaceOverride>(() =>
+    getStoredWorkspaceOverride(id)
+  )
   const [workspaceTransitionEnabled, setWorkspaceTransitionEnabled] = useState(false)
   const [hasMountedActivity, setHasMountedActivity] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
@@ -333,6 +352,17 @@ export default function GadgetEditor() {
     }
   }, [])
 
+  const setWorkspaceVisibility = useCallback((visibility: Exclude<WorkspaceOverride, null>) => {
+    setWorkspaceTransitionEnabled(true)
+    setWorkspaceOverride(visibility)
+    if (!id) return
+    try {
+      window.localStorage.setItem(workspaceVisibilityStorageKey(id), visibility)
+    } catch {
+      // The control still works for the current session when storage is unavailable.
+    }
+  }, [id])
+
   useEffect(() => {
     const handleResize = () => {
       setChatWidth(width => clampChatWidth(width))
@@ -426,7 +456,7 @@ export default function GadgetEditor() {
     setHasChatZero(false)
     setHasAnyProposedChanges(false)
     setSelectedChatHasProposedChanges(false)
-    setWorkspaceOverride(null)
+    setWorkspaceOverride(getStoredWorkspaceOverride(id))
     setWorkspaceTransitionEnabled(false)
     setHasMountedActivity(false)
     hasAutoSwitchedToCodeRef.current = false
@@ -744,10 +774,7 @@ export default function GadgetEditor() {
           )}
 
           <WorkshopIconButton
-            onClick={() => {
-              setWorkspaceTransitionEnabled(true)
-              setWorkspaceOverride(showFullEditor ? 'closed' : 'open')
-            }}
+            onClick={() => setWorkspaceVisibility(showFullEditor ? 'closed' : 'open')}
             className="text-kumo-default"
             title={showFullEditor ? 'Hide workspace' : 'Open workspace'}
             aria-label={showFullEditor ? 'Hide workspace' : 'Open workspace'}
@@ -1015,6 +1042,7 @@ export default function GadgetEditor() {
             overseer={overseer.stub}
             metadata={metadata}
             currentUser={userInfo}
+            authenticatedApi={authenticatedApi}
           />
           <BlueprintModal
             open={blueprintModalOpen}

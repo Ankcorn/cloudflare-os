@@ -493,6 +493,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
           overseer={shareOverseer.stub}
           metadata={shareTarget}
           currentUser={userInfo}
+          authenticatedApi={authenticatedApi}
         />
       )}
     </div>
