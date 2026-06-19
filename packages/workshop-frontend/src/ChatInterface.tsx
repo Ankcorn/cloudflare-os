@@ -7,6 +7,7 @@ import {
   useMemo,
   useCallback,
   type ReactNode,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
@@ -62,6 +63,8 @@ import {
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
+  ChatAttachmentHandle,
+  ChatAttachmentRef,
 } from "@gadgets/workshop-shared/api";
 import { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import CapsuleOverlay from "./CapsuleOverlay";
@@ -189,6 +192,72 @@ interface InputCapsule {
   length: number;
   gatekeeperId: number;
   description: ResourceDescription;
+}
+
+type PendingAttachment = {
+  id: string;
+  blob: Blob;
+  name?: string;
+  previewUrl?: string;
+  mimeType: string;
+  uploadState: "uploading" | "ready" | "error";
+  ref?: ChatAttachmentHandle;
+  error?: string;
+};
+
+const MAX_PENDING_ATTACHMENTS = 5;
+const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;
+const CHAT_ATTACHMENT_IMAGE_MAX_EDGE = 1568;
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Failed to encode image.")), type, quality);
+  });
+}
+
+async function prepareChatAttachment(file: File): Promise<{blob: Blob, mimeType: string}> {
+  if (!file.type.startsWith("image/")) {
+    if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      throw new Error(`Attachments must be ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_BYTES)} or smaller.`);
+    }
+    return { blob: file, mimeType: file.type || "application/octet-stream" };
+  }
+  if (file.size > MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES) {
+    throw new Error(`Images must be ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_SOURCE_IMAGE_BYTES)} or smaller before resizing.`);
+  }
+
+  const bitmap = await createImageBitmap(file);
+  try {
+    const supportedOriginalType = file.type === "image/jpeg" || file.type === "image/png" || file.type === "image/webp";
+    if (supportedOriginalType && file.size <= MAX_CHAT_ATTACHMENT_BYTES && Math.max(bitmap.width, bitmap.height) <= CHAT_ATTACHMENT_IMAGE_MAX_EDGE) {
+      return { blob: file, mimeType: file.type };
+    }
+
+    const scale = Math.min(1, CHAT_ATTACHMENT_IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Failed to get 2D canvas context.");
+    ctx.drawImage(bitmap, 0, 0, width, height);
+
+    // Preserve supported source formats when resizing. In particular, converting PNG to JPEG would
+    // discard transparency, and changing PNG/WebP encoding would make the original filename
+    // extension inconsistent with the uploaded MIME type.
+    const outputMimeType = supportedOriginalType ? file.type : "image/jpeg";
+    const quality = outputMimeType === "image/png" ? undefined : 0.85;
+    const blob = await canvasToBlob(canvas, outputMimeType, quality);
+    if (blob.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      throw new Error(`Attachments must be ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_BYTES)} or smaller.`);
+    }
+    return { blob, mimeType: outputMimeType };
+  } finally {
+    bitmap.close();
+  }
 }
 
 // Matches http:// and https:// URLs in text, stopping at whitespace and common delimiters.
@@ -788,6 +857,237 @@ const MarkdownMessage = memo(function MarkdownMessage(
   );
 });
 
+function formatAttachmentSize(size: number | undefined): string | null {
+  if (size === undefined) return null;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Build a temporary object URL for inlined attachment bytes, revoking it when no longer needed.
+function useAttachmentObjectUrl(content: Uint8Array | undefined, mimeType: string): string | null {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!content) {
+      setObjectUrl(null);
+      return;
+    }
+
+    const url = URL.createObjectURL(
+      new Blob([content as BlobPart], {type: mimeType || "application/octet-stream"}));
+    setObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [content, mimeType]);
+  return objectUrl;
+}
+
+type AttachmentDownloadHandler = (attachment: ChatAttachmentRef) => void;
+
+type AttachmentPreviewModalProps = {
+  attachment: ChatAttachmentRef | null;
+  onClose: () => void;
+  onDownload?: AttachmentDownloadHandler;
+};
+
+const AttachmentPreviewModal = memo(function AttachmentPreviewModal(
+  {
+    attachment,
+    onClose,
+    onDownload,
+  }: AttachmentPreviewModalProps,
+) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isImage = (attachment?.mimeType ?? "").startsWith("image/");
+  const objectUrl = useAttachmentObjectUrl(
+    isImage ? attachment?.content : undefined, attachment?.mimeType ?? "");
+
+  // Dialog keyboard handling: Escape closes, Tab stays trapped, focus restores on close.
+  useEffect(() => {
+    if (!attachment) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key === "Tab" && containerRef.current) {
+        const focusable = containerRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], iframe, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    // Defer to after paint so the close button exists.
+    const raf = requestAnimationFrame(() => {
+      containerRef.current?.querySelector<HTMLElement>("button")?.focus();
+    });
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      cancelAnimationFrame(raf);
+      previouslyFocused?.focus?.();
+    };
+  }, [attachment, onClose]);
+
+  if (!attachment) return null;
+
+  const sizeLabel = formatAttachmentSize(attachment.size);
+  const title = attachment.name ?? "Attached file";
+  const modalWidthClass = isImage
+    ? "w-[min(1120px,calc(100vw-32px))]"
+    : "w-[min(520px,calc(100vw-32px))]";
+  const modalSurfaceClass = "rounded-2xl border border-kumo-line/70 bg-kumo-base";
+  const modalPaddingClass = "p-3 sm:p-4";
+
+  return (
+    <div
+      className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[1px]"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Preview ${title}`}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div ref={containerRef} className={`relative max-h-[calc(100vh-32px)] ${modalWidthClass} overflow-hidden ${modalSurfaceClass} p-0 shadow-[0_24px_80px_rgba(0,0,0,0.28)]`}>
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-3 top-3 z-10 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-kumo-line bg-kumo-base/90 text-kumo-subtle shadow-[0_1px_2px_rgba(0,0,0,0.05)] backdrop-blur-sm transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-base hover:text-kumo-default active:scale-[0.96]"
+          aria-label="Close preview"
+        >
+          <X size={18} />
+        </button>
+
+        <div className={modalPaddingClass}>
+          {isImage && objectUrl ? (
+            <img
+              src={objectUrl}
+              alt={title}
+              className="max-h-[calc(100vh-96px)] w-full rounded-xl object-contain"
+            />
+          ) : (
+            <div className="grid min-h-56 place-items-center rounded-xl border border-kumo-line/70 bg-kumo-elevated/40 p-6 py-10 text-center">
+              <div className="max-w-sm space-y-2">
+                <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-kumo-line/70 bg-kumo-base text-kumo-inactive">
+                  <FileIcon size={26} />
+                </div>
+                <div className="text-[14px] font-medium text-kumo-default">{title}</div>
+                <div className="text-[12px] leading-5 text-kumo-subtle">
+                  {attachment.mimeType || "Unknown file type"}{sizeLabel ? ` · ${sizeLabel}` : ""}
+                </div>
+                <div className="text-[12px] leading-5 text-kumo-inactive">This file can’t be previewed here.</div>
+                {onDownload && (
+                  <button
+                    type="button"
+                    onClick={() => onDownload(attachment)}
+                    className="mt-1 inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-kumo-line/70 bg-kumo-base px-3 py-1.5 text-[12px] font-medium text-kumo-default transition-colors hover:bg-kumo-tint/40"
+                  >
+                    Download
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+type ChatAttachmentThumbnailProps = {
+  attachment: ChatAttachmentRef;
+  onPreview: (id: string) => void;
+};
+
+const ChatAttachmentThumbnail = memo(function ChatAttachmentThumbnail(
+  {
+    attachment,
+    onPreview,
+  }: ChatAttachmentThumbnailProps,
+) {
+  const isImage = attachment.mimeType.startsWith("image/");
+  const objectUrl = useAttachmentObjectUrl(isImage ? attachment.content : undefined, attachment.mimeType);
+  const [imageState, setImageState] = useState<"loading" | "loaded" | "error">("loading");
+
+  return (
+    <button
+      type="button"
+      onClick={() => onPreview(attachment.id)}
+      className="relative h-28 w-36 shrink-0 cursor-pointer overflow-hidden rounded-xl border border-kumo-line/70 bg-kumo-elevated text-left transition-[border-color,background-color,transform] duration-150 ease-out hover:border-kumo-line hover:bg-kumo-tint/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-brand/40 active:scale-[0.98]"
+      aria-label={`Preview ${attachment.name ?? "attached file"}`}
+    >
+      {isImage && objectUrl && imageState !== "error" ? (
+        <>
+          {/* Kept in layout (not display:none) so lazy-loading actually triggers. */}
+          <img
+            src={objectUrl}
+            alt={attachment.name ?? "Attached image"}
+            loading="lazy"
+            className="block h-full w-full object-cover"
+            onLoad={() => setImageState("loaded")}
+            onError={() => setImageState("error")}
+          />
+          {imageState !== "loaded" && (
+            <div className="absolute inset-0 grid place-items-center bg-kumo-elevated text-[11px] text-kumo-inactive">Loading image…</div>
+          )}
+        </>
+      ) : (
+        <div className="flex h-full w-full min-w-0 items-center justify-center gap-2 p-3 text-[12px] leading-4 text-kumo-subtle">
+          <FileIcon size={20} className="shrink-0 text-kumo-inactive" />
+          <span className="min-w-0 truncate">{attachment.name ?? "Attached file"}</span>
+        </div>
+      )}
+    </button>
+  );
+});
+
+type ChatAttachmentGridProps = {
+  attachments: ChatAttachmentRef[];
+  onDownload?: AttachmentDownloadHandler;
+};
+
+const ChatAttachmentGrid = memo(function ChatAttachmentGrid(
+  {
+    attachments,
+    onDownload,
+  }: ChatAttachmentGridProps,
+) {
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(null);
+  const previewAttachment = previewAttachmentId === null
+    ? null
+    : attachments.find((attachment) => attachment.id === previewAttachmentId) ?? null;
+  const handlePreview = useCallback((id: string) => setPreviewAttachmentId(id), []);
+  const handleClose = useCallback(() => setPreviewAttachmentId(null), []);
+
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap gap-2">
+        {attachments.map((attachment) => (
+          <ChatAttachmentThumbnail
+            key={attachment.id}
+            attachment={attachment}
+            onPreview={handlePreview}
+          />
+        ))}
+      </div>
+      <AttachmentPreviewModal
+        attachment={previewAttachment}
+        onClose={handleClose}
+        onDownload={onDownload}
+      />
+    </>
+  );
+});
+
 const ToolCallDetails = memo(function ToolCallDetails(
   { toolCall: tc }: { toolCall: AiToolCall },
 ) {
@@ -1123,7 +1423,8 @@ export const ChatInput = ({
     message: string,
     modelId: string | null,
     capsules?: CapsuleSpecifier[],
-  ) => void;
+    attachments?: ChatAttachmentHandle[],
+  ) => Promise<void> | void;
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
   selectedModel: string | null;
@@ -1147,8 +1448,17 @@ export const ChatInput = ({
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
 }) => {
+  const toasts = useKumoToastManager();
   const [inputValue, setInputValue] = useState("");
   const [capsules, setCapsules] = useState<InputCapsule[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [isSending, setIsSending] = useState(false);
+  const [isAttachmentDragActive, setIsAttachmentDragActive] = useState(false);
+  const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
+  pendingAttachmentsRef.current = pendingAttachments;
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const attachmentDragDepthRef = useRef(0);
+  const mountedRef = useRef(true);
   const [activeUrl, setActiveUrl] = useState<{
     text: string;
     start: number;
@@ -1220,19 +1530,184 @@ export const ChatInput = ({
 
   const isBlocked = !!blockedReason;
 
-  const handleSend = () => {
-    if (isBlocked) return;
-    if (!inputValue.trim()) return;
+  const deleteStagedAttachment = (ref: ChatAttachmentHandle) => {
+    void (async () => {
+      try {
+        const overseer = await getOverseer();
+        await overseer.deleteChatAttachment(ref.id);
+      } catch {
+        // Best-effort cleanup; the parent may have already disposed the Overseer while unmounting.
+      }
+    })();
+  };
 
-    if (capsules.length === 0) {
-      // No capsules — simple send.
-      onSend(inputValue.trim(), selectedModel);
-    } else {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const attachments = pendingAttachmentsRef.current;
+      pendingAttachmentsRef.current = [];
+      for (const attachment of attachments) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      for (const attachment of attachments) {
+        if (attachment.ref) deleteStagedAttachment(attachment.ref);
+      }
+    };
+  }, []);
+
+  const uploadPendingAttachment = async (id: string, blob: Blob, mimeType: string, name?: string) => {
+    try {
+      const content = new Uint8Array(await blob.arrayBuffer());
+      if (!mountedRef.current || !pendingAttachmentsRef.current.some((attachment) => attachment.id === id)) return;
+      const overseer = await getOverseer();
+      if (!mountedRef.current || !pendingAttachmentsRef.current.some((attachment) => attachment.id === id)) return;
+      const ref = await overseer.uploadChatAttachment({
+        mimeType,
+        content,
+        name,
+      });
+      if (!mountedRef.current || !pendingAttachmentsRef.current.some((attachment) => attachment.id === id)) {
+        deleteStagedAttachment(ref);
+        return;
+      }
+      setPendingAttachments((prev) => prev.map((attachment) => attachment.id === id ? { ...attachment, uploadState: "ready", ref } : attachment));
+    } catch (err: any) {
+      console.error("Failed to upload chat attachment:", err);
+      if (!mountedRef.current) return;
+      setPendingAttachments((prev) => prev.map((attachment) => attachment.id === id ? {
+        ...attachment,
+        uploadState: "error",
+        error: err?.message || "Upload failed",
+      } : attachment));
+      toasts.add({ title: err?.message || "Failed to upload attachment", variant: "error" });
+    }
+  };
+
+  const addFiles = async (files: FileList | File[]) => {
+    const attachmentFiles = Array.from(files);
+
+    const initialRoom = MAX_PENDING_ATTACHMENTS - pendingAttachmentsRef.current.length;
+    if (initialRoom <= 0) {
+      toasts.add({ title: `You can attach up to ${MAX_PENDING_ATTACHMENTS} attachments`, variant: "error" });
+      return;
+    }
+    const accepted = attachmentFiles.slice(0, initialRoom);
+    if (attachmentFiles.length > initialRoom) {
+      const title = initialRoom === 1
+        ? "Only the first attachment was attached"
+        : `Only the first ${initialRoom} attachments were attached`;
+      toasts.add({ title, variant: "error" });
+    }
+
+    const prepared = await Promise.allSettled(accepted.map(async (file) => ({
+      file,
+      ...(await prepareChatAttachment(file)),
+    })));
+    if (!mountedRef.current) return;
+
+    for (const result of prepared) {
+      if (result.status === "rejected") {
+        console.error("Failed to process chat attachment:", result.reason);
+        toasts.add({ title: result.reason?.message || "Failed to process attachment", variant: "error" });
+        continue;
+      }
+
+      const { file, blob, mimeType } = result.value;
+      if (pendingAttachmentsRef.current.length >= MAX_PENDING_ATTACHMENTS) {
+        toasts.add({ title: `You can attach up to ${MAX_PENDING_ATTACHMENTS} attachments`, variant: "error" });
+        continue;
+      }
+      const totalPendingBytes = pendingAttachmentsRef.current.reduce((sum, attachment) => sum + attachment.blob.size, 0);
+      if (totalPendingBytes + blob.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+        toasts.add({ title: `Attached files must total ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_TOTAL_BYTES)} or less`, variant: "error" });
+        continue;
+      }
+      const id = crypto.randomUUID();
+      const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(blob) : undefined;
+      const pending: PendingAttachment = {
+        id,
+        blob,
+        mimeType,
+        name: file.name || undefined,
+        previewUrl,
+        uploadState: "uploading",
+      };
+      pendingAttachmentsRef.current = [...pendingAttachmentsRef.current, pending];
+      setPendingAttachments((prev) => [...prev, pending]);
+      void uploadPendingAttachment(id, blob, mimeType, file.name || undefined);
+    }
+  };
+
+  const removeAttachment = (id: string) => {
+    const attachment = pendingAttachmentsRef.current.find((attachment) => attachment.id === id);
+    if (attachment) {
+      if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      if (attachment.ref) deleteStagedAttachment(attachment.ref);
+    }
+    pendingAttachmentsRef.current = pendingAttachmentsRef.current.filter((attachment) => attachment.id !== id);
+    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+  };
+
+  const hasDraggedFiles = (event: ReactDragEvent): boolean => {
+    return Array.from(event.dataTransfer.types).includes("Files");
+  };
+
+  const handleAttachmentDragEnter = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    attachmentDragDepthRef.current++;
+    setIsAttachmentDragActive(true);
+  };
+
+  const handleAttachmentDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = pendingAttachmentsRef.current.length >= MAX_PENDING_ATTACHMENTS ? "none" : "copy";
+    setIsAttachmentDragActive(true);
+  };
+
+  const handleAttachmentDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(event)) return;
+    attachmentDragDepthRef.current = Math.max(0, attachmentDragDepthRef.current - 1);
+    if (attachmentDragDepthRef.current === 0) setIsAttachmentDragActive(false);
+  };
+
+  const handleAttachmentDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    attachmentDragDepthRef.current = 0;
+    setIsAttachmentDragActive(false);
+    void addFiles(event.dataTransfer.files);
+  };
+
+  const handleSend = async () => {
+    if (isSending || isBlocked) return;
+    const attachmentsSnapshot = pendingAttachments;
+    const readyAttachments = attachmentsSnapshot
+      .filter((attachment) => attachment.uploadState === "ready" && attachment.ref)
+      .map((attachment) => attachment.ref!);
+    const hasUploadingAttachment = attachmentsSnapshot.some((attachment) => attachment.uploadState === "uploading");
+    const hasFailedAttachment = attachmentsSnapshot.some((attachment) => attachment.uploadState === "error");
+
+    if (!inputValue.trim() && readyAttachments.length === 0) return;
+    if (hasUploadingAttachment) {
+      toasts.add({ title: "Please wait for attachment uploads to finish", variant: "error" });
+      return;
+    }
+    if (hasFailedAttachment) {
+      toasts.add({ title: "Remove failed attachment uploads before sending", variant: "error" });
+      return;
+    }
+
+    let message = inputValue.trim();
+    let specifiers: CapsuleSpecifier[] | undefined;
+    if (capsules.length > 0) {
       // Build processed message: replace each capsule title with [i] placeholder.
       const sortedCapsules = [...capsules].sort((a, b) => a.start - b.start);
       let processedMsg = inputValue;
       let cumulativeShift = 0;
-      const specifiers: CapsuleSpecifier[] = [];
+      specifiers = [];
 
       for (let i = 0; i < sortedCapsules.length; i++) {
         const c = sortedCapsules[i];
@@ -1250,12 +1725,28 @@ export const ChatInput = ({
         });
         cumulativeShift += placeholder.length - c.length;
       }
-
-      onSend(processedMsg.trim(), selectedModel, specifiers);
+      message = processedMsg.trim();
     }
 
-    setInputValue("");
-    setCapsules([]);
+    setIsSending(true);
+    try {
+      await onSend(message, selectedModel, specifiers, readyAttachments.length ? readyAttachments : undefined);
+      for (const attachment of attachmentsSnapshot) {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      }
+      setInputValue("");
+      setCapsules([]);
+      pendingAttachmentsRef.current = [];
+      setPendingAttachments([]);
+    } finally {
+      if (mountedRef.current) setIsSending(false);
+    }
+  };
+
+  const submitMessage = () => {
+    void handleSend().catch((err) => {
+      console.error("Failed to send chat message:", err);
+    });
   };
 
   const handleAttachLogs = () => {
@@ -1719,12 +2210,34 @@ export const ChatInput = ({
     ? "No agent"
     : models.find((model) => model.id === selectedModel)?.name ?? selectedModel;
 
+  const hasReadyAttachment = pendingAttachments.some(
+    (attachment) => attachment.uploadState === "ready" && attachment.ref,
+  );
+  const hasUnreadyAttachment = pendingAttachments.some(
+    (attachment) => attachment.uploadState !== "ready",
+  );
+  const canSend = !isSending && !isAgentActive && !isBlocked &&
+    (inputValue.trim().length > 0 || hasReadyAttachment) &&
+    !hasUnreadyAttachment;
+  const canAttachMore = pendingAttachments.length < MAX_PENDING_ATTACHMENTS;
+
   return (
     // isolation: isolate contains z-indexes used inside the composer (the
     // captured-log floating chip with z-10, the textarea/mirror with z-[1])
     // so they can't paint on top of body-level portaled popovers like the
     // model picker dropdown opening above the composer.
     <div className={`px-4 py-4 relative isolate ${styles.chatInputRoot}`}>
+      <input
+        ref={attachmentInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          if (files.length > 0) void addFiles(files);
+        }}
+      />
       {/* Captured-log floating chip — sits above the composer like a transient pill */}
       {pendingConsoleLogCount > 0 && (
         <div className="pointer-events-none absolute inset-x-4 -top-10 z-10 flex justify-center">
@@ -1766,7 +2279,23 @@ export const ChatInput = ({
       )}
 
       {/* Prompt card */}
-      <div className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-base shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+      <div
+        className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-base shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]"
+        onDragEnter={handleAttachmentDragEnter}
+        onDragOver={handleAttachmentDragOver}
+        onDragLeave={handleAttachmentDragLeave}
+        onDrop={handleAttachmentDrop}
+      >
+        {isAttachmentDragActive && (
+          <div className={`pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-2xl border-2 border-dashed p-4 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.55)] backdrop-blur-[1px] transition-[opacity,transform] duration-150 ease-out ${canAttachMore ? "border-kumo-brand/55 bg-kumo-brand/10" : "border-kumo-warning/60 bg-kumo-warning/10"}`}>
+            <div className={`flex items-center gap-2 rounded-full border bg-kumo-base/90 px-3 py-2 text-[13px] font-medium leading-4 tracking-[-0.2px] text-kumo-default shadow-[0_10px_30px_rgba(82,16,0,0.14)] ${canAttachMore ? "border-kumo-brand/25" : "border-kumo-warning/30"}`}>
+              <span className={`grid h-7 w-7 place-items-center rounded-full ${canAttachMore ? "bg-kumo-brand/12 text-kumo-brand" : "bg-kumo-warning/15 text-kumo-warning"}`}>
+                <FileIcon size={16} weight="duotone" />
+              </span>
+              {canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
+            </div>
+          </div>
+        )}
         {draftUpdateBanner}
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
@@ -1821,11 +2350,21 @@ export const ChatInput = ({
               }
               autoFocus={autoFocus}
               rows={minRows}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.items)
+                  .filter((item) => item.kind === "file")
+                  .map((item) => item.getAsFile())
+                  .filter((file): file is File => file !== null);
+                if (files.length > 0) {
+                  e.preventDefault();
+                  void addFiles(files);
+                }
+              }}
               onKeyDown={(e) => {
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (!isAgentActive && !isBlocked) handleSend();
+                  if (!isAgentActive && !isBlocked) submitMessage();
                   return;
                 }
                 if (activeUrl) {
@@ -1852,23 +2391,51 @@ export const ChatInput = ({
           </div>
         </div>
 
+        {pendingAttachments.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 px-3 pb-2 pt-1">
+            {pendingAttachments.map((attachment) => (
+              <div key={attachment.id} className="relative flex h-14 w-14 items-center justify-center overflow-hidden rounded-lg border border-kumo-line/70 bg-kumo-elevated">
+                {attachment.previewUrl ? (
+                  <img src={attachment.previewUrl} alt={attachment.name ?? "Attached file"} className="h-full w-full object-cover" />
+                ) : (
+                  <FileIcon size={22} className="text-kumo-inactive" />
+                )}
+                {attachment.uploadState === "uploading" && (
+                  <div className="absolute inset-0 grid place-items-center rounded-lg bg-black/35 text-[10px] text-white">Uploading</div>
+                )}
+                {attachment.uploadState === "error" && (
+                  <div className="absolute inset-0 grid place-items-center rounded-lg bg-kumo-danger/80 px-1 text-center text-[9px] leading-3 text-white">Failed</div>
+                )}
+                <button
+                  type="button"
+                  aria-label="Remove attachment"
+                  onClick={() => removeAttachment(attachment.id)}
+                  className="absolute right-0.5 top-0.5 flex h-4 w-4 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white hover:bg-black/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                >
+                  <X size={10} weight="bold" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Footer row: connection/options left, model + send right */}
         <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-            {onToggleThinkingTraces && (
-              <DropdownMenu>
-                <DropdownMenu.Trigger
-                  render={
-                    <button
-                      type="button"
-                      className="group flex h-8 w-8 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.96] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-subtle"
-                      aria-label="Open chat options"
-                    >
-                      <Plus size={18} />
-                    </button>
-                  }
-                />
-                <DropdownMenu.Content collisionPadding={16} className="!z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+            <DropdownMenu>
+              <DropdownMenu.Trigger
+                render={
+                  <button
+                    type="button"
+                    className="group flex h-8 w-8 flex-shrink-0 cursor-pointer items-center justify-center rounded-lg text-kumo-inactive transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-tint hover:text-kumo-subtle focus-visible:bg-kumo-tint focus-visible:text-kumo-subtle focus-visible:outline-none active:scale-[0.96] data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-subtle"
+                    aria-label="Open chat options"
+                  >
+                    <Plus size={18} />
+                  </button>
+                }
+              />
+              <DropdownMenu.Content collisionPadding={16} className="!z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+                {onToggleThinkingTraces && (
                   <DropdownMenu.Item
                     onClick={onToggleThinkingTraces}
                     className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
@@ -1880,9 +2447,18 @@ export const ChatInput = ({
                       {showThinkingTraces ? "Hide thinking" : "Show thinking"}
                     </span>
                   </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu>
-            )}
+                )}
+                <DropdownMenu.Item
+                  onClick={() => attachmentInputRef.current?.click()}
+                  className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                >
+                  <span className="mr-2 inline-flex h-4 w-4 items-center justify-center text-kumo-inactive">
+                    <FileIcon size={14} />
+                  </span>
+                  <span className="flex-1">Upload file</span>
+                </DropdownMenu.Item>
+              </DropdownMenu.Content>
+            </DropdownMenu>
             <button
               type="button"
               onClick={handleAttachOpen}
@@ -1958,8 +2534,8 @@ export const ChatInput = ({
                 </WorkshopIconButton>
               ) : (
                 <WorkshopIconButton
-                  onClick={handleSend}
-                  disabled={!inputValue.trim() || isAgentActive || isBlocked}
+                  onClick={submitMessage}
+                  disabled={!canSend}
                   tone="primary"
                   className="!h-8 !w-8 disabled:cursor-not-allowed disabled:opacity-30"
                   aria-label="Send message"
@@ -2910,6 +3486,32 @@ function ChatInterface({
   const currentChatMetadata =
     selectedChatId !== null ? cacheRef.current.chats.get(selectedChatId) : null;
 
+  // Download a committed chat attachment. Image bytes are already inlined on the message; other
+  // attachments are fetched on demand over the authenticated RPC connection.
+  const downloadChatAttachment = useCallback(async (chatId: number, attachment: ChatAttachmentRef) => {
+    try {
+      let bytes = attachment.content;
+      const mimeType = attachment.mimeType;
+      const name = attachment.name;
+      if (!bytes) {
+        bytes = await overseer.getChatAttachmentContent(chatId, attachment.id);
+      }
+      const url = URL.createObjectURL(
+        new Blob([bytes as BlobPart], {type: mimeType || "application/octet-stream"}));
+      try {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name ?? "attachment";
+        a.click();
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+    } catch (err: any) {
+      console.error("Failed to download chat attachment:", err);
+      toasts.add({ title: err?.message || "Failed to download attachment", variant: "error" });
+    }
+  }, [overseer, toasts]);
+
   const onSelectedChatHasProposedChangesChangeRef = useRef(onSelectedChatHasProposedChangesChange);
   onSelectedChatHasProposedChangesChangeRef.current = onSelectedChatHasProposedChangesChange;
   useEffect(() => {
@@ -3488,9 +4090,10 @@ function ChatInterface({
     messageText?: string,
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
   ) => {
-    const message = messageText?.trim();
-    if (!message) return;
+    const message = messageText?.trim() ?? "";
+    if (!message && (!attachments || attachments.length === 0)) return;
 
     // Use provided modelId or fall back to selectedModel
     const model = modelId !== undefined ? modelId : selectedModel;
@@ -3498,7 +4101,7 @@ function ChatInterface({
     try {
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
-        const newChatId = await overseer.newChat(message, model, capsules);
+        const newChatId = await overseer.newChat(message, model, capsules, attachments);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -3507,11 +4110,13 @@ function ChatInterface({
           message,
           model,
           capsules || undefined,
+          attachments || undefined,
         );
       }
     } catch (err) {
       console.error("Failed to send message:", err);
       toasts.add({ title: "Failed to send message", variant: "error" });
+      throw err;
     }
   };
 
@@ -3520,16 +4125,18 @@ function ChatInterface({
     messageText?: string,
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
   ) => {
-    const message = messageText?.trim();
-    if (!message) return;
+    const message = messageText?.trim() ?? "";
+    if (!message && (!attachments || attachments.length === 0)) return;
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
-      const newChatId = await overseer.newChat(message, model, capsules);
+      const newChatId = await overseer.newChat(message, model, capsules, attachments);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       console.error("Failed to create new chat:", err);
       toasts.add({ title: "Failed to start conversation", variant: "error" });
+      throw err;
     }
   };
 
@@ -4753,10 +5360,18 @@ function ChatInterface({
                           msg.author.type === "user" ? (
                             <div className="group/message relative flex flex-col items-end">
                               <div className={`w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default shadow-[0_1px_1px_rgba(82,16,0,0.03),inset_0_1px_0_rgba(255,255,255,0.55)] ${styles.markdownContent}`}>
-                                <MarkdownMessage
-                                  message={msg.message}
-                                  capsules={msg.capsules}
-                                />
+                                {msg.attachments && msg.attachments.length > 0 && (
+                                  <ChatAttachmentGrid
+                                    attachments={msg.attachments}
+                                    onDownload={(attachment) => { void downloadChatAttachment(msg.chatId, attachment); }}
+                                  />
+                                )}
+                                {msg.message.trim() && (
+                                  <MarkdownMessage
+                                    message={msg.message}
+                                    capsules={msg.capsules}
+                                  />
+                                )}
                               </div>
                               <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
                                 {/* hideOwnUserName implies currentUser is non-null (see memo). */}
