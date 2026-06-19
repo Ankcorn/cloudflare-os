@@ -12,6 +12,7 @@ import {
   Overseer,
   AiChatAuthorInfo,
   CapsuleSpecifier,
+  ChatAttachmentHandle,
 } from "@gadgets/workshop-shared/api";
 import {
   getStoredSelectedModel,
@@ -83,24 +84,30 @@ function HomePage() {
       message: string,
       modelId: string | null,
       capsules?: CapsuleSpecifier[],
+      attachments?: ChatAttachmentHandle[],
     ) => {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
         const metadata = await overseer.getMetadata();
-        await overseer.newChat(message, modelId, capsules);
+        await overseer.newChat(message, modelId, capsules, attachments);
         // Dispose the provisional stub — the gadget editor will open its own.
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
         navigate({ to: "/gadget/$id", params: { id: metadata.id } });
       } catch (err) {
         console.error("Failed to create gadget:", err);
-        provisionalOverseerRef.current?.stub[Symbol.dispose]();
-        provisionalOverseerRef.current = null;
+        if (!attachments?.length) {
+          provisionalOverseerRef.current?.stub[Symbol.dispose]();
+          provisionalOverseerRef.current = null;
+        }
+        // Staged attachment handles are scoped to this provisional gadget. Keep it alive so retrying
+        // does not require re-uploading the files.
         toasts.add({ title: "Failed to create gadget", variant: "error" });
+        throw err;
       }
     },
-    [ensureProvisionalGadget, navigate],
+    [ensureProvisionalGadget, navigate, toasts],
   );
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {

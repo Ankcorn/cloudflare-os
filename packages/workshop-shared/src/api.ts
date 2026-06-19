@@ -740,6 +740,9 @@ export interface Overseer extends RpcTarget {
   // histories if and when the user opens a specific.
   getChatHistory(chatId: number): Promise<AiChatMessage[]>;
 
+  // Fetch a single message from a chat thread.
+  getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined>;
+
   // Subscribe to all new chat messages (across all threads).
   //
   // If `startAt` is given, it must be a date in the past. All messages starting from that date
@@ -758,7 +761,7 @@ export interface Overseer extends RpcTarget {
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
   newChat(initialMessage: string, modelId: string | null,
-          capsules?: CapsuleSpecifier[]): Promise<number>;
+          capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number>;
 
   // Send a message to the chat from this client. Sending a message causes the LLM to start
   // running if it isn't already.
@@ -766,7 +769,21 @@ export interface Overseer extends RpcTarget {
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
   sendChatMessage(chatId: number, message: string, modelId: string | null,
-                  capsules?: CapsuleSpecifier[]): Promise<void>;
+                  capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void>;
+
+  // Upload an attachment for use in a future chat message. This way by the time the user wants to
+  // send the message, likely uploading is complete.
+  //
+  // Pass the returned handle to newChat() or sendChatMessage() to commit the attachment into chat history.
+  uploadChatAttachment(attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle>;
+
+  // Fetch the bytes of a committed chat attachment over RPC. The canonical metadata is already
+  // present in the message's ChatAttachmentRef. Images are inlined there, so this is normally used
+  // only to download non-image attachments on demand.
+  getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array>;
+
+  // Delete an uploaded attachment that the user explicitly removed before sending the message.
+  deleteChatAttachment(id: string): Promise<void>;
 
   // Update the title of a chat. Usually not needed as a title is generated automatically from
   // the first message.
@@ -985,6 +1002,9 @@ export type AiChatMessageBody = {
 
   // Messages from an AI agent can invoke tools.
   toolCalls?: AiToolCall[];
+
+  // Attachments that were sent with this message. Actual bytes stored separately.
+  attachments?: ChatAttachmentRef[];
 } | {
   // Represents changes made to the code by an agent tool call or by a collaborating user as part
   // of a chat. These changes are provisional until they are accepted.
@@ -1091,6 +1111,44 @@ export type AiChatMessageBody = {
   // saveCapsuleAsBinding if its gadget code needs it.
   gatekeeperId?: number;
 };
+
+// Bytes to upload as a chat attachment.
+//
+// The server stores the bytes and returns the handle to pass when sending the message.
+export type ChatAttachmentUpload = {
+  mimeType: string;
+  content: Uint8Array;
+  name?: string;
+};
+
+// Handle for an attachment that has been uploaded but not yet sent as part of a message.
+//
+// Pass this back unchanged when sending the chat message.
+export type ChatAttachmentHandle = {
+  // Clients must not infer storage paths from this ID or construct handles by hand.
+  id: string;
+};
+
+// Attachment metadata returned to clients.
+//
+// For image attachments, `content` carries the full image bytes inline so the client can render
+// them in the chat without an extra round trip. For other attachments, fetch the bytes on demand
+// via `Overseer.getChatAttachmentContent()`.
+export type ChatAttachmentRef = ChatAttachmentHandle & {
+  mimeType: string;
+  name?: string;
+  size: number;
+
+  // Inlined bytes for small image attachments. Present only for images.
+  content?: Uint8Array;
+};
+
+// Whether attachment bytes can be decoded and inlined into the agent's prompt as text.
+export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
+  if (mimeType.startsWith("image/")) return false;
+  return mimeType.startsWith("text/") ||
+      /\b(json|javascript|typescript|xml|yaml|csv|markdown)\b/.test(mimeType);
+}
 
 // Describes a tool call performed by an AI agent as part of a message.
 export type AiToolCall = {

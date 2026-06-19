@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, isTextLikeAttachmentMimeType } from '@gadgets/workshop-shared/api';
 import { ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import * as Y from "yjs";
 import { streamText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
@@ -57,6 +57,9 @@ export interface AgentHooks {
       resourceTitle: string,
       resourceUrl: string | undefined,
       description: ObservationDescription): Promise<void>;
+
+  // Returns the bytes of a committed attachment owned by this chat for inclusion in model input.
+  getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array>;
 
   // Returns the resources needed by `webFetch` to delegate document-to-Markdown conversion
   // to Workers AI. Exposed as a narrow interface (rather than handing over the whole `env`)
@@ -697,7 +700,7 @@ export async function runAgent(
           content = parts.join("");
         }
 
-        if (msg.message === "" && !msg.reasoning && !msg.toolCalls) {
+        if (msg.message === "" && !msg.reasoning && !msg.toolCalls && !msg.attachments?.length) {
           // Anthropic's API will throw an error if you try to send it an empty message.
           // Annoyingly, though, Claude will sometimes produce empty messages. Anyway, let's just
           // drop the message from the log...
@@ -708,10 +711,44 @@ export async function runAgent(
         switch (msg.author.type) {
           case "user":
           case "gadget":
-            modelMessage = {
-              role: "user",
-              content,
-            };
+            if (msg.attachments?.length) {
+              let parts: Array<
+                {type: "text", text: string} |
+                {type: "image", image: Uint8Array, mediaType: string} |
+                {type: "file", data: Uint8Array, filename?: string, mediaType: string}
+              > = [];
+              if (content) parts.push({type: "text", text: content});
+              let attachmentParts = await Promise.all(msg.attachments.map(async (attachment) => {
+                let filename = attachment.name ? ` (${attachment.name})` : "";
+                let data = await hooks.getChatAttachmentData(chatId, attachment.id);
+                if (attachment.mimeType.startsWith("image/")) {
+                  return {
+                    type: "image" as const,
+                    image: data,
+                    mediaType: attachment.mimeType,
+                  };
+                } else if (isTextLikeAttachmentMimeType(attachment.mimeType)) {
+                  return {
+                    type: "text" as const,
+                    text: `\n\n[Attached text file${filename}]\n${new TextDecoder().decode(data)}`,
+                  };
+                } else {
+                  return {
+                    type: "file" as const,
+                    data,
+                    filename: attachment.name,
+                    mediaType: attachment.mimeType,
+                  };
+                }
+              }));
+              parts.push(...attachmentParts);
+              modelMessage = { role: "user", content: parts };
+            } else {
+              modelMessage = {
+                role: "user",
+                content,
+              };
+            }
             break;
 
           case "agent":
@@ -1221,9 +1258,10 @@ export async function runAgent(
 
   let tools: ToolSet = {
     readFile: tool({
-      description: "Read the content of a file in the project. Note that you will be " +
+      description: "Read the content of a file in the project workspace. Note that you will be " +
           "informed any time a file changes, so it is not necessary to read a file again " +
-          "after you have already read it once.",
+          "after you have already read it once. This cannot read chat attachments; " +
+          "attachments are provided directly in the conversation.",
       inputSchema: z.object({
         filename: z.string().describe("Name of the file to read."),
         // TODO: line range?

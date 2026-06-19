@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -162,6 +162,80 @@ function validateBlueprintScreenshotUpload(screenshot: BlueprintScreenshotUpload
     throw new Error("Blueprint screenshot must be under 1 MB.");
   }
   return screenshot;
+}
+
+const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = 5;
+const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
+// Staged attachments (not associated with chat) older than this may be deleted when the gadget next stages an attachment.
+const MAX_STAGED_CHAT_ATTACHMENT_AGE_MS = 24 * 60 * 60 * 1000;
+const CHAT_ATTACHMENT_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateChatAttachmentId(id: string): string {
+  if (!CHAT_ATTACHMENT_ID_REGEX.test(id)) throw new Error("Invalid chat attachment ID.");
+  return id;
+}
+
+type ChatAttachmentContentRecord = {
+  fileId: string;
+  data: Uint8Array;
+  state:
+    | {
+        type: "staged";
+        uploadedAt: number;
+        mimeType: string;
+        name?: string;
+      }
+    | {
+        type: "committed";
+        chatId: number;
+      };
+};
+
+const ALLOWED_CHAT_ATTACHMENT_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function sanitizeChatAttachmentMimeType(mimeType: string | undefined): string {
+  if (!mimeType || /[\r\n]/.test(mimeType)) return "application/octet-stream";
+  return mimeType.split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
+}
+
+function sanitizeChatAttachmentName(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  let result = name.replace(/[\r\n]/g, " ").slice(0, 255).trim();
+  return result || undefined;
+}
+
+function validateChatAttachmentUpload(attachment: ChatAttachmentUpload): ChatAttachmentUpload {
+  attachment.mimeType = sanitizeChatAttachmentMimeType(attachment.mimeType);
+  attachment.name = sanitizeChatAttachmentName(attachment.name);
+  if (attachment.content.byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
+    throw new Error("Chat attachment is too large.");
+  }
+
+  if (attachment.mimeType.startsWith("image/")) {
+    if (!isAllowedChatAttachmentImageMimeType(attachment.mimeType)) {
+      throw new Error("Unsupported chat image type.");
+    }
+
+    let data = attachment.content;
+    let isJpeg = data[0] === 0xFF && data[1] === 0xD8 && data[2] === 0xFF;
+    let isPng = data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47;
+    let isWebp = data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 &&
+        data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50;
+    let matchesMime =
+        (attachment.mimeType === "image/jpeg" && isJpeg) ||
+        (attachment.mimeType === "image/png" && isPng) ||
+        (attachment.mimeType === "image/webp" && isWebp);
+    if (!matchesMime) {
+      throw new Error("Chat image content does not match its MIME type.");
+    }
+  }
+
+  return attachment;
+}
+
+function isAllowedChatAttachmentImageMimeType(mimeType: string): boolean {
+  return ALLOWED_CHAT_ATTACHMENT_IMAGE_MIME_TYPES.has(mimeType);
 }
 
 // Sentinel gatekeeperId used on ActionRecords that originated from built-in agent tools
@@ -383,6 +457,18 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
       blueprints: collection<BlueprintGadgetRecord>()({
         primaryKey: "id"
+      }),
+
+      // Attachment bytes. Before an attachment is committed to a chat message, this also carries
+      // the temporary metadata needed to construct its ChatAttachmentRef. Once committed, the
+      // message owns that metadata and this record retains only the bytes and owning chat ID.
+      chatAttachmentContent: collection<ChatAttachmentContentRecord>()({
+        primaryKey: "fileId",
+        nonUniqueIndexes: {
+          stagedByUploadedAt(record: ChatAttachmentContentRecord) {
+            return record.state.type === "staged" ? record.state.uploadedAt : null;
+          },
+        },
       }),
     }
   });
@@ -1199,6 +1285,91 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
+  }
+
+  async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
+    let content = this.storage.chatAttachmentContent.get(validateChatAttachmentId(id));
+    if (!content || content.state.type !== "committed" || content.state.chatId !== chatId) {
+      throw new Error("Chat attachment not found.");
+    }
+    return content.data;
+  }
+
+  // Inline image attachment bytes before sending a chat message to the client.
+  // Non-image attachments are fetched on demand via getChatAttachmentContent().
+  hydrateChatMessageForClient(msg: AiChatMessage): AiChatMessage {
+    if (msg.type !== "message" || !msg.attachments?.length) return msg;
+    let attachments = msg.attachments.map((a) => {
+      if (!isAllowedChatAttachmentImageMimeType(sanitizeChatAttachmentMimeType(a.mimeType))) {
+        return a;
+      }
+      let content = this.storage.chatAttachmentContent.get(a.id);
+      if (!content) return a;
+      return {...a, content: content.data};
+    });
+    return {...msg, attachments};
+  }
+
+  // Look up the attachments that the client wants to send.
+  //
+  // The send message request only contains staged attachment IDs. This fills in metadata from
+  // upload records before the message is stored in chat history.
+  canonicalizeChatAttachmentRefs(attachments?: ChatAttachmentHandle[]): ChatAttachmentRef[] | undefined {
+    if (!attachments || attachments.length === 0) return undefined;
+    if (attachments.length > MAX_CHAT_ATTACHMENTS_PER_MESSAGE) {
+      throw new Error(`You can attach up to ${MAX_CHAT_ATTACHMENTS_PER_MESSAGE} attachments.`);
+    }
+
+    let total = 0;
+    let result: ChatAttachmentRef[] = [];
+    let seenIds = new Set<string>();
+    for (let attachment of attachments) {
+      let id = validateChatAttachmentId(attachment.id);
+      if (seenIds.has(id)) throw new Error("Duplicate chat attachment.");
+      seenIds.add(id);
+      let content = this.storage.chatAttachmentContent.get(id);
+      if (!content || content.state.type !== "staged") {
+        throw new Error("Chat attachment not found.");
+      }
+      if (content.data.byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
+        throw new Error("Chat attachment is too large.");
+      }
+      total += content.data.byteLength;
+      result.push({
+        id,
+        mimeType: content.state.mimeType,
+        name: content.state.name,
+        size: content.data.byteLength,
+      });
+    }
+    if (total > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+      throw new Error("Attached files are too large.");
+    }
+    return result;
+  }
+
+  commitChatAttachments(chatId: number, attachments?: ChatAttachmentRef[]): void {
+    for (let attachment of attachments ?? []) {
+      let id = validateChatAttachmentId(attachment.id);
+      let content = this.storage.chatAttachmentContent.get(id);
+      if (!content || content.state.type !== "staged") {
+        throw new Error("Chat attachment is no longer available.");
+      }
+      this.storage.chatAttachmentContent.put({
+        fileId: id,
+        data: content.data,
+        state: {type: "committed", chatId},
+      });
+    }
+  }
+
+  sweepStagedChatAttachments(): void {
+    let cutoff = Date.now() - MAX_STAGED_CHAT_ATTACHMENT_AGE_MS;
+    this.ctx.storage.transactionSync(() => {
+      for (let content of [...this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff})]) {
+        this.storage.chatAttachmentContent.delete(content.fileId);
+      }
+    });
   }
 
   // Provides web-fetch with the Workers AI binding and AI Gateway config it needs to call
@@ -3849,17 +4020,61 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.clientUser.listModels();
   }
 
+  async uploadChatAttachment(attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> {
+    attachment = validateChatAttachmentUpload(attachment);
+
+    this.impl.sweepStagedChatAttachments();
+
+    let id = crypto.randomUUID();
+    this.impl.storage.chatAttachmentContent.put({
+      fileId: id,
+      data: new Uint8Array(attachment.content),
+      state: {
+        type: "staged",
+        uploadedAt: Date.now(),
+        mimeType: attachment.mimeType,
+        name: attachment.name,
+      },
+    });
+    return {id};
+  }
+
+  // Fetch the bytes of a committed chat attachment over the authenticated RPC connection. The
+  // caller already has its canonical metadata from the ChatAttachmentRef in the message.
+  async getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
+    let content = this.impl.storage.chatAttachmentContent.get(validateChatAttachmentId(id));
+    if (!content || content.state.type !== "committed" || content.state.chatId !== chatId) {
+      throw new Error("Chat attachment not found.");
+    }
+    return content.data;
+  }
+
+  async deleteChatAttachment(id: string): Promise<void> {
+    id = validateChatAttachmentId(id);
+    let content = this.impl.storage.chatAttachmentContent.get(id);
+    if (content?.state.type === "staged") {
+      this.impl.storage.chatAttachmentContent.delete(id);
+    }
+  }
+
   async getChatHistory(chatId: number): Promise<AiChatMessage[]> {
     let result = [...this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})];
-    for (let msg of result) {
-      if (msg.type === "action") {
-        let record = this.impl.storage.actions.get(msg.actionId);
-        if (record) {
-          msg.actionLog = actionRecordToLog(record);
-        }
+    return Promise.all(result.map((msg) => this.#getChatMessageForClient(msg)));
+  }
+
+  async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
+    let msg = this.impl.storage.chats.get(`${keyString(chatId)}.${keyString(sequence)}`);
+    return msg && this.#getChatMessageForClient(msg);
+  }
+
+  async #getChatMessageForClient(msg: AiChatMessage): Promise<AiChatMessage> {
+    if (msg.type === "action") {
+      let record = this.impl.storage.actions.get(msg.actionId);
+      if (record) {
+        msg.actionLog = actionRecordToLog(record);
       }
     }
-    return result;
+    return this.impl.hydrateChatMessageForClient(msg);
   }
 
   async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
@@ -3889,6 +4104,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let self = this;
+    let messageDelivery = Promise.resolve();
+    function queueMessage(record: AiChatMessage) {
+      // Preserve chat message order across async delivery.
+      messageDelivery = messageDelivery.then(async () => {
+        let delivered = record.type === "message" && record.attachments?.length ?
+            self.impl.hydrateChatMessageForClient(record) : record;
+        await subscriber.message(delivered);
+      }).catch(unsubscribe);
+    }
+
     let msgSubscriber = {
       add(record: AiChatMessage) {
         if (record.type == "action") {
@@ -3898,7 +4123,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           }
         }
 
-        subscriber.message(record).catch(unsubscribe);
+        queueMessage(record);
       },
       update(oldRecord: AiChatMessage, newRecord: AiChatMessage): void {
         // Chat messages are normally immutable, but connectionRequest messages are mutated in
@@ -3978,7 +4203,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (startAfter !== undefined) {
       // Catch up on messages.
       for (let msg of chats.byTimestamp.list({startAfter: startAfter.valueOf()})) {
-        subscriber.message(msg).catch(unsubscribe);
+        queueMessage(msg);
       }
     }
 
@@ -3995,31 +4220,40 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newChat(initialMessage: string, chosenModelId: string | null,
-                capsules?: CapsuleSpecifier[]): Promise<number> {
+                capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
-
-    let chatId = this.impl.nextChatId();
-    let timestamp = this.impl.getChatTimestamp();
-    let meta: AiChatMetadata = {
-      id: chatId,
-      title: "New Chat",   // filled in later by AI
-      started: timestamp,
-      lastActive: timestamp,
-    };
-    if (userMeta.aiModel) {
-      meta.activeAgent = userMeta.aiModel.profile;
+    let canonicalAttachments = this.impl.canonicalizeChatAttachmentRefs(attachments);
+    if (!initialMessage.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
+      throw new Error("Cannot send an empty chat message.");
     }
-    this.impl.storage.chatMeta.put(meta);
 
-    this.impl.storage.chats.put({
-      chatId,
-      sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
-      timestamp,
-      author: userMeta.profile,
+    let chatId!: number;
+    let timestamp = this.impl.getChatTimestamp();
+    this.impl.ctx.storage.transactionSync(() => {
+      chatId = this.impl.nextChatId();
+      let meta: AiChatMetadata = {
+        id: chatId,
+        title: "New Chat",   // filled in later by AI
+        started: timestamp,
+        lastActive: timestamp,
+      };
+      if (userMeta.aiModel) {
+        meta.activeAgent = userMeta.aiModel.profile;
+      }
+      this.impl.storage.chatMeta.put(meta);
 
-      type: "message",
-      message: initialMessage,
-      capsules,
+      this.impl.commitChatAttachments(chatId, canonicalAttachments);
+      this.impl.storage.chats.put({
+        chatId,
+        sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
+        timestamp,
+        author: userMeta.profile,
+
+        type: "message",
+        message: initialMessage,
+        capsules,
+        attachments: canonicalAttachments,
+      });
     });
 
     if (userMeta.aiModel) {
@@ -4030,7 +4264,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     // Also fire off a second LLM call to generate a title based on the first message.
     if (userMeta.quickModel) {
-      this.impl.generateThreadTitle(chatId, initialMessage, userMeta.quickModel, userMeta.profile);
+      let titleMessage = initialMessage.trim() || `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
+      this.impl.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
     }
 
     this.impl.recordGadgetAnalytics({
@@ -4045,8 +4280,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async sendChatMessage(
       chatId: number, message: string, chosenModelId: string | null,
-      capsules?: CapsuleSpecifier[]): Promise<void> {
+      capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
+    let canonicalAttachments = this.impl.canonicalizeChatAttachmentRefs(attachments);
+    if (!message.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
+      throw new Error("Cannot send an empty chat message.");
+    }
 
     let meta = this.#assertChatNotActive(chatId);
     let result = this.impl.materializeChatDraft(chatId, meta);
@@ -4055,17 +4294,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
-    this.impl.storage.chatMeta.put(meta);
+    this.impl.ctx.storage.transactionSync(() => {
+      this.impl.storage.chatMeta.put(meta);
+      this.impl.commitChatAttachments(chatId, canonicalAttachments);
+      this.impl.storage.chats.put({
+        chatId,
+        sequence: this.impl.nextChatSequence(chatId),
+        timestamp: meta.lastActive,
+        author: userMeta.profile,
 
-    this.impl.storage.chats.put({
-      chatId,
-      sequence: this.impl.nextChatSequence(chatId),
-      timestamp: meta.lastActive,
-      author: userMeta.profile,
-
-      type: "message",
-      message,
-      capsules,
+        type: "message",
+        message,
+        capsules,
+        attachments: canonicalAttachments,
+      });
     });
 
     if (userMeta.aiModel) {
@@ -4203,6 +4445,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async deleteChat(chatId: number): Promise<void> {
     this.impl.storage.chatMeta.delete(chatId);
     this.impl.deleteChatDraftUpdates(chatId);
+
+    // Delete the chat's messages and the attachment content referenced by them. Attachment metadata
+    // is canonical in each message's ChatAttachmentRef, so no separate attachment index is needed.
+    this.impl.ctx.storage.transactionSync(() => {
+      for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
+        if (msg.type === "message") {
+          for (let attachment of msg.attachments ?? []) {
+            let content = this.impl.storage.chatAttachmentContent.get(attachment.id);
+            if (content?.state.type === "committed" && content.state.chatId === chatId) {
+              this.impl.storage.chatAttachmentContent.delete(attachment.id);
+            }
+          }
+        }
+        this.impl.storage.chats.delete(`${keyString(msg.chatId)}.${keyString(msg.sequence)}`);
+      }
+    });
 
     // Clean up agentCallbackArgs for this chat.
     for (let entry of this.impl.storage.agentCallbackArgs.list(
@@ -4685,14 +4943,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
   async getChatHistory(_chatId: number): Promise<AiChatMessage[]> { this.#deny(); }
+  async getChatMessage(_chatId: number, _sequence: number): Promise<AiChatMessage | undefined> { this.#deny(); }
   async subscribeToChat(
       _subscriber: RpcStub<AiChatSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     this.#deny();
   }
   async newChat(_initialMessage: string, _modelId: string | null,
-                _capsules?: CapsuleSpecifier[]): Promise<number> { this.#deny(); }
+                _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> { this.#deny(); }
   async sendChatMessage(_chatId: number, _message: string, _modelId: string | null,
-                        _capsules?: CapsuleSpecifier[]): Promise<void> { this.#deny(); }
+                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> { this.#deny(); }
+  async uploadChatAttachment(_attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> { this.#deny(); }
+  async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
+  async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
   async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
   async mergeChanges(_chatId: number, _mergeThrough: number | null,
                      _options?: { includeDraft?: boolean }): Promise<void> { this.#deny(); }
