@@ -3,7 +3,38 @@
 // This file was largely vibe-coded based on an interface spec.
 
 import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
-import { GmailMessage, GmailThreadContent, GmailThreadSummary } from "./types";
+import { GmailThreadInfo, EmailAddress } from "./types";
+import { createMimeMessage } from "mimetext/browser";
+import PostalMime, { addressParser } from "postal-mime";
+
+// Internal type for parsed message info with raw label IDs (not yet resolved
+// to GmailLabel objects). The stub layer resolves labels via the label map.
+export type GmailMessageInfoRaw = {
+  from: EmailAddress;
+  to: EmailAddress[];
+  cc: EmailAddress[];
+  subject: string;
+  timestamp: Date;
+  labelIds: string[];
+};
+
+export type GmailOutboundMessage = {
+  raw: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  attachments: Array<{
+    filename: string;
+    contentType: string;
+    description: string;
+  }>;
+};
+
+export type GmailReplyMessage = GmailOutboundMessage & {
+  sourceWasSent: boolean;
+};
 
 export type GoogleAccessToken = {
   token: string;
@@ -86,7 +117,7 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
           `Failed to refresh access token: ${body.error} ${body.error_description}`);
     }
 
-    let errorText = await response.text();
+    let errorText = await readErrorText(response);
     throw new Error(`Failed to refresh access token: ${response.status} ${errorText}`);
   }
 
@@ -187,195 +218,427 @@ export async function revokeGoogleToken(refreshToken: string): Promise<void> {
 }
 
 // =======================================================================================
+// Gmail API
+// =======================================================================================
+
+// Minimal thread data. Message MIME is fetched lazily by message capabilities
+// only when content, reply, or forward operations actually need it.
+type GmailThread = {
+  id: string;
+  snippet: string;
+  messages: Array<{ id: string; threadId: string }>;
+};
+
+// Message data from Gmail API when using format=raw. The `raw` field
+// contains the full RFC 2822 MIME message as a base64url-encoded string,
+// which postal-mime parses into structured headers and body content.
+export type GmailMessageRaw = {
+  id: string;
+  threadId: string;
+  labelIds?: string[];
+  raw: string;
+  internalDate: string;
+};
+
+// Metadata-only thread response (format=metadata). Used by getThreadInfo()
+// to avoid downloading full message payloads.
+type GmailThreadMetadata = {
+  id: string;
+  snippet: string;
+  historyId: string;
+  messages?: Array<{
+    payload: { headers: Array<{ name: string; value: string }> };
+  }>;
+};
+
+// Decode a base64url-encoded string to raw bytes.
+const MAX_FORWARD_SOURCE_BYTES = 10 * 1024 * 1024;
+const MAX_FORWARD_ATTACHMENT_DESCRIPTIONS = 50;
+
+function base64UrlDecodedByteLength(data: string): number {
+  return Math.floor(data.length * 3 / 4);
+}
+
+function base64UrlToBase64(data: string): string {
+  const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
+  return base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+}
+
+function decodeBase64UrlToBytes(data: string): Uint8Array {
+  const binary = atob(base64UrlToBase64(data));
+  return Uint8Array.from(binary, c => c.charCodeAt(0));
+}
+
+// Parse a format=raw Gmail message into structured email data via postal-mime.
+// Passes raw bytes (not a UTF-8 string) so postal-mime can apply per-part
+// charset decoding without data loss on non-UTF-8 messages.
+async function parseMimeMessage(raw: string): Promise<import("postal-mime").Email> {
+  return PostalMime.parse(decodeBase64UrlToBytes(raw));
+}
+
+// Convert a postal-mime Address to our EmailAddress type.
+function postalAddressToEmailAddress(addr: import("postal-mime").Address): EmailAddress {
+  if (addr.address) {
+    return addr.name ? { address: addr.address, name: addr.name } : { address: addr.address };
+  }
+  // Group address — take the first mailbox, or fall back to the group name.
+  const first = addr.group?.[0];
+  if (first?.address) {
+    return first.name ? { address: first.address, name: first.name } : { address: first.address };
+  }
+  return { address: '', name: addr.name };
+}
+
+function postalAddressListToEmailAddresses(addrs: import("postal-mime").Address[] | undefined): EmailAddress[] {
+  if (!addrs) return [];
+  const result: EmailAddress[] = [];
+  for (const addr of addrs) {
+    if (addr.address) {
+      result.push(addr.name ? { address: addr.address, name: addr.name } : { address: addr.address });
+    } else if (addr.group) {
+      for (const mb of addr.group) {
+        result.push(mb.name ? { address: mb.address, name: mb.name } : { address: mb.address });
+      }
+    }
+  }
+  return result;
+}
+
+export function normalizeEmailRecipients(inputs: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const input of inputs) {
+    if (/[\x00-\x1f\x7f]/.test(input)) {
+      throw new Error("Email addresses must not contain control characters.");
+    }
+    const parsed = addressParser(input, { flatten: true });
+    if (parsed.length !== 1 || !parsed[0].address || parsed[0].group) {
+      throw new Error(`Expected exactly one email address, got: ${input}`);
+    }
+    const address = parsed[0].address.trim();
+    const at = address.lastIndexOf('@');
+    if (at <= 0 || at === address.length - 1 || address.length > 320 || /[<>\s,;]/.test(address)) {
+      throw new Error(`Invalid email address: ${input}`);
+    }
+    const key = address.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(address);
+    }
+  }
+  return result;
+}
+
+const MESSAGE_ID_RE = /^<[^<>\s@]+@[^<>\s@]+>$/;
+const MAX_SUBJECT_BYTES = 998;
+
+function validateMessageId(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!MESSAGE_ID_RE.test(trimmed)) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  return trimmed;
+}
+
+function foldReferences(references: string | undefined, parentId: string): string {
+  const tokens = references?.match(/<[^<>\s@]+@[^<>\s@]+>/g) ?? [];
+  const valid = tokens.filter(token => MESSAGE_ID_RE.test(token));
+  const bounded = valid.length > 20
+    ? [valid[0], ...valid.slice(-18)]
+    : valid;
+  if (bounded[bounded.length - 1] !== parentId) bounded.push(parentId);
+
+  let lines: string[] = [];
+  let current = '';
+  for (const token of bounded) {
+    if (current && current.length + 1 + token.length > 76) {
+      lines.push(current);
+      current = token;
+    } else {
+      current = current ? `${current} ${token}` : token;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.join('\r\n ');
+}
+
+function normalizeTextBody(body: string): string {
+  if (body.includes('\0')) throw new Error("Email body must not contain NUL bytes.");
+  return body.replace(/\r\n|\r|\n/g, '\r\n');
+}
+
+function foldBase64(value: string): string {
+  return value.match(/.{1,76}/g)?.join('\r\n') ?? '';
+}
+
+function utf8ToBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function encodeSubjectHeader(subject: string): string {
+  // Keep each encoded-word comfortably under RFC 2047's 75-character limit,
+  // splitting only between Unicode code points.
+  const chunks: string[] = [];
+  let chunk = '';
+  for (const char of subject) {
+    if (chunk && new TextEncoder().encode(chunk + char).byteLength > 36) {
+      chunks.push(chunk);
+      chunk = char;
+    } else {
+      chunk += char;
+    }
+  }
+  if (chunk || chunks.length === 0) chunks.push(chunk);
+  const words = chunks.map(value => `=?utf-8?B?${utf8ToBase64(value)}?=`);
+  return `Subject: ${words[0]}${words.slice(1).map(word => `\r\n ${word}`).join('')}`;
+}
+
+function base64UrlEncodeUtf8(value: string): string {
+  return utf8ToBase64(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+// Build an RFC 2822 email and return it as a base64url-encoded string
+// ready for the Gmail API `raw` field.
+//
+// MIMEText handles the multipart structure and default headers. Its RFC 2047
+// Subject encoder emits one encoded-word without folding, which can exceed the
+// header-line limit for long Unicode subjects. After serialization we replace
+// only that header with the folded output from encodeSubjectHeader().
+function buildEncodedEmail(options: {
+  from: string;
+  to: string[];
+  subject: string;
+  body: string;
+  cc?: string[];
+  inReplyTo?: string;
+  references?: string;
+  attachments?: Array<{
+    filename: string;
+    contentType: string;
+    data: string;
+  }>;
+}): string {
+  const msg = createMimeMessage();
+
+  if (/[\x00-\x1f\x7f]/.test(options.subject) ||
+      new TextEncoder().encode(options.subject).byteLength > MAX_SUBJECT_BYTES) {
+    throw new Error(`Email subject must be at most ${MAX_SUBJECT_BYTES} UTF-8 bytes and contain no control characters.`);
+  }
+
+  const from = normalizeEmailRecipients([options.from])[0];
+  const to = normalizeEmailRecipients(options.to);
+  const cc = normalizeEmailRecipients(options.cc ?? [])
+    .filter(address => !to.some(item => item.toLowerCase() === address.toLowerCase()));
+  msg.setSender({addr: from});
+  msg.setTo(to.map(address => ({addr: address})));
+  if (cc.length > 0) {
+    msg.setCc(cc.map(address => ({addr: address})));
+  }
+  msg.setSubject(options.subject);
+
+  if (options.inReplyTo) {
+    msg.setHeader('In-Reply-To', validateMessageId(options.inReplyTo, 'In-Reply-To'));
+  }
+  if (options.references) {
+    msg.setHeader('References', options.references);
+  }
+  msg.addMessage({
+    contentType: 'text/plain',
+    data: foldBase64(utf8ToBase64(normalizeTextBody(options.body))),
+    encoding: 'base64',
+  });
+
+  for (const attachment of options.attachments ?? []) {
+    msg.addAttachment({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      data: attachment.data,
+      encoding: 'base64',
+    });
+  }
+
+  const raw = msg.asRaw().replace(/^Subject:[^\r\n]*(?:\r\n[ \t][^\r\n]*)*/m, encodeSubjectHeader(options.subject));
+  return base64UrlEncodeUtf8(raw);
+}
+
+// Gmail IDs are hex strings. Validate before interpolating into API URLs.
+const GMAIL_ID_RE = /^[a-zA-Z0-9_-]+$/;
+function validateGmailId(id: string, label: string): void {
+  if (!GMAIL_ID_RE.test(id)) {
+    throw new Error(`Invalid ${label}: ${id}`);
+  }
+}
+
+// Fetch wrapper that retries once on 429/503 for GET requests only.
+// POST/PUT/DELETE are not retried to avoid duplicate side effects (e.g., sending
+// an email twice if the first request succeeded but returned a transient error).
+async function readErrorText(response: Response, maxBytes = 4096): Promise<string> {
+  if (!response.body) return response.statusText;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (total < maxBytes) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    const remaining = maxBytes - total;
+    const chunk = value.subarray(0, remaining);
+    chunks.push(chunk);
+    total += chunk.byteLength;
+    if (chunk.byteLength < value.byteLength) break;
+  }
+  await reader.cancel();
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+  let response = await fetch(url, init);
+  let method = (init?.method ?? "GET").toUpperCase();
+  if (method === "GET" && (response.status === 429 || response.status === 503)) {
+    let retryAfter = response.headers.get("Retry-After");
+    let delayMs = retryAfter ? Math.min(parseInt(retryAfter, 10) * 1000, 10_000) : 1000;
+    if (isNaN(delayMs)) delayMs = 1000;
+    await response.body?.cancel();
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    response = await fetch(url, init);
+  }
+  return response;
+}
 
 export class GmailApi {
-  // The getAccessToken() callback obtains a current access token. It should be called before
-  // each operation.
-  constructor(private getAccessToken: () => Promise<string>) {}
+  private selfEmail: string;
 
-  // List the top `count` threads in the user's inbox.
-  // If `query` is provided, only threads matching the Gmail search query are returned.
-  async listThreads(count: number, query?: string): Promise<GmailThreadSummary[]> {
+  constructor(selfEmail: string, private getAccessToken: () => Promise<string>) {
+    this.selfEmail = selfEmail;
+  }
+
+  // All Gmail API calls go through this to get automatic retry on rate limits.
+  private fetch(url: string, init?: RequestInit): Promise<Response> {
+    return fetchWithRetry(url, init);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Thread operations
+  // ─────────────────────────────────────────────────────────────────
+
+  // List threads. Returns a page of minimal thread data (id, snippet, historyId)
+  // plus a nextPageToken for pagination.
+  async listThreads(count: number, query?: string, pageToken?: string, labelIds?: string[]):
+      Promise<{ threads: Array<{ id: string }>; nextPageToken?: string }> {
     const accessToken = await this.getAccessToken();
 
     let url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=${count}`;
     if (query) {
       url += `&q=${encodeURIComponent(query)}`;
     }
+    if (pageToken) {
+      url += `&pageToken=${encodeURIComponent(pageToken)}`;
+    }
+    for (const labelId of labelIds ?? []) {
+      validateGmailId(labelId, "label ID");
+      url += `&labelIds=${encodeURIComponent(labelId)}`;
+    }
 
-    const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-        },
-      }
-    );
+    const response = await this.fetch(url, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await readErrorText(response);
       throw new Error(`Failed to list threads: ${response.status} ${errorText}`);
     }
 
     const data = await response.json() as {
-      threads?: Array<{
-        id: string;
-        snippet: string;
-        historyId: string;
-      }>;
+      threads?: Array<{ id: string }>;
+      nextPageToken?: string;
     };
-
-    if (!data.threads) {
-      return [];
-    }
-
-    return data.threads;
+    return {
+      threads: data.threads || [],
+      nextPageToken: data.nextPageToken,
+    };
   }
 
-  // Obtain the email content of the given thread ID.
-  async readThread(threadId: string): Promise<GmailThreadContent> {
+  // Get thread snippet and message IDs. Raw MIME is fetched lazily by each
+  // message capability when content is actually needed.
+  async getThread(threadId: string): Promise<GmailThread> {
+    validateGmailId(threadId, "thread ID");
     const accessToken = await this.getAccessToken();
 
-    const response = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-        },
-      }
+    const response = await this.fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Failed to read thread: ${response.status} ${errorText}`);
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to get thread: ${response.status} ${errorText}`);
     }
 
-    const threadData = await response.json() as {
-      messages: Array<{
-        payload: {
-          headers: Array<{ name: string; value: string }>;
-          parts?: Array<{
-            mimeType: string;
-            body: { data?: string };
-          }>;
-          body?: { data?: string };
-        };
-        internalDate: string;
-      }>;
+    const thread = await response.json() as {
+      id: string;
+      snippet: string;
+      messages?: Array<{ id: string }>;
     };
 
-    const messages: GmailMessage[] = threadData.messages.map(message => {
-      const getHeader = (name: string) =>
-        message.payload.headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+    const messages = (thread.messages ?? []).map(message => ({
+      id: message.id,
+      threadId: thread.id,
+    }));
 
-      // Extract body text
-      let body = '';
-
-      // Try to get body from main payload
-      if (message.payload.body?.data) {
-        body = atob(message.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
-      }
-      // Try to get body from parts (for multipart messages)
-      else if (message.payload.parts) {
-        for (const part of message.payload.parts) {
-          if (part.mimeType === 'text/plain' && part.body.data) {
-            body = atob(part.body.data.replace(/-/g, '+').replace(/_/g, '/'));
-            break;
-          }
-        }
-
-        // Fallback to HTML if no plain text found
-        if (!body) {
-          for (const part of message.payload.parts) {
-            if (part.mimeType === 'text/html' && part.body.data) {
-              body = atob(part.body.data.replace(/-/g, '+').replace(/_/g, '/'));
-              break;
-            }
-          }
-        }
-      }
-
-      const from = getHeader('From');
-      const to = getHeader('To');
-      const subject = getHeader('Subject');
-
-      // Extract email addresses from "Name <email>" format
-      const extractEmail = (address: string) => {
-        const match = address.match(/<([^>]+)>/);
-        return match ? match[1] : address.trim();
-      };
-
-      const toAddresses = to.split(',').map(addr => extractEmail(addr.trim())).filter(Boolean);
-
-      return {
-        from: extractEmail(from),
-        to: toAddresses,
-        subject,
-        timestamp: new Date(parseInt(message.internalDate)),
-        body: body.trim(),
-      };
-    });
-
-    return { messages };
+    return { id: thread.id, snippet: thread.snippet, messages };
   }
 
-  // Apply a label to the given thread ID.
-  async applyLabel(threadId: string, label: string): Promise<void> {
+  // Get thread info (id, snippet, subject) using a metadata-only fetch to
+  // avoid downloading full message payloads.
+  async getThreadInfo(threadId: string): Promise<GmailThreadInfo> {
+    validateGmailId(threadId, "thread ID");
     const accessToken = await this.getAccessToken();
 
-    // First, get or create the label ID
-    let labelId: string;
-
-    // Try to find existing label
-    const labelsResponse = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/labels',
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-        },
-      }
+    const response = await this.fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=Subject`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
-    if (!labelsResponse.ok) {
-      const errorText = await labelsResponse.text();
-      throw new Error(`Failed to list labels: ${labelsResponse.status} ${errorText}`);
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to get thread info: ${response.status} ${errorText}`);
     }
 
-    const labelsData = await labelsResponse.json() as {
-      labels: Array<{ id: string; name: string }>;
+    const thread = await response.json() as GmailThreadMetadata;
+    const firstMsg = thread.messages?.[0];
+    const subject = firstMsg?.payload.headers.find(
+      h => h.name.toLowerCase() === 'subject'
+    )?.value ?? '';
+
+    return {
+      id: threadId,
+      snippet: thread.snippet,
+      subject,
+      messageCount: thread.messages?.length ?? 0,
     };
+  }
 
-    const existingLabel = labelsData.labels.find(l => l.name === label);
+  // Modify thread labels (for archive, trash, read/unread).
+  async modifyThread(
+    threadId: string,
+    addLabelIds?: string[],
+    removeLabelIds?: string[]
+  ): Promise<void> {
+    validateGmailId(threadId, "thread ID");
+    const accessToken = await this.getAccessToken();
 
-    if (existingLabel) {
-      labelId = existingLabel.id;
-    } else {
-      // Create new label
-      const createResponse = await fetch(
-        'https://gmail.googleapis.com/gmail/v1/users/me/labels',
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            name: label,
-            labelListVisibility: 'labelShow',
-            messageListVisibility: 'show',
-          }),
-        }
-      );
-
-      if (!createResponse.ok) {
-        const errorText = await createResponse.text();
-        throw new Error(`Failed to create label: ${createResponse.status} ${errorText}`);
-      }
-
-      const newLabel = await createResponse.json() as { id: string };
-      labelId = newLabel.id;
-    }
-
-    // Apply the label to the thread
-    const modifyResponse = await fetch(
+    const response = await this.fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`,
       {
         method: 'POST',
@@ -384,14 +647,397 @@ export class GmailApi {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          addLabelIds: [labelId],
+          addLabelIds: addLabelIds || [],
+          removeLabelIds: removeLabelIds || [],
         }),
       }
     );
 
-    if (!modifyResponse.ok) {
-      const errorText = await modifyResponse.text();
-      throw new Error(`Failed to apply label: ${modifyResponse.status} ${errorText}`);
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to modify thread: ${response.status} ${errorText}`);
     }
+    await response.body?.cancel();
+  }
+
+  // Trash a thread.
+  async trashThread(threadId: string): Promise<void> {
+    validateGmailId(threadId, "thread ID");
+    const accessToken = await this.getAccessToken();
+
+    const response = await this.fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/trash`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to trash thread: ${response.status} ${errorText}`);
+    }
+    await response.body?.cancel();
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Message operations
+  // ─────────────────────────────────────────────────────────────────
+
+  // Fetch only participant headers for visibility checks, avoiding message
+  // bodies and attachments.
+  async getMessageParticipants(messageId: string): Promise<Set<string>> {
+    validateGmailId(messageId, "message ID");
+    const accessToken = await this.getAccessToken();
+    const url = new URL(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}`);
+    url.searchParams.set("format", "metadata");
+    for (const header of ["From", "To", "Cc", "Bcc"]) {
+      url.searchParams.append("metadataHeaders", header);
+    }
+
+    const response = await this.fetch(url.toString(), {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to get message participants: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      payload?: { headers?: Array<{name: string; value: string}> };
+    };
+    const participants = new Set<string>();
+    for (const header of data.payload?.headers ?? []) {
+      if (!["from", "to", "cc", "bcc"].includes(header.name.toLowerCase())) continue;
+      for (const address of postalAddressListToEmailAddresses(addressParser(header.value))) {
+        if (address.address) participants.add(address.address.toLowerCase());
+      }
+    }
+    return participants;
+  }
+
+  // Get a single message with raw MIME content.
+  async getMessage(messageId: string): Promise<GmailMessageRaw> {
+    validateGmailId(messageId, "message ID");
+    const accessToken = await this.getAccessToken();
+
+    const response = await this.fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=raw`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
+    );
+
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to get message: ${response.status} ${errorText}`);
+    }
+
+    return await response.json() as GmailMessageRaw;
+  }
+
+  // Parse message info from raw MIME data via postal-mime. Returns raw label
+  // IDs — the caller resolves them to GmailLabel objects via the label map.
+  async parseMessageInfo(message: GmailMessageRaw): Promise<GmailMessageInfoRaw> {
+    const parsed = await parseMimeMessage(message.raw);
+
+    const from = parsed.from
+      ? postalAddressToEmailAddress(parsed.from)
+      : { address: '' };
+
+    return {
+      from,
+      to: postalAddressListToEmailAddresses(parsed.to),
+      cc: postalAddressListToEmailAddresses(parsed.cc),
+      subject: parsed.subject ?? '',
+      timestamp: new Date(parseInt(message.internalDate)),
+      labelIds: message.labelIds || [],
+    };
+  }
+
+  // Parse both info and content from a single postal-mime pass.
+  async parseMessage(message: GmailMessageRaw): Promise<{
+    info: GmailMessageInfoRaw;
+    content: { text?: string; html?: string };
+  }> {
+    const parsed = await parseMimeMessage(message.raw);
+
+    const from = parsed.from
+      ? postalAddressToEmailAddress(parsed.from)
+      : { address: '' };
+
+    return {
+      info: {
+        from,
+        to: postalAddressListToEmailAddresses(parsed.to),
+        cc: postalAddressListToEmailAddresses(parsed.cc),
+        subject: parsed.subject ?? '',
+        timestamp: new Date(parseInt(message.internalDate)),
+        labelIds: message.labelIds || [],
+      },
+      content: {
+        ...(parsed.text != null ? { text: parsed.text.trim() } : {}),
+        ...(parsed.html != null ? { html: parsed.html.trim() } : {}),
+      },
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Outbound message construction + send
+  //
+  // Outbound mail is built into a raw RFC 2822 message at submit time and is
+  // only delivered (via messages.send) after the action is approved — see the
+  // approval-model comment in google.ts. Nothing is written to the user's
+  // mailbox (no draft) before approval.
+  // ─────────────────────────────────────────────────────────────────
+
+  // Build a raw new outbound email and return the exact structured payload
+  // used to generate it, for approval display.
+  buildSendRaw(to: string[], subject: string, body: string): GmailOutboundMessage {
+    const normalizedTo = normalizeEmailRecipients(to);
+    return {
+      raw: buildEncodedEmail({ from: this.selfEmail, to: normalizedTo, subject, body }),
+      from: this.selfEmail,
+      to: normalizedTo,
+      cc: [],
+      subject,
+      body,
+      attachments: [],
+    };
+  }
+
+  // Build a raw reply to an existing message. `originalMessage` is the cached
+  // raw message being replied to (no extra fetch). When replyAll is true, this
+  // mailbox's own address is filtered out of the CC list. Returns the encoded
+  // raw message along with the resolved recipients and subject so the caller
+  // can describe exactly what will be sent in the approval prompt.
+  async buildReplyRaw(
+    originalMessage: GmailMessageRaw,
+    body: string,
+    replyAll: boolean,
+    sourceWasSent?: boolean,
+  ): Promise<GmailReplyMessage> {
+    const original = await parseMimeMessage(originalMessage.raw);
+
+    const originalFromAddr = original.from?.address ?? '';
+    const originalSubject = original.subject ?? '';
+    const self = this.selfEmail.toLowerCase();
+    const originalTo = postalAddressListToEmailAddresses(original.to)
+      .map(a => a.address)
+      .filter(address => address && address.toLowerCase() !== self);
+    const originalCc = postalAddressListToEmailAddresses(original.cc)
+      .map(a => a.address)
+      .filter(address => address && address.toLowerCase() !== self);
+    // Gmail's SENT label is authoritative even when the message used a send-as
+    // alias that differs from the primary account address.
+    const sentBySelf = sourceWasSent ??
+      (originalMessage.labelIds?.includes('SENT') === true ||
+        originalFromAddr.toLowerCase() === self);
+
+    // For an incoming message, Reply-To overrides From per normal email
+    // semantics. For a message authored by this mailbox (e.g. from Sent), reply
+    // to its original recipients rather than sending back to ourselves.
+    const replyTo = postalAddressListToEmailAddresses(original.replyTo)
+      .map(a => a.address)
+      .filter(Boolean);
+    let to = sentBySelf
+      ? (replyAll ? originalTo : originalTo.slice(0, 1))
+      : (replyTo.length > 0 ? replyTo : [originalFromAddr].filter(Boolean));
+    let cc: string[] = [];
+
+    if (replyAll) {
+      const seen = new Set(to.map(a => a.toLowerCase()));
+      const candidates = sentBySelf ? originalCc : [...originalTo, ...originalCc];
+      cc = candidates.filter(addr => {
+        const lower = addr.toLowerCase();
+        if (lower === self || seen.has(lower)) return false;
+        seen.add(lower);
+        return true;
+      });
+    }
+
+    to = normalizeEmailRecipients(to);
+    cc = normalizeEmailRecipients(cc)
+      .filter(address => !to.some(item => item.toLowerCase() === address.toLowerCase()));
+    if (to.length === 0) {
+      throw new Error("Cannot construct a reply: source message has no usable recipient.");
+    }
+
+    // Build subject (add Re: if not already present)
+    const subject = originalSubject.toLowerCase().startsWith('re:')
+      ? originalSubject
+      : `Re: ${originalSubject}`;
+
+    // Build References header
+    const originalMsgId = original.messageId?.trim();
+    if (!originalMsgId) {
+      throw new Error("Cannot construct a threaded reply: source message has no Message-ID header.");
+    }
+    const parentId = validateMessageId(originalMsgId, 'source Message-ID');
+    const references = foldReferences(original.references, parentId);
+
+    const raw = buildEncodedEmail({
+      from: this.selfEmail,
+      to,
+      cc: cc.length > 0 ? cc : undefined,
+      subject,
+      body,
+      inReplyTo: parentId,
+      references,
+    });
+
+    return {
+      raw,
+      from: this.selfEmail,
+      to,
+      cc,
+      subject,
+      body,
+      attachments: [],
+      sourceWasSent: sentBySelf,
+    };
+  }
+
+  // Build a lossless forward by attaching the complete original raw message as
+  // message/rfc822. This preserves the original HTML, MIME structure, headers,
+  // inline resources, and attachments without reconstructing any of them.
+  async buildForwardRaw(
+    originalMessage: GmailMessageRaw,
+    to: string[],
+    body?: string,
+  ): Promise<GmailOutboundMessage> {
+    const sourceBytes = base64UrlDecodedByteLength(originalMessage.raw);
+    if (sourceBytes > MAX_FORWARD_SOURCE_BYTES) {
+      throw new Error(
+        `Cannot forward this message: the original is ${sourceBytes} bytes, exceeding the ` +
+        `${MAX_FORWARD_SOURCE_BYTES}-byte safe forwarding limit.`);
+    }
+
+    const normalizedTo = normalizeEmailRecipients(to);
+    const original = await parseMimeMessage(originalMessage.raw);
+    const originalSubject = original.subject ?? '';
+    const subject = originalSubject.toLowerCase().startsWith('fwd:')
+      ? originalSubject
+      : `Fwd: ${originalSubject}`;
+    const forwardBody = body ?? 'Forwarded message attached.';
+    const attachment = {
+      filename: 'forwarded-message.eml',
+      // RFC 2045 forbids base64 transfer encoding for message/* composite
+      // types. Use octet-stream with an .eml filename so clients still open it
+      // as an attached email while preserving the bytes exactly.
+      contentType: 'application/octet-stream',
+      data: foldBase64(base64UrlToBase64(originalMessage.raw)),
+    };
+    const originalFrom = original.from
+      ? (original.from.address
+          ? `${original.from.name ? `${original.from.name} ` : ''}<${original.from.address}>`
+          : original.from.name)
+      : '(unknown sender)';
+    const originalPreview = (original.text ?? original.html ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1000);
+    const originalAttachments = original.attachments
+      .slice(0, MAX_FORWARD_ATTACHMENT_DESCRIPTIONS)
+      .map(item => {
+        const size = typeof item.content === 'string'
+          ? new TextEncoder().encode(item.content).byteLength
+          : item.content.byteLength;
+        const filename = (item.filename ?? '(unnamed)').replace(/[\r\n]+/g, ' ').slice(0, 200);
+        return `${filename} (${item.mimeType}, ${size} bytes)`;
+      });
+    if (original.attachments.length > originalAttachments.length) {
+      originalAttachments.push(
+        `... ${original.attachments.length - originalAttachments.length} additional attachments omitted`);
+    }
+    const attachmentDescription = [
+      `Complete original message from ${originalFrom}`,
+      `Date: ${original.date ?? '(unknown)'}`,
+      `Subject: ${originalSubject || '(no subject)'}`,
+      `Preview: ${originalPreview || '(no text preview)'}`,
+      `Embedded attachments: ${originalAttachments.length > 0 ? originalAttachments.join(', ') : 'none'}`,
+    ].join('\n');
+
+    return {
+      raw: buildEncodedEmail({
+        from: this.selfEmail,
+        to: normalizedTo,
+        subject,
+        body: forwardBody,
+        attachments: [attachment],
+      }),
+      from: this.selfEmail,
+      to: normalizedTo,
+      cc: [],
+      subject,
+      body: forwardBody,
+      attachments: [{
+        filename: attachment.filename,
+        contentType: attachment.contentType,
+        description: attachmentDescription,
+      }],
+    };
+  }
+
+  // Send a pre-built raw RFC 2822 message. Optionally attach to an existing
+  // thread. Called only from applyAction(), i.e. after approval. POST is not
+  // retried by fetchWithRetry, so an approved send is attempted exactly once.
+  async sendRawMessage(raw: string, threadId?: string): Promise<{ id: string; threadId: string }> {
+    if (threadId !== undefined) validateGmailId(threadId, "thread ID");
+    const accessToken = await this.getAccessToken();
+
+    const message: { raw: string; threadId?: string } =
+      threadId !== undefined ? { raw, threadId } : { raw };
+
+    const response = await this.fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(message),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to send message: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json() as { id?: string; threadId?: string };
+    if (!result.id || !result.threadId) {
+      throw new Error("Gmail accepted the send request but returned an invalid response.");
+    }
+    return {id: result.id, threadId: result.threadId};
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Labels
+  // ─────────────────────────────────────────────────────────────────
+
+  // Fetch all labels for this account. Returns a map of label ID → label name.
+  async listLabels(): Promise<Map<string, string>> {
+    const accessToken = await this.getAccessToken();
+
+    const response = await this.fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/labels',
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
+    );
+
+    if (!response.ok) {
+      const errorText = await readErrorText(response);
+      throw new Error(`Failed to list labels: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      labels: Array<{ id: string; name: string; type: string }>;
+    };
+
+    let map = new Map<string, string>();
+    for (let label of data.labels || []) {
+      map.set(label.id, label.name);
+    }
+    return map;
   }
 }

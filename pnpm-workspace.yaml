@@ -6,6 +6,7 @@ minimumReleaseAgeExclude:
   - capnweb-validate
 
 allowBuilds:
+  core-js-pure: true
   esbuild: true
   sharp: true
   workerd: true
