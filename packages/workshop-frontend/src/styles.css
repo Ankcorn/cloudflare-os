@@ -201,6 +201,11 @@ html {
   background: var(--color-kumo-tint);
 }
 
+/* Keep global notifications above dialogs, which use z-indexes up to 1200. */
+[role="region"][aria-label="Notifications"] {
+  z-index: 2000;
+}
+
 /* Toast slide-in animation */
 @keyframes slide-in {
   from {
@@ -215,6 +220,76 @@ html {
 
 .animate-slide-in {
   animation: slide-in 0.25s var(--ease-out) forwards;
+}
+
+/* Share modal: inline confirm + composer entrances. */
+@keyframes share-confirm-in {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.share-confirm-in {
+  animation: share-confirm-in 0.16s var(--ease-out) both;
+}
+
+@keyframes share-expand-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.share-expand-in {
+  animation: share-expand-in 0.18s var(--ease-out) both;
+}
+
+/* Opacity-only entrance: used where the element must not move layout (e.g. the link composer
+   swapping in place of the create trigger). */
+@keyframes share-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.share-fade-in {
+  animation: share-fade-in 0.16s var(--ease-out) both;
+}
+
+/* Newly added people / link rows briefly flash to confirm they landed. */
+@keyframes share-row-land {
+  0%,
+  20% {
+    background-color: var(--color-kumo-tint);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.share-row-land {
+  animation: share-row-land 2.2s var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-confirm-in,
+  .share-expand-in,
+  .share-fade-in,
+  .share-row-land {
+    animation: none;
+  }
 }
 
 /* Chat panel resizer */
