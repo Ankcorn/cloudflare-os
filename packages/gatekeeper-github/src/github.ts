@@ -4,6 +4,7 @@ import {
   ApprovalQueue,
   type ActionDescription,
   type AccountDescription,
+  type Cursor,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -31,7 +32,6 @@ import {
 } from "./github-api";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
-  Cursor,
   GitHubActor,
   GitHubCreateIssueOptions,
   GitHubCreatePullRequestOptions,

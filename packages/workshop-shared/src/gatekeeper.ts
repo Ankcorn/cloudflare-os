@@ -18,6 +18,17 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
+/**
+ * A pagination cursor.
+ *
+ * This is an RPC object. Call `next()` repeatedly on the same cursor to fetch
+ * subsequent batches of results. `next()` returns `null` once exhausted. Dispose the
+ * cursor when finished.
+ */
+export interface Cursor<T> {
+  next(): Promise<T[] | null>;
+}
+
 // A small image used to identify a vendor, account, or resource type in the UI.
 export type AvatarImage = {
   url: string;

@@ -65,7 +65,7 @@ scopes (`openid`, `userinfo.email`, `userinfo.profile`). **Connecting** Google f
 requests the full set below. The full request asks for:
 
 - `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
-- `gmail.labels` and `gmail.modify` for Gmail thread reads and label changes.
+- `gmail.modify` for Gmail thread reads, organization, replies, forwards, and sending. This single scope already includes label access and sending.
 - `documents` for Google Docs reads and edits.
 - `drive.metadata.readonly` so the resource picker can search Google Docs by title.
 - `bigquery` for BigQuery dry-runs and queries. This is intentionally broader than `bigquery.readonly` because dry-runs use `jobs.insert`; the gatekeeper enforces read-only SQL and resource scope checks before running queries.

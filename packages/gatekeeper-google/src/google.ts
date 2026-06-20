@@ -1,8 +1,11 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper';
-import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GoogleAccessToken, revokeGoogleToken } from "./google-api";
-import { GmailSession, GmailThreadContent, GmailThreadSummary } from "./types";
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor } from '@gadgets/workshop-shared/gatekeeper';
+import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
+import {
+  GmailSession, GmailThread, GmailMessage,
+  GmailThreadInfo, GmailThreadEntry, GmailMessageInfo, GmailLabel, GmailSystemLabel, EmailContent
+} from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
 import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnapshot } from "./markdown-converter";
@@ -58,6 +61,61 @@ type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
   // NOT include a trailing slash. Omit for localhost dev server.
   BASE_URL?: string,
+}
+
+// Well-known Gmail system label IDs — derived from GmailSystemLabel so the
+// type and runtime set can't drift apart.
+const SYSTEM_LABEL_IDS: GmailSystemLabel[] = [
+  "INBOX", "TRASH", "SPAM", "UNREAD", "STARRED",
+  "IMPORTANT", "SENT", "DRAFT", "CHAT",
+  "CATEGORY_PRIMARY", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL",
+  "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
+];
+const SYSTEM_LABELS: Set<string> = new Set(SYSTEM_LABEL_IDS);
+
+// Resolve raw Gmail label IDs into GmailLabel objects with human-readable names.
+// System labels use their well-known name; custom labels are resolved via the
+// labelMap (fetched from Gmail's labels.list API).
+function toLabelObjects(labelIds: string[], labelMap: Map<string, string>): GmailLabel[] {
+  return labelIds.map(id => {
+    if (SYSTEM_LABELS.has(id)) {
+      return { id, name: id as GmailSystemLabel, type: "system" as const };
+    }
+    let name = labelMap.get(id) || id;
+    return { id, name, type: "custom" as const };
+  });
+}
+
+function validateGmailQueryForGrouping(query: string): void {
+  if (new TextEncoder().encode(query).byteLength > MAX_GMAIL_QUERY_BYTES) {
+    throw new Error(`Gmail search query must be at most ${MAX_GMAIL_QUERY_BYTES} bytes.`);
+  }
+  const stack: string[] = [];
+  let quote: string | undefined;
+  let escaped = false;
+  for (const char of query) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === '(' || char === '{') {
+      stack.push(char);
+    } else if (char === ')' || char === '}') {
+      const expected = char === ')' ? '(' : '{';
+      if (stack.pop() !== expected) throw new Error("Gmail query has mismatched grouping delimiters.");
+    }
+  }
+  if (quote || stack.length > 0) throw new Error("Gmail query has unterminated grouping or quotes.");
 }
 
 function getBaseUrl(env: Env) {
@@ -136,9 +194,11 @@ const SCOPE_CATALOG: VendorScope[] = [
         "Read your name, email, and profile picture so this account can be labeled in Gadgets.",
   },
   {
-    displayName: "Read and label Gmail",
+    displayName: "Read, organize, and send Gmail",
     rationale:
-        "Lets Gadgets triage your inbox and apply labels.",
+        "Lets Gadgets triage your inbox, archive/trash threads, mark read/unread, and " +
+        "compose, reply to, and forward email. Outgoing messages are sent only after you " +
+        "approve them.",
   },
   {
     displayName: "Read and edit Google Docs",
@@ -163,7 +223,6 @@ const OAUTH_SCOPES = [
   "openid",
   "https://www.googleapis.com/auth/userinfo.profile",
   "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/gmail.labels",
   "https://www.googleapis.com/auth/gmail.modify",
   "https://www.googleapis.com/auth/documents",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
@@ -597,15 +656,23 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     // Default: Gmail
     let props: GmailGatekeeperImplProps = {...this.ctx.props};
 
-    // Parse the URL hash to extract a search or label filter. Gmail URLs encode these in the
-    // fragment:
-    //   #search/from%3Abob%40example.com  ->  search query "from:bob@example.com"
-    //   #label/my-label                   ->  search query "label:my-label"
+    // Parse the URL hash to extract a search or label scope. Keep labels as
+    // opaque names; startSession resolves them to Gmail label IDs so label text
+    // can never be interpreted as search syntax.
     let hash = parsed.hash;
     if (hash.startsWith("#search/")) {
-      props.searchQuery = decodeURIComponent(hash.slice("#search/".length));
+      const query = decodeURIComponent(hash.slice("#search/".length));
+      validateGmailQueryForGrouping(query);
+      props.searchQuery = query;
     } else if (hash.startsWith("#label/")) {
-      props.searchQuery = "label:" + decodeURIComponent(hash.slice("#label/".length));
+      const labelName = decodeURIComponent(hash.slice("#label/".length));
+      if (!labelName || new TextEncoder().encode(labelName).byteLength > 320) {
+        throw new Error("Gmail label name must be between 1 and 320 bytes.");
+      }
+      props.labelName = labelName;
+    } else if (hash && hash !== "#inbox") {
+      throw new Error(
+        "Unsupported Gmail view. Connect the inbox, an explicit search, or an explicit label.");
     }
 
     return {class: this.ctx.exports.GmailGatekeeperImpl({props}), resource: GMAIL_RESOURCE};
@@ -696,117 +763,583 @@ class PendingActionStore<Action> {
   }
 }
 
+// =======================================================================================
+// Gmail capability stubs
+//
+// Capability-based API: GmailSession returns GmailThread[] stubs, which return
+// GmailMessage[] stubs, etc. Each stub is an RpcTarget that can be passed across
+// Worker boundaries. Actions go through the approval queue; reads go through
+// authorizeObservation for audit logging.
+//
+// Approval model:
+//   submitAction (requires approval): all side-effecting actions — archive, trash,
+//                                     markRead, markUnread, send (reply / replyAll /
+//                                     forward all share the `send` action type)
+//   authorizeObservation (audit-only): all reads
+//
+// All side-effecting actions go through the approval queue. Policy configuration
+// determines which actions are auto-approved vs. requiring human review — it is
+// not up to the gatekeeper to make that decision.
+//
+// Outbound-email semantics: send(), reply(), replyAll(), and forward() submit
+// compact semantic actions (recipients/body/source message ID). Nothing is
+// written to the user's mailbox before approval. applyAction() refetches any
+// immutable source message, builds the raw RFC 5322/MIME payload, and delivers
+// it via messages.send. There is therefore no pre-approval side effect, no
+// large MIME blob in action storage, and no draft to clean up on rejection.
+
+// ── Action types ────────────────────────────────────────────────────
+
+type GmailAction =
+  | { type: "archive" | "trash" | "markRead" | "markUnread"; threadId: string }
+  | { type: "send"; to: string[]; subject: string; body: string }
+  | {
+      type: "reply";
+      sourceMessageId: string;
+      threadId: string;
+      body: string;
+      replyAll: boolean;
+      sourceWasSent: boolean;
+    }
+  | { type: "forward"; sourceMessageId: string; to: string[]; body?: string };
+
+// ── Session context ─────────────────────────────────────────────────
+// Shared context passed to all stubs created within a session.
+
+type GmailSessionContext = {
+  gmailApi: GmailApi;
+  approvalQueue: ApprovalQueue;
+  pendingActions: PendingActionStore<GmailAction>;
+  // SESSION PATH: the raw search query passed to the Gmail API for listThreads/search.
+  // This handles historical + new messages. See GmailGatekeeperImplProps.searchQuery.
+  searchQuery: string | undefined;
+  labelId: string | undefined;
+  labelName: string | undefined;
+  resolveLabels: (labelIds: string[]) => Promise<GmailLabel[]>;
+};
+
+// ── GmailSessionImpl ────────────────────────────────────────────────
+
+const MAX_GMAIL_RECIPIENTS = 100;
+const MAX_GMAIL_SUBJECT_BYTES = 998;
+const MAX_GMAIL_BODY_BYTES = 64 * 1024;
+const MAX_GMAIL_QUERY_BYTES = 4096;
+const MAX_GMAIL_ADDRESS_BYTES = 320;
+const MAX_GMAIL_VISIBLE_THREAD_MESSAGES = 100;
+
+function validateOutboundInput(to: string[], subject: string, body: string): void {
+  if (to.length === 0 || to.length > MAX_GMAIL_RECIPIENTS) {
+    throw new Error(`Email must have between 1 and ${MAX_GMAIL_RECIPIENTS} recipients.`);
+  }
+  if (to.some(address => address.length === 0 ||
+      new TextEncoder().encode(address).byteLength > MAX_GMAIL_ADDRESS_BYTES)) {
+    throw new Error("Invalid recipient address length.");
+  }
+  if (new TextEncoder().encode(subject).byteLength > MAX_GMAIL_SUBJECT_BYTES) {
+    throw new Error(`Email subject must be at most ${MAX_GMAIL_SUBJECT_BYTES} UTF-8 bytes.`);
+  }
+  if (new TextEncoder().encode(body).byteLength > MAX_GMAIL_BODY_BYTES) {
+    throw new Error(`Email body must be at most ${MAX_GMAIL_BODY_BYTES} bytes.`);
+  }
+}
+
 @validateRpc()
 class GmailSessionImpl extends RpcTarget implements GmailSession {
-  #gmailApi: GmailApi;
-  #approvalQueue: ApprovalQueue;
-  #pendingActions: PendingActionStore<GmailAction>;
-  #searchQuery: string | undefined;
+  #ctx: GmailSessionContext;
 
-  // Callback to record/check thread IDs for search-filtered gatekeepers. When a search query is
-  // active, listThreads() stores each returned thread ID via recordAllowedThread(), and
-  // readThread() verifies the ID via isThreadAllowed() before proceeding. Each thread ID is stored
-  // as its own key in DO storage for O(1) lookups that don't degrade as the set grows.
-  #recordAllowedThread: (threadId: string) => void;
-  #isThreadAllowed: (threadId: string) => boolean;
-
-  constructor(
-    gmailApi: GmailApi,
-    approvalQueue: ApprovalQueue,
-    pendingActions: PendingActionStore<GmailAction>,
-    searchQuery: string | undefined,
-    recordAllowedThread: (threadId: string) => void,
-    isThreadAllowed: (threadId: string) => boolean,
-  ) {
+  constructor(ctx: GmailSessionContext) {
     super();
-    this.#gmailApi = gmailApi;
-    this.#approvalQueue = approvalQueue;
-    this.#pendingActions = pendingActions;
-    this.#searchQuery = searchQuery;
-    this.#recordAllowedThread = recordAllowedThread;
-    this.#isThreadAllowed = isThreadAllowed;
+    this.#ctx = ctx;
   }
 
-  async listThreads(count: number): Promise<GmailThreadSummary[]> {
-    let queryDesc = this.#searchQuery
-        ? ` matching "${this.#searchQuery}"` : "";
+  // TODO: The dup'd approvalQueue RPC stub should be disposed when the session
+  // ends. Symbol.dispose requires esnext lib; revisit when the tsconfig target
+  // is upgraded.
 
-    await this.#approvalQueue.authorizeObservation({
+  async listThreads(): Promise<Cursor<GmailThreadEntry>> {
+    const scopeDescription = this.#ctx.searchQuery
+      ? "the connected Gmail search scope"
+      : this.#ctx.labelId
+        ? "the connected Gmail label scope"
+        : "the Gmail inbox";
+
+    await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Gmail threads",
       description:
-          `List the top ${count} threads${queryDesc} in the Gmail inbox, including IDs and snippets.`
+        `Create a cursor for the most recent threads in ${scopeDescription}.` +
+        (this.#ctx.searchQuery
+          ? `\n\n${formatApprovalField("Search restriction", this.#ctx.searchQuery)}`
+          : "") +
+        (this.#ctx.labelName
+          ? `\n\n${formatApprovalField("Required label", this.#ctx.labelName)}`
+          : ""),
     });
 
-    let results = await this.#gmailApi.listThreads(count, this.#searchQuery);
-
-    if (this.#searchQuery) {
-      for (let thread of results) {
-        this.#recordAllowedThread(thread.id);
-      }
-    }
-
-    return results;
+    const labelIds = this.#ctx.labelId
+      ? [this.#ctx.labelId]
+      : (!this.#ctx.searchQuery ? ["INBOX"] : undefined);
+    return new GmailThreadCursorImpl(this.#ctx, this.#ctx.searchQuery, labelIds);
   }
 
-  async readThread(threadId: string): Promise<GmailThreadContent> {
-    if (this.#searchQuery && !this.#isThreadAllowed(threadId)) {
-      throw new Error(
-        `Thread ${threadId} was not found in search results for "${this.#searchQuery}". ` +
-        `Only threads returned by listThreads() can be read.`);
+  async search(query: string): Promise<Cursor<GmailThreadEntry>> {
+    validateGmailQueryForGrouping(query);
+    // A leading boolean operator could bind outside the appended group.
+    if (this.#ctx.searchQuery && /^(OR|AND)\b/i.test(query.trim())) {
+      throw new Error("Query cannot start with OR/AND.");
     }
 
-    let result = await this.#gmailApi.readThread(threadId);
+    const effectiveQuery = this.#ctx.searchQuery
+      ? `(${this.#ctx.searchQuery}) (${query})`
+      : query;
 
-    await this.#approvalQueue.authorizeObservation({
-      title: `Read thread: ${result.messages[0].subject}`,
-      description: `Fetch the full content of thread ${threadId}, including all messages.`
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: "Search Gmail",
+      description:
+        "Create a cursor for Gmail threads matching this effective query.\n\n" +
+        formatApprovalField("Query", effectiveQuery) +
+        (this.#ctx.labelName
+          ? `\n\n${formatApprovalField("Required label", this.#ctx.labelName)}`
+          : ""),
     });
 
+    const labelIds = this.#ctx.labelId
+      ? [this.#ctx.labelId]
+      : (!this.#ctx.searchQuery ? ["INBOX"] : undefined);
+    return new GmailThreadCursorImpl(this.#ctx, effectiveQuery, labelIds);
+  }
+
+  async send(to: string[], subject: string, body: string): Promise<void> {
+    // send() composes a brand-new outbound message, which isn't tied to any
+    // particular thread. For search/label-scoped bindings the user only
+    // granted access to a subset of their mail, so composing arbitrary new
+    // outbound mail is out of scope — reject it. (reply/forward remain
+    // available, since those act on a specific message capability that the
+    // caller already obtained through the scoped session.)
+    if (this.#ctx.searchQuery || this.#ctx.labelId) {
+      throw new Error(
+        "send() is not available on a search- or label-scoped Gmail binding. " +
+        "Use reply()/forward() on a specific message, or connect the full mailbox.");
+    }
+
+    validateOutboundInput(to, subject, body);
+    const message = this.#ctx.gmailApi.buildSendRaw(to, subject, body);
+    await submitGmailAction(
+      this.#ctx,
+      { type: "send", to: message.to, subject: message.subject, body: message.body },
+      {
+        title: sanitizeApprovalTitle(`Send email: ${message.subject}`),
+        description: describeOutboundMessage("Send a new email.", message),
+      });
+  }
+}
+
+function sanitizeApprovalTitle(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").slice(0, 200);
+}
+
+function formatApprovalField(label: string, value: string): string {
+  // Use a fence longer than any backtick run in the value, so untrusted email
+  // fields render verbatim and cannot forge surrounding approval Markdown.
+  let fence = "```";
+  while (value.includes(fence)) fence += "`";
+  return `**${label}:**\n\n${fence}\n${value}\n${fence}`;
+}
+
+function describeOutboundMessage(intro: string, message: GmailOutboundMessage): string {
+  let fields = [
+    formatApprovalField("From", message.from),
+    formatApprovalField("To", message.to.join(", ")),
+    ...(message.cc.length > 0 ? [formatApprovalField("Cc", message.cc.join(", "))] : []),
+    formatApprovalField("Subject", message.subject),
+    formatApprovalField("Body", message.body),
+    ...message.attachments.map(attachment => formatApprovalField(
+      "Attachment",
+      `${attachment.filename} (${attachment.contentType})\n${attachment.description}`)),
+  ];
+  return `${intro}\n\n${fields.join("\n\n")}`;
+}
+
+async function submitGmailAction(
+    ctx: GmailSessionContext,
+    action: GmailAction,
+    desc: { title: string; description: string }): Promise<void> {
+  if (ctx.pendingActions.list().length >= 100) {
+    throw new Error("Too many pending Gmail actions. Resolve existing actions before adding more.");
+  }
+  let actionId = ctx.pendingActions.submit(action);
+  try {
+    await ctx.approvalQueue.submitAction(actionId, { ...desc, implementsRevert: false });
+  } catch (err) {
+    ctx.pendingActions.remove(actionId);
+    throw err;
+  }
+}
+
+// ── GmailThreadCursorImpl ───────────────────────────────────────────
+// Lazily fetches pages from the Gmail API as the gadget calls next().
+// Each next() returns a batch of GmailThreadEntry objects (thread info +
+// capability), or null when exhausted. Pages are fetched in batches of 20.
+//
+// The cursor itself is a capability. The initial listThreads()/search() call
+// authorizes creation; each next() separately authorizes the page it returns.
+
+@validateRpc()
+class GmailThreadCursorImpl extends RpcTarget implements Cursor<GmailThreadEntry> {
+  #ctx: GmailSessionContext;
+  #query: string | undefined;
+  #labelIds: string[] | undefined;
+  #pageToken: string | undefined;
+  #exhausted = false;
+  #tail: Promise<void> = Promise.resolve();
+
+  constructor(ctx: GmailSessionContext, query: string | undefined, labelIds?: string[]) {
+    super();
+    this.#ctx = ctx;
+    this.#query = query;
+    this.#labelIds = labelIds;
+  }
+
+  next(): Promise<GmailThreadEntry[] | null> {
+    const result = this.#tail.then(() => this.#nextPage());
+    this.#tail = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  async applyLabel(threadId: string, label: string): Promise<void> {
-    if (this.#searchQuery && !this.#isThreadAllowed(threadId)) {
-      throw new Error(
-        `Thread ${threadId} was not found in search results for "${this.#searchQuery}". ` +
-        `Only threads returned by listThreads() can have labels applied.`);
+  async #nextPage(): Promise<GmailThreadEntry[] | null> {
+    if (this.#exhausted) return null;
+
+    let result: {threads: Array<{id: string}>; nextPageToken?: string};
+    let pageToken = this.#pageToken;
+    let exhausted = false;
+    let skippedPages = 0;
+    do {
+      const previousToken = pageToken;
+      result = await this.#ctx.gmailApi.listThreads(
+        20, this.#query, pageToken, this.#labelIds);
+      pageToken = result.nextPageToken;
+      exhausted = !result.nextPageToken;
+      if (result.nextPageToken && result.nextPageToken === previousToken) {
+        throw new Error("Gmail returned a repeated thread page token.");
+      }
+      skippedPages++;
+    } while (result.threads.length === 0 && !exhausted && skippedPages < 20);
+
+    if (result.threads.length === 0) {
+      if (!exhausted) throw new Error("Gmail returned too many empty thread pages.");
+      this.#pageToken = pageToken;
+      this.#exhausted = true;
+      return null;
     }
 
-    let action: GmailAction = {type: "applyLabel", threadId, label};
-    let actionId = this.#pendingActions.submit(action);
-
-    try {
-      await this.#approvalQueue.submitAction(actionId, {
-        title: `Apply the label ${label} to thread ${threadId}`,
-        description: `Apply the label ${label} to thread ${threadId}`,
-
-        // TODO: Implement revert.
-        implementsRevert: false,
-      });
-    } catch (error) {
-      this.#pendingActions.remove(actionId);
-      throw error;
+    // Stay below the Workers six-outgoing-connection limit while enriching the
+    // page with metadata.
+    const entries: GmailThreadEntry[] = [];
+    for (let i = 0; i < result.threads.length; i += 5) {
+      const batch = await Promise.all(result.threads.slice(i, i + 5).map(async thread => {
+        const info = await this.#ctx.gmailApi.getThreadInfo(thread.id);
+        const stub = new GmailThreadStub(this.#ctx, thread.id, info);
+        return { info, thread: stub };
+      }));
+      entries.push(...batch);
     }
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `Read ${entries.length} Gmail threads`,
+      description:
+        `Fetch the next page of Gmail threads.\n\n` +
+        formatApprovalField("Subjects", entries.map(entry => entry.info.subject).join("\n")),
+    });
+
+    this.#pageToken = pageToken;
+    this.#exhausted = exhausted;
+    return entries;
   }
 }
 
-type GmailAction = {
-  type: "applyLabel",
-  threadId: string,
-  label: string
+// ── GmailThreadStub ─────────────────────────────────────────────────
+
+@validateRpc()
+class GmailThreadStub extends RpcTarget implements GmailThread {
+  #ctx: GmailSessionContext;
+  #threadId: string;
+  #cachedInfo: GmailThreadInfo | undefined;
+
+  constructor(ctx: GmailSessionContext, threadId: string, cachedInfo?: GmailThreadInfo) {
+    super();
+    this.#ctx = ctx;
+    this.#threadId = threadId;
+    this.#cachedInfo = cachedInfo;
+  }
+
+  async #ensureInfo(): Promise<GmailThreadInfo> {
+    if (!this.#cachedInfo) {
+      this.#cachedInfo = await this.#ctx.gmailApi.getThreadInfo(this.#threadId);
+    }
+    return this.#cachedInfo;
+  }
+
+  async getMetadata(): Promise<GmailThreadInfo> {
+    const info = await this.#ensureInfo();
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Thread info: ${info.subject}`),
+      description: `Get metadata for thread ${this.#threadId}.`,
+    });
+
+    return info;
+  }
+
+  async messages(): Promise<GmailMessage[]> {
+    const thread = await this.#ctx.gmailApi.getThread(this.#threadId);
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Get messages: ${thread.snippet || "(no snippet)"}`),
+      description: `Get all messages in thread ${this.#threadId}.`,
+    });
+
+    return thread.messages.map(message =>
+      new GmailMessageStub(this.#ctx, message.id, this.#threadId)
+    );
+  }
+
+  async messagesVisibleTo(address: string): Promise<GmailMessage[]> {
+    if (new TextEncoder().encode(address).byteLength > MAX_GMAIL_ADDRESS_BYTES) {
+      throw new Error(`Email address must be at most ${MAX_GMAIL_ADDRESS_BYTES} bytes.`);
+    }
+    const [normalizedAddress] = normalizeEmailRecipients([address]);
+    const thread = await this.#ctx.gmailApi.getThread(this.#threadId);
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Messages involving ${normalizedAddress}`),
+      description:
+        "List messages in this thread involving the requested address.\n\n" +
+        formatApprovalField("Address", normalizedAddress) + "\n\n" +
+        formatApprovalField("Thread snippet", thread.snippet || "(no snippet)"),
+    });
+
+    if (thread.messages.length > MAX_GMAIL_VISIBLE_THREAD_MESSAGES) {
+      throw new Error(
+        `Thread has ${thread.messages.length} messages; messagesVisibleTo() supports at most ` +
+        `${MAX_GMAIL_VISIBLE_THREAD_MESSAGES}.`);
+    }
+
+    const target = normalizedAddress.toLowerCase();
+    const visible: GmailMessage[] = [];
+    // Fetch only participant metadata, at most five messages at once.
+    for (let i = 0; i < thread.messages.length; i += 5) {
+      const batch = thread.messages.slice(i, i + 5);
+      const participantSets = await Promise.all(batch.map(message =>
+        this.#ctx.gmailApi.getMessageParticipants(message.id).catch(err => {
+          console.warn(`getMessageParticipants failed for ${message.id}:`, err);
+          return null;
+        })));
+      for (let j = 0; j < batch.length; j++) {
+        if (participantSets[j]?.has(target)) {
+          visible.push(new GmailMessageStub(this.#ctx, batch[j].id, this.#threadId));
+        }
+      }
+    }
+    return visible;
+  }
+
+  async #submitThreadAction(
+      type: "archive" | "trash" | "markRead" | "markUnread",
+      titlePrefix: string,
+      intro: string): Promise<void> {
+    const info = await this.#ensureInfo();
+    const subject = info.subject || "(no subject)";
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Read thread before ${titlePrefix.toLowerCase()}: ${subject}`),
+      description: "Read the current Gmail thread metadata needed to prepare this action.",
+    });
+    await submitGmailAction(
+      this.#ctx,
+      { type, threadId: this.#threadId },
+      {
+        title: sanitizeApprovalTitle(`${titlePrefix}: ${subject}`),
+        description:
+          `${intro}\n\n` +
+          formatApprovalField("Subject", subject) + "\n\n" +
+          formatApprovalField("Snippet", info.snippet),
+      });
+  }
+
+  async archive(): Promise<void> {
+    await this.#submitThreadAction("archive", "Archive", "Remove this thread from the inbox.");
+  }
+
+  async trash(): Promise<void> {
+    await this.#submitThreadAction("trash", "Trash", "Move this thread to trash.");
+  }
+
+  async markRead(): Promise<void> {
+    await this.#submitThreadAction("markRead", "Mark read", "Mark every message in this thread as read.");
+  }
+
+  async markUnread(): Promise<void> {
+    await this.#submitThreadAction("markUnread", "Mark unread", "Mark every message in this thread as unread.");
+  }
 }
+
+// ── GmailMessageStub ────────────────────────────────────────────────
+
+@validateRpc()
+class GmailMessageStub extends RpcTarget implements GmailMessage {
+  #ctx: GmailSessionContext;
+  #messageId: string;
+  #threadId: string;
+  #cachedRaw: GmailMessageRaw | undefined;
+
+  constructor(ctx: GmailSessionContext, messageId: string, threadId: string, cachedRaw?: GmailMessageRaw) {
+    super();
+    this.#ctx = ctx;
+    this.#messageId = messageId;
+    this.#threadId = threadId;
+    this.#cachedRaw = cachedRaw;
+  }
+
+  async #getRaw(): Promise<GmailMessageRaw> {
+    if (!this.#cachedRaw) {
+      this.#cachedRaw = await this.#ctx.gmailApi.getMessage(this.#messageId);
+    }
+    return this.#cachedRaw;
+  }
+
+  async getMetadata(): Promise<GmailMessageInfo> {
+    const raw = await this.#getRaw();
+    const rawInfo = await this.#ctx.gmailApi.parseMessageInfo(raw);
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Message info: ${rawInfo.subject}`),
+      description: `Get metadata for message ${this.#messageId}.`,
+    });
+
+    // Resolve raw label IDs to GmailLabel objects.
+    const labels = await this.#ctx.resolveLabels(rawInfo.labelIds);
+    return {
+      id: this.#messageId,
+      from: rawInfo.from,
+      to: rawInfo.to,
+      cc: rawInfo.cc,
+      subject: rawInfo.subject,
+      timestamp: rawInfo.timestamp,
+      labels,
+    };
+  }
+
+  async thread(): Promise<GmailThread> {
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: `Get thread for message`,
+      description: `Navigate from message ${this.#messageId} to its parent thread.`,
+    });
+    return new GmailThreadStub(this.#ctx, this.#threadId);
+  }
+
+  async getContent(): Promise<EmailContent> {
+    const raw = await this.#getRaw();
+    const { info, content } = await this.#ctx.gmailApi.parseMessage(raw);
+
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`Read message: ${info.subject}`),
+      description: `Get body content of message ${this.#messageId}.`,
+    });
+
+    return content;
+  }
+
+  async reply(body: string): Promise<void> {
+    if (new TextEncoder().encode(body).byteLength > MAX_GMAIL_BODY_BYTES) {
+      throw new Error(`Email body must be at most ${MAX_GMAIL_BODY_BYTES} bytes.`);
+    }
+    const original = await this.#getRaw();
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: "Read message headers to prepare reply",
+      description: "Read the source message headers needed to calculate reply recipients and threading.",
+    });
+    const message = await this.#ctx.gmailApi.buildReplyRaw(original, body, false);
+    validateOutboundInput([...message.to, ...message.cc], message.subject, message.body);
+    await submitGmailAction(
+      this.#ctx,
+      {
+        type: "reply",
+        sourceMessageId: this.#messageId,
+        threadId: this.#threadId,
+        body,
+        replyAll: false,
+        sourceWasSent: message.sourceWasSent,
+      },
+      {
+        title: sanitizeApprovalTitle(`Reply: ${message.subject}`),
+        description: describeOutboundMessage("Send a reply.", message),
+      });
+  }
+
+  async replyAll(body: string): Promise<void> {
+    if (new TextEncoder().encode(body).byteLength > MAX_GMAIL_BODY_BYTES) {
+      throw new Error(`Email body must be at most ${MAX_GMAIL_BODY_BYTES} bytes.`);
+    }
+    const original = await this.#getRaw();
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: "Read message headers to prepare reply-all",
+      description: "Read the source message headers needed to calculate reply-all recipients and threading.",
+    });
+    const message = await this.#ctx.gmailApi.buildReplyRaw(original, body, true);
+    validateOutboundInput([...message.to, ...message.cc], message.subject, message.body);
+    await submitGmailAction(
+      this.#ctx,
+      {
+        type: "reply",
+        sourceMessageId: this.#messageId,
+        threadId: this.#threadId,
+        body,
+        replyAll: true,
+        sourceWasSent: message.sourceWasSent,
+      },
+      {
+        title: sanitizeApprovalTitle(`Reply all: ${message.subject}`),
+        description: describeOutboundMessage("Send a reply to all recipients.", message),
+      });
+  }
+
+  async forward(to: string[], body?: string): Promise<void> {
+    const normalizedTo = normalizeEmailRecipients(to);
+    if (normalizedTo.length === 0 || normalizedTo.length > MAX_GMAIL_RECIPIENTS) {
+      throw new Error(`Email must have between 1 and ${MAX_GMAIL_RECIPIENTS} recipients.`);
+    }
+    if (new TextEncoder().encode(body ?? '').byteLength > MAX_GMAIL_BODY_BYTES) {
+      throw new Error(`Email body must be at most ${MAX_GMAIL_BODY_BYTES} bytes.`);
+    }
+    const original = await this.#getRaw();
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: "Read message to prepare forward",
+      description: "Read the complete source message and attachment metadata needed to prepare a forward.",
+    });
+    const message = await this.#ctx.gmailApi.buildForwardRaw(original, normalizedTo, body);
+    validateOutboundInput(message.to, message.subject, message.body);
+    await submitGmailAction(
+      this.#ctx,
+      { type: "forward", sourceMessageId: this.#messageId, to: normalizedTo, body },
+      {
+        title: sanitizeApprovalTitle(`Forward: ${message.subject}`),
+        description: describeOutboundMessage(
+          "Forward an existing message. The complete original email is attached losslessly.",
+          message),
+      });
+  }
+}
+
+// =======================================================================================
 
 type GmailGatekeeperImplProps = {
   userObjectId: string;
 
-  // If the user pasted a Gmail URL with a search query (e.g. #search/from%3Abob%40example.com),
-  // this is the decoded search query (e.g. "from:bob@example.com"). When set, listThreads()
-  // results are restricted to matching threads, and readThread() only allows threads previously
-  // returned by listThreads().
+  // Optional free-form Gmail search restriction.
   searchQuery?: string;
-}
 
-const ALL_GMAIL_PERMISSIONS: string[] = ["listThreads", "readThread", "applyLabel"];
+  // Optional exact Gmail label name. Resolved to a label ID at session start;
+  // never interpolated into Gmail search syntax.
+  labelName?: string;
+}
 
 @validateRpc()
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
@@ -815,36 +1348,43 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
 
   async #getAccessToken(): Promise<string> {
     if (!this.#accessToken) {
-      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+      let stub = this.ctx.exports.UserAccount.get(
           this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
       this.#accessToken = await stub.getAccessToken();
 
       let ttl = this.#accessToken.expires.valueOf() - Date.now();
-
-      // Time out when half-way expired.
-      // TODO: Maybe store in persistent storage?
-      setTimeout(() => {this.#accessToken = undefined}, ttl / 2);
+      setTimeout(() => { this.#accessToken = undefined; }, ttl / 2);
     }
     return this.#accessToken.token;
   }
 
+  async #getSelfEmail(): Promise<string> {
+    let cached = this.ctx.storage.kv.get<string>("selfEmail");
+    if (cached) return cached;
+
+    let token = await this.#getAccessToken();
+    let desc = await getGoogleAccountDescription(token);
+    if (!desc.uniqueName) {
+      throw new Error("Google account has no email address");
+    }
+    this.ctx.storage.kv.put("selfEmail", desc.uniqueName);
+    return desc.uniqueName;
+  }
+
   async describe(): Promise<ResourceDescription> {
+    const labelName = this.ctx.props.labelName;
+    if (labelName) {
+      return {
+        url: `https://mail.google.com/mail/#label/${encodeURIComponent(labelName)}`,
+        title: `Gmail label: ${labelName}`,
+        snippet: `Gmail threads with label: ${labelName}`,
+        suggestedBindingName: "GMAIL_LABEL",
+        tsType: "GmailSession",
+      };
+    }
+
     let searchQuery = this.ctx.props.searchQuery;
     if (searchQuery) {
-      // If the query is a simple "label:X" filter, produce a nicer label-specific description
-      // with the native #label/ URL form.
-      let labelMatch = searchQuery.match(/^label:(.+)$/);
-      if (labelMatch) {
-        let label = labelMatch[1];
-        return {
-          url: `https://mail.google.com/mail/#label/${encodeURIComponent(label)}`,
-          title: `Gmail label: ${label}`,
-          snippet: `Gmail threads with label: ${label}`,
-          suggestedBindingName: "GMAIL_LABEL",
-          tsType: "GmailSession",
-        };
-      }
-
       return {
         url: `https://mail.google.com/mail/#search/${encodeURIComponent(searchQuery)}`,
         title: `Gmail: ${searchQuery}`,
@@ -869,55 +1409,92 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GmailSession> {
-    let gmailApi = new GmailApi(() => this.#getAccessToken());
-    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
-    let searchQuery = this.ctx.props.searchQuery;
+    let selfEmail = await this.#getSelfEmail();
+    let gmailApi = new GmailApi(selfEmail, () => this.#getAccessToken());
 
-    // Key prefix for storing allowed thread IDs in DO storage. When a search query is active,
-    // each thread ID returned by listThreads() is stored as a separate key for O(1) lookups.
-    let THREAD_KEY_PREFIX = "allowedThread:";
+    // In-memory label map cache for the session lifetime. Fetched once on
+    // first label resolution, shared across all stubs in this session.
+    let labelMapCache: Map<string, string> | undefined;
+    const getLabelMap = async () => {
+      if (!labelMapCache) labelMapCache = await gmailApi.listLabels();
+      return labelMapCache;
+    };
+    let labelId: string | undefined;
+    if (this.ctx.props.labelName) {
+      const labelMap = await getLabelMap();
+      labelId = [...labelMap].find(([, name]) => name === this.ctx.props.labelName)?.[0];
+      if (!labelId) {
+        throw new Error(`Gmail label not found: ${this.ctx.props.labelName}`);
+      }
+    }
 
-    return new GmailSessionImpl(
+    const ctx: GmailSessionContext = {
       gmailApi,
-      approvalQueue.dup(),
-      pendingActions,
-      searchQuery,
-      (threadId: string) => {
-        // Fire-and-forget: store the thread ID in DO storage so it persists across sessions.
-        this.ctx.storage.put(THREAD_KEY_PREFIX + threadId, true);
-      },
-      (threadId: string) => {
-        // Synchronous check using the KV cache (which is always in sync with storage).
-        return this.ctx.storage.kv.get(THREAD_KEY_PREFIX + threadId) !== undefined;
-      },
-    );
+      approvalQueue: approvalQueue.dup(),
+      pendingActions: new PendingActionStore<GmailAction>(this.ctx.storage.kv),
+      searchQuery: this.ctx.props.searchQuery,
+      labelId,
+      labelName: this.ctx.props.labelName,
+      resolveLabels: async (labelIds: string[]): Promise<GmailLabel[]> =>
+        toLabelObjects(labelIds, await getLabelMap()),
+    };
+
+    return new GmailSessionImpl(ctx);
   }
 
   // ---------------------------------------------------------------------------
   async applyAction(actionId: number): Promise<void> {
-    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
-    let action = pendingActions.get(actionId);
-    if (!action) {
-      throw new Error(`Unknown pending Gmail action: ${actionId}`);
-    }
+    const pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
+    const action = pendingActions.get(actionId);
+    if (!action) throw new Error(`Unknown pending Gmail action: ${actionId}`);
+
+    const selfEmail = await this.#getSelfEmail();
+    const gmailApi = new GmailApi(selfEmail, () => this.#getAccessToken());
 
     switch (action.type) {
-      case "applyLabel": {
-        let gmailApi = new GmailApi(() => this.#getAccessToken());
-        await gmailApi.applyLabel(action.threadId, action.label);
-        pendingActions.remove(actionId);
+      case "archive":
+        await gmailApi.modifyThread(action.threadId, [], ["INBOX"]);
+        break;
+      case "trash":
+        await gmailApi.trashThread(action.threadId);
+        break;
+      case "markRead":
+        await gmailApi.modifyThread(action.threadId, [], ["UNREAD"]);
+        break;
+      case "markUnread":
+        await gmailApi.modifyThread(action.threadId, ["UNREAD"], []);
+        break;
+      case "send": {
+        const message = gmailApi.buildSendRaw(action.to, action.subject, action.body);
+        await gmailApi.sendRawMessage(message.raw);
         break;
       }
-
+      case "reply": {
+        const original = await gmailApi.getMessage(action.sourceMessageId);
+        const message = await gmailApi.buildReplyRaw(
+          original, action.body, action.replyAll, action.sourceWasSent);
+        await gmailApi.sendRawMessage(message.raw, action.threadId);
+        break;
+      }
+      case "forward": {
+        const original = await gmailApi.getMessage(action.sourceMessageId);
+        const message = await gmailApi.buildForwardRaw(original, action.to, action.body);
+        await gmailApi.sendRawMessage(message.raw);
+        break;
+      }
       default:
-        action.type satisfies never;
-        throw new Error(`unknown action type: ${action.type}`);
+        action satisfies never;
+        throw new Error(`unknown action type: ${(action as {type: string}).type}`);
     }
+
+    pendingActions.remove(actionId);
   }
 
   async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
-    // Nothing to do, since we don't maintain a simulation.
-    let pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
+    const pendingActions = new PendingActionStore<GmailAction>(this.ctx.storage.kv);
+    if (!pendingActions.get(actionId)) {
+      throw new Error(`Unknown pending Gmail action: ${actionId}`);
+    }
     pendingActions.remove(actionId);
   }
 
@@ -927,7 +1504,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   }
 
   async setHook(_hook: Fetcher | null): Promise<void> {
-    // No hooks for Gmail.
+    // Gmail hooks will be implemented separately.
   }
 }
 
