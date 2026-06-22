@@ -661,7 +661,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     // can never be interpreted as search syntax.
     let hash = parsed.hash;
     if (hash.startsWith("#search/")) {
-      const query = decodeURIComponent(hash.slice("#search/".length));
+      // Gmail's own UI encodes spaces in hash searches as `+`, while
+      // decodeURIComponent() only decodes `%20`. Normalize both forms.
+      const encodedQuery = hash.slice("#search/".length).replace(/\+/g, " ");
+      const query = decodeURIComponent(encodedQuery);
       validateGmailQueryForGrouping(query);
       props.searchQuery = query;
     } else if (hash.startsWith("#label/")) {
@@ -902,9 +905,9 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
           : ""),
     });
 
-    const labelIds = this.#ctx.labelId
-      ? [this.#ctx.labelId]
-      : (!this.#ctx.searchQuery ? ["INBOX"] : undefined);
+    // A full-mailbox binding may search all mail. Only an explicit label scope
+    // attenuates search results; listThreads() separately defaults to INBOX.
+    const labelIds = this.#ctx.labelId ? [this.#ctx.labelId] : undefined;
     return new GmailThreadCursorImpl(this.#ctx, effectiveQuery, labelIds);
   }
 
@@ -1008,7 +1011,7 @@ class GmailThreadCursorImpl extends RpcTarget implements Cursor<GmailThreadEntry
   async #nextPage(): Promise<GmailThreadEntry[] | null> {
     if (this.#exhausted) return null;
 
-    let result: {threads: Array<{id: string}>; nextPageToken?: string};
+    let result: {threads: Array<{id: string; snippet?: string}>; nextPageToken?: string};
     let pageToken = this.#pageToken;
     let exhausted = false;
     let skippedPages = 0;
@@ -1036,7 +1039,11 @@ class GmailThreadCursorImpl extends RpcTarget implements Cursor<GmailThreadEntry
     const entries: GmailThreadEntry[] = [];
     for (let i = 0; i < result.threads.length; i += 5) {
       const batch = await Promise.all(result.threads.slice(i, i + 5).map(async thread => {
-        const info = await this.#ctx.gmailApi.getThreadInfo(thread.id);
+        const metadata = await this.#ctx.gmailApi.getThreadInfo(thread.id);
+        const info: GmailThreadInfo = {
+          ...metadata,
+          ...(thread.snippet !== undefined ? {snippet: thread.snippet} : {}),
+        };
         const stub = new GmailThreadStub(this.#ctx, thread.id, info);
         return { info, thread: stub };
       }));
@@ -1159,8 +1166,10 @@ class GmailThreadStub extends RpcTarget implements GmailThread {
         title: sanitizeApprovalTitle(`${titlePrefix}: ${subject}`),
         description:
           `${intro}\n\n` +
-          formatApprovalField("Subject", subject) + "\n\n" +
-          formatApprovalField("Snippet", info.snippet),
+          formatApprovalField("Subject", subject) +
+          (info.snippet !== undefined
+            ? `\n\n${formatApprovalField("Snippet", info.snippet)}`
+            : ""),
       });
   }
 
