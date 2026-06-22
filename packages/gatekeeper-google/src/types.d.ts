@@ -12,7 +12,8 @@ export type EmailAddress = {
 
 export type GmailThreadInfo = {
   id: string;
-  snippet: string;
+  /** Preview text when Gmail includes one for this response format. */
+  snippet?: string;
   subject: string;
   messageCount: number;
 }

@@ -244,7 +244,7 @@ export type GmailMessageRaw = {
 // to avoid downloading full message payloads.
 type GmailThreadMetadata = {
   id: string;
-  snippet: string;
+  snippet?: string;
   historyId: string;
   messages?: Array<{
     payload: { headers: Array<{ name: string; value: string }> };
@@ -532,10 +532,10 @@ export class GmailApi {
   // Thread operations
   // ─────────────────────────────────────────────────────────────────
 
-  // List threads. Returns a page of minimal thread data (id, snippet, historyId)
-  // plus a nextPageToken for pagination.
+  // List threads. Gmail returns Thread resources with id/snippet, omitting only
+  // the messages array. Subject/count are enriched separately by getThreadInfo().
   async listThreads(count: number, query?: string, pageToken?: string, labelIds?: string[]):
-      Promise<{ threads: Array<{ id: string }>; nextPageToken?: string }> {
+      Promise<{ threads: Array<{ id: string; snippet?: string }>; nextPageToken?: string }> {
     const accessToken = await this.getAccessToken();
 
     let url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=${count}`;
@@ -560,7 +560,7 @@ export class GmailApi {
     }
 
     const data = await response.json() as {
-      threads?: Array<{ id: string }>;
+      threads?: Array<{ id: string; snippet?: string }>;
       nextPageToken?: string;
     };
     return {
@@ -587,7 +587,7 @@ export class GmailApi {
 
     const thread = await response.json() as {
       id: string;
-      snippet: string;
+      snippet?: string;
       messages?: Array<{ id: string }>;
     };
 
@@ -596,7 +596,7 @@ export class GmailApi {
       threadId: thread.id,
     }));
 
-    return { id: thread.id, snippet: thread.snippet, messages };
+    return { id: thread.id, snippet: thread.snippet ?? '', messages };
   }
 
   // Get thread info (id, snippet, subject) using a metadata-only fetch to
@@ -623,7 +623,7 @@ export class GmailApi {
 
     return {
       id: threadId,
-      snippet: thread.snippet,
+      ...(thread.snippet !== undefined ? {snippet: thread.snippet} : {}),
       subject,
       messageCount: thread.messages?.length ?? 0,
     };
