@@ -373,7 +373,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     ...collaborators.map(info => ({ kind: 'collaborator' as const, info })),
   ]
   const sortedShareKeys = useMemo(
-    () => [...shareKeys].sort((a, b) => b.created.getTime() - a.created.getTime()),
+    () => [...shareKeys].toSorted((a, b) => b.created.getTime() - a.created.getTime()),
     [shareKeys],
   )
   const removeTarget = confirmationTarget?.kind === 'remove' ? confirmationTarget : null

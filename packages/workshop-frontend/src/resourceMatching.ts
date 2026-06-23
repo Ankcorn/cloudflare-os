@@ -178,7 +178,7 @@ export function getPlaceholderRanges(url: string): Array<{ start: number; end: n
   while ((match = starRegex.exec(url)) !== null) {
     ranges.push({ start: match.index, end: match.index + match[0].length })
   }
-  return ranges.sort((a, b) => a.start - b.start)
+  return ranges.toSorted((a, b) => a.start - b.start)
 }
 
 // Check if search text matches a resource by name/description tokens only.

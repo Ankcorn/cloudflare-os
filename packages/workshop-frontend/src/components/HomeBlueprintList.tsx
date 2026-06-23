@@ -101,7 +101,7 @@ export default function HomeBlueprintList() {
       item.pinned ||= blueprint.pinned === true
     }
 
-    return Array.from(items.values()).sort((a, b) => {
+    return Array.from(items.values()).toSorted((a, b) => {
       if (a.pinned && !b.pinned) return -1
       if (!a.pinned && b.pinned) return 1
       const aTime = (a.lastUpdated ?? a.addedAt ?? new Date(0)).valueOf()

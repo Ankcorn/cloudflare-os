@@ -346,7 +346,7 @@ function createDeletionZoneNodes({
       button.className = 'gadgets-deleted-code-row gadgets-deleted-omitted-row'
       const hidden = total - 2 * DELETED_HEAD_TAIL
       button.textContent = `Show ${hidden} hidden deleted line${hidden === 1 ? '' : 's'}`
-      button.onclick = onExpand
+      button.addEventListener("click", onExpand)
       code.append(button)
     }
 
@@ -381,7 +381,7 @@ function appendDeletedLineContent(
     row.textContent = text
     return
   }
-  const sorted = [...slices].sort((a, b) => a.startCol - b.startCol)
+  const sorted = [...slices].toSorted((a, b) => a.startCol - b.startCol)
   let column = 1
   for (const slice of sorted) {
     if (slice.startCol > column) {

@@ -20,7 +20,7 @@ let CAPNWEB_BUNDLE_ANNOTATED = `//# sourceURL=jsrpc.js\n${CAPNWEB_BUNDLE}`
 //
 // In any case, we'll prefix the gadget code with this prefix which imports the Cap'n Web library
 // (from a massive data URL) and sets up the RPC connection to the parent.
-let INJECTED_CODE_PREFIX = encodeURIComponent(`//# sourceURL=client.js
+let INJECTED_CODE_PREFIX = encodeURIComponent(String.raw`//# sourceURL=client.js
 import { RpcTarget, RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(CAPNWEB_BUNDLE_ANNOTATED)}";
 
 let gadget;  // RPC stub to the gadget's server-side Durable Object.

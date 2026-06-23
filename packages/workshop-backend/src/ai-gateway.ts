@@ -7,13 +7,6 @@ import { UserAiModelRecord } from "./user.js";
 // compared to the actual coding model so there's not much reason to use a smaller model.
 const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
-const PROVIDER_PATHS: Record<string, string> = {
-  "anthropic": "anthropic",
-  "openai": "openai",
-  "google": "google-ai-studio",
-  // "cloudflare" uses the Workers AI binding with a gateway option, not a URL.
-};
-
 export class AiGatewayConfig {
   readonly gateway: string;
   readonly workersAiGateway: string;

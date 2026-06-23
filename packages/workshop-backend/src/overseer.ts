@@ -18,22 +18,6 @@ import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker"
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 
-let DEFAULT_README = `This is a placeholder "Hello, World!" app. It will be replaced by the app you request.
-`;
-
-let DEFAULT_SERVER_CODE = `import { DurableObject } from "cloudflare:workers";
-
-export class Gadget extends DurableObject {
-  greet(name) {
-    return \`Hello, \${name}!\`;
-  }
-}
-`;
-
-let DEFAULT_CLIENT_CODE = `let greeting = await gadget.greet("World");
-document.body.appendChild(document.createTextNode(greeting));
-`;
-
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint } from "cloudflare:workers";
 import agent from "agent.js";
@@ -563,7 +547,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   destroyAllLiveChats() {
-    for (let chatId of [...this.#liveChats.keys()]) {
+    for (let chatId of Array.from(this.#liveChats.keys())) {
       this.destroyLiveChat(chatId);
     }
   }
@@ -648,7 +632,7 @@ class OverseerImpl implements AgentHooks {
 
     // Resume any agent turns that were left running by a previous instance of this DO (i.e. were
     // interrupted by a server restart).
-    for (let record of [...this.storage.activeAgents.list()]) {
+    for (let record of Array.from(this.storage.activeAgents.list())) {
       // Make sure to register the running agent synchronously so that if we were called at the
       // start of the alarm handler, it'll recognize that agents are running and wait for them.
       this.#registerRunningAgent(record.chatId);
@@ -668,7 +652,7 @@ class OverseerImpl implements AgentHooks {
     //
     // After this change has been deployed, we could plausibly remove this block, though it might
     // be nice to keep for consistency purposes.
-    for (let thread of [...this.storage.chatMeta.list()]) {
+    for (let thread of Array.from(this.storage.chatMeta.list())) {
       if (thread.activeAgent && !this.#runningAgents.has(thread.id)) {
         this.postAgentErrorMessage(thread.id, thread.activeAgent,
             "Agent interrupted due to server restart.");
@@ -1366,7 +1350,7 @@ class OverseerImpl implements AgentHooks {
   sweepStagedChatAttachments(): void {
     let cutoff = Date.now() - MAX_STAGED_CHAT_ATTACHMENT_AGE_MS;
     this.ctx.storage.transactionSync(() => {
-      for (let content of [...this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff})]) {
+      for (let content of Array.from(this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff}))) {
         this.storage.chatAttachmentContent.delete(content.fileId);
       }
     });

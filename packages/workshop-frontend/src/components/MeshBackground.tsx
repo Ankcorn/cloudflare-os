@@ -123,7 +123,7 @@ export default function MeshBackground() {
     // Pre-compute stroke styles for quantized alpha levels to avoid
     // allocating ~60k rgba strings per second.
     const ALPHA_STEPS = 64
-    const strokeCache: string[] = new Array(ALPHA_STEPS)
+    const strokeCache: string[] = Array.from({ length: ALPHA_STEPS })
     for (let i = 0; i < ALPHA_STEPS; i++) {
       const a = i / (ALPHA_STEPS - 1)
       strokeCache[i] = `rgba(${LINE_R}, ${LINE_G}, ${LINE_B}, ${a})`

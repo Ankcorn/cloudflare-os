@@ -203,7 +203,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     let cancelled = false
     authenticatedApi.listGadgets().then((list) => {
       if (cancelled) return
-      const sorted = [...list].sort((a, b) => {
+      const sorted = [...list].toSorted((a, b) => {
         if (a.pinned && !b.pinned) return -1
         if (!a.pinned && b.pinned) return 1
         return b.lastActive.getTime() - a.lastActive.getTime()
@@ -284,7 +284,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     // Optimistically update the list
     setGadgets(prev => {
       const updated = prev.map(g => g.id === gadget.id ? { ...g, pinned: newPinned } : g)
-      return updated.sort((a, b) => {
+      return updated.toSorted((a, b) => {
         if (a.pinned && !b.pinned) return -1
         if (!a.pinned && b.pinned) return 1
         return b.lastActive.getTime() - a.lastActive.getTime()
@@ -298,7 +298,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       console.error('Failed to pin gadget:', err)
       setGadgets(prev => {
         const reverted = prev.map(g => g.id === gadget.id ? { ...g, pinned: gadget.pinned } : g)
-        return reverted.sort((a, b) => {
+        return reverted.toSorted((a, b) => {
           if (a.pinned && !b.pinned) return -1
           if (!a.pinned && b.pinned) return 1
           return b.lastActive.getTime() - a.lastActive.getTime()

@@ -6,7 +6,6 @@ import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
-import { AiGatewayConfig } from "./ai-gateway";
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -583,7 +582,7 @@ export async function runAgent(
     }
 
     let diffParts: string[] = [];
-    for (let filename of [...touchedFiles].sort()) {
+    for (let filename of [...touchedFiles].toSorted()) {
       let oldContent = currentContents.get(filename) ?? "";
       let text = files.get(filename);
       let newContent = text?.toString() ?? "";
@@ -638,7 +637,7 @@ export async function runAgent(
   //    content.
   // 2. Let us know which *reads* are reading from reverted content, and therefore should be
   //    elided from the chat history for being no longer relevant.
-  let chatMessageStatus: (undefined | "merged" | "reverted")[] = new Array(chatMessages.length);
+  let chatMessageStatus: (undefined | "merged" | "reverted")[] = Array.from({ length: chatMessages.length });
   for (let msg of chatMessages) {
     if (msg.type === "merge") {
       for (let i = 0; i < msg.mergeThrough; i++) {
@@ -1456,7 +1455,7 @@ export async function runAgent(
             "Represents changes made by the user (other than broad reverts), in unified " +
             "diff format.")),
       }),
-      execute: ({}, {}) => {
+      execute: () => {
         // The agent shouldn't be calling this explicitly.
         return {};
       },

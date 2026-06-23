@@ -63,6 +63,7 @@ export interface NonUniqueIndex<T, Key> {
 }
 
 type Key = string | number;
+type StorageValue = NonNullable<unknown>;
 
 type IndexFunction<T> =
     | ((record: T) => string | null)
@@ -87,7 +88,7 @@ export interface Subscriber<T> {
   remove(record: T): void;
 }
 
-export interface Collection<T extends Object, PrimaryKey = string> extends UniqueIndex<T, PrimaryKey> {
+export interface Collection<T extends object, PrimaryKey = string> extends UniqueIndex<T, PrimaryKey> {
   put(value: T): void;
 
   subscribe(subscriber: Subscriber<T>): void;
@@ -127,7 +128,7 @@ interface CollectionSchemaBrand {
 
 // TODO: Add singleton values.
 interface CollectionSchema<
-      T extends Object,
+      T extends object,
       PrimaryKey extends PrimaryKeySpec<T>,
       UniqueIndexes,
       NonUniqueIndexes
@@ -137,7 +138,7 @@ interface CollectionSchema<
   nonUniqueIndexes?: NonUniqueIndexes;
 }
 
-export function collection<T extends Object>() {
+export function collection<T extends object>() {
   return function<PrimaryKey extends PrimaryKeySpec<T>,
                   UniqueIndexes,
                   NonUniqueIndexes>(
@@ -153,7 +154,7 @@ export function collection<T extends Object>() {
 
 // =======================================================================================
 
-type CollectionImpl<T extends Object,
+type CollectionImpl<T extends object,
                     PrimaryKey extends PrimaryKeySpec<T>,
                     UniqueIndexes,
                     NonUniqueIndexes> =
@@ -185,7 +186,7 @@ export function keyString(key: Key): string {
 
 // Helper class that implements a view of KV storage by adding a prefix to all keys. Also, accepts
 // `Key` (string | number) as the key type, encoding numbers so that they sort nicely.
-class KvPrefixedView<T extends Object> {
+class KvPrefixedView<T extends StorageValue> {
   #kv: SyncKvStorage;
   #name: string;
 
@@ -268,7 +269,7 @@ class KvPrefixedView<T extends Object> {
     return this.#kv.delete(this.#rawKey(key));
   }
 
-  getChild<U extends Object>(name: string): KvPrefixedView<U> {
+  getChild<U extends StorageValue>(name: string): KvPrefixedView<U> {
     return new KvPrefixedView(this.#kv, `${this.#name}.${name}`);
   }
 
@@ -281,7 +282,7 @@ class KvPrefixedView<T extends Object> {
 }
 
 function createCollection<
-      T extends Object,
+      T extends object,
       PrimaryKey extends PrimaryKeySpec<T>,
       UniqueIndexes,
       NonUniqueIndexes
@@ -377,7 +378,7 @@ function createCollection<
       add(record: T) {
         let pk = pkForT(record);
         let idxKeys = idx(record);
-        if (idxKeys instanceof Array) {
+        if (Array.isArray(idxKeys)) {
           for (let idxKey of idxKeys) {
             ops.add(idxKey, pk, "Insertion");
           }
@@ -391,15 +392,15 @@ function createCollection<
         let oldIdxKeys: Key | Key[] | null = idx(oldRecord);
         let newIdxKeys: Key | Key[] | null = idx(newRecord);
 
-        if (oldIdxKeys instanceof Array || newIdxKeys instanceof Array) {
-          if (!(oldIdxKeys instanceof Array)) {
+        if (Array.isArray(oldIdxKeys) || Array.isArray(newIdxKeys)) {
+          if (!Array.isArray(oldIdxKeys)) {
             if (oldIdxKeys === null) {
               oldIdxKeys = [];
             } else {
               oldIdxKeys = [oldIdxKeys];
             }
           }
-          if (!(newIdxKeys instanceof Array)) {
+          if (!Array.isArray(newIdxKeys)) {
             if (newIdxKeys === null) {
               newIdxKeys = [];
             } else {
@@ -434,7 +435,7 @@ function createCollection<
       remove(record: T) {
         let pk = pkForT(record);
         let idxKeys = idx(record);
-        if (idxKeys instanceof Array) {
+        if (Array.isArray(idxKeys)) {
           for (let idxKey of idxKeys) {
             ops.remove(idxKey, pk);
           }
@@ -517,7 +518,7 @@ function createCollection<
           //   at a time by the KV storage interface, the outer list has to be buffered upfront.
           //   But we could arguably buffer a few at a time and use `startAfter` to get more. But
           //   it's probably rare to list() on a non-unique index anyway?
-          for (let id of [...idxKv.list(options)]) {
+          for (let id of Array.from(idxKv.list(options))) {
             let child = idxKv.getChild(id.toString());
             for (let pk of child.listKeys({reverse: options.reverse})) {
               if (!seen.has(pk)) {
@@ -527,7 +528,7 @@ function createCollection<
             }
           }
         } else {
-          for (let id of [...idxKv.list(options)]) {
+          for (let id of Array.from(idxKv.list(options))) {
             let child = idxKv.getChild(id.toString());
             for (let pk of child.listKeys({reverse: options.reverse})) {
               yield collection.get(pk)!;
@@ -546,7 +547,7 @@ function createCollection<
           //   to buffer them upfront. But if we wanted to we could buffer a few at a time, delete
           //   them, then list again, etc. But it's probably rare to delete() on a non-unique index
           //   anyway?
-          for (let pk of [...child.listKeys()]) {
+          for (let pk of Array.from(child.listKeys())) {
             collection.delete(pk);
             ++count;
           }
@@ -576,7 +577,7 @@ function createCollection<
 
         let child = idxKv.getChild(id.toString());
         child.delete(pk);
-        if ([...child.list({limit: 1})].length == 0) {
+        if (Array.from(child.list({limit: 1})).length == 0) {
           idxKv.delete(idxKey);
         }
       }

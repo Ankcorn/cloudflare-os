@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "types:check": "tsc --noEmit",
     "preview": "vite preview",
     "clean": "rm -rf dist"
   },

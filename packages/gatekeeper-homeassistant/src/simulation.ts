@@ -293,7 +293,7 @@ function applyServiceToState(
 /** Sort pending actions chronologically. Action IDs are monotonically assigned by the
  * gatekeeper so they're a reliable proxy for submit order. */
 export function sortActionsChronologically(actions: HomeAssistantAction[]): HomeAssistantAction[] {
-  return [...actions].sort((a, b) => a.id - b.id);
+  return [...actions].toSorted((a, b) => a.id - b.id);
 }
 
 /** Build a map of entity_id → ordered actions that target it, so each entity's overlay can be

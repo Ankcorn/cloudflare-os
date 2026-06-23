@@ -195,7 +195,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Migrate data created prior to the minions -> gadgets rename.
     // TODO(cleanup): Eventually remove this, very few people ever used it as "minions".
-    for (let [key, value] of [...ctx.storage.kv.list({prefix: "minions:"})]) {
+    for (let [key, value] of Array.from(ctx.storage.kv.list({prefix: "minions:"}))) {
       let newKey = "gadgets:" + key.slice("minions:".length);
       ctx.storage.kv.put(newKey, value);
       ctx.storage.kv.delete(key);
@@ -273,7 +273,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Do a little migration here for old data.
     // TODO(soon): Delete this.
-    for (let gadget of [...this.storage.gadgets.list()]) {
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (!gadget.created || !gadget.lastActive) {
         if (!gadget.created) {
           gadget.created = new Date("2026-01-01");

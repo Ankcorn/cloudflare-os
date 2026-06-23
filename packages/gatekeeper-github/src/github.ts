@@ -28,7 +28,6 @@ import {
   type GitHubPullFileResponse,
   type GitHubPullRequestResponse,
   type GitHubPullRequestReviewCommentResponse,
-  type GitHubPullRequestReviewResponse,
 } from "./github-api";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
@@ -37,7 +36,6 @@ import type {
   GitHubCreatePullRequestOptions,
   GitHubDiffCommentTarget,
   GitHubDiffThread,
-  GitHubDiffThreadComment,
   GitHubDiscussionEntry,
   GitHubDraftDiffComment,
   GitHubIssue,
@@ -54,7 +52,6 @@ import type {
   GitHubPullRequestDiff,
   GitHubPullRequestDiffFile,
   GitHubPullRequestDiffHunk,
-  GitHubPullRequestDiffLine,
   GitHubPullRequestFilter,
   GitHubPullRequestMergeOptions,
   GitHubPullRequestReviewDraft,
@@ -65,7 +62,6 @@ import type {
   GitHubRepoMetadata,
   GitHubRepoRef,
   GitHubReviewDecision,
-  GitHubSubmittedDiffComment,
 } from "./types";
 import TYPES_CODE from "./types.txt";
 import {
@@ -1219,7 +1215,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     } catch (error) {
       if (error instanceof GitHubApiError && error.isAuthError) {
         await account.noteCredentialsExpired();
-        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.");
+        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.", { cause: error });
       }
       throw error;
     }
@@ -1351,7 +1347,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     } catch (error) {
       if (error instanceof GitHubApiError && error.isAuthError) {
         await account.noteCredentialsExpired();
-        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.");
+        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.", { cause: error });
       }
       throw error;
     }
@@ -1871,7 +1867,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         .map(([, value]) => value)
         .filter(record => record.state === "pending")
         .map(record => record.action)
-        .sort((a, b) => a.submittedAt - b.submittedAt);
+        .toSorted((a, b) => a.submittedAt - b.submittedAt);
     }
 
     return this.#pendingActionsCache;
@@ -2125,7 +2121,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     targetId: string,
   ): { state: GitHubIssueState; reason?: "completed" | "notPlanned" } | undefined {
     const latestStateAction = [...this.#pendingActionsForEntity(targetKind, targetId)]
-      .reverse()
+      .toReversed()
       .find((action): action is ChangeStateAction | MergePullRequestAction =>
         action.type === "changeState" || action.type === "mergePullRequest",
       );
@@ -2437,7 +2433,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const items = (await Promise.all([...ids].map(async id => this.#getIssueDetails(id))))
       .filter(predicate)
       .map(details => summarizeIssueDetails(details))
-      .sort(compare);
+      .toSorted(compare);
     return { ids, items };
   }
 
@@ -2449,7 +2445,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const items = (await Promise.all([...ids].map(async id => this.#getPullRequestDetails(id))))
       .filter(predicate)
       .map(details => summarizePullDetails(details))
-      .sort(compare);
+      .toSorted(compare);
     return { ids, items };
   }
 
@@ -2461,8 +2457,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       .filter((action): action is CreateIssueAction => action.type === "createIssue")
       .map(action => this.#buildProvisionalIssueDetails(action).then(issue => this.#overlayIssueLike(issue, "issue", action.provisionalId, true)))))
       .filter(item => issueMatchesFilter(item, filter))
-      .sort(compare);
-    const injectedItems = [...touched.items, ...provisionals].sort(compare);
+      .toSorted(compare);
+    const injectedItems = [...touched.items, ...provisionals].toSorted(compare);
 
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
@@ -2510,7 +2506,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       .filter((action): action is CreateIssueAction => action.type === "createIssue")
       .map(action => this.#buildProvisionalIssueDetails(action).then(issue => this.#overlayIssueLike(issue, "issue", action.provisionalId, true)))))
       .filter(item => issueMatchesSearch(item, query))
-      .sort(compare);
+      .toSorted(compare);
 
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
@@ -2551,8 +2547,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       .filter((action): action is CreatePullRequestAction => action.type === "createPullRequest")
       .map(action => this.#buildProvisionalPullRequestDetails(action).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
       .filter(item => pullMatchesFilter(item, filter))
-      .sort(compare);
-    const injectedItems = [...touched.items, ...provisionals].sort(compare);
+      .toSorted(compare);
+    const injectedItems = [...touched.items, ...provisionals].toSorted(compare);
 
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
@@ -2599,7 +2595,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       .filter((action): action is CreatePullRequestAction => action.type === "createPullRequest")
       .map(action => this.#buildProvisionalPullRequestDetails(action).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
       .filter(item => pullMatchesSearch(item, query))
-      .sort(compare);
+      .toSorted(compare);
 
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
@@ -3076,7 +3072,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       }
     }
 
-    const sorted = [...threads.values()].sort((a, b) => a.comments[0].createdAt.getTime() - b.comments[0].createdAt.getTime());
+    const sorted = [...threads.values()].toSorted((a, b) => a.comments[0].createdAt.getTime() - b.comments[0].createdAt.getTime());
     return new ArrayCursor(sorted, pageSize);
   }
 
@@ -3114,7 +3110,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       });
     }
 
-    return [...byThread.values()].sort((a, b) => a.comments[0].createdAt.getTime() - b.comments[0].createdAt.getTime());
+    return [...byThread.values()].toSorted((a, b) => a.comments[0].createdAt.getTime() - b.comments[0].createdAt.getTime());
   }
 
   async describe(): Promise<ResourceDescription> {

@@ -652,7 +652,7 @@ export class HomeAssistantUserImpl
     try {
       parsed = new URL(url);
     } catch (e: any) {
-      throw new Error(`Invalid Home Assistant URL "${url}": ${e?.message ?? e}`);
+      throw new Error(`Invalid Home Assistant URL "${url}": ${e?.message ?? e}`, { cause: e });
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error(`Unsupported URL scheme for Home Assistant: ${parsed.protocol}`);
@@ -759,7 +759,7 @@ class InstanceConfiguratorUI extends RpcTarget implements HomeAssistantInstanceC
     try {
       const config = await new HomeAssistantRest(creds).getConfig();
       if (config?.location_name) name = config.location_name;
-    } catch {
+    } catch (e) {
       // Ignore; fall back to default name.
     }
     return { name, baseUrl: creds.baseUrl };
@@ -1172,7 +1172,7 @@ export class HomeAssistantGatekeeperImpl
     let revertInfo: HomeAssistantRevertInfo;
     try {
       revertInfo = await this.#snapshotForRevert(action, creds);
-    } catch (e) {
+    } catch {
       // If we can't snapshot, proceed without revert.
       revertInfo = { type: "noRevert" };
     }
@@ -1381,7 +1381,7 @@ export class HomeAssistantGatekeeperImpl
     const rows = [...this.ctx.storage.kv.list<PendingActionRow>({ prefix: "pending:" })];
     return rows
       .map(([_, row]) => row.action)
-      .sort((a, b) => a.id - b.id);
+      .toSorted((a, b) => a.id - b.id);
   }
 
   // Action storage (KV layout):
@@ -2098,7 +2098,7 @@ class HomeAssistantSessionImpl extends RpcTarget implements HomeAssistantSession
       const idx = id.indexOf(".");
       if (idx > 0) set.add(id.slice(0, idx));
     }
-    const result = [...set].sort();
+    const result = [...set].toSorted();
     await this.#ctx.approvalQueue.authorizeObservation({
       title: "List Home Assistant integration domains",
       description: `Listed ${result.length} domain${result.length === 1 ? "" : "s"}.`,

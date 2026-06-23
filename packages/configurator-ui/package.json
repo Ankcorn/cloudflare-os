@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "types:check": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "devDependencies": {

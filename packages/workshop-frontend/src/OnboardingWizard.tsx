@@ -321,7 +321,7 @@ export default function OnboardingWizard({
 
   // ── derived ───────────────────────────────────────────────────────────────────
 
-  const sortedVendors = [...vendors].sort((a, b) => {
+  const sortedVendors = [...vendors].toSorted((a, b) => {
     // Connected ones first
     const aConnected = connectedVendorIds.has(a.id)
     const bConnected = connectedVendorIds.has(b.id)

@@ -4,7 +4,6 @@
 // content byte length), followed by UTF-8 JSON metadata and the gzip-compressed Yjs snapshot.
 // See docs/blueprints.md for the full format description.
 
-import * as Y from "yjs";
 import { BlueprintMetadata, BlueprintPublicInfo } from '@gadgets/workshop-shared/api';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
