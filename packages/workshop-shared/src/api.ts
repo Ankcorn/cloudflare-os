@@ -439,8 +439,8 @@ export type AiModelConfig = {
 // the model ID should be used both for `AiModelConfig.model` and `AiChatAuthorInfo.id`.
 export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
   "cloudflare": {
-    "@cf/moonshotai/kimi-k2.6": "Kimi K2.6 (Workers AI)",
-    "@cf/zai-org/glm-5.1": "GLM 5.1 (Workers AI)",
+    "@cf/moonshotai/kimi-k2.7-code": "Kimi K2.7 Code (Workers AI)",
+    "@cf/zai-org/glm-5.2": "GLM 5.2 (Workers AI)",
   },
   "anthropic": {
     "claude-opus-4-8": "Claude Opus 4.8",
