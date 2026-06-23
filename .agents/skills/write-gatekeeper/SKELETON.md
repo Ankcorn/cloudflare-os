@@ -10,7 +10,8 @@ import {
   GatekeeperUser,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
-  HookInitiator,
+  HookController,        // Remove if no hooks
+  HookInitiator,         // Remove if no hooks
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
@@ -295,11 +296,17 @@ class MyConfiguratorUI extends RpcTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Hook type — remove this section if the gatekeeper doesn't support hooks.
-// Intersect the hook interface from types.d.ts with WorkerEntrypoint so it satisfies the
-// Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
+// Hook type — remove this section (and HookController/HookInitiator imports, the `subscribe`
+// method, the `hookTsType` field, and MyHookControllerImpl) if the gatekeeper doesn't push events.
+//
+// The hook interface from types.d.ts is implemented by the Gadget as an RpcTarget. Intersect it
+// with RpcTarget so it satisfies the HookController/HookInitiator generic constraints (Hook
+// extends RpcTarget).
+//
+// Note that you can also use a plain function as a hook type, e.g. `RpcStub<() => Promise<void>>`.
+// In that case you would not need to merge the type with `RpcTarget`.
 
-type MyHook = WorkerEntrypoint & MyHookIface;
+type MyHook = RpcTarget & MyHookIface;
 
 // ---------------------------------------------------------------------------
 // GatekeeperImpl DO — per-resource instance, runs as a facet of the Overseer
@@ -310,7 +317,7 @@ type MyGatekeeperImplProps = {
 };
 
 export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
-    implements Gatekeeper<MySession, MyHook> {
+    implements Gatekeeper<MySession> {
 
   async describe(): Promise<ResourceDescription> {
     return {
@@ -330,6 +337,7 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<MySession> {
     return new MySessionImpl(
       approvalQueue.dup(),  // Always dup() before storing
+      this.ctx,
       // ... API client, props, etc.
     );
   }
@@ -351,24 +359,77 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
     // TODO: Undo the action (look up what was done from own storage)
     throw new Error("Revert not implemented");
   }
+}
 
-  async setHook(hook: Fetcher<HookInitiator<MyHook>> | null): Promise<void> {
-    // Remove the Hook type parameter from Gatekeeper<> above if hooks are not supported.
-    // If hooks are supported, store the HookInitiator Fetcher and call its startHook()
-    // method when an event arrives. startHook() returns {hook, approvalQueue} -- use the
-    // approvalQueue to register observations/actions, then call methods on the hook.
+// ---------------------------------------------------------------------------
+// HookController — remove if the gatekeeper doesn't push events.
+//
+// A WorkerEntrypoint the overseer uses to enable/disable the hook after the user approves it.
+// It is constructed with `props` carrying the specifics of that particular registration, so it
+// needs no other state. If your gatekeeper offers several kinds of hooks, give each its own
+// controller class.
+
+// Bind-time details for a single hook registration, baked into the controller's props.
+type MyHookProps = {
+  // TODO: e.g. an event kind, a filter, a sub-resource id, etc. — whatever the registration
+  // method received and the controller/event source will need later.
+  filter?: string;
+};
+
+type MyHookControllerImplProps = MyGatekeeperImplProps & MyHookProps;
+
+export class MyHookControllerImpl extends WorkerEntrypoint<Env, MyHookControllerImplProps>
+    implements HookController<MyHook> {
+  // Called when the user enables the hook. Store `initiator` somewhere it can be reached when an
+  // event arrives — typically an event-source DO. Don't store other state until now; everything
+  // else is already in `this.ctx.props`. If already enabled, replace the previous initiator.
+  async enable(initiator: Fetcher<HookInitiator<MyHook>>): Promise<void> {
+    // TODO: persist `initiator` (e.g. forward it to an event-source DO keyed by props).
+  }
+
+  // Called when the hook is disabled or deleted. Forget the stored initiator and clean up all
+  // related state. May never be called again, though the overseer may later call enable() afresh.
+  async disable(): Promise<void> {
+    // TODO: forget the stored initiator.
   }
 }
+
+// Event delivery (sketch). When the external event arrives — e.g. in the event-source DO that
+// holds the `initiator` — invoke the hook like so:
+//
+//   async onEvent(initiator: Fetcher<HookInitiator<MyHook>>, event: MyEvent) {
+//     // startHook() begins a fresh session and returns the callback (re-bound to it) plus an
+//     // ApprovalQueue. `using` disposes the result (and its stubs) at end of scope.
+//     using result = initiator.startHook();
+//
+//     // A hook event is almost always an observation. (Register actions too if invoking the
+//     // callback can cause side effects.) Pipeline through the not-yet-resolved promise.
+//     await result.approvalQueue.authorizeObservation({
+//       title: "TODO: short event summary",
+//       description: "TODO: details about the event being delivered",
+//     });
+//
+//     // Deliver the event to the Gadget's callback.
+//     await result.callback.onMyEvent(event);
+//   }
 
 // ---------------------------------------------------------------------------
 // SessionImpl — the RPC interface exposed to the Gadget
 
 class MySessionImpl extends RpcTarget implements MySession {
-  #approvalQueue: ApprovalQueue;
+  #approvalQueue: RpcStub<ApprovalQueue>;
+  #ctx: DurableObjectState<MyGatekeeperImplProps>;
 
-  constructor(approvalQueue: ApprovalQueue) {
+  constructor(
+      approvalQueue: RpcStub<ApprovalQueue>,
+      ctx: DurableObjectState<MyGatekeeperImplProps>) {
     super();
     this.#approvalQueue = approvalQueue;
+    this.#ctx = ctx;
+  }
+
+  [Symbol.dispose]() {
+    this.#approvalQueue[Symbol.dispose]();
   }
 
   // Example: observation (read). Fetch data, then authorize before returning.
@@ -397,6 +458,22 @@ class MySessionImpl extends RpcTarget implements MySession {
 
     // TODO: Update cache/simulation state so subsequent reads reflect this
   }
+
+  // Example: hook registration — remove if the gatekeeper doesn't push events.
+  // `callback` is a persistent stub the Gadget created with ctx.restore(). Construct a controller
+  // whose props capture the specifics of THIS registration (e.g. `filter`), then hand it, the
+  // callback, and a user-facing description to the overseer via bindHook(). For multiple hook
+  // kinds, pick the appropriate controller class here. Do NOT store the callback yourself — it is
+  // bound to this session and would be revoked when the session ends.
+  async subscribe(callback: RpcStub<MyHook>, filter?: string): Promise<void> {
+    let controller = this.#ctx.exports.MyHookControllerImpl({
+      props: { ...this.#ctx.props, filter },
+    });
+    await this.#approvalQueue.bindHook(controller, callback, {
+      title: "TODO: short hook title",
+      description: `TODO: what events this hook delivers${filter ? ` (filter: ${filter})` : ""}`,
+    });
+  }
 }
 ```
 
@@ -416,6 +493,8 @@ class MySessionImpl extends RpcTarget implements MySession {
   ]
 }
 ```
+
+Only Durable Object classes go in `new_sqlite_classes`. `MyHookControllerImpl` is a `WorkerEntrypoint`, so it needs no migration entry — but, like all entrypoints, it must be `export`ed from the worker's main module. If your hook uses a dedicated event-source DO to hold the `initiator`, add that DO here too.
 
 ## Creating the `types.txt` symlink
 

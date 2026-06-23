@@ -443,8 +443,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 //
 // The Gatekeeper executes as a Durable Object Facet, where it is a child of the Overseer. This
 // interface is exposed to the Overseer, not directly to the Gadget.
-export interface Gatekeeper<Session, Hook extends WorkerEntrypoint = WorkerEntrypoint>
-    extends DurableObject {
+export interface Gatekeeper<Session> extends DurableObject {
   // Get more info on the specific resource without actually granting access. This information is
   // to be presented to the user in the UI, before the user actually confirms they want to grant
   // access.
@@ -518,11 +517,6 @@ export interface Gatekeeper<Session, Hook extends WorkerEntrypoint = WorkerEntry
   // `restart` has the same meaning as for `rejectAction()`.
   revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}>;
-
-  // If the gatekeeper offers a hook, set the hook. Setting to `null` disables the hook.
-  //
-  // If the gatekeeper doesn't offer a hook, this does nothing.
-  setHook(hook: Fetcher<HookInitiator<Hook>> | null): Promise<void>;
 }
 
 // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
@@ -563,18 +557,93 @@ export interface ApprovalQueue extends RpcTarget {
   // TODO: It would be nice if we can link this with the output gate so that if the submission
   //   does not complete, any SQL writes performed just before submit() are rolled back...
   submitAction(action: number, description: ActionDescription): Promise<void>;
-}
 
-// Callback the Gatekeeper uses to invoke a hook when the corresponding event arrives, including
-// recording the actions / observations.
-export interface HookInitiator<Hook extends WorkerEntrypoint> extends WorkerEntrypoint {
-  // Indicates that the hook is about to be invoked.
+  // Notifies the overseer that the gadget (or an agent) has requested to register a persistent
+  // callback hook.
   //
-  // This returns an ApprovalQueue which the gatekeeper may use to register observations and
-  // actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
-  // observation. Some hooks may pass callbacks or interpret the return value in a way that causes
-  // side effects, which should be registered as actions.
-  startHook(): Promise<{hook: Fetcher<Hook>, approvalQueue: ApprovalQueue}>;
+  // `callback` is the stub received from the Gadget, which is intended to be called whenever some
+  // event occurs. Although `callback` is always a persistent stub (see below), the gatekeeper
+  // should NOT try to store it on its own; it should always pass it to `bindHook` for the overseer
+  // to store. Why? Because the callback needs to be bound to a particular gatekeeper *session*.
+  // At the time you are calling `bindHook()`, the callback is tied to the session that is tied
+  // to the `ApprovalQueue`. But that session will end at some point, after which the callback stub
+  // you received is revoked. When you call HookInitiator.startHook() later on, that actually
+  // initiates a *new* session (returning a new `ApprovalQueue`), and the callback returned then
+  // is tied to that session instead.
+  //
+  // `controller` is an object implemented by the gatekeeper which allows the overseer to enable
+  // or disable the hook.
+  //
+  // The hook is not immediately enabled, as the user may need to approve it first. If and when
+  // the user has approved, the overseer will call controller.enable() to request that the the
+  // gatekeeper begin delivering hook events. If the user never approves, no call will ever be
+  // made. Therefore, the gatekeeper should avoid storing any state until the hook is enabled.
+  // Typically, the `HookController` implementation should capture all information it needs to
+  // register the hook into `props` so that it doesn't need to store anything elsewhere.
+  //
+  // In a typical implementation, the gatekeeper may expose an API to the gadget like:
+  //
+  //     onSomeEvent(callback: RpcStub<SomeInterface>)
+  //
+  // Where `SomeInterface` can be either an RpcTarget-derived interface, or a function type, but
+  // either way the stub must be a persistent stub (see below). The gadget could call `onSomeEvent`
+  // directly, but more commonly an agent will call it in a one-off `executeCode` tool call, since
+  // this is usually one-time setup, not something that happens programmatically. The
+  // implementation of `onSomeEvent` constructs a `HookController` implementation whose `props`
+  // specify the details of the event to be hooked, then calls `bindHook()` to register the hook.
+  // When the user approves, the overseer calls `controller.enable()`, which takes the provided
+  // `HookInitiator` object and stores it somewhere where it can be invoked whenever "SomeEvent"
+  // occurs. When the event occurs, first the gatekeeper calls `hookInitiator.startHook()` to
+  // notify the overseer that a hook is incoming. The overseer returns back the original `callback`
+  // stub along with an `ApprovalQueue`. Next the gatekeeper calls `authorizeObservation()` on the
+  // `ApprovalQueue` -- since a hook invocation is almost always an observation of some sort.
+  // Finally, it invokes the `callback` object to deliver the event to the gadget.
+  //
+  // Persistent stubs are (as of this writing) a relatively new feature of the Workers Runtime.
+  // A worker can construct an `RpcStub` that is "persistent", meaning it can be stored into
+  // Durable Object storage, as well as be used as part of the `props` for a WorkerEntrypoint. To
+  // create such a stub, the worker:
+  // 1. Implements a `[restore](params)` method, then
+  // 2. Calls `ctx.restore(params)` to invoke that method.
+  //
+  //     import {restore, RpcTarget, DurableObject} from "cloudflare:workers";
+  //
+  //     class Gadget extends DurableObject {
+  //       [restore]({type: string, greeting: string}) {
+  //         switch (type) {
+  //           case "greeter":
+  //             return new Greeter(greeting);
+  //           default:
+  //             throw new Error("unknown restore params");
+  //         }
+  //       }
+  //
+  //       async registerSomeHook() {
+  //         // Create a persistent stub.
+  //         let callback = await this.ctx.restore({type: "greeter", greeting: "Hello"});
+  //
+  //         // Register it against a hook offered by some gatekeeper API.
+  //         await this.env.SOME_GATEKEEPER.onSomeEventHook(callback);
+  //       }
+  //     }
+  //
+  //     // Some sort of RpcTarget implementation (just an example).
+  //     class Greeter extends RpcTarget {
+  //       constructor(greeting) {
+  //         super();
+  //         this.greeting = greeting;
+  //       }
+  //       greet(name) {
+  //         return `${this.greeting}, ${name}!`;
+  //       }
+  //     }
+  //
+  // The idea here is that `ctx.restore(params)` creates a *persistent* stub which can be
+  // re-created any time it is needed by calling the `[restore]()` method with the same params
+  // again. The params themselves also have to be persistable.
+  bindHook<Hook extends RpcTarget>(
+        controller: Fetcher<HookController<Hook>>, callback: RpcStub<Hook>,
+        description: HookDescription): Promise<void>;
 }
 
 export type ObservationDescription = {
@@ -658,4 +727,41 @@ export type ActionDescription = {
   // - Does this action modify existing content or only create new content? The former is somewhat
   //   riskier since it could damage existing information whereas posting new content is at worst
   //   an annoyance.
+}
+
+// Describes a registered hook, for display purposes (e.g. so the user can see what hooks are
+// registered and choose whether to enable / disable a hook).
+export type HookDescription = {
+  title: string;
+  description: string;
+}
+
+// Object passed to `ApprovalQueue.bindHook()`, providing the overseer with callbacks to enable
+// or disable a hook.
+export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint {
+  // Called to enable this hook. When a hook event is to be delivered, initiator.startHook() must
+  // be called first, before actually invoking the hook.
+  //
+  // If the hook was already enabled, the previously-registered `initiator` should be replaced.
+  enable(initiator: Fetcher<HookInitiator<Hook>>): Promise<void>;
+
+  // Unregister the hook, so that future events stop being delivered. The gatekeeper should forget
+  // the `initiator` previously registered by `enable()`.
+  //
+  // This must permanently clean up all state related to the hook, as it may never be called again.
+  // However, the overseer can also call enable() again in the future.
+  disable(): Promise<void>;
+}
+
+// Object passed to HookController.enable(), used to inform the overseer when a hook event occurs.
+// A gatekeeper MUST use a HookInitiator to obtain a fresh version of the callback stub any time
+// it wants to deliver an event. It must not store the callback in its own storage.
+export interface HookInitiator<Hook extends RpcTarget> extends WorkerEntrypoint {
+  // Indicates that the hook is about to be invoked.
+  //
+  // This returns an ApprovalQueue which the gatekeeper may use to register observations and
+  // actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
+  // observation. Some hooks may even pass callbacks or interpret the return value in a way that
+  // causes side effects, which should be registered as actions.
+  startHook(): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
 }

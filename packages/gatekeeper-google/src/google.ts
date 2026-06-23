@@ -791,7 +791,7 @@ type GmailAction =
 
 type GmailSessionContext = {
   gmailApi: GmailApi;
-  approvalQueue: ApprovalQueue;
+  approvalQueue: RpcStub<ApprovalQueue>;
   pendingActions: PendingActionStore<GmailAction>;
   // SESSION PATH: the raw search query passed to the Gmail API for listThreads/search.
   // This handles historical + new messages. See GmailGatekeeperImplProps.searchQuery.
@@ -1491,10 +1491,6 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // Gmail hooks will be implemented separately.
-  }
 }
 
 // =======================================================================================
@@ -1828,17 +1824,13 @@ export class GoogleDocGatekeeperImpl
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // No hooks for Google Docs.
-  }
 }
 
 @validateRpc()
 class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   #docsApi: GoogleDocsApi;
   #documentId: string;
-  #approvalQueue: ApprovalQueue;
+  #approvalQueue: RpcStub<ApprovalQueue>;
   #pendingActions: PendingActionStore<GoogleDocAction>;
   #storage: DurableObjectStorage;
   #simulationCache: GoogleDocSimulationCacheHolder;
@@ -1846,7 +1838,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
   constructor(
     docsApi: GoogleDocsApi,
     documentId: string,
-    approvalQueue: ApprovalQueue,
+    approvalQueue: RpcStub<ApprovalQueue>,
     pendingActions: PendingActionStore<GoogleDocAction>,
     storage: DurableObjectStorage,
     simulationCache: GoogleDocSimulationCacheHolder,
@@ -2088,23 +2080,19 @@ export class BigQueryGatekeeperImpl
   revertAction(_action: number): Promise<void> {
     throw new Error("BigQuery gatekeeper has no writable actions to revert");
   }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // BigQuery doesn't push events.
-  }
 }
 
 @validateRpc()
 class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
   #api: BigQueryApi;
-  #approvalQueue: ApprovalQueue;
+  #approvalQueue: RpcStub<ApprovalQueue>;
   #scopedProjectId?: string;
   #scopedDatasetId?: string;
   #scopedTableId?: string;
 
   constructor(
     api: BigQueryApi,
-    approvalQueue: ApprovalQueue,
+    approvalQueue: RpcStub<ApprovalQueue>,
     scopedProjectId?: string,
     scopedDatasetId?: string,
     scopedTableId?: string,

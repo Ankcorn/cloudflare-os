@@ -9,7 +9,7 @@ A Gatekeeper is a Cloudflare Worker that mediates all access between a Gadget an
 
 - **Vendor** (`GatekeeperVendor`, a `WorkerEntrypoint`) — top-level entry for the service. One per service.
 - **User** (`GatekeeperUser`, a `WorkerEntrypoint` with `ctx.props`) — a human user's authenticated connection.
-- **Instance** (`Gatekeeper<Session, Hook>`, a DO facet of the Overseer) — per-resource, per-Gadget binding that provides the Session API.
+- **Instance** (`Gatekeeper<Session>`, a DO facet of the Overseer) — per-resource, per-Gadget binding that provides the Session API.
 
 Read `packages/workshop-shared/src/gatekeeper.ts` for the canonical interfaces and detailed JSDoc.
 
@@ -40,7 +40,7 @@ Study the service's API docs. Identify:
 
 ### Step 2: Design the Session types
 
-Create `src/types.d.ts` defining the Session interface (and Hook interface if the service pushes events).
+Create `src/types.d.ts` defining the Session interface (and Hook interface if the service pushes events — see [Hooks](#hooks-push-notifications)).
 
 Before designing, read `packages/workshop-shared/node_modules/capnweb/README.md` to understand what Cap'n Web RPC supports — this determines what types and patterns are expressible in the Session interface.
 
@@ -174,6 +174,32 @@ Choose based on the service's data model and the complexity of simulating each a
 Keep in mind that the agent calling the API (or the agent writing a gadget to call it) is generally not aware that actions do not take place immediately. If the simulation is correct, the agent doesn't need to be aware. If the simulation has gaps, you may want to mention it in your API's doc comments, so that the calling agent knows to work around them — but ideally there are no gaps and the calling agent does not need to think about it.
 
 For concrete examples, see the Google gatekeeper's Google Docs simulation/cache handling and BigQuery dry-run scope enforcement.
+
+## Hooks (push notifications)
+
+Some services can push events to the Gadget (inbound email, webhooks, chat messages, etc.). A gatekeeper exposes this as a **hook**: the Gadget registers a callback, and the gatekeeper later invokes it when an event arrives. Hooks are persistent — they survive across sessions and server restarts — and are subject to the same observation/action approval model as everything else.
+
+`gatekeeper-email` is the canonical reference implementation. Read it alongside the `HookController`, `HookInitiator`, and `ApprovalQueue.bindHook()` JSDoc in `gatekeeper.ts`.
+
+### The pieces
+
+- **Hook interface** (in `types.d.ts`): the methods the Gadget implements to receive events, e.g. `EmailHook.receiveEmail(email)`. It is implemented by the Gadget as an **`RpcTarget`** (or a plain function), *not* a `WorkerEntrypoint`. Reference it from `describe()` via `hookTsType`.
+- **Session method**: a method like `subscribe(callback)` that the Gadget (or, more commonly, an agent in a one-off `executeCode` call) uses to register interest. The `callback` is a **persistent stub** (created by the Gadget with `ctx.restore()`), so it can be stored and re-invoked long after the session ends.
+- **`HookController`** (a `WorkerEntrypoint` you implement): lets the overseer `enable()` / `disable()` the hook. All the state it needs must live in its `props`, so it is constructed via `this.ctx.exports.MyHookControllerImpl({props})` **at bind time**, immediately before calling `bindHook()` — see below.
+- **`HookInitiator`** (provided to you by the overseer): you call `startHook()` on it when an event arrives.
+
+### Lifecycle
+
+1. **Register.** The Gadget calls your Session method (e.g. `subscribe(callback, filter)`). Inside it, construct a `HookController` whose `props` capture the specifics of *this* registration, then call `approvalQueue.bindHook(controller, callback, description)`. The overseer stores the callback and records the hook (initially **disabled**). Do **not** store the callback yourself — it is bound to the current session and would be revoked when the session ends.
+2. **Enable.** When the user approves the hook in the Workshop UI, the overseer calls `controller.enable(initiator)`. Store the `initiator` Fetcher somewhere it can be reached when events arrive (e.g. an event-source DO). Avoid storing any other state until enabled; everything else should already be in the controller's `props`.
+3. **Deliver.** When the event occurs, call `initiator.startHook()`. This returns `{callback, approvalQueue}` bound to a fresh session. Call `authorizeObservation()` (a hook event is almost always an observation; register actions too if the callback's return value triggers side effects), then invoke the `callback` to deliver the event to the Gadget.
+4. **Disable / delete.** The overseer calls `controller.disable()`. Forget the stored `initiator` and clean up all related state — `disable()` may never be called again, though the overseer may later call `enable()` afresh.
+
+Because the callback is a persistent stub tied to a session, the gatekeeper never stores it directly; the overseer hands it back (re-bound to a new session) each time you call `startHook()`. See the SKELETON for the full code shape.
+
+### Documentation
+
+When defining a session interface with hooks, it's important to include comments that clearly state when a method expects to be passed a *persistent* stub created with `ctx.restore()`, as opposed to a regular RpcStub. The caller needs to do extra work to make sure the stub they provide you is persistent.
 
 ## Tips
 

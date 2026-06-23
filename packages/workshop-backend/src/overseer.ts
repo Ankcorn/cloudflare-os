@@ -1,8 +1,8 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource } from "@gadgets/workshop-shared/gatekeeper";
-import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
@@ -19,7 +19,7 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 
 let CODE_MODE_HARNESS =
-`import { WorkerEntrypoint } from "cloudflare:workers";
+`import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
 import agent from "agent.js";
 
 export default class extends WorkerEntrypoint {
@@ -36,6 +36,40 @@ export default class extends WorkerEntrypoint {
       }
     }
     await agent(self, env, this.ctx);
+  }
+
+  [restore](params) {
+    // TODO: Add runtime features that allow us to actually invoke the gadget's [restore]()
+    // method to return the real target stub. For now, since this is always used to construct
+    // stubs that are meant for hooks, and therefore we generally don't expect the stub to be
+    // called before being passed to bindHook(), we return a placeholder that throws if called.
+    // Once passed to bindHook(), stored, and then read back from storage, the stub will have been
+    // replaced with the real thing.
+    return new RpcStub(new PlaceholderRpcTarget());
+  }
+}
+
+class PlaceholderRpcTarget extends RpcTarget {
+  constructor() {
+    super();
+
+    return new Proxy(this, {
+      get(target, prop, receiver) {
+        switch (prop) {
+          case "then":
+          case "dup":
+            return undefined;
+          default:
+            return () => {
+              throw new Error(
+                  "Tried to invoke a placeholder stub for a persistent hook callback. This " +
+                  "stub is only intended to be stored; once loaded back from storage it will " +
+                  "work properly. This is a temporary hack until the runtime can be extended " +
+                  "with better APIs for sealing/unsealing.");
+            };
+        }
+      },
+    });
   }
 }
 `;
@@ -246,7 +280,32 @@ type ActionRecord = {
 } | {
   type: "observation";
   description: ObservationDescription;
+} | {
+  type: "bindHook";
+
+  // Denormalized so that the log is coherent even after the hook itself has been deleted.
+  description: HookDescription;
+
+  // Binding a hook is treated as an action in the log for the purpose of logging that the hook
+  // was created, but hooks are also independently long-lived entities that live in their own
+  // table. `hookId` is a reference into the bound hooks table.
+  //
+  // This becomes `undefined` if the hook was later deleted.
+  hookId?: number;
+
+  // Denormalized for display purposes.
+  enabled: boolean;
 });
+
+type BoundHookRecord = {
+  id: number;
+  actionId: number;
+  gatekeeperId: number;
+  controller: Fetcher<HookController<RpcTarget>>;
+  callback: NativeRpcStub<RpcTarget>;
+  description: HookDescription;
+  enabled: boolean;
+};
 
 type ChatDraftUpdateRecord = {
   chatId: number;
@@ -306,29 +365,46 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // - ActionRecord includes `appliedAt` only when type == "action". ActionLogEntry could match.
   // - ActionRecord includes `action`, which should NOT be provided to the client.
   // We could make the two match more -- just `action` needs to be different.
-  if (record.type === "observation") {
-    return {
-      id: record.id,
-      bindingName: record.bindingName,
-      resourceTitle: record.resourceTitle || "(title unavailable)",
-      resourceUrl: record.resourceUrl,
-      createdAt: record.createdAt,
-      state: record.state,
-      type: "observation",
-      description: record.description,
-    };
-  } else {
-    return {
-      id: record.id,
-      bindingName: record.bindingName,
-      resourceTitle: record.resourceTitle || "(title unavailable)",
-      resourceUrl: record.resourceUrl,
-      createdAt: record.createdAt,
-      appliedAt: record.appliedAt,
-      state: record.state,
-      type: "action",
-      description: record.description,
-    };
+  switch (record.type) {
+    case "observation":
+      return {
+        id: record.id,
+        bindingName: record.bindingName,
+        resourceTitle: record.resourceTitle || "(title unavailable)",
+        resourceUrl: record.resourceUrl,
+        createdAt: record.createdAt,
+        state: record.state,
+        type: "observation",
+        description: record.description,
+      };
+    case "action":
+      return {
+        id: record.id,
+        bindingName: record.bindingName,
+        resourceTitle: record.resourceTitle || "(title unavailable)",
+        resourceUrl: record.resourceUrl,
+        createdAt: record.createdAt,
+        appliedAt: record.appliedAt,
+        state: record.state,
+        type: "action",
+        description: record.description,
+      };
+    case "bindHook":
+      return {
+        id: record.id,
+        bindingName: record.bindingName,
+        resourceTitle: record.resourceTitle || "(title unavailable)",
+        resourceUrl: record.resourceUrl,
+        createdAt: record.createdAt,
+        state: record.state,
+        type: "bindHook",
+        hookId: record.hookId,
+        description: record.description,
+        enabled: record.enabled,
+      };
+    default:
+      record satisfies never;
+      throw new TypeError(`Invalid ActionRecord type: ${(record as ActionRecord).type}`);
   }
 }
 
@@ -346,6 +422,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       nextGatekeeperId: 0,
       nextActionId: 0,
       nextChatId: 0,
+      nextHookId: 0,
 
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
@@ -382,6 +459,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
       actions: collection<ActionRecord>()({
         primaryKey: "id"
+      }),
+
+      boundHooks: collection<BoundHookRecord>()({
+        primaryKey: "id",
       }),
 
       chatMeta: collection<AiChatMetadata>()({
@@ -1019,6 +1100,9 @@ class OverseerImpl implements AgentHooks {
           // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
           //   This should soon no longer require "experimental".
           "experimental",
+
+          // Make ctx.restore() available.
+          "allow_irrevocable_stub_storage",
         ],
         allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
         mainModule: "server.js",
@@ -1036,10 +1120,7 @@ class OverseerImpl implements AgentHooks {
   //
   // If `chatId` is specified, load the gadget including changes proposed in the given chat
   // thread.
-  //
-  // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
-  // look like an RpcTarget instead.
-  async getGadgetFacet(chatId?: number): Promise<RpcStub<any>> {
+  getGadgetFacetFetcher(chatId?: number): Fetcher<DurableObject> {
     if (chatId !== undefined) {
       // Check if the requested chat has proposed changes. If not, then we don't want to load the
       // chat-specific facet, we just want to load the main-branch facet.
@@ -1057,7 +1138,7 @@ class OverseerImpl implements AgentHooks {
       this.#runningChatId = chatId;
     }
 
-    let facet = this.ctx.facets.get<DurableObject>("gadget", () => {
+    return this.ctx.facets.get<DurableObject>("gadget", () => {
       let stub = this.loadGadgetWorker(chatId);
 
       return {
@@ -1065,6 +1146,14 @@ class OverseerImpl implements AgentHooks {
         id: "gadget"
       };
     });
+  }
+
+  // Get an RpcStub for the gadget facet, which can be returned to the client.
+  //
+  // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
+  // look like an RpcTarget instead.
+  async getGadgetFacet(chatId?: number): Promise<RpcStub<any>> {
+    let facet = this.getGadgetFacetFetcher(chatId);
 
     let self = this;
 
@@ -1439,6 +1528,51 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
+  async bindHook<Hook extends RpcTarget>(
+        gatekeeperId: number, controller: Fetcher<HookController<Hook>>,
+        callback: NativeRpcStub<Hook>, description: HookDescription, caller: GatekeeperCaller)
+        : Promise<void> {
+    let hookId = this.storage.nextHookId.get();
+    this.storage.nextHookId.put(hookId + 1);
+
+    let actionId = this.storage.nextActionId.get();
+    this.storage.nextActionId.put(actionId + 1);
+
+    // Hooks start out disabled, until the user enables them. (But we could consider changing
+    // that.)
+    let enabled = false;
+
+    this.storage.boundHooks.put({
+      id: hookId,
+      actionId,
+      gatekeeperId,
+      controller: controller as unknown as Fetcher<HookController<RpcTarget>>,
+      callback: callback as unknown as NativeRpcStub<RpcTarget>,
+      description,
+      enabled,
+    });
+
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+
+    let record: ActionRecord = {
+      id: actionId,
+      gatekeeperId,
+      caller,
+      bindingName: gatekeeper?.bindingName,
+      resourceTitle: gatekeeper?.resourceTitle,
+      resourceUrl: gatekeeper?.resourceUrl,
+      createdAt: new Date(),
+      state: "approved",
+      type: "bindHook",
+      hookId,
+      description,
+      enabled,
+    };
+
+    this.storage.actions.put(record);
+    this.#associateAction(caller, actionId);
+  }
+
   // What is the last active time that we know the user DO has been made aware of?
   #lastActiveTimeKnownToUserDo?: Date;
   // What is the last active time we've seen locally?
@@ -1681,51 +1815,6 @@ class OverseerImpl implements AgentHooks {
 
     // Creating a named gatekeeper affects the code.
     this.bumpVersion();
-  }
-
-  async setBindingHook(bindingNameOrId: string | number, newHook: string | null): Promise<void> {
-    let id: number;
-    let gatekeeperRecord: GatekeeperRecord;
-    if (typeof bindingNameOrId === "string") {
-      let rec = this.storage.gatekeepers.byBindingName.get(bindingNameOrId);
-      if (!rec) {
-        throw new Error(`No such binding: ${bindingNameOrId}`);
-      }
-      id = rec.id;
-      gatekeeperRecord = rec;
-    } else {
-      id = bindingNameOrId;
-      let rec = this.storage.gatekeepers.get(id);
-      if (!rec) {
-        throw new Error(`No such binding: ${bindingNameOrId}`);
-      }
-      gatekeeperRecord = rec;
-    }
-
-    gatekeeperRecord.hook = newHook || undefined;
-    this.storage.gatekeepers.put(gatekeeperRecord);
-
-    // Make sure the gatekeeper is configured to call us back.
-    try {
-      let gatekeeper = this.getGatekeeperFacet(gatekeeperRecord.id);
-      let props: GatekeeperHookLoopbackProps = {
-        overseerId: this.ctx.id.toString(),
-        gatekeeperId: gatekeeperRecord.id,
-      }
-      if (newHook) {
-        await gatekeeper.setHook(this.ctx.exports.GatekeeperHookLoopback({props}));
-      } else {
-        await gatekeeper.setHook(null);
-      }
-    } catch (err) {
-      // Something went wrong, clear the hook mapping in storage to be safe.
-      let gatekeeperRecord = this.storage.gatekeepers.get(id);
-      if (gatekeeperRecord) {
-        delete gatekeeperRecord.hook;
-        this.storage.gatekeepers.put(gatekeeperRecord);
-      }
-      throw err;
-    }
   }
 
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
@@ -2530,37 +2619,52 @@ class OverseerImpl implements AgentHooks {
     });
 
     try {
-      let worker = this.env.LOADER.get(null, () => {
-        let tailProps = {
-          executionId,
-          overseerId: this.ctx.id.toString(),
-        };
+      let tailProps = {
+        executionId,
+        overseerId: this.ctx.id.toString(),
+      };
 
-        return {
-          compatibilityDate: "2026-02-01",
-          compatibilityFlags: [
-            // disallow_importable_env also disallows importable ctx.exports, to prevent the code
-            // from calling itself in a loop.
-            "disallow_importable_env",
+      let workerDef: WorkerLoaderWorkerCode = {
+        compatibilityDate: "2026-02-01",
+        compatibilityFlags: [
+          // disallow_importable_env also disallows importable ctx.exports, to prevent the code
+          // from calling itself in a loop.
+          "disallow_importable_env",
 
-            // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
-            //   This should soon no longer require "experimental".
-            "experimental",
-          ],
-          allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
-          mainModule: "harness.js",
-          modules: {
-            "harness.js": CODE_MODE_HARNESS,
-            "agent.js": code,
-          },
-          env: this.getEnvForLoader({from: "agent", chatId}, context.spawnerConfig?.env,
-                                    capsules, chatId),
-          tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
-          globalOutbound: null,
-        };
-      });
+          // TEMPORARY: enable "experimental" to allow stubs to be passed over RPC / props.
+          //   This should soon no longer require "experimental".
+          "experimental",
 
-      let entrypoint = worker.getEntrypoint<CodeModeEntrypoint>(undefined);
+          // Make ctx.restore() available.
+          "allow_irrevocable_stub_storage",
+        ],
+        allowExperimental: true,  // TODO: MUST REMOVE BEFORE PUBLIC LAUNCH
+        mainModule: "harness.js",
+        modules: {
+          "harness.js": CODE_MODE_HARNESS,
+          "agent.js": code,
+        },
+        env: this.getEnvForLoader({from: "agent", chatId}, context.spawnerConfig?.env,
+                                  capsules, chatId),
+        tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
+        globalOutbound: null,
+      };
+
+      // Wacky hack: Load the code mode dynamic worker through `ctx.restore()`, so that it gets
+      // imbued with a self-token encoding its restore params as `{ type: "gadget", codeId }`.
+      // However, as soon as we remove `codeId` from the table, these params will redirect to
+      // point at the gadget instead. Hence, ctx.restore() inside the code mode worker will
+      // actually create RpcStubs that point at the gadget's `[restore]()` method. Whoa!
+      let codeId = crypto.randomUUID();
+      let entrypoint: Fetcher<CodeModeEntrypoint>;
+      try {
+        this.#codeIdMap.set(codeId, workerDef);
+        let restoreParams: OverseerRestoreParams = { type: "gadget", codeId };
+        entrypoint = await this.ctx.restore(restoreParams);
+      } finally {
+        this.#codeIdMap.delete(codeId);
+      }
+
       // First check the code actually starts up. Treat startup errors as total failures.
       await entrypoint.verify();
 
@@ -2841,7 +2945,39 @@ class OverseerImpl implements AgentHooks {
     }
     return this.#sharingManager;
   }
+
+  #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
+
+  restore(params: OverseerRestoreParams): Fetcher<DurableObject> | Fetcher<CodeModeEntrypoint> {
+    if (params.type !== "gadget") {
+      throw new TypeError("Unknown restore params type: " + params.type);
+    }
+
+    if (params.codeId) {
+      let code = this.#codeIdMap.get(params.codeId);
+      if (code) {
+        return this.env.LOADER.load(code).getEntrypoint<CodeModeEntrypoint>();
+      }
+    }
+
+    return this.getGadgetFacetFetcher();
+  }
 }
+
+type OverseerRestoreParams = {
+  // This is a stub pointing at the gadget. [restore]() will return the facet stub.
+  type: "gadget";
+
+  // A hack: If present, and if the executeCode injection table currently contains this ID, then
+  // instead of returning the gadget stub, [restore]() loads a dynamic worker.
+  //
+  // This is a super-tricky hack: When an executeCode tool call runs, we load the dynamic worker
+  // by putting the code we want into the code table under `codeId`, then calling ctx.restore()
+  // with `codeId`, then clearing the ID from the code table. This gets us a stub pointing at the
+  // code mode dynamic worker, but if that worker itself invokes ctx.restore(), it will actually
+  // have the effect of creating an RPC stub that restores from the gadget's [restore]() method.
+  codeId?: string;
+};
 
 export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   private impl: OverseerImpl;
@@ -3017,8 +3153,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  createHookApprovalQueue(gatekeeperId: number): ApprovalQueueImpl {
-    return new ApprovalQueueImpl(this.impl, gatekeeperId, {from: "hook"});
+  startHook(hookId: number): {callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue} {
+    let record = this.impl.storage.boundHooks.get(hookId);
+    if (!record) {
+      throw new Error("Hook has been deleted.");
+    }
+
+    return {
+      callback: record.callback,
+      approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, {from: "hook"}),
+    };
   }
 
   async deliverGadgetLogs(chatId: number | null, logs: ConsoleLogEvent[]) {
@@ -3115,6 +3259,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // TODO: Flag as needing user attention.
     }
   }
+
+  [restore](params: OverseerRestoreParams): any {
+    return this.impl.restore(params);
+  }
 }
 
 type GatekeeperCaller = {
@@ -3171,62 +3319,26 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
 
 type GatekeeperHookLoopbackProps = {
   overseerId: string;
-  gatekeeperId: number;
+  hookId: number;
 };
 
 // When a gatekeeper's hook is connected, it receives a Fetcher to this class, which implements
 // the HookInitiator interface. When the gatekeeper wants to invoke the hook, it calls
-// startHook(), which returns both the actual hook Fetcher (a GatekeeperHookProxy) and an
-// ApprovalQueue for logging observations and actions. This is needed because direct stubs to
-// entrypoints of a dynamic worker cannot be persisted (since the system doesn't know how to start
-// the dynamic worker back up again without the overseer's help).
+// startHook(), which returns both the actual hook RpcStub and an ApprovalQueue for logging
+// observations and actions.
 export class GatekeeperHookLoopback
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
-    implements HookInitiator<WorkerEntrypoint> {
-  async startHook() {
+    implements HookInitiator<RpcTarget> {
+  startHook(): Promise<
+      {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
     let ns = this.ctx.exports.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
     // Get an ApprovalQueue for this hook invocation from the overseer.
-    let approvalQueue = await overseer.createHookApprovalQueue(this.ctx.props.gatekeeperId);
-
-    // Create a serializable Fetcher that proxies to the gadget's hook entrypoint.
-    let hook = this.ctx.exports.GatekeeperHookProxy({props: this.ctx.props});
-
-    return {hook, approvalQueue};
+    // @ts-ignore seems the RPC types aren't working here
+    return overseer.startHook(this.ctx.props.hookId);
   }
-}
-
-// Transparent proxy that wraps the gadget's hook entrypoint into a serializable Fetcher. This is
-// needed because the gadget's dynamic worker entrypoints produce non-serializable Fetchers that
-// cannot travel over RPC. GatekeeperHookLoopback.startHook() returns an instance of this class
-// as the hook Fetcher.
-export class GatekeeperHookProxy
-    extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps> {
-  constructor(ctx: ExecutionContext<GatekeeperHookLoopbackProps>, env: Cloudflare.Env) {
-    super(ctx, env);
-
-    let ns = ctx.exports.OverseerDurableObject;
-    let stub: DurableObjectStub<OverseerDurableObject> =
-        ns.get(ns.idFromString(ctx.props.overseerId));
-    let hook = stub.startGatekeeperHook(this.ctx.props.gatekeeperId);
-
-    return new Proxy<GatekeeperHookProxy>(<any>hook, {
-      get(target, prop, receiver) {
-        // Note: We need `target` to be used as the receiver. If we use `receiver` as the receiver,
-        //   we'll get an illegal invocation, as `receiver` points to our Proxy.
-        return Reflect.get(target, prop, target);
-      },
-      getPrototypeOf(target) {
-        return WorkerEntrypoint.prototype;
-      },
-    });
-  }
-
-  // We need to declare a method otherwise the validator won't even report this class as existing
-  // and so the loopback binding won't be created.
-  dummyMethodToWorkAroundValidatorBug() {}
 }
 
 type AgentSelfLoopbackProps = {
@@ -3563,6 +3675,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.destroyAllLiveChats();
     // TODO: Revoke user sessions.
 
+    // Disable all enabled hooks so that the gatekeepers stop delivering events to this gadget.
+    // We do this before deleting storage so that we still have access to the hook controllers.
+    // TODO: If any disablement fails, deletion will be blocked. We could ignore failures, but that
+    //   would leave gatekeepers pointing at gadgets that don't exist anymore, which is also bad.
+    //   What do we really want here?
+    for (let record of Array.from(this.impl.storage.boundHooks.list())) {
+      if (record.enabled) {
+        await this.disableHook(record.id);
+      }
+    }
+
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
@@ -3816,6 +3939,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`No such action: ${id}`);
     }
 
+    if (action.type === "bindHook") {
+      throw new Error("Hooks should be enabled/disabled, not approved/rejected.");
+    }
     if (action.state !== "pending") {
       throw new Error(`Action is not pending: ${id}`);
     }
@@ -3830,6 +3956,82 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     action.state = "approved";
     action.appliedAt = new Date();
     this.impl.storage.actions.put(action);
+  }
+
+  async listHooks(): Promise<BoundHookInfo[]> {
+    let result: BoundHookInfo[] = [];
+    for (let record of this.impl.storage.boundHooks.list()) {
+      let gatekeeper = this.impl.storage.gatekeepers.get(record.gatekeeperId);
+      result.push({
+        id: record.id,
+        bindingName: gatekeeper?.bindingName,
+        resourceTitle: gatekeeper?.resourceTitle,
+        resourceUrl: gatekeeper?.resourceUrl,
+        description: record.description,
+        enabled: record.enabled,
+      });
+    }
+
+    return result;
+  }
+
+  async enableHook(id: number): Promise<void> {
+    let record = this.impl.storage.boundHooks.get(id);
+    if (!record) throw new Error("Invalid hook ID.");
+
+    if (!record.enabled) {
+      let props: GatekeeperHookLoopbackProps = {
+        overseerId: this.impl.ctx.id.toString(),
+        hookId: id,
+      }
+
+      await record.controller.enable(
+          this.impl.ctx.exports.GatekeeperHookLoopback({props}) as unknown as
+              Fetcher<HookInitiator<RpcTarget>>);
+
+      record.enabled = true;
+      this.impl.storage.boundHooks.put(record);
+
+      let actionRecord = this.impl.storage.actions.get(record.actionId);
+      if (actionRecord?.type === "bindHook") {
+        actionRecord.enabled = true;
+        this.impl.storage.actions.put(actionRecord);
+      }
+    }
+  }
+
+  async disableHook(id: number): Promise<void> {
+    let record = this.impl.storage.boundHooks.get(id);
+    if (!record) throw new Error("Invalid hook ID.");
+
+    if (record.enabled) {
+      await record.controller.disable();
+
+      record.enabled = false;
+      this.impl.storage.boundHooks.put(record);
+
+      let actionRecord = this.impl.storage.actions.get(record.actionId);
+      if (actionRecord?.type === "bindHook") {
+        actionRecord.enabled = false;
+        this.impl.storage.actions.put(actionRecord);
+      }
+    }
+  }
+
+  async deleteHook(id: number): Promise<void> {
+    let record = this.impl.storage.boundHooks.get(id);
+    if (!record) return;
+    if (record.enabled) {
+      await record.controller.disable();
+    }
+    this.impl.storage.boundHooks.delete(record.id);
+
+    let actionRecord = this.impl.storage.actions.get(record.actionId);
+    if (actionRecord?.type === "bindHook") {
+      actionRecord.enabled = false;
+      delete actionRecord.hookId;
+      this.impl.storage.actions.put(actionRecord);
+    }
   }
 
   async rejectAction(id: number): Promise<void> {
@@ -4909,6 +5111,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listActions(): Promise<ActionLogEntry[]> { this.#deny(); }
   async approveAction(_id: number): Promise<void> { this.#deny(); }
   async rejectAction(_id: number): Promise<void> { this.#deny(); }
+  async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
+  async enableHook(id: number): Promise<void> { this.#deny(); }
+  async disableHook(id: number): Promise<void> { this.#deny(); }
+  async deleteHook(id: number): Promise<void> { this.#deny(); }
   async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
   async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
   async subscribeToActions(
@@ -5054,14 +5260,6 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
   }
 
-  async getHook(): Promise<string | null | undefined> {
-    return this.impl.storage.gatekeepers.get(this.id)!.hook;
-  }
-
-  async setHook(exportName: string | null): Promise<void> {
-    await this.impl.setBindingHook(this.id, exportName);
-  }
-
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {
     let record = this.impl.storage.gatekeepers.get(this.id);
     if (!record) throw new Error("No such gatekeeper.");
@@ -5112,6 +5310,12 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   submitAction(action: number, description: ActionDescription): Promise<void> {
     return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
   }
+
+  bindHook<Hook extends RpcTarget>(
+        controller: Fetcher<HookController<Hook>>, callback: NativeRpcStub<Hook>,
+        description: HookDescription): Promise<void> {
+    return this.impl.bindHook(this.gatekeeperId, controller, callback, description, this.caller);
+  }
 }
 
 // =======================================================================================
@@ -5151,7 +5355,7 @@ export class AgentSpawnerGatekeeper
     return AGENT_SPAWNER_BINDING_TYPES;
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
+  async startSession(approvalQueue: NativeRpcStub<ApprovalQueue>)
       : Promise<AgentSpawnerBinding> {
     return new AgentSpawnerBindingImpl(this.ctx);
   }
@@ -5165,10 +5369,6 @@ export class AgentSpawnerGatekeeper
   revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
-  }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // Safe to ignore since we don't have a hook!
   }
 }
 

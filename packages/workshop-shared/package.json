@@ -29,7 +29,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^4.20260515.1",
+    "@cloudflare/workers-types": "^4.20260619.1",
     "capnweb": "^0.8.0"
   },
   "devDependencies": {

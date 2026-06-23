@@ -40,11 +40,19 @@ export type IncomingEmail = {
 export interface EmailSession {
   /** Returns the full email address (e.g. "name@example.com"). */
   getAddress(): Promise<string>;
+
+  /**
+   * Request a callback on each inbound email.
+   *
+   * @param callback - A persistent stub (must be created with ctx.restore()) implementing the
+   *   `EmailHook` interface, which will be called back whenever an email arrives.
+   */
+  subscribe(callback: RpcStub<EmailHook>): Promise<void>;
 }
 
 /**
  * Hook interface for receiving inbound emails. A Gadget implements this
- * as a WorkerEntrypoint to receive push notifications when email arrives.
+ * as an RpcTarget to receive push notifications when email arrives.
  */
 export interface EmailHook {
   /** Called when an email is received at the bound address. */

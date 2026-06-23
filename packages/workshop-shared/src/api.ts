@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope, HookDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -579,7 +579,29 @@ export type ActionLogEntry = {
 } | {
   type: "observation";
   description: ObservationDescription;
+} | {
+  type: "bindHook";
+
+  description: HookDescription;
+
+  // Hook that was created by this action. `undefined` if it was later deleted.
+  hookId?: number;
+
+  // Is the hook currently enabled?
+  enabled: boolean;
+
+  // Note that `state` is not meaningful for hooks. Instead of being "approved" or "rejected", they
+  // are enabled/disabled, which the user can freely toggle as often as they want.
 });
+
+export type BoundHookInfo = {
+  id: number;
+  bindingName?: string;   // omitted for capsules
+  resourceTitle?: string;
+  resourceUrl?: string;
+  description: HookDescription;
+  enabled: boolean;
+};
 
 // Configuration for an AI spawner binding. This binding allows the gadget to programmatically
 // create new agents, that is, start new agent chat threads, which appear in the gadget's agent
@@ -707,6 +729,18 @@ export interface Overseer extends RpcTarget {
   // Reject an action that is in the "pending" state. This notifies the gatekeeper that it will not
   // be approved in the future.
   rejectAction(id: number): Promise<void>;
+
+  // List information about bound hooks (which could wake up the gadget asynchronously).
+  listHooks(): Promise<BoundHookInfo[]>;
+
+  // Enable the hook with the given ID. Callbacks will begin flowing.
+  enableHook(id: number): Promise<void>;
+
+  // Disable the hook with the given ID. Callbacks will stop.
+  disableHook(id: number): Promise<void>;
+
+  // Permanently delete the hook. Implies disabling it.
+  deleteHook(id: number): Promise<void>;
 
   // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
   // is responsible for having actually created the gatekeeper (via newGatekeeper()) and passes the
@@ -1586,13 +1620,6 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
   // Open a direct session to this gatekeeper. Particularly useful when using the AI agent to talk
   // to the resource directly.
   openSession(): Promise<RpcStub<Session>>;
-
-  // Get the export name to which the gatekeeper's "hook" is connected. Returns null if there is
-  // a hook available, but it's not connected, or undefined if this gatekeeper offers no hook.
-  getHook(): Promise<string | null | undefined>;
-
-  // Set the hook to target a particular exported class (or none).
-  setHook(exportName: string | null): Promise<void>;
 
   // Get the creation spec describing how this gatekeeper was originally created.
   getCreationSpec(): Promise<GatekeeperCreationSpec>;
