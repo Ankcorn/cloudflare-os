@@ -639,6 +639,21 @@ export type ActionDescription = {
   // to revert cleanly.
   implementsRevert: boolean;
 
+  // Hint that an agent should not keep working until this action has been approved or denied.
+  //
+  // Set this for actions whose effects the gatekeeper does NOT simulate. Because a not-yet-approved
+  // action isn't reflected by later reads, an agent that keeps going would observe a world where
+  // its action "didn't happen" — and tends to get confused: re-trying, second-guessing, or undoing
+  // its own work. When this is set, the harness driving the agent should suspend the current turn
+  // once the action is submitted and resume it after the user decides (or leave it ended on deny),
+  // rather than letting the agent proceed against state the action hasn't been applied to.
+  //
+  // This is an advisory hint, not an enforcement mechanism: the action is still submitted and the
+  // approval/security semantics are unchanged. Gatekeepers that fully simulate their actions (so
+  // reads already reflect pending changes) should leave this unset, so the agent keeps working
+  // seamlessly.
+  awaitDecision?: boolean;
+
   // ----------------------------------------------------------------------------
   // Policy hints
   //
