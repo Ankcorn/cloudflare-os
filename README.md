@@ -39,6 +39,7 @@ To enable support for external APIs, you must do further configuration to regist
 * [Google API](packages/gatekeeper-google/README.md)
 * [Cloudflare API](packages/gatekeeper-cloudflare/README.md)
 * [Supabase API](packages/gatekeeper-supabase/README.md)
+* [Notion API](packages/gatekeeper-notion/README.md)
 * [Email Workers](packages/gatekeeper-email/README.md)
 * [Home Assistant](packages/gatekeeper-homeassistant/README.md)
 
