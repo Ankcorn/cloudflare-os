@@ -964,10 +964,6 @@ export class SupabaseGatekeeperImpl extends DurableObject<Env, SupabaseGatekeepe
           "statement (e.g. a corresponding `DELETE`, `UPDATE`, or `DROP`).",
     };
   }
-
-  async setHook(): Promise<void> {
-    // No hooks; Supabase access is polling-based.
-  }
 }
 
 // ---------------------------------------------------------------------------
