@@ -194,7 +194,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     const filesMap = filesMapRef.current
 
     const updateFileList = () => {
-      const names = Array.from(filesMap.keys()).sort()
+      const names = Array.from(filesMap.keys()).toSorted()
       setFileNames(names)
     }
 
@@ -219,7 +219,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
     const previewMap = streamingFilesMapRef.current ?? editableFilesMapRef.current
     const displayed = previewMap
-      ? Array.from(new Set([...fileNames, ...previewFileNames])).sort()
+      ? Array.from(new Set([...fileNames, ...previewFileNames])).toSorted()
       : fileNames
 
     if (displayed.length > 0) {
@@ -294,7 +294,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
   // sidebar reflects files added/removed in the (mutable) preview map.
   const syncPreviewFileNames = useCallback((previewMap: Y.Map<Y.Text> | null) => {
     setPreviewFileNames(prev => {
-      const next = previewMap ? Array.from(previewMap.keys()).sort() : []
+      const next = previewMap ? Array.from(previewMap.keys()).toSorted() : []
       return areArraysEqual(prev, next) ? prev : next
     })
   }, [])
@@ -708,7 +708,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
     // Switch to another file if the deleted file was active
     if (activeFile === filename) {
-      const remainingFiles = Array.from(filesMap.keys()).sort()
+      const remainingFiles = Array.from(filesMap.keys()).toSorted()
       setActiveFile(remainingFiles.length > 0 ? remainingFiles[0] : null)
     }
 
@@ -764,7 +764,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
 
   const displayedFiles = useMemo(() => {
     return isDiffMode && previewFilesMap
-      ? Array.from(new Set([...fileNames, ...previewFileNames])).sort()
+      ? Array.from(new Set([...fileNames, ...previewFileNames])).toSorted()
       : fileNames
   }, [fileNames, isDiffMode, previewFilesMap, previewFileNames])
 

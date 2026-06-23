@@ -294,7 +294,7 @@ export async function webFetch(
       err instanceof Error &&
       (err.name === "AbortError" || /abort/i.test(err.message))
     ) {
-      throw new Error(`Fetch timed out after ${FETCH_TIMEOUT_MS}ms`);
+      throw new Error(`Fetch timed out after ${FETCH_TIMEOUT_MS}ms`, { cause: err });
     }
     throw err;
   } finally {

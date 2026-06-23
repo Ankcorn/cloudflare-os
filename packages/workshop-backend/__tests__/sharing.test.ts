@@ -106,7 +106,7 @@ function seedKey(
 }
 
 function ids(list: { profile: AiChatAuthorInfo }[]): string[] {
-  return list.map(x => x.profile.id).sort();
+  return list.map(x => x.profile.id).toSorted();
 }
 
 const owner = { profileId: OWNER, isOwner: true };
@@ -431,7 +431,7 @@ describe("removeCollaborator", () => {
     seedCollaborator(storage, "b", [userEdge(OWNER, "use"), userEdge("a", "build")]);
 
     let affected = mgr.removeCollaborator(owner, "a", []);
-    expect(affected.map(x => x.profile.id).sort()).toEqual(["a", "b"]);
+    expect(affected.map(x => x.profile.id).toSorted()).toEqual(["a", "b"]);
     expect(affected.find(x => x.profile.id === "b")!.newRole).toBe("use");
     // b retains access at the lower role; its (now-inert) edge from a is left untouched (lazy).
     expect(mgr.getEffectiveRole("b")).toBe("use");
@@ -528,7 +528,7 @@ describe("revokeShareKey", () => {
 
 describe("createShareKey", () => {
   it("persists the granted role", async () => {
-    let { storage, mgr } = makeManager();
+    let { mgr } = makeManager();
     let { key } = await mgr.createShareKey({ caller: owner, role: "use" });
     expect(key).toMatch(/^[0-9a-f]{32}$/);
     let records = mgr.listShareKeyRecords();

@@ -244,7 +244,7 @@ async function callRest<T>(
   let response = await fetch(url, {
     ...init,
     headers: {
-      ...(init.headers ?? {}),
+      ...init.headers,
       "Authorization": `Bearer ${token}`,
       "Accept": "application/json",
     },

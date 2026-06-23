@@ -128,26 +128,6 @@ function getBasePath(env: Env) {
 
 // =======================================================================================
 
-function apiKeyForm(hasApiKey: boolean) {
-  return `
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>Gmail gatekeeper</title>
-  </head>
-  <body>
-    <p>Please enter your gmail refresh token:</p>
-    <form action="" method="post">
-      <input type="text" name="key">
-    </form>
-    <p>${hasApiKey ? "You have a refresh token set already." : "You do not have a refresh token set."}
-  </body>
-</html>`;
-}
-
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
 <html lang="en">
   <body>
@@ -758,7 +738,7 @@ class PendingActionStore<Action> {
     return [...this.#kv.list<Action>({prefix: "pending:action:"})]
         .map(([key, action]) => ({id: Number(key.slice("pending:action:".length)), action}))
         .filter(({id}) => Number.isFinite(id))
-        .sort((a, b) => a.id - b.id);
+        .toSorted((a, b) => a.id - b.id);
   }
 
   remove(id: number): void {

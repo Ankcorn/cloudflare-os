@@ -298,7 +298,7 @@ function buildTokenizedCapsuleMessage(
   message: string,
   capsules: CapsuleSpecifier[],
 ): TokenizedCapsuleMessage {
-  const sorted = [...capsules].sort((a, b) => a.position - b.position);
+  const sorted = [...capsules].toSorted((a, b) => a.position - b.position);
   const usedTokens = new Set<string>();
   const capsulesByToken = new Map<string, CapsuleSpecifier>();
   let markdown = "";
@@ -1704,7 +1704,7 @@ export const ChatInput = ({
     let specifiers: CapsuleSpecifier[] | undefined;
     if (capsules.length > 0) {
       // Build processed message: replace each capsule title with [i] placeholder.
-      const sortedCapsules = [...capsules].sort((a, b) => a.start - b.start);
+      const sortedCapsules = [...capsules].toSorted((a, b) => a.start - b.start);
       let processedMsg = inputValue;
       let cumulativeShift = 0;
       specifiers = [];
@@ -2161,7 +2161,7 @@ export const ChatInput = ({
 
     const positions = [...boundaries]
       .filter((position) => position >= 0 && position <= inputValue.length)
-      .sort((a, b) => a - b);
+      .toSorted((a, b) => a - b);
 
     for (let i = 0; i < positions.length; i++) {
       const start = positions[i];
@@ -3445,7 +3445,7 @@ function ChatInterface({
   );
 
   const entryTopClasses = useMemo(() => {
-    const out: string[] = new Array(displayEntries.length);
+    const out: string[] = Array.from({ length: displayEntries.length });
     for (let i = 0; i < displayEntries.length; i++) {
       out[i] = rhythmTopClass(i > 0 ? displayEntries[i - 1] : null, displayEntries[i]);
     }

@@ -2,7 +2,7 @@
 // with source mapping to allow Markdown-level edits to be translated back
 // to Google Docs batchUpdate operations.
 
-import type { GoogleDocsDocument, Paragraph, ParagraphElement, TextStyle } from "./docs-api";
+import type { GoogleDocsDocument, Paragraph } from "./docs-api";
 
 // ---------------------------------------------------------------------------
 // Source map types

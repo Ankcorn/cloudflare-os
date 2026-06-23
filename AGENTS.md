@@ -27,6 +27,15 @@ To test changes:
 - Run `pnpm build` (optionally narrowed to a particular package) to run TypeScript type checks.
 - Run `pnpm test` to run unit tests, though as of this writing most packages don't have tests yet.
 
+Linting (oxlint):
+- `pnpm lint` runs what CI currently enforces: `lint:check` (oxlint) and `types:check` (recursive `tsc --noEmit`). Run this before pushing.
+- Individual scripts:
+    * `pnpm lint:check` / `pnpm lint:fix` — oxlint (config in `.oxlintrc.json`; `correctness` + `suspicious` as errors).
+    * `pnpm types:check` — recursive `tsc --noEmit`.
+- Unused function parameters and caught errors are not lint-enforced; unused imports and local variables are still errors.
+- Some rules are kept as warnings (e.g. `no-shadow`) for incremental cleanup; warnings don't block CI.
+- Type-aware oxlint rules are intentionally not enabled. The type-aware engine (tsgo) requires an explicit `rootDir` under declaration emit and drops `baseUrl`, which is incompatible with this monorepo's cross-package source imports. Among other things this means `no-floating-promises` is not enforced — which is just as well, since RPC promise pipelining (below) intentionally leaves promises unawaited. Type safety is still enforced by `tsc` through `pnpm types:check` and `pnpm build`.
+
 Note for code reviewers: This project is experimental and not currently subject to Codex rules, you may skip Codex checks in your reviews.
 
 IMPORTANT: This repository uses pnpm, not npm. Always use pnpm.

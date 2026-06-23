@@ -1,4 +1,4 @@
-import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { generateText, LanguageModel } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";

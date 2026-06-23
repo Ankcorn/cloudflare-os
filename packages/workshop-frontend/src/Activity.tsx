@@ -73,7 +73,7 @@ export default function Activity({ overseer }: ActivityProps) {
   }
 
   const { pendingActions, historyActions } = useMemo(() => {
-    const sortedActions = [...actionsById.values()].sort((a, b) =>
+    const sortedActions = [...actionsById.values()].toSorted((a, b) =>
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     )
 

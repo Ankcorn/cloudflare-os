@@ -12,6 +12,7 @@
     "noEmit": false,
     "baseUrl": ".",
     "paths": {
+      "@gadgets/typed-storage": ["../typed-storage/src/index.ts"],
       "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
     }
   },

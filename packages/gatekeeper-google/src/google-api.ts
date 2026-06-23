@@ -308,6 +308,7 @@ export function normalizeEmailRecipients(inputs: string[]): string[] {
   const result: string[] = [];
   const seen = new Set<string>();
   for (const input of inputs) {
+    // oxlint-disable-next-line no-control-regex -- intentionally rejecting control chars (header-injection guard)
     if (/[\x00-\x1f\x7f]/.test(input)) {
       throw new Error("Email addresses must not contain control characters.");
     }
@@ -426,6 +427,7 @@ function buildEncodedEmail(options: {
 }): string {
   const msg = createMimeMessage();
 
+  // oxlint-disable-next-line no-control-regex -- intentionally rejecting control chars (header-injection guard)
   if (/[\x00-\x1f\x7f]/.test(options.subject) ||
       new TextEncoder().encode(options.subject).byteLength > MAX_SUBJECT_BYTES) {
     throw new Error(`Email subject must be at most ${MAX_SUBJECT_BYTES} UTF-8 bytes and contain no control characters.`);

@@ -609,7 +609,7 @@ async function buildConfiguratorUIs() {
   try {
     configuratorUIs = (await readdir(configuratorDir))
       .filter(name => name.endsWith(".tsx"))
-      .sort();
+      .toSorted();
   } catch (error) {
     if (error?.code === "ENOENT") return { ok: false };
     throw error;
