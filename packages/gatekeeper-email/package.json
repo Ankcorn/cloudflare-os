@@ -15,11 +15,11 @@
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.8.0",
-    "postal-mime": "^2.7.4",
-    "capnweb-validate": "0.2.1"
+    "capnweb-validate": "0.2.1",
+    "postal-mime": "^2.7.4"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "wrangler": "^4.92.0"
+    "wrangler": "^4.103.0"
   }
 }

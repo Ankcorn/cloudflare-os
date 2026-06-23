@@ -3153,7 +3153,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async submitActionForApproval(
-    approvalQueue: ApprovalQueue,
+    approvalQueue: RpcStub<ApprovalQueue>,
     action: GitHubAction,
     description: ActionDescription,
   ): Promise<void> {
@@ -3496,10 +3496,6 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           canRetry: false,
         };
     }
-  }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // No hooks for GitHub repos.
   }
 
   async repoMetadata(): Promise<GitHubRepoMetadata> {

@@ -1,9 +1,14 @@
 packages:
   - packages/*
 
+overrides:
+  workerd: ">=1.20260623.1"
+
 minimumReleaseAgeExclude:
   - capnweb
   - capnweb-validate
+  - workerd
+  - "@cloudflare/workerd-*"
   # oxlint is pinned dev tooling; its platform-specific binding
   # packages are published per release and would otherwise trip the policy.
   - oxlint

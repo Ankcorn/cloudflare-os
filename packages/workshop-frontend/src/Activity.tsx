@@ -5,6 +5,7 @@ import { RpcStub } from 'capnweb'
 import { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import { EmptyState } from './components/EmptyState'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
+import { HookToggle } from './components/HookToggle'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { useActions } from './useActions'
 
@@ -33,8 +34,30 @@ interface ActivityProps {
 export default function Activity({ overseer }: ActivityProps) {
   const { actionsById, isReady } = useActions(overseer)
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
+  const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [expandedActionId, setExpandedActionId] = useState<number | null>(null)
   const toasts = useKumoToastManager()
+
+  const handleToggleHook = async (hookId: number, enabled: boolean) => {
+    setTogglingHooks(prev => new Set(prev).add(hookId))
+    try {
+      if (enabled) {
+        await overseer.enableHook(hookId)
+      } else {
+        await overseer.disableHook(hookId)
+      }
+      // The action log subscription will deliver the updated record.
+    } catch (err) {
+      console.error('Failed to toggle hook:', err)
+      toasts.add({ title: `Failed to ${enabled ? 'enable' : 'disable'} hook`, variant: 'error' })
+    } finally {
+      setTogglingHooks(prev => {
+        const next = new Set(prev)
+        next.delete(hookId)
+        return next
+      })
+    }
+  }
 
   const handleApproveAction = async (actionId: number) => {
     setProcessingActions(prev => new Set(prev).add(actionId))
@@ -156,6 +179,8 @@ export default function Activity({ overseer }: ActivityProps) {
                     expandedActionId={expandedActionId}
                     onToggleExpand={toggleExpanded}
                     formatDate={formatDate}
+                    togglingHooks={togglingHooks}
+                    onToggleHook={handleToggleHook}
                   />
                 )}
               </section>
@@ -274,11 +299,15 @@ function ActivityLogTable({
   expandedActionId,
   onToggleExpand,
   formatDate,
+  togglingHooks,
+  onToggleHook,
 }: {
   actions: ActionLogEntry[]
   expandedActionId: number | null
   onToggleExpand: (id: number) => void
   formatDate: (date: Date) => string
+  togglingHooks: Set<number>
+  onToggleHook: (hookId: number, enabled: boolean) => void
 }) {
   return (
     <div className="overflow-x-auto rounded-xl border border-kumo-line bg-kumo-base">
@@ -298,6 +327,8 @@ function ActivityLogTable({
             isFirst={index === 0}
             onToggleExpand={() => onToggleExpand(record.id)}
             formatDate={formatDate}
+            togglingHooks={togglingHooks}
+            onToggleHook={onToggleHook}
           />
         ))}
       </div>
@@ -311,12 +342,16 @@ function ActivityLogRow({
   isFirst,
   onToggleExpand,
   formatDate,
+  togglingHooks,
+  onToggleHook,
 }: {
   record: ActionLogEntry
   isExpanded: boolean
   isFirst: boolean
   onToggleExpand: () => void
   formatDate: (date: Date) => string
+  togglingHooks: Set<number>
+  onToggleHook: (hookId: number, enabled: boolean) => void
 }) {
   const statusLabel = record.state === 'approved' ? 'Approved' : 'Rejected'
   const safeResourceUrl = getSafeExternalUrl(record.resourceUrl)
@@ -368,7 +403,21 @@ function ActivityLogRow({
           </p>
         </div>
         <div>
-          <StatusPill state={record.state} label={statusLabel} />
+          {record.type === 'bindHook' ? (
+            record.hookId !== undefined ? (
+              <HookToggle
+                enabled={record.enabled}
+                disabled={togglingHooks.has(record.hookId)}
+                onToggle={(enabled) => onToggleHook(record.hookId!, enabled)}
+              />
+            ) : (
+              <span className="shrink-0 rounded-full border border-kumo-line bg-kumo-tint px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle">
+                Deleted
+              </span>
+            )
+          ) : (
+            <StatusPill state={record.state} label={statusLabel} />
+          )}
         </div>
       </div>
 

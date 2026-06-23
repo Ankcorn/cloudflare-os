@@ -8,9 +8,10 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, GatekeeperMetadata, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { Overseer, GatekeeperMetadata, BoundHookInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
+import { HookToggle } from './components/HookToggle'
 import { useVendorLogos } from './useVendorLogos'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { EmptyState } from './components/EmptyState'
@@ -30,25 +31,70 @@ interface ConnectionsProps {
 
 export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible: _isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
+  const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorLogos = useVendorLogos(authenticatedApi)
   const [loading, setLoading] = useState(true)
   const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ bindingName: string; resourceTitle: string } | null>(null)
+  const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
+  const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
     try {
-      const gatekeeperList = await overseer.listGatekeepers()
+      const [gatekeeperList, hookList] = await Promise.all([
+        overseer.listGatekeepers(),
+        overseer.listHooks(),
+      ])
       setGatekeepers(gatekeeperList)
+      setHooks(hookList)
       onHasGatekeepersChange?.(gatekeeperList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
       toasts.add({ title: 'Failed to load connections', variant: 'error' })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleToggleHook = async (id: number, enabled: boolean) => {
+    // Optimistically reflect the new state.
+    setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled } : h)))
+    setTogglingHooks((prev) => new Set(prev).add(id))
+    try {
+      if (enabled) {
+        await overseer.enableHook(id)
+      } else {
+        await overseer.disableHook(id)
+      }
+      await loadGatekeepers()
+    } catch (err) {
+      console.error('Failed to toggle hook:', err)
+      toasts.add({ title: `Failed to ${enabled ? 'enable' : 'disable'} hook`, variant: 'error' })
+      // Revert optimistic update.
+      setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled: !enabled } : h)))
+    } finally {
+      setTogglingHooks((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    }
+  }
+
+  const handleDeleteHookConfirm = async () => {
+    if (!deleteHookTarget) return
+    try {
+      await overseer.deleteHook(deleteHookTarget.id)
+      await loadGatekeepers()
+    } catch (err) {
+      console.error('Failed to delete hook:', err)
+      toasts.add({ title: 'Failed to delete hook', variant: 'error' })
+    } finally {
+      setDeleteHookTarget(null)
     }
   }
 
@@ -249,6 +295,101 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
             </div>
           )}
         </section>
+
+        {!loading && hooks.length > 0 && (
+          <section className="mt-8">
+            <div className="mb-3">
+              <h2 className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
+                Hooks
+              </h2>
+              <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                Callbacks that let connected resources wake up this gadget when events happen.
+              </p>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+              {hooks.map((hook, index) => {
+                const isDeleting = deleteHookTarget?.id === hook.id
+                const vendorId = gatekeepers.find((g) => g.bindingName === hook.bindingName)?.vendorId
+
+                return (
+                  <div
+                    key={hook.id}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
+                  >
+                    {isDeleting ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
+                            Delete hook "{hook.description.title}"?
+                          </p>
+                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            This permanently removes the hook. Future events will stop being delivered.
+                          </p>
+                        </div>
+                        <WorkshopButton
+                          tone="danger"
+                          className="min-w-[68px]"
+                          onClick={handleDeleteHookConfirm}
+                        >
+                          Delete
+                        </WorkshopButton>
+                        <WorkshopButton
+                          onClick={() => setDeleteHookTarget(null)}
+                        >
+                          Cancel
+                        </WorkshopButton>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <GatekeeperIcon
+                          vendorId={vendorId}
+                          bindingName={hook.bindingName}
+                          logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            {hook.description.title}
+                          </p>
+                          {hook.description.description && (
+                            <p className="mt-0.5 truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                              {hook.description.description}
+                            </p>
+                          )}
+                          {(hook.resourceTitle || hook.bindingName) && (
+                            <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                              {hook.resourceTitle}
+                              {hook.resourceTitle && hook.bindingName && ' · '}
+                              {hook.bindingName && (
+                                <span className="font-mono text-kumo-subtle">{hook.bindingName}</span>
+                              )}
+                            </p>
+                          )}
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-2">
+                          <HookToggle
+                            enabled={hook.enabled}
+                            disabled={togglingHooks.has(hook.id)}
+                            onToggle={(enabled) => handleToggleHook(hook.id, enabled)}
+                          />
+                          <Tooltip content="Delete hook" asChild>
+                            <WorkshopIconButton
+                              danger
+                              onClick={() => setDeleteHookTarget({ id: hook.id, title: hook.description.title })}
+                              aria-label="Delete hook"
+                            >
+                              <Trash size={14} />
+                            </WorkshopIconButton>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        )}
       </div>
 
       <GatekeeperModal

@@ -226,10 +226,6 @@ export class LanguageModelGatekeeper
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-
-  async setHook(_hook: Fetcher | null): Promise<void> {
-    // Safe to ignore since we don't have a hook!
-  }
 }
 
 @validateRpc()

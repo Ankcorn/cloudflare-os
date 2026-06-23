@@ -1249,10 +1249,6 @@ export class HomeAssistantGatekeeperImpl
     }
   }
 
-  async setHook(_hook: any): Promise<void> {
-    // Hooks not supported in Phase 1.
-  }
-
   // ---------------------------------------------------------------------
   // Internal helpers
 

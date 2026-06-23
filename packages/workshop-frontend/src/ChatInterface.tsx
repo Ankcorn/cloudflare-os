@@ -71,6 +71,7 @@ import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
+import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
@@ -4345,6 +4346,32 @@ function ChatInterface({
     return changed;
   };
 
+  const applyOptimisticHookEnabled = (actionId: number, enabled: boolean): boolean => {
+    let changed = false;
+    const locations = cacheRef.current.actionMessages.get(actionId);
+    if (!locations) return false;
+
+    for (const [key, location] of locations) {
+      const messages = cacheRef.current.messages.get(location.chatId);
+      const msg = messages?.[location.sequence];
+      if (msg?.type !== "action" || msg.actionId !== actionId || msg.actionLog?.type !== "bindHook") {
+        locations.delete(key);
+        continue;
+      }
+
+      const nextMessages = [...messages!];
+      nextMessages[location.sequence] = {
+        ...msg,
+        actionLog: { ...msg.actionLog, enabled },
+      };
+      cacheRef.current.messages.set(location.chatId, nextMessages);
+      changed = true;
+    }
+
+    if (locations.size === 0) cacheRef.current.actionMessages.delete(actionId);
+    return changed;
+  };
+
   // Handle reverting changes from a specific sequence number onward
   const handleRevertChanges = useCallback(async (revertFrom: number) => {
     if (selectedChatId === null) return;
@@ -4385,6 +4412,30 @@ function ChatInterface({
     } catch (err) {
       console.error("Failed to reject action:", err);
       toasts.add({ title: "Failed to reject action", variant: "error" });
+    } finally {
+      setProcessingActions((prev) => {
+        const next = new Set(prev);
+        next.delete(actionId);
+        return next;
+      });
+    }
+  };
+
+  // Handle enabling/disabling a bound hook from the chat thread.
+  const handleToggleHook = async (actionId: number, hookId: number, enabled: boolean) => {
+    setProcessingActions((prev) => new Set(prev).add(actionId));
+    if (applyOptimisticHookEnabled(actionId, enabled)) forceUpdate();
+    try {
+      if (enabled) {
+        await overseer.enableHook(hookId);
+      } else {
+        await overseer.disableHook(hookId);
+      }
+    } catch (err) {
+      console.error("Failed to toggle hook:", err);
+      toasts.add({ title: `Failed to ${enabled ? "enable" : "disable"} hook`, variant: "error" });
+      // Revert the optimistic update.
+      if (applyOptimisticHookEnabled(actionId, !enabled)) forceUpdate();
     } finally {
       setProcessingActions((prev) => {
         const next = new Set(prev);
@@ -4711,6 +4762,84 @@ function ChatInterface({
     const open = expandedActions.has(msg.actionId);
     const isProc = processingActions.has(msg.actionId);
     const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
+
+    if (log.type === "bindHook") {
+      const isDeleted = log.hookId === undefined;
+      const stateLabel = isDeleted
+        ? "Deleted"
+        : log.enabled
+          ? "Enabled"
+          : "Disabled";
+      const stateLabelCls = isDeleted
+        ? "text-kumo-inactive"
+        : log.enabled
+          ? "text-green-600 dark:text-green-400"
+          : "text-kumo-subtle";
+
+      return (
+        <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+          <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
+            <div className="flex items-start gap-3">
+              <GatekeeperIcon
+                bindingName={log.bindingName ?? log.resourceTitle}
+                className="h-9 w-9 flex-shrink-0 rounded-lg"
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span className="font-medium text-kumo-default">
+                    Hook: {log.description.title}
+                  </span>
+                  <span className={`text-[12px] font-medium ${stateLabelCls}`}>
+                    {stateLabel}
+                  </span>
+                </div>
+                {log.description.description && (
+                  <div className={`mt-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                    <MarkdownMessage message={log.description.description} />
+                  </div>
+                )}
+                {(log.resourceTitle || log.bindingName) && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
+                    {log.resourceTitle && (
+                      <span className="min-w-0 truncate">
+                        {safeResourceUrl ? (
+                          <a
+                            href={safeResourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {log.resourceTitle}
+                          </a>
+                        ) : (
+                          log.resourceTitle
+                        )}
+                      </span>
+                    )}
+                    {log.resourceTitle && log.bindingName && (
+                      <span aria-hidden="true">·</span>
+                    )}
+                    {log.bindingName && (
+                      <span className="font-mono text-[11px]">{log.bindingName}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+              {!isDeleted && (
+                <div className="ml-3 flex flex-shrink-0 items-center self-center">
+                  <HookToggle
+                    enabled={log.enabled}
+                    disabled={isProc}
+                    onToggle={(enabled) => handleToggleHook(msg.actionId, log.hookId!, enabled)}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     if (!isAct) {
       const metadata = [

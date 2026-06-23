@@ -4,6 +4,7 @@ import {
   GatekeeperUser,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
+  HookController,
   HookInitiator,
   ResourceDescription,
   ApprovalQueue,
@@ -453,15 +454,38 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 class EmailSessionImpl extends RpcTarget implements EmailSession {
   #emailName: string;
   #emailHost: string;
+  #ctx: DurableObjectState<EmailGatekeeperImplProps>;
+  #approvalQueue: RpcStub<ApprovalQueue>;
 
-  constructor(emailName: string, emailHost: string) {
+  constructor(emailName: string, emailHost: string,
+      ctx: DurableObjectState<EmailGatekeeperImplProps>,
+      approvalQueue: RpcStub<ApprovalQueue>) {
     super();
     this.#emailName = emailName;
     this.#emailHost = emailHost;
+    this.#ctx = ctx;
+    this.#approvalQueue = approvalQueue;
+  }
+
+  [Symbol.dispose]() {
+    this.#approvalQueue[Symbol.dispose]();
   }
 
   async getAddress(): Promise<string> {
     return `${this.#emailName}@${this.#emailHost}`;
+  }
+
+  async subscribe(callback: RpcStub<EmailHookTarget>): Promise<void> {
+    // Construct the HookController at bind time, so its props carry the specifics of this
+    // registration (here, just the gatekeeper props). The controller needs no other state.
+    let hookController: Fetcher<HookController<EmailHookTarget>> =
+        this.#ctx.exports.EmailHookControllerImpl({props: this.#ctx.props});
+
+    // @ts-ignore TS insists hookController is the wrong type... why? It looks identical to me.
+    await this.#approvalQueue.bindHook(hookController, callback, {
+      title: `Receive email`,
+      description: `Receive emails sent to ${this.#emailName}@${this.#emailHost}`,
+    });
   }
 }
 
@@ -472,13 +496,13 @@ type EmailGatekeeperImplProps = {
   userAccountId: string;
 };
 
-// Use intersection type: EmailHook for the hook-specific methods, WorkerEntrypoint to satisfy
-// the Gatekeeper generic constraint (Hook extends WorkerEntrypoint).
-type EmailHookEntrypoint = WorkerEntrypoint & EmailHook;
+// Intersection type: EmailHook for the hook-specific methods, RpcTarget to satisfy the
+// HookController/HookInitiator generic constraint (Hook extends RpcTarget).
+type EmailHookTarget = RpcTarget & EmailHook;
 
 @validateRpc()
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
-    implements Gatekeeper<EmailSession, EmailHookEntrypoint> {
+    implements Gatekeeper<EmailSession> {
 
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;
@@ -500,7 +524,7 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
-    return new EmailSessionImpl(emailName, host);
+    return new EmailSessionImpl(emailName, host, this.ctx, approvalQueue.dup());
   }
 
   // ---------------------------------------------------------------------------
@@ -517,14 +541,26 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("Email gatekeeper has no actions to revert");
   }
+}
 
-  async setHook(hook: Fetcher<HookInitiator<EmailHookEntrypoint>> | null): Promise<void> {
+@validateRpc()
+export class EmailHookControllerImpl extends WorkerEntrypoint<Env, EmailGatekeeperImplProps>
+    implements HookController<EmailHookTarget> {
+  async enable(initiator: Fetcher<HookInitiator<EmailHookTarget>>): Promise<void> {
+    return this.#setHook(initiator);
+  }
+
+  disable(): Promise<void> {
+    return this.#setHook(null);
+  }
+
+  async #setHook(initiator: Fetcher<HookInitiator<EmailHookTarget>> | null) {
     // Forward the hook initiator to the EmailAddress DO for this email name.
     let emailName = this.ctx.props.emailName;
     let userAccountId = this.ctx.props.userAccountId;
     let stub: DurableObjectStub<EmailAddress> =
         this.ctx.exports.EmailAddress.getByName(emailName);
-    await stub.setHook(hook, userAccountId);
+    await stub.setHook(initiator, userAccountId);
   }
 }
 
@@ -559,7 +595,7 @@ export class EmailAddress extends DurableObject<Env> {
   }
 
   async setHook(
-      hook: Fetcher<HookInitiator<EmailHookEntrypoint>> | null,
+      hook: Fetcher<HookInitiator<EmailHookTarget>> | null,
       userAccountId: string): Promise<void> {
     let owner = this.ctx.storage.kv.get<string>("owner");
     if (owner !== userAccountId) {
@@ -575,7 +611,7 @@ export class EmailAddress extends DurableObject<Env> {
 
   async receiveEmail(email: IncomingEmail): Promise<void> {
     let hookInitiator =
-        this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookEntrypoint>>>("hook");
+        this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookTarget>>>("hook");
     if (!hookInitiator) {
       throw new Error("No hook configured for this email address");
     }
@@ -583,6 +619,7 @@ export class EmailAddress extends DurableObject<Env> {
     // The stored Fetcher is a HookInitiator. Call startHook() to get the actual hook entrypoint
     // and an ApprovalQueue for logging observations. Use `using` to dispose the result (and its
     // contained stubs, including approvalQueue) at end of scope.
+    // @ts-ignore TODO: TS doesn't understand that the returned promise is disposable?
     using startHookResult = hookInitiator.startHook();
 
     // Pipeline: access approvalQueue on the not-yet-resolved promise and call through it.
@@ -602,10 +639,7 @@ export class EmailAddress extends DurableObject<Env> {
               : ""),
     });
 
-    // Fetcher doesn't support pipelining, so we must await to get the hook.
-    let {hook} = await startHookResult;
-
     // Deliver the email to the gadget's hook entrypoint.
-    await hook.receiveEmail(email);
+    await startHookResult.callback.receiveEmail(email);
   }
 }
