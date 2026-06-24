@@ -283,11 +283,43 @@ html {
   animation: share-row-land 2.2s var(--ease-out);
 }
 
+@keyframes presence-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.presence-pop-in {
+  animation: presence-pop-in 0.22s cubic-bezier(0.22, 1.2, 0.36, 1) both;
+}
+
+@keyframes presence-pop-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+}
+
+.presence-pop-out {
+  animation: presence-pop-out 0.13s var(--ease-out) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .share-confirm-in,
   .share-expand-in,
   .share-fade-in,
-  .share-row-land {
+  .share-row-land,
+  .presence-pop-in,
+  .presence-pop-out {
     animation: none;
   }
 }
@@ -308,6 +340,24 @@ html {
 }
 
 .chat-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.presence-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-kumo-line) transparent;
+}
+
+.presence-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.presence-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-kumo-line);
+  border-radius: 4px;
+}
+
+.presence-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 

@@ -12,7 +12,7 @@ This document describes the collaborator system.
 A collaborator is a user who has direct access to a gadget they do not own. Each collaborator has a **role** that determines their level of access:
 
 - **`build`** -- full access: edit code, use the AI chat, manage bindings, and interact with the gadget UI -- the same as the owner, modulo the owner-only exceptions below.
-- **`use`** -- may only render and interact with the gadget's deployed UI. Concretely, a `use` collaborator may call `getUiBundle()` and `connectToGadget()` against the mainline code (`chatId` must be omitted), read basic metadata via `getMetadata()`/`subscribeToMetadata()` (restricted to `id`/`title`/`owner`/`role`), and nothing else. Every other `Overseer` method throws `Unauthorized`, with two exceptions: `subscribeToConsoleLogs()` and `subscribeToActions()` return inert subscriptions that never deliver data (no console logs; an empty, immediately-`ready()` action log). The editor opens both speculatively from top-level hooks before switching to the use-only view, so resolving them quietly avoids spurious client-side errors while still revealing nothing.
+- **`use`** -- may only render and interact with the gadget's deployed UI. Concretely, a `use` collaborator may call `getUiBundle()` and `connectToGadget()` against the mainline code (`chatId` must be omitted), read basic metadata via `getMetadata()`/`subscribeToMetadata()` (restricted to `id`/`title`/`owner`/`role`), and call `subscribeToPresence()` to see active viewers' names, profile IDs, and roles. Every other `Overseer` method throws `Unauthorized`, with two exceptions: `subscribeToConsoleLogs()` and `subscribeToActions()` return inert subscriptions that never deliver data (no console logs; an empty, immediately-`ready()` action log). The editor opens both speculatively from top-level hooks before switching to the use-only view, so resolving them quietly avoids spurious client-side errors while still revealing nothing else.
 
 Roles are totally ordered: `build` > `use`.
 
@@ -27,7 +27,7 @@ A caller may never grant a role higher than their own effective role. Today only
 
 ### Restricted capability
 
-Authorization is capability-based: `open()` computes the caller's effective role from the permission graph and hands back a different object depending on the result. `build`/owner sessions get the full `OverseerClientInterface`; `use` sessions get a `UseOverseerInterface` that implements the entire `Overseer` interface but throws `Unauthorized` for everything outside the `use` allowlist (except the two inert telemetry subscriptions noted above). Because that class `implements Overseer`, any newly-added interface method fails to compile until a developer consciously decides whether `use` callers may invoke it (default-deny).
+Authorization is capability-based: `open()` computes the caller's effective role from the permission graph and hands back a different object depending on the result. `build`/owner sessions get the full `OverseerClientInterface`; `use` sessions get a `UseOverseerInterface` that implements the entire `Overseer` interface but throws `Unauthorized` for everything outside the `use` allowlist (except the two inert telemetry subscriptions noted above). Presence is intentionally in the allowlist and exposes active viewers' names, profile IDs, and roles. Because that class `implements Overseer`, any newly-added interface method fails to compile until a developer consciously decides whether `use` callers may invoke it (default-deny).
 
 ### Adding collaborators
 

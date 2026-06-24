@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -592,6 +592,96 @@ class OverseerImpl implements AgentHooks {
 
   removeChatSubscriber(subscriber: RpcStub<AiChatSubscriber>) {
     this.#chatSubscribers.delete(subscriber);
+  }
+
+  // Active viewers, keyed by profileId. Multiple sessions from the same user collapse into one
+  // participant.
+  #presence = new Map<string, {
+    key: string;
+    user: AiChatAuthorInfo;
+    sessions: Map<object, CollaboratorRole>;
+  }>();
+
+  // Subscribers to roster changes, registered via subscribeToPresence().
+  #presenceSubscribers = new Map<object, RpcStub<PresenceSubscriber>>();
+  #presenceKeyCounter = 0;
+
+  #effectivePresenceRole(sessions: Map<object, CollaboratorRole>): CollaboratorRole {
+    for (let role of sessions.values()) {
+      if (role === "build") return "build";
+    }
+    return "use";
+  }
+
+  #toParticipant(profileId: string): PresenceParticipant {
+    let entry = this.#presence.get(profileId)!;
+    return { key: entry.key, user: entry.user, role: this.#effectivePresenceRole(entry.sessions) };
+  }
+
+  #broadcastPresenceAdd(participant: PresenceParticipant) {
+    for (let [token, sub] of this.#presenceSubscribers) {
+      sub.add(participant).catch(() => this.#removePresenceSubscriber(token));
+    }
+  }
+
+  #broadcastPresenceRemove(key: string) {
+    for (let [token, sub] of this.#presenceSubscribers) {
+      sub.remove(key).catch(() => this.#removePresenceSubscriber(token));
+    }
+  }
+
+  // Mark a session as present. Returns a function that removes it.
+  joinPresence(profileId: string, user: AiChatAuthorInfo, role: CollaboratorRole): () => void {
+    let token = {};
+    let entry = this.#presence.get(profileId);
+    if (entry) {
+      let before = this.#effectivePresenceRole(entry.sessions);
+      entry.sessions.set(token, role);
+      if (this.#effectivePresenceRole(entry.sessions) !== before) {
+        this.#broadcastPresenceAdd(this.#toParticipant(profileId));
+      }
+    } else {
+      this.#presence.set(profileId,
+          { key: `p${++this.#presenceKeyCounter}`, user, sessions: new Map([[token, role]]) });
+      this.#broadcastPresenceAdd(this.#toParticipant(profileId));
+    }
+
+    let removed = false;
+    return () => {
+      if (removed) return;
+      removed = true;
+      let e = this.#presence.get(profileId);
+      if (!e) return;
+      let before = this.#effectivePresenceRole(e.sessions);
+      e.sessions.delete(token);
+      if (e.sessions.size === 0) {
+        this.#presence.delete(profileId);
+        this.#broadcastPresenceRemove(e.key);
+      } else if (this.#effectivePresenceRole(e.sessions) !== before) {
+        this.#broadcastPresenceAdd(this.#toParticipant(profileId));
+      }
+    };
+  }
+
+  // Subscribe to roster changes. The current roster is delivered immediately via init().
+  addPresenceSubscriber(subscriber: RpcStub<PresenceSubscriber>): RpcStub<{}> {
+    subscriber = subscriber.dup();
+    let token = {};
+    this.#presenceSubscribers.set(token, subscriber);
+    let snapshot = [...this.#presence.keys()].map(id => this.#toParticipant(id));
+    subscriber.init(snapshot).catch(() => this.#removePresenceSubscriber(token));
+    subscriber.onRpcBroken(() => this.#removePresenceSubscriber(token));
+    // @ts-expect-error Bugs in native RPC types make this not work currently.
+    return new NativeRpcStub<{}>({
+      [Symbol.dispose]: () => this.#removePresenceSubscriber(token),
+    });
+  }
+
+  #removePresenceSubscriber(token: object) {
+    let sub = this.#presenceSubscribers.get(token);
+    if (!sub) return;
+    this.#presenceSubscribers.delete(token);
+    sub[Symbol.dispose]();
   }
 
   #getLiveChat(chatId: number): LiveChatContext {
@@ -3530,6 +3620,22 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
   }
 }
 
+// Mark an overseer session as a present viewer for its lifetime. The caller invokes the returned
+// function from the session's [Symbol.dispose] to leave.
+function joinSessionPresence(
+    impl: OverseerImpl, profileId: string, role: CollaboratorRole,
+    fetchProfile: () => Promise<AiChatAuthorInfo>): () => void {
+  let leave: (() => void) | undefined;
+  let cancelled = false;
+  fetchProfile().then(user => {
+    if (!cancelled) leave = impl.joinPresence(profileId, user, role);
+  }).catch(() => {});
+  return () => {
+    cancelled = true;
+    leave?.();
+  };
+}
+
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
@@ -3541,9 +3647,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               private isOwner: boolean,
               private notifyClosed: NativeRpcStub<() => void>) {
     super();
+    this.#leavePresence = joinSessionPresence(
+        this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
   }
 
+  #leavePresence: () => void;
+
   [Symbol.dispose]() {
+    this.#leavePresence();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -3651,6 +3762,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         unsubscribe();
       }
     });
+  }
+
+  async subscribeToPresence(
+      subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
+    return this.impl.addPresenceSubscriber(subscriber);
   }
 
   async setTitle(title: string): Promise<void> {
@@ -4989,7 +5105,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // Restricted capability handed to "use"-role collaborators. It implements the full `Overseer`
 // interface but permits only the handful of methods needed to render and interact with the
 // gadget's deployed UI: getMetadata() (restricted to id/title/owner), a restricted
-// subscribeToMetadata(), getUiBundle() and connectToGadget() (both mainline-only). Every other
+// subscribeToMetadata(), subscribeToPresence(), getUiBundle() and connectToGadget() (both
+// mainline-only). Presence includes active viewers' names, profile IDs, and roles. Every other
 // method throws "Unauthorized", with two exceptions: subscribeToConsoleLogs() and
 // subscribeToActions() return inert subscriptions (they never deliver data) rather than denying.
 // The editor subscribes to both speculatively from its top-level hooks, before it has switched to
@@ -5007,9 +5124,14 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
               private clientProfileId: string,
               private notifyClosed: NativeRpcStub<() => void>) {
     super();
+    this.#leavePresence = joinSessionPresence(
+        this.impl, this.clientProfileId, "use", () => this.clientUser.whoami());
   }
 
+  #leavePresence: () => void;
+
   [Symbol.dispose]() {
+    this.#leavePresence();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -5064,6 +5186,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
         unsubscribe();
       }
     });
+  }
+
+  async subscribeToPresence(
+      subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
+    return this.impl.addPresenceSubscriber(subscriber);
   }
 
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {

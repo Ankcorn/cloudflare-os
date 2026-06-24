@@ -14,8 +14,8 @@ import {
   CollaboratorRole,
 } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
+import { PersonAvatar } from './components/PersonAvatar'
 import { copyToClipboard } from './clipboard'
-import { useAvatar } from './useAvatar'
 
 type CollaboratorRow =
   | { kind: 'owner'; profile: AiChatAuthorInfo }
@@ -34,49 +34,6 @@ type Props = {
   authenticatedApi: RpcStub<AuthenticatedApi>
 }
 
-function PersonAvatar({
-  api,
-  userId,
-  name,
-  size = 32,
-}: {
-  api: RpcStub<AuthenticatedApi>
-  userId: string
-  name: string
-  size?: number
-}) {
-  const elementRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => {
-    const element = elementRef.current
-    if (!element) return
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        setVisible(true)
-        observer.disconnect()
-      }
-    }, { rootMargin: '100px' })
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
-
-  const url = useAvatar(api, visible ? userId : null)
-  return (
-    <div
-      ref={elementRef}
-      className="relative grid shrink-0 place-items-center overflow-hidden rounded-full bg-gradient-to-br from-kumo-tint to-kumo-elevated text-[10px] font-semibold text-kumo-strong ring-1 ring-inset ring-kumo-line/60"
-      style={{ width: size, height: size }}
-    >
-      {url ? (
-        <img src={url} alt="" className="h-full w-full object-cover" />
-      ) : (
-        initials(name)
-      )}
-    </div>
-  )
-}
-
 function formatRelativeTime(date: Date): string {
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
@@ -90,10 +47,6 @@ function formatRelativeTime(date: Date): string {
   if (diffHours < 24) return `${diffHours}h ago`
   if (diffDays < 7) return `${diffDays}d ago`
   return date.toLocaleDateString()
-}
-
-function initials(name: string) {
-  return name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase()
 }
 
 const ROLE_LABELS: Record<CollaboratorRole, string> = {

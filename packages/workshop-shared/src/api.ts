@@ -645,6 +645,10 @@ export interface Overseer extends RpcTarget {
       callback: RpcStub<(metadata: GadgetMetadata) => void>)
       : Promise<RpcStub<{}>>;
 
+  // Receive the current viewer roster, then incremental updates as viewers come and go.
+  // A viewer is present for the lifetime of the openGadget() session.
+  subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>>;
+
   // Change the title.
   setTitle(title: string): Promise<void>;
 
@@ -1645,6 +1649,22 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 // from the owner through their valid permission edges, where each edge grants
 // min(edge role, sharer's effective role). The owner is the implicit root at "build".
 export type CollaboratorRole = "build" | "use";
+
+// One person currently connected to a gadget.
+export type PresenceParticipant = {
+  // Opaque key matching this participant across add/remove events.
+  key: string;
+  user: AiChatAuthorInfo;
+  role: CollaboratorRole;
+};
+
+// `init` delivers the full roster once on subscribe.
+// `add`/`remove` (keyed by `key`) report changes thereafter.
+export interface PresenceSubscriber {
+  init(participants: PresenceParticipant[]): void;
+  add(participant: PresenceParticipant): void;
+  remove(key: string): void;
+}
 
 // Describes how one user came to have collaborator access.
 export type PermissionEdge = {
