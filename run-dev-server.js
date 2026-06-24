@@ -6,12 +6,16 @@
 // Flags:
 //   --use-workers-ai-binding   Include the Workers AI binding in
 //                               workshop-backend (requires Cloudflare login).
+//
+// Env:
+//   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
+import { getWranglerPortFromBackendHost } from "./scripts/dev-server-config.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(ROOT, "packages");
@@ -229,6 +233,24 @@ const configs = [
 ];
 
 const args = configs.flatMap(c => ["-c", c]);
+const backendHost = process.env.VITE_BACKEND_HOST;
+if (backendHost) {
+  let wranglerPort;
+  try {
+    wranglerPort = getWranglerPortFromBackendHost(backendHost);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+
+  if (wranglerPort) {
+    args.push("--port", wranglerPort);
+  } else {
+    console.warn(
+        "VITE_BACKEND_HOST did not include a port, so run-dev-server.js could not derive " +
+        "a Wrangler --port override.");
+  }
+}
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
 try {

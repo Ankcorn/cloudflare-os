@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  // Override the local backend host used by Vite dev, e.g. "localhost:9000".
+  readonly VITE_BACKEND_HOST?: string;
+
   // Set to "true" to enable Cloudflare Access authentication mode.
   // In this mode, password-based login/signup is disabled and the app authenticates
   // via the CF Access JWT that Access injects into requests before they reach the server.

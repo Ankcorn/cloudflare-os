@@ -52,11 +52,18 @@ async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
 let lastConnectTime: number = 0;
 let backoff: number = 1000;
 
-function startConnection(): RpcStub<PublicApi> {
-  lastConnectTime = Date.now();
+function getBackendHost(): string {
+  const backendHost = import.meta.env.VITE_BACKEND_HOST?.trim();
+  if (backendHost) return backendHost;
+
   // When opening the Vite dev server directly (localhost:3000), the backend is at localhost:8787.
   // Otherwise, the API is on the same host as the frontend.
-  const apiHost = window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host;
+  return window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host;
+}
+
+function startConnection(): RpcStub<PublicApi> {
+  lastConnectTime = Date.now();
+  const apiHost = getBackendHost();
   const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
   return newWebSocketRpcSession<PublicApi>(wsUrl);
 }

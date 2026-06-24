@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm run --recursive build",
-    "test": "pnpm run --recursive --if-present test",
+    "test": "node --test scripts/dev-server-config.test.js && pnpm run --recursive --if-present test",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node run-dev-server.js",
     "clean": "pnpm run --recursive clean",
