@@ -29,6 +29,7 @@ import Connections from './Connections'
 import Activity from './Activity'
 import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
+import { GadgetPresence } from './components/GadgetPresence'
 import BlueprintModal from './BlueprintModal'
 import AlphaWarning from './AlphaWarning'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
@@ -684,7 +685,14 @@ export default function GadgetEditor() {
 
   // ── "use"-role collaborators get the minimal UI: top bar + gadget iframe only ──
   if (isUseOnly) {
-    return <GadgetUseView overseer={overseer.stub} metadata={metadata} />
+    return (
+      <GadgetUseView
+        overseer={overseer.stub}
+        metadata={metadata}
+        authenticatedApi={authenticatedApi}
+        currentUserId={userInfo?.id ?? null}
+      />
+    )
   }
 
   // ── always render the full two-pane edit layout; preview overlays on top ──────
@@ -759,8 +767,14 @@ export default function GadgetEditor() {
           )}
         </div>
 
-        {/* Right: cost, workspace, share, blueprints */}
+        {/* Right: presence, cost, workspace, share, blueprints */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          <GadgetPresence
+            overseer={overseer.stub}
+            authenticatedApi={authenticatedApi}
+            currentUserId={userInfo?.id ?? null}
+          />
+
           {metadata.totalCost != null && (
             <span className="mr-2 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
               {formatHeaderCost(metadata.totalCost)}

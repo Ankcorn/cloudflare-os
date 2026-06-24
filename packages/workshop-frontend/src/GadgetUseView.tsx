@@ -1,26 +1,35 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, GadgetMetadata } from '@gadgets/workshop-shared/api'
+import { AuthenticatedApi, Overseer, GadgetMetadata } from '@gadgets/workshop-shared/api'
 import GadgetUI from './GadgetUI'
 import UserMenu from './components/UserMenu'
 import AlphaWarning from './AlphaWarning'
+import { GadgetPresence } from './components/GadgetPresence'
 
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
 // UI (see UseOverseerInterface in the backend), so we deliberately omit the chat sidebar, the
 // Gadget/Code/Connections/Activity tab bar, and every editor-only control. The overseer passed in
 // here is the restricted capability returned by openGadget() for "use" sessions; calling anything
-// outside getMetadata()/subscribeToMetadata()/getUiBundle()/connectToGadget() would throw.
+// outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/getUiBundle()/connectToGadget()
+// would throw.
 type Props = {
   overseer: RpcStub<Overseer>
   metadata: GadgetMetadata
+  authenticatedApi: RpcStub<AuthenticatedApi>
+  currentUserId: string | null
 }
 
 // Matches the top bar height used by the full editor (and the home page header).
 const TOPBAR_H = 56
 
-export default function GadgetUseView({ overseer, metadata }: Props) {
+export default function GadgetUseView({
+  overseer,
+  metadata,
+  authenticatedApi,
+  currentUserId,
+}: Props) {
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-kumo-base relative">
       {/* ═══ TOP BAR ════════════════════════════════════════════════════════════ */}
@@ -48,8 +57,13 @@ export default function GadgetUseView({ overseer, metadata }: Props) {
           )}
         </div>
 
-        {/* Right: user menu */}
+        {/* Right: presence and user menu */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          <GadgetPresence
+            overseer={overseer}
+            authenticatedApi={authenticatedApi}
+            currentUserId={currentUserId}
+          />
           <div className="ml-2">
             <UserMenu />
           </div>
