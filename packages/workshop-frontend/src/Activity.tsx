@@ -27,6 +27,18 @@ const formatTime = (date: Date) => new Date(date).toLocaleTimeString([], {
   minute: '2-digit',
 })
 
+function timeValue(date: Date | undefined): number {
+  return date ? new Date(date).getTime() : 0
+}
+
+function compareCreatedDesc(a: ActionLogEntry, b: ActionLogEntry): number {
+  return timeValue(b.createdAt) - timeValue(a.createdAt) || b.id - a.id
+}
+
+function compareHistoryDesc(a: ActionLogEntry, b: ActionLogEntry): number {
+  return timeValue(b.appliedAt ?? b.createdAt) - timeValue(a.appliedAt ?? a.createdAt) || b.id - a.id
+}
+
 interface ActivityProps {
   overseer: RpcStub<Overseer>
 }
@@ -96,13 +108,11 @@ export default function Activity({ overseer }: ActivityProps) {
   }
 
   const { pendingActions, historyActions } = useMemo(() => {
-    const sortedActions = [...actionsById.values()].toSorted((a, b) =>
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    )
+    const actions = [...actionsById.values()]
 
     return {
-      pendingActions: sortedActions.filter(record => record.state === 'pending'),
-      historyActions: sortedActions.filter(record => record.state !== 'pending'),
+      pendingActions: actions.filter(record => record.state === 'pending').toSorted(compareCreatedDesc),
+      historyActions: actions.filter(record => record.state !== 'pending').toSorted(compareHistoryDesc),
     }
   }, [actionsById])
   const hasAnyActivity = pendingActions.length > 0 || historyActions.length > 0
