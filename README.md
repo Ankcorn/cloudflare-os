@@ -18,6 +18,7 @@ This is a demonstration of an agent harness and vibe coding environment built en
 3. Run `pnpm build`.
 4. Start the server: `pnpm run dev-server`
     * To enable Workers AI models, use `pnpm run dev-server -- --use-workers-ai-binding`, but this will require Cloudflare login.
+    * To run the backend on a different local port, set the same backend host for both dev commands, e.g. `VITE_BACKEND_HOST=localhost:9000 pnpm run dev-server` and `VITE_BACKEND_HOST=localhost:9000 pnpm run dev-client`.
 5. Start the client: `pnpm run dev-client`
 6. Visit `localhost:3000`
 7. Create an account and log in.
@@ -95,4 +96,3 @@ with `PUBLIC_BASE_URL`):
 
 See [docs/oauth-signin.md](docs/oauth-signin.md) and [docs/ai-gateway-billing.md](docs/ai-gateway-billing.md)
 for the full list of options, the free-tier / top-up behavior, and the storage bindings involved.
-
