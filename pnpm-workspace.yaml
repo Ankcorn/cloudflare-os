@@ -9,10 +9,6 @@ minimumReleaseAgeExclude:
   - capnweb-validate
   - workerd
   - "@cloudflare/workerd-*"
-  # oxlint is pinned dev tooling; its platform-specific binding
-  # packages are published per release and would otherwise trip the policy.
-  - oxlint
-  - "@oxlint/*"
 
 allowBuilds:
   core-js-pure: true
