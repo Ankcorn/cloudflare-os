@@ -454,9 +454,10 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
     case "saveCapsuleAsBinding":
       return { verb: "Saved resource", target: tc.input.bindingName };
     case "executeCode": {
-      // Prefer the first non-empty line as a preview.
+      // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
+      // input is still streaming in, so guard against undefined.
       const firstLine = tc.input.code
-        .split("\n")
+        ?.split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0);
       return {
