@@ -7,6 +7,8 @@ interface AuthContextType {
   logout: () => void
   /** Current user info, fetched once on mount. Null while loading. */
   currentUser: AiChatAuthorInfo | null
+  /** Whether the current user is a deployment admin. False while loading / for non-admins. */
+  isAdmin: boolean
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
@@ -19,6 +21,7 @@ interface AuthProviderProps {
 
 export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProviderProps) {
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -28,8 +31,16 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
     return () => { cancelled = true }
   }, [authenticatedApi])
 
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi.amIAdmin().then((admin) => {
+      if (!cancelled) setIsAdmin(admin)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [authenticatedApi])
+
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser }}>
+    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin }}>
       {children}
     </AuthContext.Provider>
   )

@@ -15,7 +15,9 @@ interface SignupPageProps {
 export default function SignupPage({ rpcStub }: SignupPageProps) {
   const serverConfig = useServerConfig();
   const authVendors = serverConfig?.authVendors ?? [];
-  const passwordAuthEnabled = serverConfig?.passwordAuthEnabled ?? true;
+  const signupsEnabled = serverConfig?.signupsEnabled ?? true;
+  // The password create-account form requires both password auth AND open signups.
+  const passwordAuthEnabled = (serverConfig?.passwordAuthEnabled ?? true) && signupsEnabled;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -99,6 +101,16 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
           </h1>
           <p className="text-sm text-kumo-subtle mt-1">Create your account</p>
         </div>
+
+        {!signupsEnabled && (
+          <Banner
+            variant="default"
+            title="Signups are closed"
+            className="mb-4"
+          >
+            New account registration is currently disabled on this deployment.
+          </Banner>
+        )}
 
         {passwordAuthEnabled && (
           <>

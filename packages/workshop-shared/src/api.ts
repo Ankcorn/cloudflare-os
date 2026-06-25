@@ -305,14 +305,6 @@ export interface AuthenticatedApi extends RpcTarget {
   // Returns null if not in library, or { uploaded } if it is.
   isBlueprintInLibrary(blueprintId: string): Promise<{ uploaded: boolean } | null>;
 
-  // Returns whether the blueprint is featured in deployment-wide admin settings.
-  // Returns null when the caller is not an admin or the blueprint cannot be featured.
-  adminIsBlueprintFeatured(blueprintId: string): Promise<boolean | null>;
-
-  // Mark or unmark a blueprint as featured in deployment-wide admin settings.
-  // Requires admin rights.
-  adminSetBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void>;
-
   // Create a new gadget from a blueprint. Reads the blueprint from KV, downloads code from
   // R2, creates a new Overseer DO, initializes it with the blueprint's code, and creates
   // gatekeepers from the provided binding assignments.
@@ -339,8 +331,144 @@ export interface AuthenticatedApi extends RpcTarget {
   // is updated and subscribers are notified with credentialsValid: true.
   reconnectAccount(accountId: number): Promise<{url: string}>;
 
+  // --- Deployment admin ---
+
+  // Whether the current user is a deployment admin. Used by the client to decide whether to show
+  // the admin UI.
+  amIAdmin(): Promise<boolean>;
+
+  // Returns a capability for managing deployment-wide admin settings, or null when the caller is not
+  // an admin. The access check happens once here, so the returned stub's methods need no per-call
+  // checks. (Authentication config — sign-in providers, password login — is intentionally not
+  // managed here; it stays env-var driven.)
+  getAdminApi(): Promise<RpcStub<AdminApi> | null>;
+
   // TODO:
   // - Edit permissions on a connected account.
+}
+
+// Maximum length (characters) of the admin announcement / banner text.
+export const MAX_ANNOUNCEMENT_LENGTH = 2000;
+
+// Accent colors available for the full-width announcement banner. Soft status tints plus the brand
+// color, so a banner need not look like an alert.
+export type BannerColor = 'neutral' | 'info' | 'success' | 'warning' | 'danger' | 'brand';
+
+export const BANNER_COLORS: BannerColor[] =
+    ['neutral', 'info', 'success', 'warning', 'danger', 'brand'];
+
+export const DEFAULT_BANNER_COLOR: BannerColor = 'info';
+
+export function isBannerColor(value: unknown): value is BannerColor {
+  return typeof value === 'string' && (BANNER_COLORS as string[]).includes(value);
+}
+
+// The deployment-wide full-width banner configuration.
+export type BannerConfig = {
+  // Banner text (Markdown supported). Empty string hides the banner.
+  text: string;
+  // Accent color.
+  color: BannerColor;
+};
+
+// Whether `value` is a valid 3- or 6-digit hex color (e.g. "#abc" or "#aabbcc"). Used to validate
+// the admin accent color before it's interpolated into CSS, preventing CSS injection.
+export function isHexColor(value: unknown): value is string {
+  return typeof value === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value);
+}
+
+// A single gatekeeper resource type in the admin resource-config UI.
+export type AdminResource = {
+  // The resource's urlPattern, used as its stable identifier.
+  urlPattern: string;
+  title: string;
+  description: string;
+  icon?: AvatarImage;
+  // Whether this resource is currently enabled (not in the admin disabled set).
+  enabled: boolean;
+};
+
+// A bound gatekeeper and its resource types, for the admin resource-config UI.
+export type AdminResourceVendor = {
+  vendorId: string;
+  displayName: string;
+  logo?: AvatarImage;
+  // Whether the whole gatekeeper is enabled. When false, its resources are unavailable regardless of
+  // their individual enabled flags.
+  enabled: boolean;
+  resources: AdminResource[];
+};
+
+// Maximum length (characters) of the admin-authored agent system-prompt instructions.
+export const MAX_INSTANCE_INSTRUCTIONS_LENGTH = 8000;
+
+// Maximum length (characters) of the admin-authored site name shown next to the top-bar logo.
+export const MAX_SITE_NAME_LENGTH = 40;
+
+// All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI.
+export type AdminSettingsView = {
+  // Whether new account signups are allowed.
+  signupsEnabled: boolean;
+  // Site name shown next to the top-bar logo ("" falls back to the default, "gadgets").
+  siteName: string;
+  // Agent system-prompt instructions ("" when unset).
+  instanceInstructions: string;
+  // Top-bar notice text ("" when unset).
+  announcement: string;
+  // Full-width banner (text + accent color).
+  banner: BannerConfig;
+  // Accent color hex, or "" for the default theme.
+  accentColor: string;
+  // Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled).
+  resourceVendors: AdminResourceVendor[];
+};
+
+// Capability for managing deployment-wide admin settings, obtained via
+// AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
+// capability is minted, so these methods don't re-check. Covers branding, agent instructions, and
+// which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
+// driven). Each setter throws on invalid input.
+export interface AdminApi {
+  // Read all admin-managed settings for the admin UI in one call.
+  getSettings(): Promise<AdminSettingsView>;
+
+  // Enable or disable new account signups. Existing users can still log in while signups are closed.
+  setSignupsEnabled(enabled: boolean): Promise<void>;
+
+  // Set the site name shown next to the top-bar logo. Pass "" to reset to the default ("gadgets").
+  // Rejects over MAX_SITE_NAME_LENGTH.
+  setSiteName(name: string): Promise<void>;
+
+  // Replace the agent system-prompt instructions. Pass "" to clear. Rejects over MAX_INSTANCE_INSTRUCTIONS_LENGTH.
+  setInstanceInstructions(text: string): Promise<void>;
+
+  // Enable or disable a single gatekeeper resource type, keyed by vendor id + resource urlPattern.
+  // Soft enforcement: disabling hides the resource from the connect UI, the resource picker, and the
+  // agent; it doesn't revoke a capability a gadget already holds.
+  setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void>;
+
+  // Enable or disable an entire gatekeeper (its connectors/resources). Like resource disabling, it
+  // doesn't revoke capabilities a gadget already holds.
+  setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void>;
+
+  // Set the top-bar notice (centered text in the top navigation bar). Pass "" to clear. Rejects over
+  // MAX_ANNOUNCEMENT_LENGTH.
+  setAnnouncement(text: string): Promise<void>;
+
+  // Set the full-width banner. Pass an empty text to hide it. Rejects over MAX_ANNOUNCEMENT_LENGTH or
+  // an invalid color.
+  setBanner(text: string, color: BannerColor): Promise<void>;
+
+  // Set the deployment accent color (hex, e.g. "#3b82f6"). Pass "" to reset to the default theme.
+  // Rejects an invalid hex color.
+  setAccentColor(color: string): Promise<void>;
+
+  // Returns whether the blueprint is featured on the deployment. Returns null when the blueprint
+  // can't be featured (e.g. it isn't a listable blueprint).
+  isBlueprintFeatured(blueprintId: string): Promise<boolean | null>;
+
+  // Mark or unmark a blueprint as featured on the deployment.
+  setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void>;
 }
 
 // A gatekeeper vendor offered as a sign-in method. The login/signup pages render a "Continue with
@@ -362,14 +490,32 @@ export type ServerConfig = {
   // configured (password-only).
   authVendors: AuthVendorInfo[];
 
-  // Whether username/password login + signup is available. Defaults to true; an installation can
-  // disable it (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true if no auth vendor is
-  // configured, to avoid locking everyone out.
+  // Whether username/password login is available. Defaults to true; an installation can disable it
+  // (DISABLE_PASSWORD_AUTH) to be OAuth-only. Forced true if no auth vendor is configured, to avoid
+  // locking everyone out.
   passwordAuthEnabled: boolean;
 
   // Whether the optional Cloudflare free-tier limits + top-up flow is enabled. When false (the
   // default, e.g. self-hosted), usage is unlimited and the credits UI is hidden.
   cloudflareLimitsEnabled: boolean;
+
+  // Whether new account signups are allowed (admin-configurable, default true). The signup page
+  // hides the create-account form when false.
+  signupsEnabled: boolean;
+
+  // Site name shown next to the top-bar logo (admin-configurable). Empty falls back to "gadgets".
+  siteName: string;
+
+  // Deployment-wide top-bar notice (centered text in the top navigation bar). Empty when none is set.
+  announcement: string;
+
+  // Deployment-wide full-width banner shown across the top of the app. Empty text hides it.
+  banner: string;
+  bannerColor: BannerColor;
+
+  // Deployment accent (brand) color as a hex string, or "" to use the default theme. The client
+  // overrides the brand CSS variables with this (and derived shades) at runtime.
+  accentColor: string;
 };
 
 // Usage + Cloudflare-connection status for the optional limits flow. Returned by

@@ -4,8 +4,8 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, Overseer, GadgetMetadata } from '@gadgets/workshop-shared/api'
 import GadgetUI from './GadgetUI'
 import UserMenu from './components/UserMenu'
-import AlphaWarning from './AlphaWarning'
 import { GadgetPresence } from './components/GadgetPresence'
+import TopBarNotice from './TopBarNotice'
 
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
@@ -37,7 +37,7 @@ export default function GadgetUseView({
         className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
         style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)' }}
       >
-        <AlphaWarning />
+        <TopBarNotice />
         {/* Left: logo / title */}
         <div className="flex items-center gap-2 min-w-0">
           <Link to="/" className="flex-shrink-0 hover:opacity-80 transition-opacity">

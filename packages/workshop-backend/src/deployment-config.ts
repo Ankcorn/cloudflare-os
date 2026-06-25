@@ -1,11 +1,12 @@
-// Builds the public ServerConfig the client fetches at boot. Aggregates the two optional,
-// independent features: sign-in via authentication gatekeepers (auth/) and AI Gateway billing
-// (ai-gateway-billing/). Contains no secrets.
+// Builds the public ServerConfig the client fetches at boot. Aggregates sign-in (auth/, env-driven),
+// AI Gateway billing (ai-gateway-billing/), and the admin-configured branding (admin-config.ts).
+// Contains no secrets.
 
 import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
+import { readAdminConfig } from "./admin-config.js";
 
 // Resolve the auth-capable, allowlisted gatekeeper vendors offered as sign-in methods, querying
 // each gatekeeper's describe() for display info. Skips vendors with no binding, that don't advertise
@@ -31,9 +32,22 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
 }
 
 export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig> {
+  // The admin-config KV get and the per-vendor describe() RPCs are independent — run them
+  // concurrently so the KV get isn't serialized ahead of N cross-Worker calls on every (re)connect.
+  // (Branding comes from admin-config; auth config is separate and env-driven.)
+  let [config, authVendors] = await Promise.all([
+    readAdminConfig(env),
+    getAuthVendors(env),
+  ]);
   return {
-    authVendors: await getAuthVendors(env),
+    authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
+    signupsEnabled: config.signupsEnabled,
+    siteName: config.siteName,
+    announcement: config.announcement,
+    banner: config.banner.text,
+    bannerColor: config.banner.color,
+    accentColor: config.accentColor,
   };
 }

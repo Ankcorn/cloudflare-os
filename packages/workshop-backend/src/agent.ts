@@ -6,6 +6,7 @@ import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
+import { formatInstanceInstructions } from "./admin-config";
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -63,6 +64,10 @@ export interface AgentHooks {
   // to Workers AI. Exposed as a narrow interface (rather than handing over the whole `env`)
   // so the dependency surface stays explicit.
   getWebFetchEnv(): WebFetchEnv;
+
+  // Deployment-wide, admin-authored instructions to append to the agent's system prompt. Returns
+  // "" when none are set. Read on each turn so admin edits take effect promptly.
+  getInstanceInstructions(): Promise<string>;
 
   // Connection-request hooks for the agent.
   //
@@ -1291,6 +1296,10 @@ export async function runAgent(
   let codePreviewManager = new CodePreviewManager(getSessionYDoc, emitStreamEvent);
   let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
+  // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
+  // inside the Anthropic prompt cache window. "" when unset.
+  let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
+
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt.
 
@@ -1306,7 +1315,9 @@ export async function runAgent(
     }
 
     // Split the system prompt into static and dynamic parts for better caching.
-    modelMessages[0].content = SPAWNER_SYSTEM_PROMPT;
+    modelMessages[0].content = instanceInstructions
+        ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}`
+        : SPAWNER_SYSTEM_PROMPT;
     modelMessages[1].content = systemPromptBindings;
   } else {
     // This is a regular coding agent.
@@ -1365,7 +1376,9 @@ export async function runAgent(
     }
 
     // Split the system prompt into static and dynamic parts for better caching.
-    modelMessages[0].content = SYSTEM_PROMPT;
+    modelMessages[0].content = instanceInstructions
+        ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
+        : SYSTEM_PROMPT;
     modelMessages[1].content = `${systemPromptFiles}\n\n${systemPromptBindings}${systemPromptConnections}`;
   }
 

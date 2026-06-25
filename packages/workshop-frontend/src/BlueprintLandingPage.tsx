@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub, RpcTarget } from 'capnweb'
-import { PublicApi, AuthenticatedApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, PushPin, Robot, Star, Trash, X } from '@phosphor-icons/react'
@@ -63,6 +63,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const [canManageFeatured, setCanManageFeatured] = useState(false)
   const [isFeatured, setIsFeatured] = useState(false)
   const [updatingFeatured, setUpdatingFeatured] = useState(false)
+  // Admin capability (null for non-admins), minted once and reused for the feature toggle. Wrapped
+  // in an object so the stub isn't mistaken for a state updater function. Disposed on cleanup.
+  const [admin, setAdmin] = useState<{ api: RpcStub<AdminApi> } | null>(null)
   const [isInLibrary, setIsInLibrary] = useState(false)
   const [isUploadedBlueprint, setIsUploadedBlueprint] = useState(false)
   const [loadingLibraryState, setLoadingLibraryState] = useState(false)
@@ -238,8 +241,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
   useEffect(() => {
     let cancelled = false
+    let stub: RpcStub<AdminApi> | null = null
 
     if (!id || !authenticatedApi) {
+      setAdmin(null)
       setCanManageFeatured(false)
       setIsFeatured(false)
       return () => {
@@ -247,25 +252,44 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       }
     }
 
-    authenticatedApi.adminIsBlueprintFeatured(id).then(result => {
-      if (cancelled) return
+    ;(async () => {
+      try {
+        // Mint the admin capability once (the access check happens server-side); null = not admin.
+        const api = await authenticatedApi.getAdminApi()
+        if (cancelled) {
+          api?.[Symbol.dispose]?.()
+          return
+        }
+        if (!api) {
+          setCanManageFeatured(false)
+          setIsFeatured(false)
+          return
+        }
+        stub = api
+        setAdmin({ api })
 
-      if (result === null) {
+        const result = await api.isBlueprintFeatured(id)
+        if (cancelled) return
+        // null means the blueprint can't be featured; a boolean means it can.
+        if (result === null) {
+          setCanManageFeatured(false)
+          setIsFeatured(false)
+        } else {
+          setCanManageFeatured(true)
+          setIsFeatured(result)
+        }
+      } catch (err) {
+        if (cancelled) return
+        console.error('Failed to load admin featured state:', err)
         setCanManageFeatured(false)
         setIsFeatured(false)
-      } else {
-        setCanManageFeatured(true)
-        setIsFeatured(result)
       }
-    }).catch(err => {
-      if (cancelled) return
-      console.error('Failed to load admin featured state:', err)
-      setCanManageFeatured(false)
-      setIsFeatured(false)
-    })
+    })()
 
     return () => {
       cancelled = true
+      stub?.[Symbol.dispose]?.()
+      setAdmin(null)
     }
   }, [id, authenticatedApi])
 
@@ -578,13 +602,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
 
   const handleToggleFeatured = async () => {
-    if (!authenticatedApi || !id || !canManageFeatured) return
+    if (!admin || !id || !canManageFeatured) return
 
     const nextFeatured = !isFeatured
     setUpdatingFeatured(true)
 
     try {
-      await authenticatedApi.adminSetBlueprintFeatured(id, nextFeatured)
+      await admin.api.setBlueprintFeatured(id, nextFeatured)
       setIsFeatured(nextFeatured)
     } catch (err: any) {
       console.error('Failed to update featured status:', err)

@@ -4,7 +4,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
 
 export default function UserMenu() {
-  const { authenticatedApi, logout, currentUser } = useAuthenticatedApi()
+  const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
   const navigate = useNavigate()
 
   const avatarUrl = useAvatar(authenticatedApi, currentUser?.id)
@@ -43,6 +43,14 @@ export default function UserMenu() {
         >
           Providers
         </DropdownMenu.Item>
+        {isAdmin && (
+          <DropdownMenu.Item
+            onClick={() => navigate({ to: '/admin' })}
+            className="!h-auto rounded-md !px-3 !py-2 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+          >
+            Admin
+          </DropdownMenu.Item>
+        )}
         <DropdownMenu.Separator />
         <DropdownMenu.Item
           variant="danger"
