@@ -8,6 +8,10 @@ import { BlueprintMetadata, BlueprintPublicInfo } from '@gadgets/workshop-shared
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
+// Reserved key in the BLUEPRINTS KV namespace holding the deployment-wide admin config (a single
+// JSON object). AdminSettings already owns this namespace; see admin-config.ts.
+export const ADMIN_CONFIG_KEY = '.adminConfig';
+
 const BLUEPRINT_ARCHIVE_MAGIC = 0xec2e2d3a2300e317n;
 const BLUEPRINT_ARCHIVE_VERSION = 1;
 const BLUEPRINT_ARCHIVE_PREFIX_BYTES = 24;
@@ -24,7 +28,7 @@ export type BlueprintKvRecord = {
 };
 
 export function isReservedBlueprintKey(id: string): boolean {
-  return id === FEATURED_BLUEPRINTS_KEY;
+  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY;
 }
 
 export function reviveBlueprintMetadata(metadata: BlueprintMetadata): BlueprintMetadata {

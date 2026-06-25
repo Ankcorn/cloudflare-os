@@ -31,7 +31,7 @@ import ChatInterface, { type StreamingProposedChanges } from './ChatInterface'
 import ShareModal from './ShareModal'
 import { GadgetPresence } from './components/GadgetPresence'
 import BlueprintModal from './BlueprintModal'
-import AlphaWarning from './AlphaWarning'
+import TopBarNotice from './TopBarNotice'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { TabButton } from './components/TabButton'
 import { useActions } from './useActions'
@@ -703,7 +703,7 @@ export default function GadgetEditor() {
         className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
         style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)' }}
       >
-        <AlphaWarning />
+        <TopBarNotice />
         {/* Left: logo / title */}
         <div className="flex items-center gap-2 min-w-0">
           <Link

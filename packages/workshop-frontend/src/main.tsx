@@ -6,6 +6,8 @@ import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
 import { ServerConfigContext } from './ServerConfigContext'
 import { createRouter } from './router'
+import AnnouncementBanner from './components/AnnouncementBanner'
+import { applyAccentColor } from './theme'
 import './styles.css'
 
 // ---------------------------------------------------------------------------
@@ -136,9 +138,15 @@ function AppWithConnection() {
     return () => { cancelled = true; };
   }, [rpcState.stub]);
 
+  // Apply the deployment's admin-chosen accent color (overrides brand CSS vars at runtime).
+  useEffect(() => {
+    applyAccentColor(serverConfig?.accentColor ?? '');
+  }, [serverConfig?.accentColor]);
+
   return (
     <RpcContext.Provider value={rpcState}>
       <ServerConfigContext.Provider value={serverConfig}>
+        <AnnouncementBanner />
         <RouterProvider router={router} />
       </ServerConfigContext.Provider>
     </RpcContext.Provider>

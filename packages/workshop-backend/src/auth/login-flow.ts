@@ -22,6 +22,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { CLOUDFLARE_VENDOR_ID } from "../user.js";
+import { readAdminConfig } from "../admin-config.js";
 
 type PendingResult = { token: string } | { error: string };
 
@@ -94,7 +95,14 @@ export class LoginConnectCallbackImpl
       }
       const userStub = this.ctx.exports.UserDurableObject.get(
           this.ctx.exports.UserDurableObject.idFromName(email));
-      const secret = await userStub.loginOrCreateViaGatekeeper(email);
+      // Closed signups block first-time account creation here too (not just password signup); an
+      // existing user signing in is unaffected.
+      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      if (secret === null) {
+        await pending.fail("New sign-ups are currently disabled on this deployment.");
+        return;
+      }
       // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
       // requested full (non-transient) scopes, so persist the grant as a connected account before
       // handing back the session. Other providers use minimal, transient sign-in grants (no persist).

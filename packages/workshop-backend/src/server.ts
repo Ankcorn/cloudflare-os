@@ -1,20 +1,21 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, AdminApi } from '@gadgets/workshop-shared/api';
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
+import { readAdminConfig } from "./admin-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
 import { SupportedResource, VendorDescription, VendorScope } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { AdminSettings } from "./admin-settings.js";
+import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
@@ -314,24 +315,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.isBlueprintInLibrary(blueprintId);
   }
 
-  adminIsBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
-    // Reject non-admins here so they cannot pile traffic onto the singleton AdminSettings DO.
-    if (!this.#isAdmin()) {
-      return Promise.resolve(null);
-    }
-
-    return this.adminSettings.getByName("").isBlueprintFeatured(blueprintId);
-  }
-
-  adminSetBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
-    // Same pre-filter here: keep unauthorized callers away from the singleton DO entirely.
-    if (!this.#isAdmin()) {
-      return Promise.reject(new Error("Admin access required."));
-    }
-
-    return this.adminSettings.getByName("").setBlueprintFeatured(blueprintId, featured);
-  }
-
   async importBlueprint(archive: ReadableStream<Uint8Array>): Promise<string> {
     let { metadata, contentLength, content } = await parseBlueprintArchive(archive);
     delete metadata.screenshot;
@@ -448,6 +431,22 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async deleteOrphanedBlueprint(blueprintId: string): Promise<void> {
     return this.user.deleteOwnedBlueprint(blueprintId);
   }
+
+  // --- Deployment admin ---
+
+  async amIAdmin(): Promise<boolean> {
+    return this.#isAdmin();
+  }
+
+  async getAdminApi(): Promise<RpcStub<AdminApi> | null> {
+    if (!this.#isAdmin()) return null;
+    // #isAdmin() guarantees a non-empty user id name. Forwarded to gatekeepers when listing the
+    // resource catalog so RBAC-gated ones still surface for this admin.
+    let adminUserId = this.user.id.name!;
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
+    //     system doesn't know this.
+    return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+  }
 }
 
 async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<Response> {
@@ -547,7 +546,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let email = this.accessPayload.email as string;
     let userId = this.users.idFromName(email);
     let stub = this.users.get(userId);
-    let accountCreated = await stub.authenticateFromCfAccess(email);
+    let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    let accountCreated = await stub.authenticateFromCfAccess(email, signupsEnabled);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
@@ -595,6 +595,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     }
     if (!isPasswordAuthEnabled(this.env)) {
       throw new Error("Password signup is disabled on this deployment. Use a sign-in option.");
+    }
+    if (!(await readAdminConfig(this.env)).signupsEnabled) {
+      throw new Error("New signups are currently disabled on this deployment.");
     }
 
     username = normalizeUsername(username);

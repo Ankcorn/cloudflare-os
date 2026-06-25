@@ -9,6 +9,7 @@ import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
+import { readAdminConfig } from "./admin-config";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
@@ -2862,6 +2863,16 @@ class OverseerImpl implements AgentHooks {
     });
     this.#vendorsCache = { expires: now + OverseerImpl.#VENDORS_CACHE_TTL_MS, promise };
     return promise;
+  }
+
+  async getInstanceInstructions(): Promise<string> {
+    try {
+      // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
+      return (await readAdminConfig(this.env)).instanceInstructions;
+    } catch (err) {
+      console.error("Failed to read instance instructions:", err);
+      return "";
+    }
   }
 
   async listConnectableVendors(): Promise<{id: string, displayName: string}[]> {

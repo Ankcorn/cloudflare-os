@@ -8,6 +8,8 @@ import { getAiGatewayConfig } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
+import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
+import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 
 type ConnectedAccountRecord = {
   id: number;
@@ -204,14 +206,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage = makeUserStorage(ctx.storage);
     this.adminSettings = this.ctx.exports.AdminSettings;
 
-    this.vendors = new Map;
-
-    for (let bindingName in env) {
-      if (bindingName.startsWith("GATEKEEPER_")) {
-        let vendorId = bindingName.slice("GATEKEEPER_".length).toLowerCase();
-        this.vendors.set(vendorId, (<any>this.env)[bindingName]);
-      }
-    }
+    this.vendors = buildGatekeeperVendorMap(env);
   }
 
   async authenticate(token: string): Promise<void> {
@@ -224,9 +219,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // Returns true when this login created the account on first use.
-  async authenticateFromCfAccess(email: string): Promise<boolean> {
+  // Returns true when this login created the account on first use. When the account doesn't yet
+  // exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
+  // existing users can still sign in.
+  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
     if (!this.storage.created.get()) {
+      if (!allowCreate) {
+        throw new Error("New sign-ups are currently disabled on this deployment.");
+      }
       // Create on first use.
       this.storage.created.put(true);
       this.storage.profile.put({
@@ -307,8 +307,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // The profile is written only on first sign-in. We intentionally do NOT refresh the display name
   // on later logins: once set, the name is the user's to change (via setOwnDisplayName), so we don't
   // clobber a customized name with the email local-part.
-  async loginOrCreateViaGatekeeper(email: string): Promise<string> {
+  //
+  // When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
+  // returns null instead of creating one — existing users can still sign in.
+  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
     if (!this.storage.created.get()) {
+      if (!allowCreate) return null;
       this.storage.created.put(true);
       this.storage.profile.put({
         type: "user",
@@ -834,9 +838,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       userId: this.storage.profile.get().id
     };
 
+    // Admin-disabled resources/gatekeepers are filtered out here, which also covers the agent (the
+    // Overseer's connectable-vendor/resource list is sourced from this method).
+    let config = await readAdminConfig(this.env);
+    let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
+
     let promises: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}|null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
+      if (disabledGatekeeperSet.has(id)) {
+        continue;  // Whole gatekeeper disabled by admin.
+      }
       promises.push((async () => {
         if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
           return null;
@@ -846,11 +858,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           vendor.describe(),
           vendor.getSupportedResources(options),
         ]);
-        if (supportedResources.length == 0) {
+        let enabledResources =
+            filterEnabledResources(config, id, supportedResources);
+        if (enabledResources.length == 0) {
+          // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
           return null;
         }
 
-        return {id, description, supportedResources};
+        return {id, description, supportedResources: enabledResources};
       })());
     }
 
@@ -870,6 +885,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
+    }
+    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
+      throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
     }
 
     let accountId = this.storage.nextAccountId.get();
@@ -898,7 +916,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let seenIds = new Set<number>();
     let vendorDescriptions = new Map<string, Promise<VendorDescription>>();
 
+    // Snapshot the admin config once for this subscription. Changes take effect when the client
+    // re-subscribes (e.g. on reconnect), matching other deployment config.
+    let config = await readAdminConfig(this.env);
+    let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
+
     async function notifyAdd(record: ConnectedAccountRecord) {
+      if (disabledGatekeeperSet.has(record.vendorId)) {
+        return;  // Whole gatekeeper disabled by admin.
+      }
       if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
         return;
       }
@@ -928,6 +954,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       let supportedResources: SupportedResource[] = [];
       try {
         supportedResources = await record.account.getSupportedResources();
+        supportedResources =
+            filterEnabledResources(config, record.vendorId, supportedResources);
       } catch (err) {
         console.error("Failed to get supported resources for connected account", record.id, err);
       }
@@ -1139,6 +1167,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+
+    // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
+    // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper
+    // and blueprint instantiation — never from gadget or agent code).
+    let config = await readAdminConfig(this.env);
+    let vendorId = account.vendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(vendorId)) {
+      throw new Error(
+          `The "${account.vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+    }
+
+    // Blocking here prevents minting a new capability to a disabled resource even if the request
+    // bypasses the (separately filtered) picker/agent listings.
+    if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
+      throw new Error(
+          `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
+    }
 
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }

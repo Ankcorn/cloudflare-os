@@ -1,12 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon, List, X } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../AuthContext'
+import { useServerConfig } from '../ServerConfigContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
-import AlphaWarning from '../AlphaWarning'
+import TopBarNotice from '../TopBarNotice'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
+  const siteName = (useServerConfig()?.siteName ?? '').trim() || 'gadgets'
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const headerRef = useRef<HTMLElement>(null)
@@ -37,7 +39,7 @@ export default function Header() {
       }}
       >
       <div className="relative px-4 sm:px-6 h-14 flex items-center justify-between">
-        <AlphaWarning />
+        <TopBarNotice />
         {/* Logo */}
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-2">
@@ -47,7 +49,7 @@ export default function Header() {
               weight="bold"
             />
             <span className="text-base font-semibold tracking-tight text-kumo-default">
-              gadgets
+              {siteName}
             </span>
           </Link>
 
@@ -149,6 +151,16 @@ export default function Header() {
                 >
                   Providers
                 </Link>
+                {auth.isAdmin && (
+                  <Link
+                    to="/admin"
+                    onClick={closeMobileMenu}
+                    className={navLinkClass}
+                    activeProps={{ className: navLinkActiveClass }}
+                  >
+                    Admin
+                  </Link>
+                )}
                 <button
                   onClick={() => { closeMobileMenu(); auth.logout() }}
                   className="text-left text-sm px-3 py-1.5 rounded-md text-kumo-danger hover:bg-kumo-tint transition-colors"

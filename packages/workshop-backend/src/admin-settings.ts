@@ -1,7 +1,12 @@
-import { BlueprintPublicInfo } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminResourceVendor, AdminSettingsView, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
+import { RpcTarget } from 'capnweb';
+import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
-import { FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
+import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from './admin-config.js';
+import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
@@ -13,7 +18,11 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
         primaryKey: 'id',
       }),
     },
-    singletons: {},
+    singletons: {
+      // Authoritative deployment admin config. Mirrored to BLUEPRINTS KV (ADMIN_CONFIG_KEY) so the
+      // connect/login/agent hot paths can read it without touching this singleton DO.
+      adminConfig: DEFAULT_ADMIN_CONFIG as AdminConfig,
+    },
   });
 }
 
@@ -28,12 +37,16 @@ type AdminSettingsStorage = ReturnType<typeof makeAdminSettingsStorage>;
 export class AdminSettings extends DurableObject<Cloudflare.Env> {
   private storage: AdminSettingsStorage;
   private users: DurableObjectNamespace<UserDurableObject>;
+  // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
+  // resource listing needs no user context.
+  private vendors: Map<string, Service<GatekeeperVendor>>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
 
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
+    this.vendors = buildGatekeeperVendorMap(env);
   }
 
   async #writeFeaturedSnapshot(): Promise<void> {
@@ -130,5 +143,178 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       this.storage.featuredBlueprints.delete(blueprintId);
       await this.#writeFeaturedSnapshot();
     }
+  }
+
+  // --- Deployment admin config ---
+
+  getAdminConfig(): AdminConfig {
+    return this.storage.adminConfig.get();
+  }
+
+  // Merge a partial update into the admin config and mirror it to KV. Callers (AdminApiImpl) validate
+  // scalar values; this just persists atomically.
+  async updateAdminConfig(patch: Partial<AdminConfig>): Promise<void> {
+    let next = { ...this.storage.adminConfig.get(), ...patch };
+    this.storage.adminConfig.put(next);
+    await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
+  }
+
+  // Read all admin-managed settings for the admin UI in one call: the stored config plus the live
+  // resource catalog (every bound gatekeeper's resource types annotated with their enabled state).
+  //
+  // `adminUserId` is the requesting admin's user id (email/username), forwarded to each gatekeeper's
+  // getSupportedResources(). Most gatekeepers ignore it, but RBAC-gated ones (e.g. the internal GTM
+  // Data gatekeeper) only reveal their resources to users with the right permission — so without it
+  // they'd be hidden from the admin Gatekeepers tab.
+  async getSettings(adminUserId: string): Promise<AdminSettingsView> {
+    let config = this.storage.adminConfig.get();
+    return {
+      signupsEnabled: config.signupsEnabled,
+      siteName: config.siteName,
+      instanceInstructions: config.instanceInstructions,
+      announcement: config.announcement,
+      banner: config.banner,
+      accentColor: config.accentColor,
+      resourceVendors: await this.#listResourceConfig(config, adminUserId),
+    };
+  }
+
+  // Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO).
+  async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
+    vendorId = vendorId.toLowerCase();
+    let map = { ...this.storage.adminConfig.get().disabledResources };
+    let disabled = new Set(map[vendorId] ?? []);
+    if (enabled) disabled.delete(urlPattern); else disabled.add(urlPattern);
+    if (disabled.size === 0) delete map[vendorId]; else map[vendorId] = [...disabled];
+    await this.updateAdminConfig({ disabledResources: map });
+  }
+
+  // Enable/disable an entire gatekeeper atomically (read-modify-write within the DO).
+  async setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void> {
+    vendorId = vendorId.toLowerCase();
+    let disabled = new Set(this.storage.adminConfig.get().disabledGatekeepers);
+    if (enabled) disabled.delete(vendorId); else disabled.add(vendorId);
+    await this.updateAdminConfig({ disabledGatekeepers: [...disabled] });
+  }
+
+  // Admin view of every bound gatekeeper's resource types, annotated with their enabled state.
+  // Unlike the user-facing listGatekeeperVendors, this does NOT hide disabled resources (so admins
+  // can re-enable them). `adminUserId` is forwarded to getSupportedResources() so RBAC-gated
+  // gatekeepers still surface for an admin who has access to them.
+  async #listResourceConfig(config: AdminConfig, adminUserId: string): Promise<AdminResourceVendor[]> {
+    let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
+
+    let promises: Promise<AdminResourceVendor | null>[] = [];
+    for (let [id, vendor] of this.vendors) {
+      promises.push((async () => {
+        try {
+          let [description, supportedResources] = await Promise.all([
+            vendor.describe(),
+            vendor.getSupportedResources({ userId: adminUserId }),
+          ]);
+          if (supportedResources.length === 0) {
+            // Nothing to toggle for this gatekeeper.
+            return null;
+          }
+          let disabled = new Set(config.disabledResources[id] ?? []);
+          return {
+            vendorId: id,
+            displayName: description.displayName,
+            logo: description.logo,
+            enabled: !disabledGatekeeperSet.has(id),
+            resources: supportedResources.map(r => ({
+              urlPattern: r.urlPattern,
+              title: r.title,
+              description: r.description,
+              icon: r.icon,
+              enabled: !disabled.has(r.urlPattern),
+            })),
+          };
+        } catch (err) {
+          console.error(`Failed to read resource config for gatekeeper "${id}":`, err);
+          return null;
+        }
+      })());
+    }
+
+    return (await Promise.all(promises)).filter((v): v is AdminResourceVendor => v !== null);
+  }
+}
+
+// Capability for managing deployment-wide admin settings, obtained via
+// AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens once
+// when the capability is minted in server.ts, so these methods don't re-check. This is a thin
+// validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
+// gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
+// stub to the DO's internal methods. Covers branding, agent instructions, signups, and gatekeeper
+// connector/resource availability; authentication config stays env-var driven.
+@validateRpc()
+export class AdminApiImpl extends RpcTarget implements AdminApi {
+  // `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
+  // resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
+  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+    super();
+  }
+
+  getSettings(): Promise<AdminSettingsView> {
+    return this.admin.getSettings(this.adminUserId);
+  }
+
+  async setSignupsEnabled(enabled: boolean): Promise<void> {
+    await this.admin.updateAdminConfig({ signupsEnabled: enabled });
+  }
+
+  async setSiteName(name: string): Promise<void> {
+    if (name.length > MAX_SITE_NAME_LENGTH) {
+      throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
+    }
+    await this.admin.updateAdminConfig({ siteName: name });
+  }
+
+  async setInstanceInstructions(text: string): Promise<void> {
+    if (text.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
+    }
+    await this.admin.updateAdminConfig({ instanceInstructions: text });
+  }
+
+  setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
+    return this.admin.setResourceEnabled(vendorId, urlPattern, enabled);
+  }
+
+  setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void> {
+    return this.admin.setGatekeeperEnabled(vendorId, enabled);
+  }
+
+  async setAnnouncement(text: string): Promise<void> {
+    if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
+      throw new Error(`Announcement too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
+    }
+    await this.admin.updateAdminConfig({ announcement: text });
+  }
+
+  async setBanner(text: string, color: BannerColor): Promise<void> {
+    if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
+      throw new Error(`Banner too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
+    }
+    if (!isBannerColor(color)) {
+      throw new Error(`Invalid banner color: ${color}`);
+    }
+    await this.admin.updateAdminConfig({ banner: { text, color } });
+  }
+
+  async setAccentColor(color: string): Promise<void> {
+    if (color !== "" && !isHexColor(color)) {
+      throw new Error(`Invalid accent color: ${color}`);
+    }
+    await this.admin.updateAdminConfig({ accentColor: color });
+  }
+
+  isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
+    return this.admin.isBlueprintFeatured(blueprintId);
+  }
+
+  setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
+    return this.admin.setBlueprintFeatured(blueprintId, featured);
   }
 }
