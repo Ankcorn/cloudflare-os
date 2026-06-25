@@ -278,6 +278,7 @@ type ActionRecord = {
   appliedAt?: Date;
   action: number;  // action key assigned by the gatekeeper, passed back on apply/reject/revert
   description: ActionDescription;
+  resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -389,6 +390,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         state: record.state,
         type: "action",
         description: record.description,
+        resolvedBy: record.resolvedBy,
       };
     case "bindHook":
       return {
@@ -4078,10 +4080,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
+    // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
+    // action applied in the world but still "pending" in storage.
+    let profile = await this.#getClientProfile();
+
     await gatekeeper.applyAction(action.action);
 
     action.state = "approved";
     action.appliedAt = new Date();
+    action.resolvedBy = profile;
     this.impl.storage.actions.put(action);
   }
 
@@ -4177,10 +4184,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
 
+    // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
+    // can't leave the action rejected with the gatekeeper but still "pending" in storage.
+    let profile = await this.#getClientProfile();
+
     await gatekeeper.rejectAction(action.action);
 
     action.state = "rejected";
     action.appliedAt = new Date();
+    action.resolvedBy = profile;
     this.impl.storage.actions.put(action);
   }
 

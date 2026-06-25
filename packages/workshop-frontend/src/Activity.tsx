@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Pulse } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
@@ -8,6 +8,8 @@ import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { useActions } from './useActions'
+import { useAuthenticatedApi } from './AuthContext'
+import { useAvatar } from './useAvatar'
 
 function getSafeExternalUrl(url: string | undefined): string | undefined {
   if (!url) return undefined
@@ -365,6 +367,7 @@ function ActivityLogRow({
 }) {
   const statusLabel = record.state === 'approved' ? 'Approved' : 'Rejected'
   const safeResourceUrl = getSafeExternalUrl(record.resourceUrl)
+  const resolvedBy = record.type === 'action' ? record.resolvedBy : undefined
   const created = new Date(record.createdAt)
   const createdDate = created.toLocaleDateString([], { month: 'numeric', day: 'numeric', year: '2-digit' })
   const createdTime = created.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
@@ -411,6 +414,15 @@ function ActivityLogRow({
           <p className="m-0 line-clamp-2 text-kumo-default">
             {record.description.title}
           </p>
+          {resolvedBy && (
+            <ResolverBadge
+              profileId={resolvedBy.id}
+              className="mt-1 flex max-w-full items-center gap-1 text-[11px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"
+              title={`${statusLabel} by ${resolvedBy.name}`}
+            >
+              <span className="truncate">{statusLabel} by {resolvedBy.name}</span>
+            </ResolverBadge>
+          )}
         </div>
         <div>
           {record.type === 'bindHook' ? (
@@ -435,9 +447,18 @@ function ActivityLogRow({
         <div className="px-3 pb-3 pl-[56px]">
           <div className="rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2.5">
             {record.appliedAt && (
-              <p className="mb-2 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                Resolved {formatDate(record.appliedAt)}
-              </p>
+              resolvedBy ? (
+                <ResolverBadge
+                  profileId={resolvedBy.id}
+                  className="mb-2 flex items-center gap-1.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"
+                >
+                  <span>{statusLabel} by {resolvedBy.name} · {formatDate(record.appliedAt)}</span>
+                </ResolverBadge>
+              ) : (
+                <p className="mb-2 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                  Resolved {formatDate(record.appliedAt)}
+                </p>
+              )
             )}
             <p className="m-0 whitespace-pre-wrap text-[12px] leading-[18px] font-normal tracking-[-0.2px] text-kumo-subtle">
               {record.description.description}
@@ -446,6 +467,32 @@ function ActivityLogRow({
         </div>
       )}
     </div>
+  )
+}
+
+// Renders a resolver's avatar (when available) alongside caller-provided label content. Isolated
+// into its own component so the avatar hooks (useAuthenticatedApi/useAvatar) only run for rows that
+// actually have a resolver, rather than for every row in the log.
+function ResolverBadge({
+  profileId,
+  className,
+  title,
+  children,
+}: {
+  profileId: string
+  className: string
+  title?: string
+  children: ReactNode
+}) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const avatarUrl = useAvatar(authenticatedApi, profileId)
+  return (
+    <span className={className} title={title}>
+      {avatarUrl && (
+        <img src={avatarUrl} alt="" className="h-4 w-4 shrink-0 rounded-full object-cover" />
+      )}
+      {children}
+    </span>
   )
 }
 

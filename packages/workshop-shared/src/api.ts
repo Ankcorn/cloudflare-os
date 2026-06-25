@@ -722,6 +722,9 @@ export type ActionLogEntry = {
 } & ({
   type: "action";
   description: ActionDescription;
+  // Who resolved the action (approved or rejected it). Set when the action leaves "pending"; absent
+  // while still pending (or for legacy actions resolved before this was tracked).
+  resolvedBy?: AiChatAuthorInfo;
 } | {
   type: "observation";
   description: ObservationDescription;
