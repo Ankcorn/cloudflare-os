@@ -9,6 +9,7 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GatekeeperMetadata, BoundHookInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
@@ -27,9 +28,10 @@ interface ConnectionsProps {
   onConnectionsChange?: () => void
   isVisible?: boolean
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
+  reloadTrigger?: number
 }
 
-export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible: _isVisible, onHasGatekeepersChange }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorLogos = useVendorLogos(authenticatedApi)
@@ -40,17 +42,23 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [deleteTarget, setDeleteTarget] = useState<{ bindingName: string; resourceTitle: string } | null>(null)
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
+  const [autoApproveRules, setAutoApproveRules] =
+    useState<Array<{ bindingName: string; actionKind: ActionKind }>>([])
+  // Keyed `${bindingName}:${actionKind.tag}` -- the rule has no numeric id.
+  const [togglingRules, setTogglingRules] = useState<Set<string>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
     try {
-      const [gatekeeperList, hookList] = await Promise.all([
+      const [gatekeeperList, hookList, ruleList] = await Promise.all([
         overseer.listGatekeepers(),
         overseer.listHooks(),
+        overseer.listAutoApprovedActionKinds(),
       ])
       setGatekeepers(gatekeeperList)
       setHooks(hookList)
+      setAutoApproveRules(ruleList)
       onHasGatekeepersChange?.(gatekeeperList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
@@ -98,9 +106,45 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     }
   }
 
+  // Disabling removes the rule (the list only contains enabled rules), so the row drops out.
+  const handleDisableRule = async (bindingName: string, tag: string) => {
+    const key = `${bindingName}:${tag}`
+    // Optimistically drop the rule from the list.
+    setAutoApproveRules((prev) =>
+      prev.filter((r) => !(r.bindingName === bindingName && r.actionKind.tag === tag)))
+    setTogglingRules((prev) => new Set(prev).add(key))
+    try {
+      await overseer.removeAutoApprovedActionKind(bindingName, tag)
+      await loadGatekeepers()
+    } catch (err) {
+      console.error('Failed to disable auto-approval rule:', err)
+      toasts.add({ title: 'Failed to disable auto-approval', variant: 'error' })
+      // Reload to restore the accurate (still-enabled) state.
+      await loadGatekeepers()
+    } finally {
+      setTogglingRules((prev) => {
+        const next = new Set(prev)
+        next.delete(key)
+        return next
+      })
+    }
+  }
+
   useEffect(() => {
     loadGatekeepers()
   }, [overseer])
+
+  // Re-load when the tab becomes visible, so rules/hooks enabled elsewhere (e.g. the "Always
+  // approve" button in Activity or the chat thread) show up without a full page reload.
+  useEffect(() => {
+    if (isVisible) loadGatekeepers()
+  }, [isVisible])
+
+  // Re-load when the parent signals a relevant change (e.g. an auto-approval rule enabled from
+  // Activity) -- covers the case where this tab is already open.
+  useEffect(() => {
+    if (reloadTrigger) loadGatekeepers()
+  }, [reloadTrigger])
 
   const handleEditStart = (bindingName: string) => {
     setEditingGatekeeper(bindingName)
@@ -384,6 +428,61 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                         </div>
                       </div>
                     )}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        )}
+
+        {!loading && autoApproveRules.length > 0 && (
+          <section className="mt-8">
+            <div className="mb-3">
+              <h2 className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
+                Auto-approval rules
+              </h2>
+              <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
+                Action types approved automatically on a connection, without prompting. Turn one off
+                to require manual approval again.
+              </p>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+              {autoApproveRules.map((rule, index) => {
+                const key = `${rule.bindingName}:${rule.actionKind.tag}`
+                const gatekeeper = gatekeepers.find((g) => g.bindingName === rule.bindingName)
+                const vendorId = gatekeeper?.vendorId
+
+                return (
+                  <div
+                    key={key}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <GatekeeperIcon
+                        vendorId={vendorId}
+                        bindingName={rule.bindingName}
+                        logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {rule.actionKind.label}
+                        </p>
+                        <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                          {gatekeeper?.resourceTitle}
+                          {gatekeeper?.resourceTitle && ' · '}
+                          <span className="font-mono text-kumo-subtle">{rule.bindingName}</span>
+                        </p>
+                      </div>
+                      <div className="ml-auto flex shrink-0 items-center gap-2">
+                        <HookToggle
+                          enabled
+                          disabled={togglingRules.has(key)}
+                          onToggle={() => handleDisableRule(rule.bindingName, rule.actionKind.tag)}
+                          label="auto-approval rule"
+                        />
+                      </div>
+                    </div>
                   </div>
                 )
               })}

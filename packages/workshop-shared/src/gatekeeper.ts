@@ -690,6 +690,16 @@ export type ObservationDescription = {
   prohibitAllSharing?: boolean;
 }
 
+// A stable, machine-readable tag for an action paired with its human-readable display name; the two
+// always travel together. Policy decisions key on `tag` (auto-approval rules group on it today, and
+// the future policy / danger-level engine will too -- treat it as a stable enum; multiple action
+// kinds MAY share a tag to be governed as one group). `label` is shown in the auto-approval UI in
+// place of the raw tag, which is not meant for display.
+export type ActionKind = {
+  tag: string;
+  label: string;
+};
+
 // Describes an action submitted to the action approval queue. This contains all the information
 // needed to:
 // - Decide whether the action needs to be approved and who can approve it.
@@ -730,6 +740,18 @@ export type ActionDescription = {
   // seamlessly.
   awaitDecision?: boolean;
 
+  // Author's verdict that this specific action is safe to auto-apply without human review, IF the
+  // user has opted in to auto-approving this action's kind (see `actionKind`). Only the gatekeeper
+  // author knows whether a given edit is benign vs. destructive, so this gate is set per-action.
+  // Absent -> never auto-approvable, even if a matching rule exists.
+  //
+  // TODO: A single opaque boolean isn't the ideal long-term shape. Eventually the gatekeeper should
+  // describe the *nature* of the action -- e.g. destructive vs. additive, reversible vs. not,
+  // posting arbitrary content (possible data leak) vs. flipping a switch -- and let a security
+  // policy decide whether auto-approval is allowed, rather than the gatekeeper author hard-coding
+  // that judgement here.
+  autoApprovable?: boolean;
+
   // ----------------------------------------------------------------------------
   // Policy hints
   //
@@ -749,6 +771,11 @@ export type ActionDescription = {
   // - Does this action modify existing content or only create new content? The former is somewhat
   //   riskier since it could damage existing information whereas posting new content is at worst
   //   an annoyance.
+
+  // The action's kind (stable tag + display label), or absent for actions that can't be matched by
+  // any tag-keyed rule -- those always require manual approval. `actionKind.tag` is what auto-
+  // approval rules and the future policy engine key on; `actionKind.label` is shown in the UI.
+  actionKind?: ActionKind;
 }
 
 // Describes a registered hook, for display purposes (e.g. so the user can see what hooks are

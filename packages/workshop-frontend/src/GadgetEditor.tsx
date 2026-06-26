@@ -261,6 +261,7 @@ export default function GadgetEditor() {
 
   // ── code / chat state ────────────────────────────────────────────────────────
   const [uiReloadTrigger, setUiReloadTrigger] = useState(0)
+  const [autoApproveReloadTrigger, setAutoApproveReloadTrigger] = useState(0)
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [draftProposedChanges, setDraftProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
   const [streamingProposedChanges, setStreamingProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
@@ -882,6 +883,7 @@ export default function GadgetEditor() {
                    constrainChatWidth={simpleMode}
                    onChatCountChange={handleChatCountChange}
                    onAgentActiveChange={handleAgentActiveChange}
+                   onAutoApproveChange={() => setAutoApproveReloadTrigger(t => t + 1)}
                    onHasAnyCodeChange={setHasAnyProposedChanges}
                    onSelectedChatHasProposedChangesChange={setSelectedChatHasProposedChanges}
                  />
@@ -1016,6 +1018,7 @@ export default function GadgetEditor() {
                   onConnectionsChange={() => setUiReloadTrigger(t => t + 1)}
                   isVisible={activeTab === 'connections'}
                   onHasGatekeepersChange={setHasBindings}
+                  reloadTrigger={autoApproveReloadTrigger}
                 />
               )}
             </div>
@@ -1024,6 +1027,7 @@ export default function GadgetEditor() {
               {overseer && hasMountedActivity && (
                 <Activity
                   overseer={overseer.stub}
+                  onAutoApproveChange={() => setAutoApproveReloadTrigger(t => t + 1)}
                 />
               )}
             </div>
