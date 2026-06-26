@@ -14,7 +14,6 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
-  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   GitHubApi,
@@ -258,20 +257,6 @@ const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
 const MAX_REPLY_TARGET_HOPS = 50;
-
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Know who you are",
-    rationale:
-        "Read your GitHub username, name, and avatar so this account can be labeled in Gadgets.",
-  },
-  {
-    displayName: "Read and write repositories",
-    rationale:
-        "Lets Gadgets read and update issues, pull requests, reviews, and discussions in any " +
-        "repository you can access.",
-  },
-];
 
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
@@ -1029,10 +1014,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
-  }
-
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
                        options?: GatekeeperConnectOptions): Promise<{ url: string }> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
@@ -1228,7 +1209,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         displayName: viewer.user.name ?? viewer.user.login,
         uniqueName: viewer.user.login,
         avatar: { url: viewer.user.avatar_url },
-        scope: SCOPE_CATALOG.map(entry => entry.displayName),
       };
     });
   }
@@ -1326,6 +1306,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return {
       url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`,
     };
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 }
 

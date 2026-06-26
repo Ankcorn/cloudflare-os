@@ -12,7 +12,6 @@ import {
   GatekeeperConnectOptions,
   AccountDescription,
   SupportedResource,
-  VendorScope,
   ResourceConfiguratorFrame,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {
@@ -89,17 +88,6 @@ type Env = Cloudflare.Env & {
 };
 
 const OAUTH_SCOPES = ["read", "write"];
-
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Read your Linear data",
-    rationale: "Lets Gadgets read teams, issues, projects, comments, and members you can access.",
-  },
-  {
-    displayName: "Create and update issues and comments",
-    rationale: "Lets Gadgets create and edit issues, move them through workflow states, and comment.",
-  },
-];
 
 const WORKSPACE_RESOURCE: SupportedResource = {
   urlPattern: "https://linear.app/:workspace",
@@ -493,10 +481,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
-  }
-
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
@@ -701,12 +685,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async describe(): Promise<AccountDescription> {
     return await this.#withApi(async api => {
-      const { user, organization } = await api.getViewer();
+      const { user } = await api.getViewer();
       return {
         displayName: user.displayName ?? user.name,
         uniqueName: user.email ?? user.name,
         avatar: { url: user.avatarUrl ?? "" },
-        scope: SCOPE_CATALOG.map(s => s.displayName).concat(`Workspace: ${organization.name}`),
       };
     });
   }
@@ -714,6 +697,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async getAuthenticatedEmail(): Promise<string | null> {
     // This vendor does not advertise providesAuth, so this is never used for sign-in.
     return null;
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

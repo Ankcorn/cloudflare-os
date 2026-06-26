@@ -62,7 +62,9 @@ Before creating credentials, you must configure how the consent screen appears t
 
 The scopes requested depend on what the user is doing. **Sign-in** requests only the identity
 scopes (`openid`, `userinfo.email`, `userinfo.profile`). **Connecting** Google for capabilities
-requests the full set below. The full request asks for:
+requests scopes granularly per resource type, not all at once: connecting a Gmail mailbox asks
+only for the Gmail scopes, a Google Doc only for the Docs scopes, and so on (identity is always
+included). Across all resource types, the gatekeeper can request:
 
 - `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
 - `gmail.modify` for Gmail thread reads, organization, replies, forwards, and sending. This single scope already includes label access and sending.

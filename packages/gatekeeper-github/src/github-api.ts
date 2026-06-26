@@ -1,5 +1,4 @@
 import "cloudflare:workers";
-import type { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 
 export type GitHubOAuthGrant = {
   accessToken: string;
@@ -285,30 +284,6 @@ async function request<T>(
   };
 }
 
-function scopesToDescriptions(scopes: string[]): string[] {
-  const descriptions = new Set<string>();
-
-  if (scopes.includes("repo")) {
-    descriptions.add(
-      "Read and write repository issues, pull requests, reviews, and metadata for repositories you can access",
-    );
-  } else if (scopes.includes("public_repo")) {
-    descriptions.add(
-      "Read and write repository issues, pull requests, reviews, and metadata for public repositories",
-    );
-  }
-
-  if (scopes.includes("user") || scopes.includes("read:user")) {
-    descriptions.add("Read your GitHub profile");
-  }
-
-  if (descriptions.size === 0) {
-    descriptions.add("GitHub access authorized for this gatekeeper");
-  }
-
-  return [...descriptions];
-}
-
 export async function exchangeAuthCode(
   code: string,
   clientId: string,
@@ -384,21 +359,6 @@ export async function revokeOAuthGrant(
       },
     },
   );
-}
-
-export async function getGitHubAccountDescription(
-  accessToken: string,
-  scopes: string[],
-): Promise<AccountDescription> {
-  const api = new GitHubApi(async () => accessToken);
-  const viewer = await api.getViewer();
-
-  return {
-    displayName: viewer.user.name ?? viewer.user.login,
-    uniqueName: viewer.user.login,
-    avatar: { url: viewer.user.avatar_url },
-    scope: scopesToDescriptions(viewer.scopes.length > 0 ? viewer.scopes : scopes),
-  };
 }
 
 export class GitHubApi {

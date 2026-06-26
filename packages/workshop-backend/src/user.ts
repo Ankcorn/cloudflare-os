@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnectedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, VendorScope, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -872,16 +872,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (await Promise.all(promises)).filter(value => value !== null);
   }
 
-  async getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]> {
-    let vendor = this.vendors.get(vendorId);
-    if (!vendor) {
-      throw new Error("No such service: " + vendorId);
-    }
-
-    return await vendor.getScopeCatalog();
-  }
-
-  async connectAccount(vendorId: string): Promise<{url: string}> {
+  async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
@@ -901,8 +892,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
 
-    let {url} = await vendor.connectAccount(callback);
+    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
     return {url};
+  }
+
+  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record) throw new Error("No such account.");
+    return record.account.ensureResources(resourceUrlPatterns);
   }
 
   async subscribeConnectedAccounts(

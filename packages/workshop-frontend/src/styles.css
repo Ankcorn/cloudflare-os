@@ -430,6 +430,27 @@ html {
   }
 }
 
+.reveal-row {
+  opacity: 0;
+  transform: translateY(4px);
+  animation: reveal-row 220ms cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+
+@keyframes reveal-row {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal-row {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+}
+
 @keyframes connectors-hero-flow {
   to {
     stroke-dashoffset: 10;

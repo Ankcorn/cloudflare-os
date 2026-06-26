@@ -44,6 +44,7 @@ export type GoogleAccessToken = {
 export type GoogleOAuthGrant = {
   refreshToken: string;
   accessToken: GoogleAccessToken;
+  grantedScopes: string[];
 };
 
 export async function exchangeAuthCode(
@@ -84,6 +85,9 @@ export async function exchangeAuthCode(
       expires: new Date(Date.now() + body.expires_in * 1000),
     },
     refreshToken: body.refresh_token,
+    grantedScopes: typeof body.scope === "string"
+        ? body.scope.split(" ").filter(Boolean)
+        : [],
   };
 }
 
@@ -154,11 +158,6 @@ export async function getGoogleAccountDescription(accessToken: string)
     displayName: data.name,
     uniqueName: data.email,
     avatar: {url: data.picture},
-    scope: [
-      "Read and label emails",
-      "Read and edit Google Docs",
-      "Read BigQuery datasets and run read-only queries",
-    ],
   };
 }
 

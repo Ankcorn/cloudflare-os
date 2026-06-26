@@ -23,6 +23,9 @@ export type SelectableItem = {
   type: 'connect'
   vendorId: string
   vendorDescription: VendorDescription
+  // If the resource being connected is independently grantable, its `urlPattern`, so a new account
+  // requests just that resource's authorization. Undefined means request everything.
+  resourceUrlPatterns?: string[]
 } | {
   type: 'refine'
   resource: SupportedResource
@@ -49,6 +52,14 @@ export interface ResourcePickerProps {
   activateRef?: MutableRefObject<((index: number) => void) | null>
 }
 
+function missingResourceGrants(account: AccountDescription, resource: SupportedResource): string[] {
+  if (!resource.grantable) return []
+  const granted = account.grantedResourceUrlPatterns
+  // Undefined means legacy/full grant.
+  if (granted === undefined) return []
+  return granted.includes(resource.urlPattern) ? [] : [resource.urlPattern]
+}
+
 export default function ResourcePicker({
   authenticatedApi, searchText, onSelectAccount, onRefine, compact, style,
   activeIndex, onItems, activateRef,
@@ -67,6 +78,7 @@ export default function ResourcePicker({
   const [vendorsLoading, setVendorsLoading] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
   const [reconnectingAccount, setReconnectingAccount] = useState<number | null>(null)
+  const [grantingAccount, setGrantingAccount] = useState<number | null>(null)
 
   const subscriptionRef = useRef<{ stub: { [Symbol.dispose](): void } } | null>(null)
   const seenAccountIdsRef = useRef(new Set<number>())
@@ -244,7 +256,7 @@ export default function ResourcePicker({
 
     const hasMatchingAccounts = lowerSearch
       ? httpAccounts.some(([_, { description }]) => {
-          const corpus = [description.displayName, description.uniqueName, ...description.scope]
+          const corpus = [description.displayName, description.uniqueName]
             .filter(Boolean).join(' ').toLowerCase()
           return lowerSearch.split(/\s+/).every(t => corpus.includes(t))
         })
@@ -278,7 +290,7 @@ export default function ResourcePicker({
 
       if (accountsOnly && lowerSearch) {
         vendorAccounts = vendorAccounts.filter(account => {
-          const corpus = [account.description.displayName, account.description.uniqueName, ...account.description.scope]
+          const corpus = [account.description.displayName, account.description.uniqueName]
             .filter(Boolean).join(' ').toLowerCase()
           return lowerSearch.split(/\s+/).every(t => corpus.includes(t))
         })
@@ -302,6 +314,7 @@ export default function ResourcePicker({
           type: 'connect',
           vendorId: vendor.id,
           vendorDescription: vendor.description,
+          resourceUrlPatterns: resource.grantable ? [resource.urlPattern] : undefined,
         })
       }
     }
@@ -335,10 +348,17 @@ export default function ResourcePicker({
           if (accountData && !accountData.credentialsValid) {
             handleReconnect(item.accountId)
           } else {
-            onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
+            const missingGrants = missingResourceGrants(item.accountDescription, item.resource)
+            if (missingGrants.length > 0) {
+              if (grantingAccount !== item.accountId) {
+                void handleGrantResourceAccess(item.accountId, missingGrants)
+              }
+            } else {
+              onSelectAccount(item.accountId, item.vendorId, item.resource, item.accountDescription, item.vendorDescription)
+            }
           }
         } else {
-          handleConnectNew(item.vendorId)
+          handleConnectNew(item.vendorId, item.resourceUrlPatterns)
         }
       }
       return () => { activateRef.current = null }
@@ -347,10 +367,10 @@ export default function ResourcePicker({
 
   // --- Connect new account handler ---
 
-  const handleConnectNew = async (vendorId: string) => {
+  const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[]) => {
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId)
+      const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
       window.open(result.url, '_blank', 'noopener,noreferrer')
     } catch (error) {
       console.error('Failed to initiate connection:', error)
@@ -359,6 +379,25 @@ export default function ResourcePicker({
       setConnectingVendor(null)
     }
   }
+
+  // --- Grant additional resource access handler ---
+
+  const handleGrantResourceAccess = useCallback(async (accountId: number, resourceUrlPatterns: string[]) => {
+    if (resourceUrlPatterns.length === 0) return
+    setGrantingAccount(accountId)
+    try {
+      const result = await authenticatedApi.ensureAccountResources(accountId, resourceUrlPatterns)
+      if (result.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+        toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
+      }
+    } catch (error) {
+      console.error('Failed to request additional access:', error)
+      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+    } finally {
+      setGrantingAccount(current => current === accountId ? null : current)
+    }
+  }, [authenticatedApi, toasts])
 
   // --- Reconnect expired account handler ---
 
@@ -433,7 +472,7 @@ export default function ResourcePicker({
             // accounts whose details match the search.
             if (accountsOnly && lowerSearch) {
               vendorAccounts = vendorAccounts.filter(account => {
-                const corpus = [account.description.displayName, account.description.uniqueName, ...account.description.scope]
+                const corpus = [account.description.displayName, account.description.uniqueName]
                   .filter(Boolean).join(' ').toLowerCase()
                 return lowerSearch.split(/\s+/).every(t => corpus.includes(t))
               })
@@ -457,21 +496,26 @@ export default function ResourcePicker({
                   const currentIdx = itemIdx++
                   const isExpired = !account.credentialsValid
                   const isReconnecting = reconnectingAccount === account.id
+                  const missingGrants = missingResourceGrants(account.description, resource)
+                  const needsAccess = !isExpired && missingGrants.length > 0
+                  const isGranting = grantingAccount === account.id
                   const accountRow = (
                     <div
                       onClick={() => {
                         if (searchHasPlaceholders) return
-                        if (isExpired || isReconnecting) {
+                        if (needsAccess) {
+                          if (!isGranting) void handleGrantResourceAccess(account.id, missingGrants)
+                        } else if (isExpired || isReconnecting) {
                           if (!isReconnecting) handleReconnect(account.id)
                         } else {
                           onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
                         }
                       }}
                       className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''} ${
-                        (isExpired && !isReconnecting) || searchHasPlaceholders ? 'opacity-70' : ''
+                        ((isExpired && !isReconnecting) || needsAccess || searchHasPlaceholders) ? 'opacity-70' : ''
                       }`}
                       style={{
-                        cursor: searchHasPlaceholders ? 'default' : isReconnecting ? 'wait' : 'pointer',
+                        cursor: searchHasPlaceholders ? 'default' : (isReconnecting || isGranting) ? 'wait' : 'pointer',
                       }}
                       onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
                       onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
@@ -486,12 +530,17 @@ export default function ResourcePicker({
                           </span>
                         )}
                       </div>
-                      {isReconnecting ? (
+                      {isReconnecting || isGranting ? (
                         <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
                       ) : isExpired ? (
                         <span className="flex items-center flex-shrink-0 gap-1">
                           <Warning size={12} className="text-kumo-warning" />
                           <span className="text-[11px] text-kumo-warning">Expired — click to re-authenticate</span>
+                        </span>
+                      ) : needsAccess ? (
+                        <span className="flex items-center flex-shrink-0 gap-1">
+                          <Warning size={12} className="text-kumo-warning" />
+                          <span className="text-[11px] text-kumo-warning">Grant access</span>
                         </span>
                       ) : (
                         <CaretRight size={10} className="text-kumo-inactive flex-shrink-0" />
@@ -516,7 +565,7 @@ export default function ResourcePicker({
                   const currentIdx = itemIdx++
                   return (
                   <div
-                    onClick={() => !connectingVendor && handleConnectNew(vendor.id)}
+                    onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
                     className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''}`}
                     style={{
                       cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',

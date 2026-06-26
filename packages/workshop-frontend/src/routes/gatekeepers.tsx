@@ -18,7 +18,6 @@ import {
   AccountDescription,
   SupportedResource,
   VendorDescription,
-  VendorScope,
 } from '@gadgets/workshop-shared/gatekeeper'
 import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
@@ -406,26 +405,13 @@ function ConnectorsPage() {
   const [loadError, setLoadError] = useState(false)
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
-  const [scopeCatalog, setScopeCatalog] = useState<VendorScope[]>([])
-  const [loadingCatalog, setLoadingCatalog] = useState(false)
-  const [catalogError, setCatalogError] = useState<string | null>(null)
   const [connecting, setConnecting] = useState(false)
   const [disconnecting, setDisconnecting] = useState(false)
 
   const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
+  const [ensuringResourceUrlPatterns, setEnsuringResourceUrlPatterns] = useState<string[]>([])
 
   const subscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null)
-  const scopeCatalogCacheRef = useRef(new Map<string, VendorScope[]>())
-  const scopeCatalogRequestsRef = useRef(new Map<string, Promise<VendorScope[]>>())
-  const retryCatalogRequestRef = useRef(0)
-  const targetVendorIdRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    return () => {
-      targetVendorIdRef.current = null
-      retryCatalogRequestRef.current += 1
-    }
-  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -507,76 +493,6 @@ function ConnectorsPage() {
     }
   }, [authenticatedApi])
 
-  const targetVendorId = useMemo(() => {
-    if (!modalTarget) return null
-    if (modalTarget.kind === 'connect') return modalTarget.vendorId
-    const account = accounts.find((a) => a.id === modalTarget.accountId)
-    return account?.vendorId ?? null
-  }, [modalTarget, accounts])
-
-  useEffect(() => {
-    targetVendorIdRef.current = targetVendorId
-    retryCatalogRequestRef.current += 1
-  }, [targetVendorId])
-
-  function loadScopeCatalog(vendorId: string): Promise<VendorScope[]> {
-    const cached = scopeCatalogCacheRef.current.get(vendorId)
-    if (cached) return Promise.resolve(cached)
-
-    const inFlight = scopeCatalogRequestsRef.current.get(vendorId)
-    if (inFlight) return inFlight
-
-    const request = authenticatedApi
-      .getGatekeeperScopeCatalog(vendorId)
-      .then((catalog) => {
-        scopeCatalogCacheRef.current.set(vendorId, catalog)
-        scopeCatalogRequestsRef.current.delete(vendorId)
-        return catalog
-      })
-      .catch((err) => {
-        scopeCatalogRequestsRef.current.delete(vendorId)
-        throw err
-      })
-
-    scopeCatalogRequestsRef.current.set(vendorId, request)
-    return request
-  }
-
-  useEffect(() => {
-    if (!targetVendorId) return
-    let cancelled = false
-    const cached = scopeCatalogCacheRef.current.get(targetVendorId)
-    if (cached) {
-      setScopeCatalog(cached)
-      setLoadingCatalog(false)
-      setCatalogError(null)
-      return
-    }
-
-    setScopeCatalog([])
-    setLoadingCatalog(true)
-    setCatalogError(null)
-    loadScopeCatalog(targetVendorId)
-      .then((catalog) => {
-        if (cancelled) return
-        setScopeCatalog(catalog)
-        setCatalogError(null)
-      })
-      .catch((err) => {
-        console.error('Failed to load scope catalog:', err)
-        if (!cancelled) {
-          setScopeCatalog([])
-          setCatalogError('Failed to load permissions')
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingCatalog(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [targetVendorId, authenticatedApi])
-
   const handleOpenConnect = (vendorId: string) => {
     setModalTarget({ kind: 'connect', vendorId })
   }
@@ -586,16 +502,18 @@ function ConnectorsPage() {
   }
 
   const handleCloseModal = () => {
-    targetVendorIdRef.current = null
-    retryCatalogRequestRef.current += 1
     setModalTarget(null)
+    setEnsuringResourceUrlPatterns([])
   }
 
-  const handleConfirmConnect = async () => {
+  const handleConfirmConnect = async (resourceUrlPatterns?: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'connect') return
     setConnecting(true)
     try {
-      const { url } = await authenticatedApi.connectAccount(modalTarget.vendorId)
+      const { url } = await authenticatedApi.connectAccount(
+        modalTarget.vendorId,
+        resourceUrlPatterns,
+      )
       window.open(url, '_blank', 'noopener,noreferrer')
       handleCloseModal()
     } catch (err) {
@@ -606,30 +524,27 @@ function ConnectorsPage() {
     }
   }
 
-  const handleRetryCatalog = () => {
-    if (!targetVendorId) return
-    const requestId = retryCatalogRequestRef.current + 1
-    retryCatalogRequestRef.current = requestId
-    const vendorId = targetVendorId
-    setCatalogError(null)
-    setLoadingCatalog(true)
-    void loadScopeCatalog(vendorId)
-      .then((catalog) => {
-        if (retryCatalogRequestRef.current !== requestId || targetVendorIdRef.current !== vendorId) return
-        setScopeCatalog(catalog)
-        setCatalogError(null)
-      })
-      .catch((err) => {
-        console.error('Failed to load scope catalog:', err)
-        if (retryCatalogRequestRef.current !== requestId || targetVendorIdRef.current !== vendorId) return
-        setScopeCatalog([])
-        setCatalogError('Failed to load permissions')
-      })
-      .finally(() => {
-        if (retryCatalogRequestRef.current === requestId && targetVendorIdRef.current === vendorId) {
-          setLoadingCatalog(false)
-        }
-      })
+  const handleEnsureResources = async (resourceUrlPatterns: string[]) => {
+    if (!modalTarget || modalTarget.kind !== 'manage') return
+    setEnsuringResourceUrlPatterns((prev) => [...new Set([...prev, ...resourceUrlPatterns])])
+    try {
+      const result = await authenticatedApi.ensureAccountResources(
+        modalTarget.accountId,
+        resourceUrlPatterns,
+      )
+      if (result.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+      }
+      // On success the new grant arrives via subscribeConnectedAccounts(); the toggle reflects it
+      // once `grantedResourceUrlPatterns` updates.
+    } catch (err) {
+      console.error('Failed to expand account access:', err)
+      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+    } finally {
+      setEnsuringResourceUrlPatterns((prev) =>
+        prev.filter((p) => !resourceUrlPatterns.includes(p)),
+      )
+    }
   }
 
   const handleDisconnect = async () => {
@@ -781,11 +696,7 @@ function ConnectorsPage() {
                   account.accountDescription.displayName ??
                   account.accountDescription.uniqueName ??
                   'Connected'
-                const tagline =
-                  account.vendorDescription.tagline ??
-                  (account.accountDescription.scope.length > 0
-                    ? account.accountDescription.scope.join(' / ')
-                    : undefined)
+                const tagline = account.vendorDescription.tagline
                 return (
                   <ConnectorCard
                     key={account.id}
@@ -859,20 +770,22 @@ function ConnectorsPage() {
 
       {activeVendor && (
         <ConnectConnectorModal
+          key={modalTarget?.kind === 'manage'
+            ? `manage:${modalTarget.accountId}`
+            : `connect:${modalTarget?.vendorId ?? ''}`}
           open={modalTarget !== null}
           mode={modalTarget?.kind === 'manage' ? 'manage' : 'connect'}
           vendorDescription={activeVendor.description}
           supportedResources={activeVendor.supportedResources}
-          scopeCatalog={scopeCatalog}
-          loadingCatalog={loadingCatalog}
-          catalogError={catalogError}
           logoUrl={activeVendor.description.logo?.url}
           color={activeVendor.description.color}
-          onRetryCatalog={handleRetryCatalog}
           connecting={connecting}
           onConfirm={handleConfirmConnect}
           accountDescription={activeAccount?.accountDescription}
           credentialsValid={activeAccount?.credentialsValid}
+          grantedResourceUrlPatterns={activeAccount?.accountDescription.grantedResourceUrlPatterns}
+          onEnsureResources={handleEnsureResources}
+          ensuringResourceUrlPatterns={ensuringResourceUrlPatterns}
           disconnecting={disconnecting}
           onDisconnect={handleDisconnect}
           onOpenChange={(open) => {

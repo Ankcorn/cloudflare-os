@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, VendorScope, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
   GmailSession, GmailThread, GmailMessage,
@@ -167,80 +167,100 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
   </body>
 </html>`;
 
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Know who you are",
-    rationale:
-        "Read your name, email, and profile picture so this account can be labeled in Gadgets.",
-  },
-  {
-    displayName: "Read, organize, and send Gmail",
-    rationale:
-        "Lets Gadgets triage your inbox, archive/trash threads, mark read/unread, and " +
-        "compose, reply to, and forward email. Outgoing messages are sent only after you " +
-        "approve them.",
-  },
-  {
-    displayName: "Read and edit Google Docs",
-    rationale:
-        "Lets Gadgets open documents you choose, summarize them, and make edits.",
-  },
-  {
-    displayName: "List your Google documents",
-    rationale:
-        "Lets Gadgets show a doc picker when you connect a Google Doc to a Gadget. Read-only " +
-        "file metadata; contents are not accessed through this permission.",
-  },
-  {
-    displayName: "Run BigQuery queries",
-    rationale:
-        "Lets Gadgets run analytics queries against datasets you choose. Google grants the " +
-        "BigQuery scope; Gatekeeper restricts use to read-only query flows at the API layer.",
-  },
-];
-
-const OAUTH_SCOPES = [
+// OAuth scopes we always request, used to identify the account (name, email, avatar). Not tied to
+// any resource type.
+const IDENTITY_SCOPES = [
   "openid",
   "https://www.googleapis.com/auth/userinfo.profile",
   "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/documents",
-  "https://www.googleapis.com/auth/drive.metadata.readonly",
-  // `bigquery` (not `bigquery.readonly`): dry-runs go through `jobs.insert` for scope
-  // enforcement, which `readonly` doesn't permit. Read-only is enforced at the API layer.
-  "https://www.googleapis.com/auth/bigquery",
 ];
 
 // Minimal scopes for sign-in only (verify the user's email). Used when connecting in "auth" mode;
-// the resulting grant is transient.
-const AUTH_SCOPES = [
-  "openid",
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-];
+// the resulting grant is transient. (Same as IDENTITY_SCOPES — sign-in needs no resource scopes.)
+const AUTH_SCOPES = IDENTITY_SCOPES;
+
+const BIGQUERY_HOST = "bigquery.googleapis.com";
 
 const GMAIL_RESOURCE: SupportedResource = {
   urlPattern: "https://mail.google.com/*",
   title: "Gmail Mailbox",
   description: "Read emails and apply labels.",
+  grantable: true,
 };
 
 const GOOGLE_DOC_RESOURCE: SupportedResource = {
   urlPattern: "https://docs.google.com/document/d/:docId/*",
   title: "Google Doc",
-  description: "Read and edit a Google Doc.",
+  description:
+      "Read and edit documents you choose.",
+  grantable: true,
 };
-
-const BIGQUERY_HOST = "bigquery.googleapis.com";
 
 const BIGQUERY_RESOURCE: SupportedResource = {
   urlPattern: `https://${BIGQUERY_HOST}/:projectId/*`,
   title: "BigQuery",
   description: "Choose a Google Cloud project, then optionally narrow access to a dataset or table.",
+  grantable: true,
 };
 
-const SUPPORTED_RESOURCES: SupportedResource[] =
-    [GMAIL_RESOURCE, GOOGLE_DOC_RESOURCE, BIGQUERY_RESOURCE];
+const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
+  {
+    resource: GMAIL_RESOURCE,
+    scopes: [
+      "https://www.googleapis.com/auth/gmail.labels",
+      "https://www.googleapis.com/auth/gmail.modify",
+    ],
+  },
+  {
+    resource: GOOGLE_DOC_RESOURCE,
+    scopes: [
+      "https://www.googleapis.com/auth/documents",
+      // Read-only Drive file metadata, used to power the doc picker when connecting a Google Doc.
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ],
+  },
+  {
+    resource: BIGQUERY_RESOURCE,
+    scopes: [
+      // `bigquery` (not `bigquery.readonly`): dry-runs go through `jobs.insert` for scope
+      // enforcement, which `readonly` doesn't permit. Read-only is enforced at the API layer.
+      "https://www.googleapis.com/auth/bigquery",
+    ],
+  },
+];
+
+const SUPPORTED_RESOURCES: SupportedResource[] = RESOURCE_SCOPES.map(entry => entry.resource);
+
+function validateResourceUrlPatterns(resourceUrlPatterns?: string[]): void {
+  if (resourceUrlPatterns === undefined) return;
+
+  let knownPatterns = new Set(RESOURCE_SCOPES.map(entry => entry.resource.urlPattern));
+  let unknownPatterns = resourceUrlPatterns.filter(pattern => !knownPatterns.has(pattern));
+  if (unknownPatterns.length > 0) {
+    throw new Error(`Unknown grantable resource URL pattern(s): ${unknownPatterns.join(", ")}`);
+  }
+}
+
+// The OAuth scopes to request for the given grantable resource `urlPattern`s.
+function resourceUrlPatternsToOAuthScopes(resourceUrlPatterns?: string[]): string[] {
+  validateResourceUrlPatterns(resourceUrlPatterns);
+
+  let scopes = new Set<string>(IDENTITY_SCOPES);
+  for (let entry of RESOURCE_SCOPES) {
+    if (resourceUrlPatterns === undefined ||
+        resourceUrlPatterns.includes(entry.resource.urlPattern)) {
+      for (let scope of entry.scopes) scopes.add(scope);
+    }
+  }
+  return [...scopes];
+}
+
+function grantedResourcesFromScopes(grantedOAuthScopes: string[]): string[] {
+  let granted = new Set(grantedOAuthScopes);
+  return RESOURCE_SCOPES
+      .filter(entry => entry.scopes.every(scope => granted.has(scope)))
+      .map(entry => entry.resource.urlPattern);
+}
 
 const GOOGLE_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GOOGLE_LOGO_SVG)}`;
 
@@ -273,7 +293,6 @@ export default {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
-      let oauthNonce = begun.oauthNonce;
 
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       newUrl.searchParams.set("client_id", env.CLIENT_ID);
@@ -282,7 +301,9 @@ export default {
       newUrl.searchParams.set("scope", begun.scopes.join(" "));
       newUrl.searchParams.set("access_type", "offline");
       newUrl.searchParams.set("prompt", "consent");
-      newUrl.searchParams.set("state", `${doId}:${oauthNonce}`);
+      // Add newly-requested scopes to any the user already granted, rather than replacing them.
+      newUrl.searchParams.set("include_granted_scopes", "true");
+      newUrl.searchParams.set("state", `${doId}:${begun.oauthNonce}`);
 
       return Response.redirect(newUrl.toString(), 302);
     } else if (relPath === "/oauth") {
@@ -302,8 +323,6 @@ export default {
 
       let code = url.searchParams.get("code");
       if (!code) return new Response("Error: no 'code' provided");
-
-      // TODO: check actual scopes granted, update our "scope" list accordingly
 
       let userObjectId = ctx.exports.UserAccount.idFromString(doId);
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
@@ -347,19 +366,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
-  }
-
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
                        options?: GatekeeperConnectOptions): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let initiationNonce = generateNonce();
 
     let authOnly = options?.scopes === "auth";
-    let scopes = authOnly ? AUTH_SCOPES : OAUTH_SCOPES;
+    let requestedScopes = authOnly
+        ? AUTH_SCOPES
+        : resourceUrlPatternsToOAuthScopes(options?.resourceUrlPatterns);
     await this.ctx.exports.UserAccount.get(userObjectId)
-        .setCallback(callback, initiationNonce, scopes, authOnly);
+        .setCallback(callback, initiationNonce, requestedScopes, authOnly);
 
     return {
       url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`
@@ -382,16 +399,16 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
-                    scopes?: string[], ephemeral?: boolean) {
+  async setCallback(
+      callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
+      requestedScopes: string[], ephemeral?: boolean) {
     // If we have no API key in 1 hour, delete this object.
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
 
     this.ctx.storage.kv.put("callback", callback);
-    // The scopes to request (auth-only for sign-in, or the full capability set). Reused on reconnect.
-    if (scopes) this.ctx.storage.kv.put<string[]>("scopes", scopes);
+    this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     // Auth-only sign-in grants are transient: dropped shortly after the email is read.
     this.ctx.storage.kv.put<boolean>("ephemeral", ephemeral ?? false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
@@ -403,8 +420,13 @@ export class UserAccount extends DurableObject<Env> {
 
   // Prepare this account for a reconnect flow. The next acceptAuthCode() call will replace the
   // existing refresh token and notify via credentialsRestored() instead of complete().
-  async prepareReconnect(initiationNonce: string) {
+  //
+  // `requestedScopes` is the full set of OAuth scopes to request on the reauthorization. For a
+  // plain reconnect this is the previously-granted set; for a scope expansion it's the union of
+  // the granted scopes and the newly-needed ones.
+  async prepareReconnect(initiationNonce: string, requestedScopes: string[]) {
     this.ctx.storage.kv.put<boolean>("reconnecting", true);
+    this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -412,10 +434,23 @@ export class UserAccount extends DurableObject<Env> {
     });
   }
 
+  // The grantable resource `urlPattern`s currently granted on this account. Used to decide
+  // whether ensureResources() needs to expand.
+  //
+  // Legacy accounts connected before granular scope tracking have no recorded granted scopes; we
+  // treat them as having every resource granted so existing connections keep working.
+  async getGrantedResourceUrlPatterns(): Promise<string[]> {
+    let granted = this.ctx.storage.kv.get<string[]>("grantedScopes");
+    if (granted === undefined) {
+      return SUPPORTED_RESOURCES.map(resource => resource.urlPattern);
+    }
+    return grantedResourcesFromScopes(granted);
+  }
+
   // Called by the fetch handler when the user visits the initiation URL. Verifies the initiation
   // nonce, consumes it, and returns a fresh OAuth nonce plus the scopes to request. Returns null if
   // the nonce is invalid or expired.
-  async beginOAuthFlow(initiationNonce: string): Promise<{ oauthNonce: string; scopes: string[] } | null> {
+  async beginOAuthFlow(initiationNonce: string): Promise<{oauthNonce: string, scopes: string[]} | null> {
     let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "initiation" ||
         Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, initiationNonce)) {
@@ -429,8 +464,10 @@ export class UserAccount extends DurableObject<Env> {
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
     });
-    let scopes = this.ctx.storage.kv.get<string[]>("scopes") ?? OAUTH_SCOPES;
-    return { oauthNonce, scopes };
+    // Fall back to all scopes for legacy flows that didn't record a requested set.
+    let scopes = this.ctx.storage.kv.get<string[]>("requestedScopes")
+        ?? resourceUrlPatternsToOAuthScopes();
+    return {oauthNonce, scopes};
   }
 
   // Returns false if the OAuth nonce is invalid or expired.
@@ -462,6 +499,9 @@ export class UserAccount extends DurableObject<Env> {
 
     this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
     this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", response.accessToken);
+    // Record what Google actually granted (the user may have declined some requested scopes).
+    this.ctx.storage.kv.put<string[]>("grantedScopes", response.grantedScopes);
+    this.ctx.storage.kv.delete("requestedScopes");
 
     let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
     if (reconnecting) {
@@ -552,8 +592,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async describe(): Promise<AccountDescription> {
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     let obj = this.ctx.exports.UserAccount.get(id);
-    let token = await obj.getAccessToken();
-    return getGoogleAccountDescription(token.token);
+    let tokenPromise = obj.getAccessToken();
+    let grantedResourcesPromise = obj.getGrantedResourceUrlPatterns();
+    let token = await tokenPromise;
+    let description = await getGoogleAccountDescription(token.token);
+
+    description.grantedResourceUrlPatterns = await grantedResourcesPromise;
+    return description;
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
@@ -703,7 +748,26 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     let obj = this.ctx.exports.UserAccount.get(id);
     let initiationNonce = generateNonce();
-    await obj.prepareReconnect(initiationNonce);
+    // Re-request the scopes already granted so a plain reconnect doesn't narrow access.
+    let requestedScopes = resourceUrlPatternsToOAuthScopes(await obj.getGrantedResourceUrlPatterns());
+    await obj.prepareReconnect(initiationNonce, requestedScopes);
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
+  }
+
+  async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    let obj = this.ctx.exports.UserAccount.get(id);
+    let granted = new Set(await obj.getGrantedResourceUrlPatterns());
+    if (resourceUrlPatterns.every(pattern => granted.has(pattern))) {
+      return {};
+    }
+
+    // Request the union of what's already granted and what's newly needed, so the expansion never
+    // drops existing access.
+    let unionPatterns = new Set([...granted, ...resourceUrlPatterns]);
+    let requestedScopes = resourceUrlPatternsToOAuthScopes([...unionPatterns]);
+    let initiationNonce = generateNonce();
+    await obj.prepareReconnect(initiationNonce, requestedScopes);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 }

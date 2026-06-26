@@ -11,7 +11,6 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
-  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   SupabaseApi,
@@ -109,15 +108,6 @@ type GatekeeperUserImplProps = {
 };
 
 const SUPABASE_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(SUPABASE_LOGO_SVG)}`;
-
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Manage projects and databases",
-    rationale:
-        "Lets Gadgets read and run SQL against the Postgres databases of the projects you choose, " +
-        "and inspect project schema, edge functions, and storage.",
-  },
-];
 
 const PROJECT_RESOURCE: SupportedResource = {
   urlPattern: "https://supabase.com/dashboard/project/:ref",
@@ -349,10 +339,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "Connect your Supabase account so Gadgets can run SQL against your project databases, " +
           "explore schema, and inspect edge functions and storage for the projects you choose.",
     };
-  }
-
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
@@ -588,13 +574,16 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         displayName: primary ? primary.name : "Supabase account",
         uniqueName: primary?.slug,
         avatar: { url: SUPABASE_LOGO_URL },
-        scope: SCOPE_CATALOG.map(entry => entry.displayName),
       };
     });
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

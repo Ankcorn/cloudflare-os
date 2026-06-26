@@ -74,6 +74,8 @@ type ConnectionType = {
   logoUrl?: string
   accent?: string
   resourceUrlPattern?: string
+  // Whether this resource type is independently grantable.
+  grantable?: boolean
 }
 
 type VendorOption = {
@@ -128,7 +130,15 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
     logoUrl: vendor.description.logo?.url,
     accent: vendor.description.color,
     resourceUrlPattern: resource.urlPattern,
+    grantable: Boolean(resource.grantable),
   }
+}
+
+// The grantable resource `urlPattern`s a connection requires before its configurator can load.
+function requiredResourceUrlPatterns(connection: ConnectionType): string[] {
+  return connection.grantable && connection.resourceUrlPattern
+    ? [connection.resourceUrlPattern]
+    : []
 }
 
 function accountSupportsConnection(account: AccountOption, connection: ConnectionType): boolean {
@@ -155,6 +165,7 @@ export default function GatekeeperModal({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
+  const [grantingAccountId, setGrantingAccountId] = useState<number | null>(null)
   const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
   const [accounts, setAccounts] = useState<AccountOption[]>([])
   const [vendors, setVendors] = useState<VendorOption[]>([])
@@ -486,6 +497,19 @@ export default function GatekeeperModal({
     return matchesResourceUrlPattern(pattern, initialResourceUrl) ? initialResourceUrl : null
   }, [selectedConnection?.resourceUrlPattern, initialResourceUrl])
 
+  // Grantable resources the chosen connection needs that the selected account hasn't granted yet.
+  // Until these are granted, the resource configurator can't load and the binding can't be created
+  // -- so we surface a focused "grant access" step instead. (An undefined granted set means a
+  // legacy account predating grant tracking; treat it as fully granted.)
+  const missingResourceUrlPatterns = useMemo(() => {
+    const required = selectedConnection ? requiredResourceUrlPatterns(selectedConnection) : []
+    if (!required.length || !selectedAccount) return []
+    const granted = selectedAccount.description.grantedResourceUrlPatterns
+    if (granted === undefined) return []
+    return required.filter(p => !granted.includes(p))
+  }, [selectedConnection, selectedAccount])
+  const hasMissingResourceGrants = missingResourceUrlPatterns.length > 0
+
   useEffect(() => {
     if (!selectedConnection?.vendorId) return
     const currentIsValid = selectedAccountId !== null
@@ -497,7 +521,7 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
-    if (!open || !resourceUrlPattern || !selectedAccount) {
+    if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants) {
       updateConfiguratorFrameState(null)
       setConfiguratorError(null)
       setConfiguratorLoading(false)
@@ -535,7 +559,7 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id])
+  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
 
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)
@@ -545,10 +569,10 @@ export default function GatekeeperModal({
     else setSelectedAccountId(null)
   }
 
-  const handleConnectAccount = async (vendorId: string) => {
+  const handleConnectAccount = async (vendorId: string, resourceUrlPatterns?: string[]) => {
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId)
+      const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
       window.open(result.url, '_blank', 'noopener,noreferrer')
       toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
     } catch (error) {
@@ -556,6 +580,30 @@ export default function GatekeeperModal({
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
     } finally {
       setConnectingVendor(null)
+    }
+  }
+
+  const handleGrantResourceAccess = async (accountId: number) => {
+    const required = selectedConnection ? requiredResourceUrlPatterns(selectedConnection) : []
+    if (!required.length) return
+    const account = matchingAccounts.find(a => a.id === accountId)
+    const granted = account?.description.grantedResourceUrlPatterns
+    const missing = granted === undefined ? [] : required.filter(p => !granted.includes(p))
+    if (missing.length === 0) return
+    setGrantingAccountId(accountId)
+    try {
+      const result = await authenticatedApi.ensureAccountResources(accountId, missing)
+      if (result.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer')
+        toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
+      }
+      // The new grant arrives via subscribeConnectedAccounts(); the account's flag then clears and
+      // the configurator loads automatically.
+    } catch (error) {
+      console.error('Failed to request additional access:', error)
+      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+    } finally {
+      setGrantingAccountId(null)
     }
   }
 
@@ -678,7 +726,8 @@ export default function GatekeeperModal({
         configuratorFrameState?.frame &&
         configuratorFrameState.accountId === selectedAccountId &&
         configuratorFrameState.resourceUrlPattern === resourceUrlPattern &&
-        configuratorSelectionReady !== false,
+        configuratorSelectionReady !== false &&
+        !hasMissingResourceGrants,
       )
     }
     return false
@@ -748,13 +797,21 @@ export default function GatekeeperModal({
                     resourceTitle={selectedConnection.resourceUrlPattern ? selectedConnection.title : undefined}
                     connecting={connectingVendor === selectedConnection.vendorId}
                     reconnectingAccountId={reconnectingAccountId}
+                    requiredResourceUrlPatterns={requiredResourceUrlPatterns(selectedConnection)}
+                    grantingAccountId={grantingAccountId}
                     onSelect={setSelectedAccountId}
-                    onConnect={() => selectedConnection.vendorId && handleConnectAccount(selectedConnection.vendorId)}
+                    onConnect={() => {
+                      if (!selectedConnection.vendorId) return
+                      const required = requiredResourceUrlPatterns(selectedConnection)
+                      // No grantable requirement -> request authorization for everything
+                      handleConnectAccount(selectedConnection.vendorId, required.length ? required : undefined)
+                    }}
                     onReconnect={handleReconnectAccount}
+                    onGrantAccess={handleGrantResourceAccess}
                   />
                 )}
 
-                {selectedConnection.resourceUrlPattern && (
+                {selectedConnection.resourceUrlPattern && !hasMissingResourceGrants && (
                   <ResourceConfiguratorHost
                     frame={configuratorFrameState?.frame ?? null}
                     frameKey={configuratorFrameState?.key ?? null}
