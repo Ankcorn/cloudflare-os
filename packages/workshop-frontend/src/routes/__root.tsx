@@ -8,6 +8,7 @@ import { markConnectionRestored } from '../main'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
 import Header from '../components/Header'
+import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
@@ -36,7 +37,13 @@ function RootComponent() {
   }, [authenticatedApi])
 
   // Routes that don't require auth (public routes)
-  const isPublicRoute = pathname === '/signup' || pathname.startsWith('/blueprint/')
+  const isSignup = pathname === '/signup'
+  const isBlueprint = pathname.startsWith('/blueprint/')
+
+  // A standalone (no app shell) render is used only for signed-out visitors of public routes.
+  // Signed-in users get the full app chrome so public pages (esp. the blueprint detail) feel
+  // native — sidebar and all — instead of floating on a bare page.
+  const standalone = isSignup || (isBlueprint && !isAuthenticated)
 
   // Chat routes hide the header (fullscreen mode)
   const isChat = pathname.startsWith('/chat/')
@@ -51,7 +58,7 @@ function RootComponent() {
   }
 
   // Loading state
-  if (isLoading && !isPublicRoute) {
+  if (isLoading && !standalone) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         {connectionLost && <ConnectionLostBanner />}
@@ -62,7 +69,7 @@ function RootComponent() {
   }
 
   // Auth error
-  if (error && !isPublicRoute) {
+  if (error && !standalone) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base p-6">
         <p className="text-sm text-kumo-danger">Authentication error: {error}</p>
@@ -77,7 +84,7 @@ function RootComponent() {
   }
 
   // CF Access mode: show spinner while pipelined auth resolves
-  if (!isAuthenticated && CF_ACCESS_MODE && !isPublicRoute) {
+  if (!isAuthenticated && CF_ACCESS_MODE && !standalone) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
@@ -87,13 +94,13 @@ function RootComponent() {
   }
 
   // Not authenticated and not a public route — show login
-  if (!isAuthenticated && !isPublicRoute) {
+  if (!isAuthenticated && !standalone) {
     return <LoginPage rpcStub={rpcStub} onLoginSuccess={handleLoginSuccess} />
   }
 
-  // For public routes (signup, blueprint) render without auth wrapper
-  if (isPublicRoute) {
-    const showHeader = pathname !== '/signup'
+  // Signed-out visitors of public routes render without the auth wrapper / app shell.
+  if (standalone) {
+    const showHeader = !isSignup
     return (
       <TooltipProvider>
         <Toasty>
@@ -169,15 +176,22 @@ function AuthenticatedShell({
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
-  // Normal app shell
+  // Normal app shell. Chat and the Gadget editor are rendered fullscreen (no chrome); everything
+  // else gets the persistent left-rail AppShell.
+  const fullscreen = isChat || isGadgetEditor
   return (
     <>
       {connectionLost && <ConnectionLostBanner />}
-      {!isChat && !isGadgetEditor && <Header />}
       <AccountSelectionModal />
-      <main className={!isChat && !isGadgetEditor ? 'dotted-bg' : ''}>
-        <Outlet />
-      </main>
+      {fullscreen ? (
+        <main>
+          <Outlet />
+        </main>
+      ) : (
+        <AppShell>
+          <Outlet />
+        </AppShell>
+      )}
     </>
   )
 }

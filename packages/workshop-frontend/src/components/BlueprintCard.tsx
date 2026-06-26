@@ -85,9 +85,9 @@ export function BindingBadge({
       />
     );
   } else if (badge.type === "aiModel") {
-    icon = <Robot size={12} weight="bold" />;
+    icon = <Robot size={11} />;
   } else if (badge.type === "agentSpawner") {
-    icon = <Lightning size={12} weight="bold" />;
+    icon = <Lightning size={11} />;
   } else {
     icon = (
       <span className="text-[10px] font-semibold leading-none">
@@ -97,8 +97,8 @@ export function BindingBadge({
   }
 
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
-      {icon}
+    <span className="inline-flex items-center gap-1 rounded-full bg-kumo-fill px-2 py-[3px] text-[11px] font-medium leading-none tracking-[-0.1px] text-kumo-subtle">
+      <span className="flex items-center text-kumo-inactive">{icon}</span>
       {vendorDescription?.displayName ?? badge.label}
     </span>
   );

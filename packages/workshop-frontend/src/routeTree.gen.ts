@@ -9,20 +9,35 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as SignupRouteImport } from './routes/signup'
+import { Route as ScheduledRouteImport } from './routes/scheduled'
 import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as ProfileRouteImport } from './routes/profile'
+import { Route as OutputsRouteImport } from './routes/outputs'
 import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
 import { Route as ExploreRouteImport } from './routes/explore'
+import { Route as ContextRouteImport } from './routes/context'
+import { Route as BlueprintsRouteImport } from './routes/blueprints'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as ChatIdRouteImport } from './routes/chat.$id'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 
+const WorkspacesRoute = WorkspacesRouteImport.update({
+  id: '/workspaces',
+  path: '/workspaces',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ScheduledRoute = ScheduledRouteImport.update({
+  id: '/scheduled',
+  path: '/scheduled',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProvidersRoute = ProvidersRouteImport.update({
@@ -35,6 +50,11 @@ const ProfileRoute = ProfileRouteImport.update({
   path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OutputsRoute = OutputsRouteImport.update({
+  id: '/outputs',
+  path: '/outputs',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const GatekeepersRoute = GatekeepersRouteImport.update({
   id: '/gatekeepers',
   path: '/gatekeepers',
@@ -43,6 +63,16 @@ const GatekeepersRoute = GatekeepersRouteImport.update({
 const ExploreRoute = ExploreRouteImport.update({
   id: '/explore',
   path: '/explore',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ContextRoute = ContextRouteImport.update({
+  id: '/context',
+  path: '/context',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BlueprintsRoute = BlueprintsRouteImport.update({
+  id: '/blueprints',
+  path: '/blueprints',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -74,11 +104,16 @@ const BlueprintIdRoute = BlueprintIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/blueprints': typeof BlueprintsRoute
+  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
+  '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
+  '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -86,11 +121,16 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/blueprints': typeof BlueprintsRoute
+  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
+  '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
+  '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -99,11 +139,16 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/blueprints': typeof BlueprintsRoute
+  '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
+  '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
+  '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -113,11 +158,16 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/admin'
+    | '/blueprints'
+    | '/context'
     | '/explore'
     | '/gatekeepers'
+    | '/outputs'
     | '/profile'
     | '/providers'
+    | '/scheduled'
     | '/signup'
+    | '/workspaces'
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
@@ -125,11 +175,16 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/admin'
+    | '/blueprints'
+    | '/context'
     | '/explore'
     | '/gatekeepers'
+    | '/outputs'
     | '/profile'
     | '/providers'
+    | '/scheduled'
     | '/signup'
+    | '/workspaces'
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
@@ -137,11 +192,16 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/admin'
+    | '/blueprints'
+    | '/context'
     | '/explore'
     | '/gatekeepers'
+    | '/outputs'
     | '/profile'
     | '/providers'
+    | '/scheduled'
     | '/signup'
+    | '/workspaces'
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
@@ -150,11 +210,16 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
+  BlueprintsRoute: typeof BlueprintsRoute
+  ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
   GatekeepersRoute: typeof GatekeepersRoute
+  OutputsRoute: typeof OutputsRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
+  ScheduledRoute: typeof ScheduledRoute
   SignupRoute: typeof SignupRoute
+  WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   ChatIdRoute: typeof ChatIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
@@ -162,11 +227,25 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/workspaces': {
+      id: '/workspaces'
+      path: '/workspaces'
+      fullPath: '/workspaces'
+      preLoaderRoute: typeof WorkspacesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/signup': {
       id: '/signup'
       path: '/signup'
       fullPath: '/signup'
       preLoaderRoute: typeof SignupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/scheduled': {
+      id: '/scheduled'
+      path: '/scheduled'
+      fullPath: '/scheduled'
+      preLoaderRoute: typeof ScheduledRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/providers': {
@@ -183,6 +262,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/outputs': {
+      id: '/outputs'
+      path: '/outputs'
+      fullPath: '/outputs'
+      preLoaderRoute: typeof OutputsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/gatekeepers': {
       id: '/gatekeepers'
       path: '/gatekeepers'
@@ -195,6 +281,20 @@ declare module '@tanstack/react-router' {
       path: '/explore'
       fullPath: '/explore'
       preLoaderRoute: typeof ExploreRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/context': {
+      id: '/context'
+      path: '/context'
+      fullPath: '/context'
+      preLoaderRoute: typeof ContextRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/blueprints': {
+      id: '/blueprints'
+      path: '/blueprints'
+      fullPath: '/blueprints'
+      preLoaderRoute: typeof BlueprintsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -238,11 +338,16 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
+  BlueprintsRoute: BlueprintsRoute,
+  ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,
   GatekeepersRoute: GatekeepersRoute,
+  OutputsRoute: OutputsRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
+  ScheduledRoute: ScheduledRoute,
   SignupRoute: SignupRoute,
+  WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   ChatIdRoute: ChatIdRoute,
   GadgetIdRoute: GadgetIdRoute,

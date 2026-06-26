@@ -18,30 +18,33 @@
   --text-lg: 1.125rem;
   --text-lg--line-height: 1.75rem;
 
-  /* ===== KUMO SEMANTIC COLOR OVERRIDES (warm brand palette) ===== */
+  /* ===== KUMO SEMANTIC COLOR OVERRIDES =====
+     Near-neutral, barely-warm greys for every surface, border, and neutral text. The brand orange
+     is reserved for *intent only* (active item, links, primary action, focus) so it actually pops.
+     This is the single biggest lever between a "consumer/playground" feel and an enterprise one. */
 
-  /* Background tokens — warm whites instead of cold neutrals */
-  --color-kumo-base: #fffdfb;
-  --color-kumo-elevated: #fffbf5;
-  --color-kumo-tint: #fef7ed;
-  --color-kumo-overlay: #fff9f2;
-  --color-kumo-recessed: #fef0e0;
-  --color-kumo-control: #fffdfb;
-  --color-kumo-contrast: #140400;
-  --color-kumo-fill: #ebd5c1;
-  --color-kumo-fill-hover: #e0c5aa;
-  --color-kumo-interact: #d4b08e;
+  /* Background tokens — near-white neutrals with a faint warm undertone */
+  --color-kumo-base: #fcfcfb;
+  --color-kumo-elevated: #f8f8f7;
+  --color-kumo-tint: #f3f3f1;
+  --color-kumo-overlay: #fbfbfa;
+  --color-kumo-recessed: #efeeec;
+  --color-kumo-control: #ffffff;
+  --color-kumo-contrast: #14110f;
+  --color-kumo-fill: #e8e7e4;
+  --color-kumo-fill-hover: #dededb;
+  --color-kumo-interact: #cac8c3;
 
-  /* Brand — warm orange accent */
+  /* Brand — warm orange accent (intent only) */
   --color-kumo-brand: #ff4801;
   --color-kumo-brand-hover: #e03f00;
 
-  /* Border / line tokens — warm */
-  --color-kumo-line: #ebd5c180;
-  --color-kumo-ring: #d4b08e;
+  /* Border / line tokens — neutral hairlines */
+  --color-kumo-line: #1411100f;
+  --color-kumo-ring: #cac8c3;
 
   /* Chat surface tokens */
-  --color-kumo-bubble-user: #ece4d6;
+  --color-kumo-bubble-user: #f1f0ee;
 
   /* Status tints — keep functional colors, warm the tints */
   --color-kumo-info: oklch(62.3% 0.214 259.815);
@@ -54,16 +57,16 @@
   --color-kumo-success-tint: oklch(92% 0.08 150);
 
   /* Tooltip */
-  --color-kumo-tip-shadow: #ebd5c140;
+  --color-kumo-tip-shadow: #14111014;
   --color-kumo-tip-stroke: transparent;
 
-  /* Text color tokens — warm tones instead of cold oklch neutrals */
-  --text-color-kumo-default: #140400;
-  --text-color-kumo-default-hover: #1f0d06;
-  --text-color-kumo-inverse: #fffdfb;
-  --text-color-kumo-strong: #521000;
-  --text-color-kumo-subtle: oklch(55% 0.027 50);
-  --text-color-kumo-inactive: oklch(70% 0.015 50);
+  /* Text color tokens — near-neutral greys (faint warm undertone, no brown) */
+  --text-color-kumo-default: #1c1a18;
+  --text-color-kumo-default-hover: #100f0d;
+  --text-color-kumo-inverse: #ffffff;
+  --text-color-kumo-strong: #100f0d;
+  --text-color-kumo-subtle: oklch(52% 0.006 60);
+  --text-color-kumo-inactive: oklch(66% 0.005 60);
   --text-color-kumo-brand: #ff4801;
   --text-color-kumo-link: #ff4801;
   --text-color-kumo-success: oklch(72.3% 0.219 149.579);
@@ -73,14 +76,14 @@
   /* ===== CUSTOM BRAND TOKENS (for direct use alongside Kumo tokens) ===== */
   --color-accent-100: #ff4801;
   --color-accent-200: #ff7038;
-  --color-background-100: #fffdfb;
-  --color-background-200: #fffbf5;
-  --color-background-300: #fef7ed;
-  --color-foreground-100: #521000;
-  --color-foreground-200: #521000;
-  --color-foreground-300: #140400;
-  --color-border-100: #ebd5c1;
-  --color-border-100-50: #ebd5c180;
+  --color-background-100: #fcfcfb;
+  --color-background-200: #f8f8f7;
+  --color-background-300: #f3f3f1;
+  --color-foreground-100: #100f0d;
+  --color-foreground-200: #100f0d;
+  --color-foreground-300: #1c1a18;
+  --color-border-100: #e8e7e4;
+  --color-border-100-50: #e8e7e480;
   --color-selection-bg: #ffe9e0;
   --color-selection-text: #ff500a;
   --color-shadow-accent-light: #ffa683;
@@ -116,10 +119,18 @@
   --radius-xl: 0.75rem;
   --radius-2xl: 1rem;
 
-  /* Transitions */
+  /* Transitions.
+     Default CSS curves are too weak to feel intentional; keep them for legacy callers but add
+     stronger custom variants (per Emil Kowalski's guidance) for UI motion:
+       --ease-out-strong    entrances / responsive feedback (starts fast)
+       --ease-in-out-strong on-screen movement / morphing
+       --ease-drawer        iOS-like drawer/sheet curve */
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --default-transition-duration: 0.15s;
   --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 
@@ -324,6 +335,41 @@ html {
   }
 }
 
+/* Sidebar list scroll: thin and unobtrusive. The thumb is transparent at rest and only fades in
+   while the user is actually interacting with the rail (hover / active scroll), so the rail stays
+   calm by default. */
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s ease;
+}
+.sidebar-scroll:hover,
+.sidebar-scroll:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--color-kumo-interact) 60%, transparent) transparent;
+}
+.sidebar-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  transition: background 0.2s ease;
+}
+.sidebar-scroll:hover::-webkit-scrollbar-thumb,
+.sidebar-scroll:focus-within::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-kumo-interact) 55%, transparent);
+}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-kumo-interact) 80%, transparent);
+}
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-button {
+  display: none;
+}
+
 /* Chat panel resizer */
 .chat-panel {
   scrollbar-width: thin;
@@ -500,10 +546,28 @@ html {
   animation-play-state: paused;
 }
 
-/* Dotted grid background for all standard (non-fullscreen) pages */
+/* The working canvas is flat. The old dotted grid read as "whiteboard/sketch/playground" and
+   undercut the enterprise feel — none of our reference apps (Linear, Claude, …) texture the
+   working surface. Kept as a no-op class so existing callers don't need to change. */
 .dotted-bg {
-  background-image: radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px);
-  background-size: 24px 24px;
+  background-image: none;
+}
+
+/* Press feedback: subtle scale-down on :active so pressable elements feel like they're listening.
+   Use on buttons/triggers that are clicked occasionally (not high-frequency nav). */
+.press {
+  transition: transform 140ms var(--ease-out-strong);
+}
+.press:active {
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .press {
+    transition: none;
+  }
+  .press:active {
+    transform: none;
+  }
 }
 
 /* Kumo Select: use text-sm consistently for trigger and dropdown options.

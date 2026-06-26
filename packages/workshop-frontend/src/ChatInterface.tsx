@@ -1409,6 +1409,8 @@ export const ChatInput = ({
   newChat = false,
   autoFocus = false,
   minRows = 2,
+  seedText,
+  seedNonce,
   attachLabel,
   draftUpdateBanner,
   blockedReason,
@@ -1442,6 +1444,10 @@ export const ChatInput = ({
   autoFocus?: boolean;
   /** Minimum number of textarea rows at rest. Defaults to 2. */
   minRows?: number;
+  /** Optional starter text to drop into the composer (e.g. a Home task suggestion). Applied
+   * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
+  seedText?: string;
+  seedNonce?: number;
   /** Optional label for the attach menu item. */
   attachLabel?: string;
   draftUpdateBanner?: ReactNode;
@@ -1480,10 +1486,27 @@ export const ChatInput = ({
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
+
+  // Seed the composer from an external suggestion (Home task cards). Re-runs whenever the nonce
+  // changes so picking the same suggestion twice still works. Focus + move the cursor to the end.
+  useEffect(() => {
+    if (seedNonce === undefined) return;
+    const text = seedText ?? "";
+    setInputValue(text);
+    requestAnimationFrame(() => {
+      const ta = composerTextareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(text.length, text.length);
+      autoResizeTextarea(ta, minRows, newChat ? 10 : 4);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedNonce]);
   const capsulesRef = useRef(capsules);
   capsulesRef.current = capsules;
   // Sync mirror div size with the textarea via ResizeObserver.
@@ -2282,9 +2305,11 @@ export const ChatInput = ({
         </div>
       )}
 
-      {/* Prompt card */}
+      {/* Prompt card. Brighter than the page surface (kumo-control vs kumo-base) and gently lifted
+          with a soft neutral shadow so the composer reads as a distinct surface instead of blending
+          into the canvas; the lift intensifies a touch on focus. */}
       <div
-        className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-base shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]"
+        className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-control shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(20,17,16,0.03),0_10px_28px_-16px_rgba(20,17,16,0.12)] transition-shadow duration-150 ease-out focus-within:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(20,17,16,0.04),0_14px_34px_-14px_rgba(20,17,16,0.16)]"
         onDragEnter={handleAttachmentDragEnter}
         onDragOver={handleAttachmentDragOver}
         onDragLeave={handleAttachmentDragLeave}
@@ -2384,6 +2409,7 @@ export const ChatInput = ({
                 }
               }}
               ref={(el) => {
+                composerTextareaRef.current = el;
                 // Initial auto-resize on mount
                 if (el) {
                   autoResizeTextarea(el, minRows, newChat ? 10 : 4);
@@ -5256,23 +5282,25 @@ function ChatInterface({
           horizontal padding, so the wrapper just adds the top divider; no
           extra p-4 (which would shrink the input vs. the in-chat composer). */}
       <div className="flex-shrink-0 border-t border-kumo-line">
-        <ChatInput
-          createCapsuleGatekeeper={(accountId, url) =>
-            overseer.newGatekeeper(accountId, url)
-          }
-          getOverseer={() => overseer}
-          onSend={handleNewChatSend}
-          isAgentActive={false}
-          models={availableModels}
-          selectedModel={selectedModel}
-          onModelChange={handleModelChange}
-          showThinkingTraces={showThinkingTraces}
-          onToggleThinkingTraces={toggleShowThinkingTraces}
-          minRows={2}
-          newChat
-        />
-        {/* Reserve the same height as the token/cost row to avoid layout shift. */}
-        <div aria-hidden className="min-h-[1rem]" />
+        <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
+          <ChatInput
+            createCapsuleGatekeeper={(accountId, url) =>
+              overseer.newGatekeeper(accountId, url)
+            }
+            getOverseer={() => overseer}
+            onSend={handleNewChatSend}
+            isAgentActive={false}
+            models={availableModels}
+            selectedModel={selectedModel}
+            onModelChange={handleModelChange}
+            showThinkingTraces={showThinkingTraces}
+            onToggleThinkingTraces={toggleShowThinkingTraces}
+            minRows={2}
+            newChat
+          />
+          {/* Reserve the same height as the token/cost row to avoid layout shift. */}
+          <div aria-hidden className="min-h-[1rem]" />
+        </div>
       </div>
     </div>
   );

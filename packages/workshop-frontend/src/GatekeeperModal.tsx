@@ -781,7 +781,7 @@ export default function GatekeeperModal({
               <button
                 type="button"
                 onClick={() => setSelectedConnectionId(null)}
-                className="mb-4 inline-flex items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
+                className="mb-4 inline-flex cursor-pointer items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
               >
                 <CaretLeft size={13} />
                 All connection types
@@ -946,7 +946,7 @@ function ConnectionTypeRow({
     <button
       type="button"
       onClick={onClick}
-      className={`group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated ${first ? '' : 'border-t border-kumo-line'}`}
+      className={`group flex w-full cursor-pointer items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated ${first ? '' : 'border-t border-kumo-line'}`}
     >
       <div
         className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-kumo-elevated"
@@ -1020,7 +1020,7 @@ function ConnectionGroupRow({
         onClick={handleClick}
         aria-expanded={expanded}
         aria-controls={panelId}
-        className="group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated"
+        className="group flex w-full cursor-pointer items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-kumo-elevated"
       >
         <div
           className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-kumo-elevated"
@@ -1055,7 +1055,7 @@ function ConnectionGroupRow({
               key={item.id}
               type="button"
               onClick={() => onSelectItem(item)}
-              className="group flex w-full items-center gap-3 border-t border-kumo-line/60 pl-10 pr-3 py-2.5 text-left transition-colors first:border-t-0 hover:bg-kumo-elevated"
+              className="group flex w-full cursor-pointer items-center gap-3 border-t border-kumo-line/60 pl-10 pr-3 py-2.5 text-left transition-colors first:border-t-0 hover:bg-kumo-elevated"
             >
               <div className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-kumo-base">
                 {item.iconUrl ? (

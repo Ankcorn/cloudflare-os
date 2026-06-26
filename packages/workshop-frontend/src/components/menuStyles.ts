@@ -1,0 +1,11 @@
+// Shared styling for kebab / overflow DropdownMenu menus, so every list (sidebar rows, Workspaces,
+// Blueprints, AI providers) uses the same compact, on-language menu instead of Kumo's larger
+// defaults. Kept tight (13px rows, small padding) to match the rest of the design system.
+export const MENU_CONTENT =
+  '!z-[1100] !min-w-[180px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(20,17,16,0.10)]'
+
+export const MENU_ITEM =
+  '!h-auto rounded-md !px-2.5 !py-1.5 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default data-highlighted:bg-kumo-tint'
+
+export const MENU_ITEM_DANGER =
+  '!h-auto rounded-md !px-2.5 !py-1.5 text-[13px] leading-[18px] tracking-[-0.25px] data-highlighted:bg-kumo-danger-tint'
