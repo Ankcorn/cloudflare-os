@@ -64,17 +64,6 @@ export type VendorDescription = {
   providesAuth?: boolean;
 }
 
-// Describes a single permission/scope that a gatekeeper will request during the connect flow.
-// These are shown in the "Permissions" section of the connect modal so the user can review
-// what they're granting before being redirected to the provider.
-export type VendorScope = {
-  // Label shown to the user (e.g. "Read and label emails").
-  displayName: string;
-
-  // Why this scope/permission is requested. Shown under `displayName`.
-  rationale: string;
-}
-
 // Describes a connected user account on an external service, for display purposes.
 export type AccountDescription = {
   // User's display name, e.g. "John Doe". This is a non-unique name that is human-readable.
@@ -87,10 +76,11 @@ export type AccountDescription = {
   // User's avatar image.
   avatar: AvatarImage;
 
-  // A list of strings describing what sort of access has been authorized through this connection.
-  // This is similar to OAuth scopes, but may or may not literally map to underlying OAuth scopes.
-  // Each string is a phrase like: "Read and send emails"
-  scope: string[];
+  // `urlPattern`s of the grantable resource types (those with `grantable`; see
+  // `SupportedResource`) currently enabled on this account. Used to show which resources are
+  // usable and which need an additional grant. If omitted, treat the account as having every
+  // resource granted (legacy accounts, or gatekeepers with no grantable resource types).
+  grantedResourceUrlPatterns?: string[];
 }
 
 // Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe().
@@ -144,6 +134,13 @@ export type SupportedResource = {
 
   // Optional icon for display in Workshop UI.
   icon?: AvatarImage;
+
+  // If true, this resource type is independently grantable. The user can enable or disable it at
+  // account-connection time, and the Workshop will request only the underlying authorization (e.g.
+  // OAuth scopes) needed for the resource types they enable.
+  //
+  // If omitted/false, the resource type is not separately grantable.
+  grantable?: boolean;
 }
 
 // Tests whether a resource URL matches a SupportedResource `urlPattern` (a URLPattern string).
@@ -281,9 +278,13 @@ export type ResourceConfiguratorFrame = {
 //
 // An installation of the Gadget Workshop is provided with a set of Adapters to allow it to
 // interface with other services.
-// Options for GatekeeperVendor.connectAccount(). `scopes` selects the access tier (see that method).
+// Options for GatekeeperVendor.connectAccount(). `scopes` selects the access tier (see that
+// method). `resourceUrlPatterns`, if given, limits the connection to the authorization needed for
+// those grantable resource types; if omitted, authorization for all the vendor's resource types
+// is requested.
 export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
+  resourceUrlPatterns?: string[];
 };
 
 export interface GatekeeperVendor extends WorkerEntrypoint {
@@ -312,6 +313,10 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   //   - "auth": only the minimal scopes needed to verify the user's email for sign-in. The grant is
   //     transient — after `complete()` lets the caller read getAuthenticatedEmail(), the gatekeeper
   //     discards it. Vendors without `providesAuth` ignore this and always use their full scopes.
+  //
+  // `options.resourceUrlPatterns`, if given, limits the connection to the authorization needed for
+  // those grantable resource types. If omitted, authorization for all of the vendor's resource
+  // types is requested.
   connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
                  options?: GatekeeperConnectOptions): Promise<{url: string}>;
 
@@ -327,13 +332,6 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   //
   // TODO: How does the Gadget Workshop know when the supported URLs have changed, without polling?
   getSupportedResources(options?: {userId?: string}): Promise<SupportedResource[]>;
-
-  // Returns the catalog of permissions this vendor will request during the connect flow.
-  // The workshop displays this in the connect modal so the user can review what they're granting
-  // before being redirected to the gatekeeper's consent screen.
-  //
-  // For vendors that don't have granular permissions, return an empty array.
-  getScopeCatalog(): Promise<VendorScope[]>;
 
   // Returns TypeScript source code defining all types covering APIs defined by this Gatekeeper.
   // The returned string is the content of a `.d.ts` file. All types refereced by
@@ -433,6 +431,15 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // Workshop keys accounts by email, so an unverified address would allow account takeover.
   // Returns null when the account has no verified email or the vendor does not support auth.
   getAuthenticatedEmail(): Promise<string | null>;
+
+  // Ensure the authorization for the listed grantable resource types (by `urlPattern`) is granted
+  // on this account, expanding the grant if needed.
+  //
+  // Returns the URL for the user to visit to authorize them, or no URL if nothing was needed.
+  // Gatekeepers with no grantable resource types should return no URL.
+  //
+  // SECURITY: As with connectAccount(), any returned URL must include a cryptographic nonce.
+  ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

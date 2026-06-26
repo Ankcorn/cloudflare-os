@@ -13,7 +13,6 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
-  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   SpotifyApi,
@@ -106,30 +105,7 @@ const OAUTH_SCOPES = [
   "user-read-currently-playing",
 ];
 
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Know who you are",
-    rationale: "Read your Spotify profile and email so this account can be labeled in Gadgets.",
-  },
-  {
-    displayName: "Read and manage your library",
-    rationale: "Read and update your saved tracks and albums, top items, and recently played.",
-  },
-  {
-    displayName: "Read and manage your playlists",
-    rationale: "Read, create, and edit your playlists (public and private).",
-  },
-  {
-    displayName: "Manage who you follow",
-    rationale: "Read and update the artists you follow.",
-  },
-  {
-    displayName: "Control playback",
-    rationale: "See and control playback on your Spotify Connect devices (requires Premium).",
-  },
-];
 
-const SCOPE_DESCRIPTIONS = SCOPE_CATALOG.map(scope => scope.displayName);
 
 const SPOTIFY_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(SPOTIFY_LOGO_SVG)}`;
 
@@ -492,10 +468,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
-  }
-
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
@@ -685,7 +657,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         displayName: user.display_name ?? user.id,
         uniqueName: user.id,
         avatar: { url: user.images?.[0]?.url ?? "" },
-        scope: SCOPE_DESCRIPTIONS,
       };
     });
   }
@@ -693,6 +664,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   // Spotify is not offered as a sign-in identity provider (no verified-email flag exposed).
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

@@ -12,7 +12,7 @@ import { readAdminConfig } from "./admin-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { SupportedResource, VendorDescription, VendorScope } from "@gadgets/workshop-shared/gatekeeper";
+import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -246,12 +246,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listGatekeeperVendors(filter);
   }
 
-  getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]> {
-    return this.user.getGatekeeperScopeCatalog(vendorId);
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
+    return this.user.connectAccount(vendorId, resourceUrlPatterns);
   }
 
-  connectAccount(vendorId: string): Promise<{url: string}> {
-    return this.user.connectAccount(vendorId);
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return this.user.ensureAccountResources(accountId, resourceUrlPatterns);
   }
 
   subscribeConnectedAccounts(

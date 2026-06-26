@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, VendorScope, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -235,14 +235,21 @@ export interface AuthenticatedApi extends RpcTarget {
   listGatekeeperVendors(filter?: GatekeeperVendorFilter)
       : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]>;
 
-  // Returns the gatekeeper's permission catalog for third-party service at `vendorId`.
-  getGatekeeperScopeCatalog(vendorId: string): Promise<VendorScope[]>;
-
   // Connect this account to a specific account on a third-party service. Returns the URL which
   // should be opened in a new tab in the user's browser to complete the authorization. When the
   // authorization flow completes, the account will be added to the list, which can be observed
   // through subscribeConnectedAccounts().
-  connectAccount(vendorId: string): Promise<{url: string}>;
+  //
+  // `resourceUrlPatterns`, if given, limits the connection to the authorization needed for those
+  // grantable resource types (those with `grantable`; see `SupportedResource`). If omitted,
+  // authorization for all of the vendor's resource types is requested.
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}>;
+
+  // Ensure the authorization for the listed grantable resource types (by `urlPattern`) is granted
+  // on a connected account, expanding if needed. Returns a URL to open in a new tab to authorize
+  // them, or no url if nothing was needed. The updated grant is observable via
+  // subscribeConnectedAccounts().
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}>;
 
   // Subscribe to the list of third-party accounts connected to the user's account.
   //

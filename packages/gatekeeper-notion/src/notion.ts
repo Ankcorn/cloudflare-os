@@ -26,7 +26,6 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
-  type VendorScope,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   NotionApi,
@@ -145,15 +144,6 @@ function constantTimeEqual(a: string, b: string): boolean {
 }
 
 const NOTION_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(NOTION_LOGO_SVG)}`;
-
-const SCOPE_CATALOG: VendorScope[] = [
-  {
-    displayName: "Read and edit shared pages and databases",
-    rationale:
-        "Lets Gadgets read, create, and update the Notion pages and databases you choose to " +
-        "share with this connection.",
-  },
-];
 
 const WORKSPACE_RESOURCE: SupportedResource = {
   urlPattern: "https://*",
@@ -305,10 +295,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "databases you share. Build agents that draft documents, organize notes, or manage " +
           "database records.",
     };
-  }
-
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
@@ -504,13 +490,16 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       displayName: info.workspaceName ?? info.ownerName ?? "Notion",
       uniqueName: info.ownerName,
       avatar: { url: info.workspaceIcon ?? info.ownerAvatar ?? "" },
-      scope: ["Read and edit the pages and databases shared with this connection"],
     };
   }
 
   async getAuthenticatedEmail(): Promise<string | null> {
     // Notion does not provide a reliably verified email for sign-in; not an auth provider.
     return null;
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

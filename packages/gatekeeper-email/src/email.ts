@@ -9,7 +9,6 @@ import {
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
-  VendorScope,
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
@@ -260,10 +259,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return [];
-  }
-
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let nonce = generateNonce();
@@ -353,7 +348,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return {
       displayName: "Email Receiver",
       avatar: { url: "" },  // TODO: email icon
-      scope: ["Receive inbound emails"],
     };
   }
 
@@ -445,6 +439,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async reconnect(): Promise<{url: string}> {
     // Email connections do not use OAuth and never expire.
     throw new Error("Email connections do not require re-authentication.");
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 }
 

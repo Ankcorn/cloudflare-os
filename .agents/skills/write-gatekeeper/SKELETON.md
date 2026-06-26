@@ -18,7 +18,6 @@ import {
   GatekeeperConnectCallback,
   AccountDescription,
   SupportedResource,
-  VendorScope,
   ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { MySession, MyHook as MyHookIface } from "./types";  // Remove MyHook if no hooks
@@ -122,19 +121,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return [
-      {
-        displayName: "Read useful data",
-        rationale: "Explain why this connector needs the permission.",
-      },
-    ];
-  }
-
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
+  // This skeleton has no independently grantable resources, so it ignores
+  // `options.resourceUrlPatterns` and stores an empty requested-resource list. Gatekeepers with
+  // grantable resources should follow gatekeeper-google.
+  async connectAccount(
+      callback: Fetcher<GatekeeperConnectCallback>,
+      _options?: {resourceUrlPatterns?: string[]}): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let nonce = generateNonce();
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce, []);
     return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}` };
   }
 
@@ -152,13 +147,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // For a full OAuth implementation with two-phase nonces and reconnect support,
 // see gatekeeper-google.
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string) {
+  async setCallback(
+      callback: Fetcher<GatekeeperConnectCallback>,
+      nonce: string,
+      requestedResourceUrlPatterns: string[]) {
     // Self-destruct if the connect flow is never completed.
     if (!this.ctx.storage.kv.get<string>("credentials")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
     this.ctx.storage.kv.put("callback", callback);
     this.ctx.storage.kv.put("nonce", { value: nonce, expiresAt: Date.now() + NONCE_LIFETIME_MS });
+    this.ctx.storage.kv.put("requestedResourceUrlPatterns", requestedResourceUrlPatterns);
   }
 
   // Verify and consume the nonce from the initiation URL. Prevents replay.
@@ -225,7 +224,6 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
     return {
       displayName: "TODO",
       avatar: { url: "" },
-      scope: ["TODO: describe authorized access"],
     };
   }
 
@@ -270,6 +268,10 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
   async revoke(): Promise<void> {
     let id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     await this.ctx.exports.UserAccount.get(id).revoke();
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 }
 

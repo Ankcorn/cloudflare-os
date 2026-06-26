@@ -2,7 +2,7 @@ import { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
   GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, VendorDescription,
-  VendorScope, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
+  GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
   SupportedResource, ResourceConfiguratorFrame,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -139,14 +139,6 @@ export default {
 
 // =======================================================================================
 
-const SCOPE_CATALOG: VendorScope[] = [
-  { displayName: "Sign you in", rationale: "Identify you by your Cloudflare account email." },
-  {
-    displayName: "Use your AI Gateway credits",
-    rationale: "Route AI usage beyond the free tier through your own Cloudflare account.",
-  },
-];
-
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   async describe(): Promise<VendorDescription> {
@@ -161,10 +153,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "own Cloudflare AI Gateway credits.",
       providesAuth: true,
     };
-  }
-
-  async getScopeCatalog(): Promise<VendorScope[]> {
-    return SCOPE_CATALOG;
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
@@ -349,7 +337,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       displayName: identity?.displayName,
       uniqueName: identity?.email,
       avatar: { url: CLOUDFLARE_LOGO_URL },
-      scope: SCOPE_CATALOG.map(s => s.displayName),
     };
   }
 
@@ -358,6 +345,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     if (!token) return null;
     const identity = await fetchIdentity(token);
     return identity?.email ?? null;
+  }
+
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
+    return {};
   }
 
   async getUsableAccessToken(): Promise<string | null> {

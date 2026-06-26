@@ -1,17 +1,10 @@
-import { Dialog } from '@cloudflare/kumo'
-import {
-  X,
-  CaretDown,
-  CaretRight,
-  ShieldCheck,
-  Check,
-} from '@phosphor-icons/react'
-import { useEffect, useState } from 'react'
+import { Dialog, Switch } from '@cloudflare/kumo'
+import { X, ShieldCheck } from '@phosphor-icons/react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   AccountDescription,
   SupportedResource,
   VendorDescription,
-  VendorScope,
 } from '@gadgets/workshop-shared/gatekeeper'
 import { WorkshopButton, WorkshopIconButton } from './WorkshopControls'
 
@@ -20,30 +13,23 @@ interface ConnectConnectorModalProps {
   mode: 'connect' | 'manage'
   vendorDescription: VendorDescription
   supportedResources: SupportedResource[]
-  scopeCatalog: VendorScope[]
-  loadingCatalog: boolean
-  catalogError?: string | null
   logoUrl?: string
   color?: string
   onOpenChange: (open: boolean) => void
-  onRetryCatalog?: () => void
   connecting?: boolean
-  onConfirm?: () => void
+  // Connect mode: invoked with the `urlPattern`s of the grantable resources the user chose to
+  // enable. `undefined` means "enable everything" (no toggle was deselected), matching the
+  // gatekeeper's default behavior.
+  onConfirm?: (resourceUrlPatterns?: string[]) => void
   accountDescription?: AccountDescription
   credentialsValid?: boolean
   disconnecting?: boolean
   onDisconnect?: () => void
-}
-
-function PermissionStatusIcon() {
-  return (
-    <span
-      className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-[rgba(42,142,58,0.12)] text-[#1f6e2c]"
-      aria-hidden
-    >
-      <Check size={10} weight="bold" />
-    </span>
-  )
+  grantedResourceUrlPatterns?: string[]
+  // Manage mode: invoked to expand the grant to include the given resource `urlPattern`s.
+  onEnsureResources?: (resourceUrlPatterns: string[]) => void
+  // Resource `urlPattern`s currently being granted (shows a busy state on the relevant toggle).
+  ensuringResourceUrlPatterns?: string[]
 }
 
 export default function ConnectConnectorModal({
@@ -51,43 +37,98 @@ export default function ConnectConnectorModal({
   mode,
   vendorDescription,
   supportedResources,
-  scopeCatalog,
-  loadingCatalog,
-  catalogError = null,
   logoUrl,
   color,
   onOpenChange,
-  onRetryCatalog,
   connecting = false,
   onConfirm,
   accountDescription,
   credentialsValid = true,
   disconnecting = false,
   onDisconnect,
+  grantedResourceUrlPatterns,
+  onEnsureResources,
+  ensuringResourceUrlPatterns = [],
 }: ConnectConnectorModalProps) {
   const isManage = mode === 'manage'
 
-  const [advancedOpen, setAdvancedOpen] = useState(isManage)
+  // Resource types the user can individually enable/disable at connect time. Resources without
+  // `grantable` are shown for information but aren't toggleable -- the account grant covers them
+  // whenever it's connected.
+  const grantableResources = useMemo(
+    () => supportedResources.filter((r) => r.grantable),
+    [supportedResources],
+  )
+  const granular = grantableResources.length > 0
+  const grantableKey = grantableResources.map((r) => r.urlPattern).join(',')
+
+  const isGranted = (urlPattern: string) =>
+    grantedResourceUrlPatterns === undefined ||
+    grantedResourceUrlPatterns.includes(urlPattern)
+
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!open) return
-    if (isManage) {
-      setAdvancedOpen(true)
-    } else {
-      setAdvancedOpen(false)
-    }
     setConfirmingDisconnect(false)
-  }, [open, isManage])
+  }, [open])
 
-  const hasScopes = scopeCatalog.length > 0
-  const permissionSummary = `${scopeCatalog.length} permission${
-    scopeCatalog.length === 1 ? '' : 's'
-  } ${isManage ? 'granted' : 'requested'}`
+  const grantedKey = (grantedResourceUrlPatterns ?? []).join(',')
+  useEffect(() => {
+    if (!open) return
+    if (isManage) {
+      setSelected(
+        new Set(
+          grantableResources
+            .map((r) => r.urlPattern)
+            .filter((p) => isGranted(p)),
+        ),
+      )
+    } else {
+      setSelected(new Set(grantableResources.map((r) => r.urlPattern)))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isManage, grantableKey, grantedKey])
+
+  const noneSelected = granular && selected.size === 0
+
+  const pendingPatterns = isManage
+    ? [...selected].filter((p) => !isGranted(p))
+    : []
+  const hasPending = pendingPatterns.length > 0
+
+  function toggleResource(urlPattern: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (checked) next.add(urlPattern)
+      else next.delete(urlPattern)
+      return next
+    })
+  }
+
+  function handleAddResources() {
+    if (hasPending) onEnsureResources?.(pendingPatterns)
+  }
+
+  function discardPending() {
+    setSelected(
+      new Set(
+        grantableResources.map((r) => r.urlPattern).filter((p) => isGranted(p)),
+      ),
+    )
+  }
+
+  const ensuringBusy = ensuringResourceUrlPatterns.length > 0
 
   function handleConfirm() {
     if (!onConfirm) return
-    onConfirm()
+    if (granular) {
+      const allSelected = selected.size === grantableResources.length
+      onConfirm(allSelected ? undefined : [...selected])
+    } else {
+      onConfirm(undefined)
+    }
   }
 
   function handleDisconnect() {
@@ -132,6 +173,24 @@ export default function ConnectConnectorModal({
   )
 
   const busy = connecting || disconnecting
+
+  // Resource icon helper shared by every resource row.
+  function resourceIcon(resource?: SupportedResource) {
+    const icon = resource?.icon?.url ?? logoUrl
+    return (
+      <div
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-kumo-strong"
+        style={{ backgroundColor: 'var(--color-kumo-tint)' }}
+      >
+        {icon ? (
+          <img src={icon} alt="" className="h-4 w-4 object-contain" />
+        ) : (
+          <ResourceIconGlyph />
+        )}
+      </div>
+    )
+  }
+
   return (
     <Dialog.Root
       open={open}
@@ -183,42 +242,54 @@ export default function ConnectConnectorModal({
 
           {supportedResources.length > 0 && (
             <div className="mt-5">
-              <h3 className="text-[12px] leading-4 font-semibold uppercase tracking-[0.6px] text-kumo-inactive">
-                What this gatekeeper can do
+              <h3 className="mb-2 text-[12px] leading-4 font-semibold uppercase tracking-[0.6px] text-kumo-inactive">
+                {granular
+                  ? isManage
+                    ? 'Resources'
+                    : 'Resources to enable'
+                  : 'What this gatekeeper can do'}
               </h3>
-              <ul className="mt-2 space-y-2">
+              <ul className="space-y-2">
                 {supportedResources.map((resource) => {
+                  const grantable = Boolean(resource.grantable)
+                  const granted = isManage && grantable && isGranted(resource.urlPattern)
+                  const ensuring = ensuringResourceUrlPatterns.includes(
+                    resource.urlPattern,
+                  )
+                  const checked =
+                    grantable &&
+                    (selected.has(resource.urlPattern) || ensuring)
+                  const disabled = isManage && (granted || ensuring)
                   return (
                     <li
                       key={resource.urlPattern}
-                      className="flex items-start gap-3 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2.5"
+                      className="flex items-center gap-3 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2.5"
                     >
-                      <div
-                        className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-kumo-strong"
-                        style={{ backgroundColor: 'var(--color-kumo-tint)' }}
-                      >
-                        {resource.icon ? (
-                          <img
-                            src={resource.icon.url}
-                            alt=""
-                            className="h-4 w-4 object-contain"
-                          />
-                        ) : logoUrl ? (
-                          <img src={logoUrl} alt="" className="h-4 w-4 object-contain" />
-                        ) : (
-                          <ResourceIconGlyph />
-                        )}
-                      </div>
+                      {resourceIcon(resource)}
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                            {resource.title}
-                          </p>
-                        </div>
+                        <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {resource.title}
+                        </p>
                         <p className="mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
                           {resource.description}
                         </p>
                       </div>
+                      {grantable && (
+                        <Switch
+                          size="sm"
+                          className="shrink-0"
+                          aria-label={
+                            isManage
+                              ? `Grant ${resource.title}`
+                              : `Enable ${resource.title}`
+                          }
+                          checked={checked}
+                          disabled={disabled}
+                          onCheckedChange={(next) =>
+                            toggleResource(resource.urlPattern, next)
+                          }
+                        />
+                      )}
                     </li>
                   )
                 })}
@@ -260,96 +331,20 @@ export default function ConnectConnectorModal({
               required permissions before they can access those connected resources.
             </div>
           )}
-
-          {hasScopes ? (
-            <div className="mt-5">
-              {isManage ? (
-                <div className="mb-3 flex items-baseline justify-between gap-2 px-1">
-                  <h3 className="m-0 text-[12px] leading-4 font-semibold uppercase tracking-[0.6px] text-kumo-inactive">
-                    Permissions you granted
-                  </h3>
-                  <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                    {permissionSummary}
-                  </p>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setAdvancedOpen((v) => !v)}
-                  className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-lg border border-kumo-line bg-kumo-base px-3 py-2.5 text-left transition-colors hover:bg-kumo-elevated"
-                >
-                  <div className="min-w-0">
-                    <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                      Permission details
-                    </p>
-                    <p className="mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                      {advancedOpen
-                        ? permissionSummary
-                        : `${permissionSummary}. Expand to review.`}
-                    </p>
-                  </div>
-                  {advancedOpen ? (
-                    <CaretDown size={14} className="shrink-0 text-kumo-subtle" />
-                  ) : (
-                    <CaretRight size={14} className="shrink-0 text-kumo-subtle" />
-                  )}
-                </button>
-              )}
-
-              {advancedOpen && (
-                <div
-                  className={`overflow-hidden rounded-lg border border-kumo-line bg-kumo-base ${
-                    isManage ? '' : 'mt-3'
-                  }`}
-                >
-                  {scopeCatalog.map((scope, idx) => (
-                    <div
-                      key={`${scope.displayName}:${idx}`}
-                      className={`flex cursor-default items-start gap-3 px-3 py-3 ${
-                        idx > 0 ? 'border-t border-kumo-line' : ''
-                      }`}
-                    >
-                      <PermissionStatusIcon />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                            {scope.displayName}
-                          </p>
-                        </div>
-                        <p className="mt-0.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                          {scope.rationale}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : loadingCatalog ? (
-            <div className="mt-5 rounded-lg border border-kumo-line bg-kumo-base px-3 py-3 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-              Loading permissions...
-            </div>
-          ) : catalogError ? (
-            <div className="mt-5 rounded-lg border border-kumo-line bg-kumo-base px-3 py-3">
-              <p className="text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default">
-                Could not load permissions.
-              </p>
-              <p className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                Retry before continuing so the OAuth request matches what this gatekeeper discloses.
-              </p>
-              {onRetryCatalog && (
-                <WorkshopButton className="mt-3" onClick={onRetryCatalog}>
-                  Retry
-                </WorkshopButton>
-              )}
-            </div>
-          ) : null}
         </div>
 
         <div className="shrink-0 flex items-center justify-between gap-3 border-t border-kumo-line bg-kumo-base px-5 py-3">
           {isManage && confirmingDisconnect ? (
             <p className="m-0 min-w-0 flex-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-default">
               Disconnect {vendorDescription.displayName}? Gadgets using this will lose access.
+            </p>
+          ) : isManage && hasPending ? (
+            <p className="m-0 min-w-0 flex-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+              {pendingPatterns.length} resource{pendingPatterns.length === 1 ? '' : 's'} to add
+            </p>
+          ) : !isManage && granular && noneSelected ? (
+            <p className="m-0 min-w-0 flex-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+              Select at least one resource to continue.
             </p>
           ) : (
             <span aria-hidden />
@@ -362,6 +357,7 @@ export default function ConnectConnectorModal({
                     <WorkshopButton
                       onClick={() => setConfirmingDisconnect(false)}
                       disabled={disconnecting}
+                      className="!h-9"
                     >
                       Cancel
                     </WorkshopButton>
@@ -369,20 +365,41 @@ export default function ConnectConnectorModal({
                       tone="danger"
                       onClick={handleDisconnect}
                       disabled={disconnecting}
-                      className="min-w-[140px]"
+                      className="!h-9 min-w-[140px]"
                     >
                       {disconnecting ? 'Disconnecting...' : 'Yes, disconnect'}
+                    </WorkshopButton>
+                  </>
+                ) : hasPending ? (
+                  <>
+                    <WorkshopButton onClick={discardPending} disabled={ensuringBusy} className="!h-9">
+                      Cancel
+                    </WorkshopButton>
+                    <WorkshopButton
+                      tone="primary"
+                      onClick={handleAddResources}
+                      disabled={ensuringBusy}
+                      className="min-w-[140px]"
+                    >
+                      {ensuringBusy
+                        ? 'Opening...'
+                        : `Continue to ${vendorDescription.displayName}`}
                     </WorkshopButton>
                   </>
                 ) : (
                   <>
                     <Dialog.Close
-                      render={(props) => <WorkshopButton {...props}>Close</WorkshopButton>}
+                      render={(props) => (
+                        <WorkshopButton {...props} className="!h-9">
+                          Close
+                        </WorkshopButton>
+                      )}
                     />
                     <WorkshopButton
                       tone="danger"
                       onClick={handleDisconnect}
                       disabled={disconnecting}
+                      className="!h-9"
                     >
                       Disconnect
                     </WorkshopButton>
@@ -393,7 +410,7 @@ export default function ConnectConnectorModal({
               <>
                 <Dialog.Close
                   render={(props) => (
-                    <WorkshopButton {...props} disabled={connecting}>
+                    <WorkshopButton {...props} disabled={connecting} className="!h-9">
                       Cancel
                     </WorkshopButton>
                   )}
@@ -401,17 +418,11 @@ export default function ConnectConnectorModal({
                 <WorkshopButton
                   tone="primary"
                   onClick={handleConfirm}
-                  disabled={
-                    connecting ||
-                    loadingCatalog ||
-                    !!catalogError
-                  }
+                  disabled={connecting || (granular && noneSelected)}
                   className="min-w-[140px]"
                 >
                   {connecting
                     ? 'Opening...'
-                    : loadingCatalog
-                    ? 'Loading...'
                     : `Continue to ${vendorDescription.displayName}`}
                 </WorkshopButton>
               </>
