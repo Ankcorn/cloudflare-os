@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
@@ -18,6 +18,7 @@ import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
+import { AutoApprovalDrainer } from "./auto-approval";
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
@@ -264,7 +265,7 @@ function isAllowedChatAttachmentImageMimeType(mimeType: string): boolean {
 // the gatekeeper, so no lookup is ever attempted.
 const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 
-type ActionRecord = {
+export type ActionRecord = {
   id: number,
   gatekeeperId: number;
   caller: GatekeeperCaller;
@@ -279,6 +280,7 @@ type ActionRecord = {
   action: number;  // action key assigned by the gatekeeper, passed back on apply/reject/revert
   description: ActionDescription;
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
+  autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -314,6 +316,17 @@ type ChatDraftUpdateRecord = {
   timestamp: Date;
   author: AiChatAuthorInfo;
   update: Uint8Array;
+};
+
+// A user opt-in to auto-approve actions carrying a given `actionKind` on a given gatekeeper
+export type AutoApproveTagRecord = {
+  gatekeeperId: number;
+  // The action kind (stable tag + display label, from ActionDescription.actionKind), captured when
+  // the rule was enabled so the rule can be listed without showing the raw machine tag.
+  actionKind: ActionKind;
+  // Who turned this rule on. Auto-approvals run under this user's authority, so each auto-applied
+  // action is attributed to them in the audit log.
+  enabledBy: AiChatAuthorInfo;
 };
 
 // Server-only record describing an in-progress agent turn, enabling resumption after a server
@@ -391,6 +404,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         type: "action",
         description: record.description,
         resolvedBy: record.resolvedBy,
+        autoApproved: record.autoApproved,
       };
     case "bindHook":
       return {
@@ -466,6 +480,13 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
       boundHooks: collection<BoundHookRecord>()({
         primaryKey: "id",
+      }),
+
+      // User-enabled rules to auto-approve actions carrying a given action kind on a given
+      // gatekeeper. Presence of a record -> the rule is enabled. Keyed by
+      // `${gatekeeperId}:${actionKind.tag}`.
+      autoApproveTags: collection<AutoApproveTagRecord>()({
+        primaryKey: (r) => `${r.gatekeeperId}:${r.actionKind.tag}`,
       }),
 
       chatMeta: collection<AiChatMetadata>()({
@@ -573,6 +594,8 @@ class OverseerImpl implements AgentHooks {
   // Per-chat in-memory state for running agents and pending agent callbacks.
   #liveChats = new Map<number, LiveChatContext>();
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
+  
+  #autoApprovalDrainer: AutoApprovalDrainer;
 
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
@@ -803,6 +826,11 @@ class OverseerImpl implements AgentHooks {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
+
+    this.#autoApprovalDrainer = new AutoApprovalDrainer(
+        this.storage,
+        (record, resolvedBy, autoApproved) =>
+            this.applyPendingAction(record, resolvedBy, autoApproved));
 
     // Resume any agent turns that were left running by a previous instance of this DO (i.e. were
     // interrupted by a server restart).
@@ -1338,6 +1366,37 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  // Apply a single pending action: invoke the gatekeeper, mark it approved, and persist (the put
+  // auto-notifies subscribeToActions). Shared by manual approval (`approveAction`) and the
+  // auto-approval drain (`drainAutoApprovals`). The caller is responsible for validating that the
+  // record is still pending before calling.
+  //
+  // `resolvedBy`/`autoApproved` are required (not defaulted) so that no apply path can omit how the
+  // gate was cleared: this is the single chokepoint where an action transitions to "approved", so
+  // requiring them here guarantees the audit log always records the resolving user and whether it
+  // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
+  async applyPendingAction(record: ActionRecord & {type: "action"},
+                           resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+    let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
+    await gatekeeper.applyAction(record.action);
+    record.state = "approved";
+    record.appliedAt = new Date();
+    record.resolvedBy = resolvedBy;
+    record.autoApproved = autoApproved;
+    this.storage.actions.put(record);
+  }
+
+  // Apply all currently-eligible pending actions of the given gatekeeper, in ascending id order.
+  // Stops at the first pending action that is NOT auto-eligible (i.e. a manual gate) or that throws
+  // while applying -- it is never skipped ahead of. This preserves in-order application and the
+  // invariant that nothing is silently applied past a human gate.
+  //
+  // Delegates to the single-flight drainer, which guards against concurrent drains for the same
+  // gatekeeper double-applying an action (the DO's input gate is open across the apply await).
+  drainAutoApprovals(gatekeeperId: number): Promise<void> {
+    return this.#autoApprovalDrainer.drain(gatekeeperId);
+  }
+
   async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec)
       : Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
@@ -1619,6 +1678,16 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
+
+    // If this action is auto-approvable and the user has opted in to auto-approving its action kind
+    // on this gatekeeper, schedule a drain to apply it (and any earlier auto-eligible pending actions)
+    // after submitAction returns. We defer via waitUntil rather than applying inline because
+    // applying calls back into the gatekeeper facet, which is still awaiting this submitAction --
+    // doing so inline risks a re-entrancy stall.
+    if (description.autoApprovable && description.actionKind &&
+        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined) {
+      this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
+    }
   }
 
   async bindHook<Hook extends RpcTarget>(
@@ -4078,18 +4147,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("Observations can't have 'pending' state.");
     }
 
-    let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
-
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
     let profile = await this.#getClientProfile();
+    await this.impl.applyPendingAction(action, profile, false);
 
-    await gatekeeper.applyAction(action.action);
-
-    action.state = "approved";
-    action.appliedAt = new Date();
-    action.resolvedBy = profile;
-    this.impl.storage.actions.put(action);
+    // Clearing this manual gate may unblock later auto-eligible pending actions on the same
+    // gatekeeper, so cascade a drain (in-order) once this one is applied.
+    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -4194,6 +4259,51 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     action.appliedAt = new Date();
     action.resolvedBy = profile;
     this.impl.storage.actions.put(action);
+  }
+
+  // Enable auto-approval of actions carrying `actionKind` on the gatekeeper identified by
+  // `bindingName`. Stores the opt-in rule (one of the two gates required to auto-apply -- the
+  // action's own `autoApprovable` verdict is the other) with the kind's display label, and
+  // immediately drains any pending actions that this newly unblocks.
+  async setAutoApprovedActionKind(bindingName: string, actionKind: ActionKind)
+      : Promise<void> {
+    let gatekeeper = this.impl.storage.gatekeepers.byBindingName.get(bindingName);
+    if (!gatekeeper) {
+      throw new Error(`No such gatekeeper: ${bindingName}`);
+    }
+
+    let profile = await this.#getClientProfile();
+    this.impl.storage.autoApproveTags.put({
+      gatekeeperId: gatekeeper.id,
+      actionKind,
+      enabledBy: profile,
+    });
+    // Apply the currently-visible pending action(s) with this tag right away.
+    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(gatekeeper.id));
+  }
+
+  // Remove the auto-approval rule for `tag` on the gatekeeper identified by `bindingName`,
+  // so future matching actions require manual approval again.
+  async removeAutoApprovedActionKind(bindingName: string, tag: string): Promise<void> {
+    let gatekeeper = this.impl.storage.gatekeepers.byBindingName.get(bindingName);
+    if (!gatekeeper) {
+      throw new Error(`No such gatekeeper: ${bindingName}`);
+    }
+    this.impl.storage.autoApproveTags.delete(`${gatekeeper.id}:${tag}`);
+  }
+
+  // List the enabled auto-approval rules, mapping each gatekeeperId back to its binding name.
+  // Rules for gatekeepers without a binding name (e.g. capsules) are omitted.
+  async listAutoApprovedActionKinds()
+      : Promise<Array<{ bindingName: string; actionKind: ActionKind }>> {
+    let result: Array<{ bindingName: string; actionKind: ActionKind }> = [];
+    for (let rule of this.impl.storage.autoApproveTags.list()) {
+      let bindingName = this.impl.storage.gatekeepers.get(rule.gatekeeperId)?.bindingName;
+      if (bindingName !== undefined) {
+        result.push({ bindingName, actionKind: rule.actionKind });
+      }
+    }
+    return result;
   }
 
   // Find a pending connectionRequest message by id. The request id encodes the chat id as a prefix
@@ -5262,9 +5372,16 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async approveAction(_id: number): Promise<void> { this.#deny(); }
   async rejectAction(_id: number): Promise<void> { this.#deny(); }
   async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
-  async enableHook(id: number): Promise<void> { this.#deny(); }
-  async disableHook(id: number): Promise<void> { this.#deny(); }
-  async deleteHook(id: number): Promise<void> { this.#deny(); }
+  async enableHook(_id: number): Promise<void> { this.#deny(); }
+  async disableHook(_id: number): Promise<void> { this.#deny(); }
+  async deleteHook(_id: number): Promise<void> { this.#deny(); }
+  async setAutoApprovedActionKind(_bindingName: string, _actionKind: ActionKind)
+      : Promise<void> { this.#deny(); }
+  async removeAutoApprovedActionKind(_bindingName: string, _tag: string): Promise<void> { this.#deny(); }
+  async listAutoApprovedActionKinds()
+      : Promise<Array<{ bindingName: string; actionKind: ActionKind }>> {
+    this.#deny();
+  }
   async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
   async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
   async subscribeToActions(

@@ -66,7 +66,7 @@ import {
   ChatAttachmentHandle,
   ChatAttachmentRef,
 } from "@gadgets/workshop-shared/api";
-import { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
@@ -75,8 +75,10 @@ import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
+import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { useActionEntries } from "./useActions";
+import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useAuthenticatedApi } from "./AuthContext";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -2981,6 +2983,9 @@ interface ChatInterfaceProps {
   onDiscardConsoleLogs: () => void;
   onChatCountChange?: (count: number, hasChatZero: boolean) => void;
   onAgentActiveChange?: (chatId: number, isActive: boolean) => void;
+  // Called after an auto-approval rule is enabled from the chat thread, so other views (the
+  // Connections rule list) can refresh without a tab switch or reload.
+  onAutoApproveChange?: () => void;
   sidebarMode?: boolean;
   sidebarWidth?: number;
   onSidebarResize?: (width: number) => void;
@@ -3146,6 +3151,7 @@ function ChatInterface({
   onDiscardConsoleLogs,
   onChatCountChange,
   onAgentActiveChange,
+  onAutoApproveChange,
   sidebarMode,
   sidebarWidth = 280,
   onSidebarResize,
@@ -4386,6 +4392,17 @@ function ChatInterface({
     }
   }, [overseer, selectedChatId, toasts]);
 
+  // Pending "always approve this type" confirmation, opened from a pending action card.
+  const [autoApproveConfirm, setAutoApproveConfirm] = useState<
+    { actionId: number; bindingName: string; actionKind: ActionKind; actionLabel: string } | null
+  >(null);
+
+  // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
+  // server applies the now-eligible pending action(s) via its drain, and the action state flips to
+  // "approved" through the actions subscription -- so we don't optimistically mutate it here.
+  const { alwaysApproveTag, isTagAutoApproved } =
+    useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);
+
   // Handle approving an action from the chat thread
   const handleApproveAction = async (actionId: number) => {
     setProcessingActions((prev) => new Set(prev).add(actionId));
@@ -4900,6 +4917,20 @@ function ChatInterface({
     const stateLabelCls = isRejected
       ? "text-kumo-danger"
       : "text-kumo-inactive";
+    // Auto-approval target: offer "Always approve this type" only when enabling a rule would
+    // actually apply this action -- a tagged action on a connection that the gatekeeper marked
+    // auto-approvable. (A non-auto-approvable action stays a manual gate even with a rule; an
+    // auto-approvable action with an existing rule wouldn't still be pending.)
+    const autoApproveTarget =
+      log.bindingName !== undefined && log.description.actionKind !== undefined &&
+      log.description.autoApprovable === true
+        ? {
+            actionId: msg.actionId,
+            bindingName: log.bindingName,
+            actionKind: log.description.actionKind,
+            actionLabel: log.description.title,
+          }
+        : undefined;
 
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
@@ -4940,6 +4971,19 @@ function ChatInterface({
           </button>
           {isPending && (
             <div className="flex flex-shrink-0 items-center gap-2 text-[13px] leading-4">
+              {autoApproveTarget &&
+                !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag) && (
+                <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
+                  <button
+                    type="button"
+                    onClick={() => setAutoApproveConfirm(autoApproveTarget)}
+                    disabled={isProc}
+                    className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Always approve
+                  </button>
+                </Tooltip>
+              )}
               <Tooltip content="Reject this action." asChild>
                 <button
                   type="button"
@@ -6063,6 +6107,24 @@ function ChatInterface({
         }}
         onConfirm={handleDeleteConfirm}
       />
+
+      {autoApproveConfirm && (
+        <AutoApproveConfirmDialog
+          open
+          actionLabel={autoApproveConfirm.actionLabel}
+          bindingName={autoApproveConfirm.bindingName}
+          isProcessing={processingActions.has(autoApproveConfirm.actionId)}
+          onOpenChange={(open) => {
+            if (!open) setAutoApproveConfirm(null);
+          }}
+          onConfirm={async () => {
+            const { actionId, bindingName, actionKind } = autoApproveConfirm;
+            if (await alwaysApproveTag(actionId, bindingName, actionKind)) {
+              setAutoApproveConfirm(null);
+            }
+          }}
+        />
+      )}
 
       {/* Accept flow for an agent connection request: pre-seeds the gatekeeper modal and, on
           creation, finalizes the request so the agent resumes. */}

@@ -3,13 +3,16 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Pulse } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
+import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import { EmptyState } from './components/EmptyState'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { useActions } from './useActions'
+import { useAlwaysApproveTag } from './useAlwaysApproveTag'
 import { useAuthenticatedApi } from './AuthContext'
 import { useAvatar } from './useAvatar'
+import AutoApproveConfirmDialog from './components/AutoApproveConfirmDialog'
 
 function getSafeExternalUrl(url: string | undefined): string | undefined {
   if (!url) return undefined
@@ -43,13 +46,17 @@ function compareHistoryDesc(a: ActionLogEntry, b: ActionLogEntry): number {
 
 interface ActivityProps {
   overseer: RpcStub<Overseer>
+  onAutoApproveChange?: () => void
 }
 
-export default function Activity({ overseer }: ActivityProps) {
+export default function Activity({ overseer, onAutoApproveChange }: ActivityProps) {
   const { actionsById, isReady } = useActions(overseer)
   const [processingActions, setProcessingActions] = useState<Set<number>>(new Set())
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [expandedActionId, setExpandedActionId] = useState<number | null>(null)
+  const [confirmAutoApprove, setConfirmAutoApprove] = useState<
+    { actionId: number; bindingName: string; actionKind: ActionKind; actionLabel: string } | null
+  >(null)
   const toasts = useKumoToastManager()
 
   const handleToggleHook = async (hookId: number, enabled: boolean) => {
@@ -105,6 +112,9 @@ export default function Activity({ overseer }: ActivityProps) {
     }
   }
 
+  const { alwaysApproveTag, isTagAutoApproved } =
+    useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange)
+
   const toggleExpanded = (id: number) => {
     setExpandedActionId(prev => prev === id ? null : id)
   }
@@ -157,20 +167,44 @@ export default function Activity({ overseer }: ActivityProps) {
                     </span>
                   </div>
                   <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-                    {pendingActions.map((record, index) => (
-                      <ActionRow
-                        key={record.id}
-                        record={record}
-                        isProcessing={processingActions.has(record.id)}
-                        isExpanded={expandedActionId === record.id}
-                        isFirst={index === 0}
-                        showApprovalActions
-                        onToggleExpand={() => toggleExpanded(record.id)}
-                        onApprove={() => handleApproveAction(record.id)}
-                        onReject={() => handleRejectAction(record.id)}
-                        formatTime={formatTime}
-                      />
-                    ))}
+                    {pendingActions.map((record, index) => {
+                      // Auto-approval target: offer "Always approve this type" only when enabling a
+                      // rule would actually apply this action -- i.e. it's a tagged action on a
+                      // connection that the gatekeeper marked auto-approvable. (A non-auto-approvable
+                      // action stays a manual gate even with a rule, so the button would be a no-op;
+                      // and an auto-approvable action with an existing rule wouldn't still be pending.)
+                      const autoApproveTarget =
+                        record.type === 'action' && record.bindingName !== undefined &&
+                        record.description.actionKind !== undefined &&
+                        record.description.autoApprovable === true
+                          ? {
+                              actionId: record.id,
+                              bindingName: record.bindingName,
+                              actionKind: record.description.actionKind,
+                              actionLabel: record.description.title,
+                            }
+                          : undefined
+                      return (
+                        <ActionRow
+                          key={record.id}
+                          record={record}
+                          isProcessing={processingActions.has(record.id)}
+                          isExpanded={expandedActionId === record.id}
+                          isFirst={index === 0}
+                          showApprovalActions
+                          onToggleExpand={() => toggleExpanded(record.id)}
+                          onApprove={() => handleApproveAction(record.id)}
+                          onReject={() => handleRejectAction(record.id)}
+                          onAlwaysApprove={
+                            autoApproveTarget &&
+                            !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag)
+                              ? () => setConfirmAutoApprove(autoApproveTarget)
+                              : undefined
+                          }
+                          formatTime={formatTime}
+                        />
+                      )
+                    })}
                   </div>
                 </section>
               )}
@@ -200,6 +234,22 @@ export default function Activity({ overseer }: ActivityProps) {
           )}
         </section>
       </div>
+
+      {confirmAutoApprove && (
+        <AutoApproveConfirmDialog
+          open
+          actionLabel={confirmAutoApprove.actionLabel}
+          bindingName={confirmAutoApprove.bindingName}
+          isProcessing={processingActions.has(confirmAutoApprove.actionId)}
+          onOpenChange={(open) => { if (!open) setConfirmAutoApprove(null) }}
+          onConfirm={async () => {
+            const { actionId, bindingName, actionKind } = confirmAutoApprove
+            if (await alwaysApproveTag(actionId, bindingName, actionKind)) {
+              setConfirmAutoApprove(null)
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -213,6 +263,7 @@ function ActionRow({
   onToggleExpand,
   onApprove,
   onReject,
+  onAlwaysApprove,
   formatTime,
 }: {
   record: ActionLogEntry
@@ -223,6 +274,7 @@ function ActionRow({
   onToggleExpand: () => void
   onApprove: () => void
   onReject: () => void
+  onAlwaysApprove?: () => void
   formatTime: (date: Date) => string
 }) {
   const safeResourceUrl = getSafeExternalUrl(record.resourceUrl)
@@ -273,6 +325,15 @@ function ActionRow({
 
         {showApprovalActions ? (
           <div className="ml-auto flex shrink-0 items-center gap-2">
+            {onAlwaysApprove && (
+              <WorkshopButton
+                className="!h-9"
+                onClick={onAlwaysApprove}
+                disabled={isProcessing}
+              >
+                Always approve this type
+              </WorkshopButton>
+            )}
             <WorkshopButton
               className="!h-9"
               onClick={onReject}
@@ -368,6 +429,7 @@ function ActivityLogRow({
   const statusLabel = record.state === 'approved' ? 'Approved' : 'Rejected'
   const safeResourceUrl = getSafeExternalUrl(record.resourceUrl)
   const resolvedBy = record.type === 'action' ? record.resolvedBy : undefined
+  const autoApproved = record.type === 'action' ? record.autoApproved === true : false
   const created = new Date(record.createdAt)
   const createdDate = created.toLocaleDateString([], { month: 'numeric', day: 'numeric', year: '2-digit' })
   const createdTime = created.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
@@ -414,7 +476,20 @@ function ActivityLogRow({
           <p className="m-0 line-clamp-2 text-kumo-default">
             {record.description.title}
           </p>
-          {resolvedBy && (
+          {resolvedBy && autoApproved && (
+            <span
+              className="mt-1 flex max-w-full items-center gap-1.5 text-[11px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"
+              title={`Auto-approved · rule enabled by ${resolvedBy.name}`}
+            >
+              <span className="inline-flex shrink-0 items-center rounded-full bg-kumo-elevated px-2 py-0.5 font-medium">
+                Auto-approved
+              </span>
+              <ResolverBadge profileId={resolvedBy.id} className="flex min-w-0 items-center gap-1">
+                <span className="truncate">{resolvedBy.name}</span>
+              </ResolverBadge>
+            </span>
+          )}
+          {resolvedBy && !autoApproved && (
             <ResolverBadge
               profileId={resolvedBy.id}
               className="mt-1 flex max-w-full items-center gap-1 text-[11px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"
@@ -424,7 +499,7 @@ function ActivityLogRow({
             </ResolverBadge>
           )}
         </div>
-        <div>
+        <div className="flex flex-col items-start gap-1">
           {record.type === 'bindHook' ? (
             record.hookId !== undefined ? (
               <HookToggle
@@ -447,7 +522,14 @@ function ActivityLogRow({
         <div className="px-3 pb-3 pl-[56px]">
           <div className="rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2.5">
             {record.appliedAt && (
-              resolvedBy ? (
+              resolvedBy && autoApproved ? (
+                <ResolverBadge
+                  profileId={resolvedBy.id}
+                  className="mb-2 flex items-center gap-1.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"
+                >
+                  <span>Auto-approved · enabled by {resolvedBy.name} · {formatDate(record.appliedAt)}</span>
+                </ResolverBadge>
+              ) : resolvedBy ? (
                 <ResolverBadge
                   profileId={resolvedBy.id}
                   className="mb-2 flex items-center gap-1.5 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle"

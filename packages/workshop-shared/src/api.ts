@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -730,8 +730,14 @@ export type ActionLogEntry = {
   type: "action";
   description: ActionDescription;
   // Who resolved the action (approved or rejected it). Set when the action leaves "pending"; absent
-  // while still pending (or for legacy actions resolved before this was tracked).
+  // while still pending (or for legacy actions resolved before this was tracked). For an
+  // auto-approved action this is the user who enabled the rule -- auto-approvals run under their
+  // authority (see `autoApproved`).
   resolvedBy?: AiChatAuthorInfo;
+
+  // True when the action was applied automatically by an auto-approval rule rather than by a human
+  // clicking Approve. Only ever set alongside state "approved" (there is no automatic rejection).
+  autoApproved?: boolean;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -901,6 +907,19 @@ export interface Overseer extends RpcTarget {
 
   // Permanently delete the hook. Implies disabling it.
   deleteHook(id: number): Promise<void>;
+
+  // Enable auto-approval of actions carrying the given `actionKind` (the
+  // ActionDescription.actionKind) on the connection identified by `bindingName`. Future actions
+  // with that kind's tag whose author marked them `autoApprovable` are then applied automatically
+  // without manual approval, and any matching action(s) already pending are applied immediately.
+  setAutoApprovedActionKind(bindingName: string, actionKind: ActionKind): Promise<void>;
+
+  // Remove the auto-approval rule for `tag` on `bindingName`; matching actions then require
+  // manual approval again.
+  removeAutoApprovedActionKind(bindingName: string, tag: string): Promise<void>;
+
+  // List the currently-enabled auto-approval rules.
+  listAutoApprovedActionKinds(): Promise<Array<{ bindingName: string; actionKind: ActionKind }>>;
 
   // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
   // is responsible for having actually created the gatekeeper (via newGatekeeper()) and passes the

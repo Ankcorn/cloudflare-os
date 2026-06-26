@@ -2034,6 +2034,9 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
           `**Old:** ${oldPreview}\n\n` +
           `**New:** ${newPreview}`,
         implementsRevert: false,
+        // Group all document edits under one tag
+        actionKind: { tag: "editDocument", label: "Document edits" },
+        autoApprovable: true,
       });
     } catch (error) {
       this.#pendingActions.remove(actionId);
@@ -2062,6 +2065,9 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
         title: "Append to Google Doc",
         description: `Append content to the end of the document:\n\n${preview}`,
         implementsRevert: false,
+        // Same "editDocument" tag as replaceText
+        actionKind: { tag: "editDocument", label: "Document edits" },
+        autoApprovable: true,
       });
     } catch (error) {
       this.#pendingActions.remove(actionId);
