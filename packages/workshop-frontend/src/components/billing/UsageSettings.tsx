@@ -83,9 +83,11 @@ export default function UsageSettings() {
   }
 
   return (
-    <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-      <h2 className="text-lg font-semibold text-kumo-strong mb-6">Usage &amp; billing</h2>
-
+    <section className="flex flex-col gap-3">
+      <h2 className="px-1 text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+        Usage &amp; billing
+      </h2>
+      <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
       {loading || !usage ? (
         <p className="text-sm text-kumo-subtle">Loading usage…</p>
       ) : (
@@ -207,6 +209,7 @@ export default function UsageSettings() {
           </p>
         </div>
       )}
-    </div>
+      </div>
+    </section>
   )
 }

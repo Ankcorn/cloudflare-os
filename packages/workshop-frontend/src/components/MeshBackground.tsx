@@ -2,18 +2,16 @@ import { useEffect, useRef } from 'react'
 
 const COLS = 22
 const ROWS = 18
-const FPS = 30
-const FRAME_MS = 1000 / FPS
 
-// Line color — warm beige matching --color-kumo-line (#ebd5c1)
-const LINE_R = 235
-const LINE_G = 213
-const LINE_B = 193
+// Line color — neutral grey for the current (de-warmed) design system.
+const LINE_R = 120
+const LINE_G = 118
+const LINE_B = 113
 
 /**
- * Animated perspective hexagonal mesh background. Draws a gently undulating
- * wireframe hex grid that recedes toward a vanishing point.
- * Zero dependencies, ~30 fps, cleaned up on unmount.
+ * Static perspective hexagonal mesh background. Draws a wireframe hex grid that recedes toward a
+ * vanishing point — a quiet, premium brand backdrop. Rendered once (and on resize), no animation
+ * loop. Zero dependencies, cleaned up on unmount.
  */
 export default function MeshBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -24,24 +22,8 @@ export default function MeshBackground() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    let raf = 0
-    let lastFrame = 0
     let cssW = 0
     let cssH = 0
-
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect()
-      cssW = rect.width
-      cssH = rect.height
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = cssW * dpr
-      canvas.height = cssH * dpr
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-
-    const ro = new ResizeObserver(resize)
-    ro.observe(canvas)
-    resize()
 
     // Project a flat-space point (fx, fy) in normalized coords into perspective.
     // fx: 0..1 across, fy: 0..1 depth (0=near/bottom, 1=far/top)
@@ -129,14 +111,12 @@ export default function MeshBackground() {
       strokeCache[i] = `rgba(${LINE_R}, ${LINE_G}, ${LINE_B}, ${a})`
     }
 
-    const draw = (now: number) => {
-      raf = requestAnimationFrame(draw)
-      if (now - lastFrame < FRAME_MS) return
-      lastFrame = now
-
+    // Static render — the spatial sine displacement (with t fixed) keeps the grid from looking
+    // perfectly rigid, but nothing animates.
+    const draw = () => {
       const w = cssW
       const h = cssH
-      const t = now / 1000
+      const t = 0
 
       ctx.clearRect(0, 0, w, h)
 
@@ -148,8 +128,8 @@ export default function MeshBackground() {
         // Use average depth for alpha/width
         const avgDepth = Math.max(0, Math.min(1, (a[1] + b[1]) * 0.5))
         const nearness = 1 - avgDepth
-        const alpha = 0.12 + nearness * 0.48
-        const lw = 0.3 + nearness * 0.7
+        const alpha = 0.07 + nearness * 0.3
+        const lw = 0.3 + nearness * 0.6
 
         const alphaIdx = Math.round(alpha * (ALPHA_STEPS - 1))
         ctx.strokeStyle = strokeCache[alphaIdx]
@@ -161,9 +141,22 @@ export default function MeshBackground() {
       }
     }
 
-    raf = requestAnimationFrame(draw)
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect()
+      cssW = rect.width
+      cssH = rect.height
+      const dpr = window.devicePixelRatio || 1
+      canvas.width = cssW * dpr
+      canvas.height = cssH * dpr
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      draw()
+    }
+
+    const ro = new ResizeObserver(resize)
+    ro.observe(canvas)
+    resize()
+
     return () => {
-      cancelAnimationFrame(raf)
       ro.disconnect()
     }
   }, [])

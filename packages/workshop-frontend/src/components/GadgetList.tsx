@@ -7,22 +7,16 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import ShareModal from '../ShareModal'
 import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges } from './BlueprintCard'
+import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
 import { BlueprintPreviewImage } from './BlueprintPreviewImage'
+import DeleteConfirmationDialog from './DeleteConfirmationDialog'
 
-// Deterministic gradient by gadget ID
-const gradients = [
-  'from-[#4A154B] to-[#7C3085]',
-  'from-[#0052CC] to-[#2684FF]',
-  'from-[#5865F2] to-[#7983F5]',
-  'from-[#34A853] to-[#4285F4]',
-  'from-[#24292e] to-[#555]',
-  'from-[#E01E5A] to-[#ECB22E]',
-  'from-orange-600 to-red-600',
-  'from-emerald-600 to-teal-600',
-]
-
-function getGradient(id: string) {
-  return gradients[id.charCodeAt(0) % gradients.length]
+// Neutral monogram for a workspace — matches the sidebar treatment (no per-item color noise).
+function initials(title: string | undefined): string {
+  const t = (title || 'Untitled').trim()
+  if (!t) return 'UG'
+  const parts = t.split(/\s+/).slice(0, 2)
+  return parts.map((p) => p[0]?.toUpperCase() ?? '').join('') || t.slice(0, 2).toUpperCase()
 }
 
 function formatRelativeTime(date: Date): string {
@@ -80,17 +74,15 @@ function AppRow({
     <Link
       to="/gadget/$id"
       params={{ id: gadget.id }}
-      className="group mr-4 flex cursor-pointer items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-[background-color,border-color,box-shadow,transform] duration-150 ease-out hover:border-kumo-line hover:bg-kumo-base hover:shadow-[0_8px_20px_-18px_rgba(82,16,0,0.28)] active:scale-[0.995] sm:mr-6"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
       onClick={(e) => {
         // Prevent navigation when renaming or clicking the menu
         if (isRenaming) e.preventDefault()
       }}
     >
-      {/* Gradient swatch */}
-      <div
-        className={`w-9 h-9 rounded-lg bg-gradient-to-br ${getGradient(gadget.id)} flex-shrink-0 flex items-center justify-center`}
-      >
-        <Hexagon size={14} className="text-white/70" weight="bold" />
+      {/* Neutral monogram */}
+      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-[12px] font-medium text-kumo-subtle">
+        {initials(gadget.title)}
       </div>
 
       {/* Info */}
@@ -135,35 +127,36 @@ function AppRow({
         <DropdownMenu.Trigger
           render={
             <button
-              className="p-1.5 text-kumo-subtle hover:text-kumo-default rounded-md hover:bg-kumo-tint transition-colors sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+              className="p-1.5 text-kumo-subtle hover:text-kumo-default rounded-md hover:bg-kumo-fill transition-colors sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
             >
               <DotsThreeVertical size={16} />
             </button>
           }
         />
-        <DropdownMenu.Content>
-          <DropdownMenu.Item onClick={startRenaming}>
-            <Pencil size={14} className="mr-2" />
+        <DropdownMenu.Content className={MENU_CONTENT}>
+          <DropdownMenu.Item onClick={startRenaming} className={MENU_ITEM}>
+            <Pencil size={13} className="mr-2" />
             Rename
           </DropdownMenu.Item>
-          <DropdownMenu.Item onClick={() => onTogglePin(gadget)}>
-            <PushPin size={14} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
+          <DropdownMenu.Item onClick={() => onTogglePin(gadget)} className={MENU_ITEM}>
+            <PushPin size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
             {gadget.pinned ? 'Unpin' : 'Pin to top'}
           </DropdownMenu.Item>
-          <DropdownMenu.Item onClick={() => onInfo(gadget)}>
-            <Info size={14} className="mr-2" />
+          <DropdownMenu.Item onClick={() => onInfo(gadget)} className={MENU_ITEM}>
+            <Info size={13} className="mr-2" />
             Information
           </DropdownMenu.Item>
-          <DropdownMenu.Item onClick={() => onShare(gadget)}>
-            <ShareNetwork size={14} className="mr-2" />
+          <DropdownMenu.Item onClick={() => onShare(gadget)} className={MENU_ITEM}>
+            <ShareNetwork size={13} className="mr-2" />
             Share
           </DropdownMenu.Item>
           <DropdownMenu.Separator />
           <DropdownMenu.Item
             variant="danger"
             onClick={() => onDelete(gadget)}
+            className={MENU_ITEM_DANGER}
           >
-            <Trash size={14} className="mr-2" />
+            <Trash size={13} className="mr-2" />
             {gadget.owner ? 'Dismiss' : 'Delete'}
           </DropdownMenu.Item>
         </DropdownMenu.Content>
@@ -353,7 +346,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
 
       {/* Search — hidden when the user has no gadgets */}
       {!loading && gadgets.length > 0 && (
-        <div className="mb-4 px-6 sm:px-10 lg:px-10">
+        <div className="mb-4 px-3">
           <div className="relative">
             <MagnifyingGlass
               size={16}
@@ -363,15 +356,17 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search gadgets..."
-              className="h-9 w-full rounded-xl border border-kumo-line bg-kumo-base/70 pl-9 pr-4 text-sm text-kumo-default placeholder:text-kumo-inactive transition-[background-color,border-color,box-shadow] duration-150 ease-out focus:border-kumo-brand focus:bg-kumo-base focus:outline-none focus:ring-[3px] focus:ring-black/5"
+              placeholder="Search workspaces…"
+              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-black/5"
             />
           </div>
         </div>
       )}
 
-      {/* List */}
-      <div className="chat-panel flex flex-col gap-0.5 flex-1 min-h-0 overflow-y-auto pl-6 sm:pl-10 lg:pl-10 pr-2 pt-1">
+      {/* List. The page gutter lives on the route wrapper; header, search, and rows all share a
+          uniform px-3 so their content lines up exactly. The scroll container itself carries no
+          horizontal padding, so the scrollbar sits just past the aligned content (not far out). */}
+      <div className="chat-panel flex flex-1 min-h-0 flex-col gap-0.5 overflow-y-auto pt-1">
         {loading ? (
           <>
             {[1, 2, 3].map((i) => (
@@ -407,38 +402,20 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       </div>
 
       {/* Delete confirmation dialog */}
-      <Dialog.Root
-        role="alertdialog"
+      <DeleteConfirmationDialog
         open={deleteTarget !== null}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
-      >
-        <Dialog className="!z-[1000] p-8" size="sm">
-          <Dialog.Title className="text-lg font-semibold">
-            {deleteTarget?.owner ? 'Remove gadget' : 'Delete gadget'}
-          </Dialog.Title>
-          <Dialog.Description className="mt-2 text-kumo-subtle">
-            {deleteTarget?.owner
-              ? `Remove "${deleteTarget?.title || 'Untitled Gadget'}" from your list? You can still access it via its link.`
-              : `Delete "${deleteTarget?.title || 'Untitled Gadget'}"? This cannot be undone.`}
-          </Dialog.Description>
-          <div className="mt-6 flex justify-end gap-2">
-            <Dialog.Close
-              render={(props) => (
-                <Button variant="secondary" {...props} disabled={isDeleting}>
-                  Cancel
-                </Button>
-              )}
-            />
-            <Button
-              variant="destructive"
-              onClick={handleDeleteConfirm}
-              loading={isDeleting}
-            >
-              {deleteTarget?.owner ? 'Remove' : 'Delete'}
-            </Button>
-          </div>
-        </Dialog>
-      </Dialog.Root>
+        isDeleting={isDeleting}
+        title={deleteTarget?.owner ? 'Remove gadget' : 'Delete gadget'}
+        description={
+          deleteTarget?.owner
+            ? `Remove "${deleteTarget?.title || 'Untitled Gadget'}" from your list? You can still access it via its link.`
+            : `Delete "${deleteTarget?.title || 'Untitled Gadget'}"? This cannot be undone.`
+        }
+        confirmLabel={deleteTarget?.owner ? 'Remove' : 'Delete'}
+        confirmingLabel={deleteTarget?.owner ? 'Removing...' : 'Deleting...'}
+        onConfirm={handleDeleteConfirm}
+      />
 
       {/* Information modal */}
       <Dialog.Root
@@ -512,7 +489,7 @@ function HomeFeaturedBlueprintCard({
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 1)
 
   return (
-    <div className="group relative isolate flex min-h-[190px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_10px_24px_-20px_rgba(82,16,0,0.22)] active:scale-[0.995]">
+    <div className="group relative isolate flex min-h-[190px] flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_10px_24px_-20px_rgba(20,17,16,0.18)] active:scale-[0.995]">
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}

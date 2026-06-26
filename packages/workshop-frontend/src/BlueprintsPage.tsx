@@ -1,21 +1,19 @@
 import { Link } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
 import {
-  ArrowRight,
+  Blueprint as BlueprintIcon,
   BookOpen,
-  Hexagon,
-  type Icon,
+  MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
 import { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { useAuthenticatedApi } from "./AuthContext";
-import {
-  BindingBadge,
-  getGradient,
-  uniqueBindingBadges,
-} from "./components/BlueprintCard";
-import { BlueprintPreviewImage } from "./components/BlueprintPreviewImage";
+import { BindingBadge, uniqueBindingBadges } from "./components/BlueprintCard";
+import { BlueprintPreviewPlaceholder } from "./components/BlueprintPreviewImage";
+import ViewToggle from "./components/ViewToggle";
+
+type VendorMap = Map<string, VendorDescription>;
 
 export default function BlueprintsPage() {
   const { authenticatedApi } = useAuthenticatedApi();
@@ -25,9 +23,17 @@ export default function BlueprintsPage() {
 
   const [featuredBlueprints, setFeaturedBlueprints] = useState<BlueprintPublicInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [vendorDescriptions, setVendorDescriptions] = useState<Map<string, VendorDescription>>(
-    () => new Map(),
-  );
+  const [vendorDescriptions, setVendorDescriptions] = useState<VendorMap>(() => new Map());
+
+  const [view, setView] = useState<"grid" | "list">(() => {
+    if (typeof window === "undefined") return "grid";
+    return localStorage.getItem("explore-view") === "list" ? "list" : "grid";
+  });
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    localStorage.setItem("explore-view", view);
+  }, [view]);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,9 +47,7 @@ export default function BlueprintsPage() {
         if (cancelled) return;
         setFeaturedBlueprints(featured);
         setVendorDescriptions(
-          new Map(
-            vendors.map((vendor) => [vendor.id.toLowerCase(), vendor.description]),
-          ),
+          new Map(vendors.map((vendor) => [vendor.id.toLowerCase(), vendor.description])),
         );
       })
       .catch((err) => {
@@ -62,65 +66,103 @@ export default function BlueprintsPage() {
     };
   }, [authenticatedApi]);
 
+  const q = search.trim().toLowerCase();
+  const filtered = featuredBlueprints.filter((b) => {
+    if (!q) return true;
+    return (
+      b.metadata.title.toLowerCase().includes(q) ||
+      (b.metadata.description ?? "").toLowerCase().includes(q)
+    );
+  });
+
   return (
-    <div className="relative min-h-[calc(100vh-3.5rem-1px)] overflow-hidden bg-kumo-base">
-      <div
-        className="pointer-events-none absolute inset-0 h-[320px]"
-        style={{
-          backgroundImage:
-            "radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px)",
-          backgroundSize: "24px 24px",
-          maskImage:
-            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)",
-          WebkitMaskImage:
-            "linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)",
-        }}
-      />
-
-      <div className="relative mx-auto w-full max-w-[1040px] px-4 py-12 sm:px-8 sm:py-14">
-        <header className="mb-8 max-w-[680px]">
-          <h1 className="m-0 text-[32px] leading-[1.05] font-semibold tracking-[-1.2px] text-kumo-default sm:text-[38px]">
-            Explore
-          </h1>
-          <p className="mt-3 max-w-[560px] text-[15px] leading-[22px] font-normal tracking-[-0.25px] text-kumo-subtle">
-            Discover featured blueprints you can use as starting points. Create
-            your own gadget and save the ones you want to reuse.
+    <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-6 sm:px-10">
+      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-10">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Explore</h1>
+          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+            Discover featured blueprints to use as starting points. Open one to create a workspace
+            from it, or save it to reuse later.
           </p>
-        </header>
+        </div>
+        <ViewToggle view={view} onChange={setView} />
+      </header>
 
-        {loading ? (
-          <LoadingPanel />
-        ) : featuredBlueprints.length === 0 ? (
-          <EmptySection
-            title="No featured blueprints yet"
-            message="Featured blueprints will appear here when they’re published. You can still create blueprints from your own Gadgets."
-            icon={BookOpen}
+      {/* Toolbar */}
+      <div className="flex items-center justify-between gap-3 px-3 pb-3">
+        <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+          Featured
+        </span>
+        <div className="relative sm:w-64">
+          <MagnifyingGlass
+            size={16}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive"
           />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search blueprints…"
+            className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-black/5"
+          />
+        </div>
+      </div>
+
+      <div className="chat-panel min-h-0 flex-1 overflow-y-auto pb-8 pt-1">
+        {loading ? (
+          <LoadingSkeleton view={view} />
+        ) : filtered.length === 0 ? (
+          <EmptySection
+            title={
+              search
+                ? "No blueprints match"
+                : "No featured blueprints yet"
+            }
+            message={
+              search
+                ? "Try a different search term."
+                : "Featured blueprints will appear here when they’re published. You can still create blueprints from your own workspaces."
+            }
+          />
+        ) : view === "grid" ? (
+          <div className="grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3">
+            {filtered.map((blueprint) => (
+              <FeaturedBlueprintCard
+                key={blueprint.id}
+                blueprint={blueprint}
+                vendorDescriptions={vendorDescriptions}
+              />
+            ))}
+          </div>
         ) : (
-          <section className="mb-10">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {featuredBlueprints.map((blueprint) => (
-                <FeaturedBlueprintCard
-                  key={blueprint.id}
-                  blueprint={blueprint}
-                  vendorDescriptions={vendorDescriptions}
-                />
-              ))}
-            </div>
-          </section>
+          <div className="flex flex-col gap-0.5">
+            {filtered.map((blueprint) => (
+              <FeaturedBlueprintRow
+                key={blueprint.id}
+                blueprint={blueprint}
+                vendorDescriptions={vendorDescriptions}
+              />
+            ))}
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-function LoadingPanel() {
+function BlueprintThumbnail({ blueprint }: { blueprint: BlueprintPublicInfo }) {
   return (
-    <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-10 text-center">
-      <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
-      <p className="mt-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-        Loading featured blueprints...
-      </p>
+    <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-kumo-line bg-kumo-tint">
+      {blueprint.screenshotUrl ? (
+        <img
+          src={blueprint.screenshotUrl}
+          alt={`Screenshot of ${blueprint.metadata.title}`}
+          className="h-full w-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <BlueprintPreviewPlaceholder id={blueprint.id} />
+      )}
     </div>
   );
 }
@@ -130,46 +172,38 @@ function FeaturedBlueprintCard({
   vendorDescriptions,
 }: {
   blueprint: BlueprintPublicInfo;
-  vendorDescriptions: Map<string, VendorDescription>;
+  vendorDescriptions: VendorMap;
 }) {
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
 
   return (
-    <div className="group relative isolate flex min-h-[148px] cursor-pointer overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base/90 text-left backdrop-blur-sm transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_10px_24px_-20px_rgba(82,16,0,0.22)] active:scale-[0.995]">
-      <div className="pointer-events-none absolute -right-12 -top-12 h-28 w-28 rounded-full bg-[rgba(255,72,1,0.08)] blur-2xl" />
+    <div className="press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill hover:shadow-[0_8px_22px_-16px_rgba(20,17,16,0.16)]">
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}
         aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
-        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
+        className="absolute inset-0 z-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
       />
 
-      <div className="pointer-events-none relative z-20 flex h-full w-full flex-col p-3.5">
-        <BlueprintPreviewImage
-          blueprintId={blueprint.id}
-          title={blueprint.metadata.title}
-          screenshotUrl={blueprint.screenshotUrl}
-          className="mb-3"
-        />
-        <div className="flex items-start gap-3">
-          <div
-            className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br ${getGradient(blueprint.id)}`}
-          >
-            <Hexagon size={15} className="text-white/75" weight="bold" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="m-0 line-clamp-2 text-[15px] leading-5 font-semibold tracking-[-0.25px] text-kumo-default">
-              {blueprint.metadata.title}
-            </p>
-            <p className={`mt-1 line-clamp-2 min-h-8 text-[12px] leading-4 font-normal tracking-[-0.2px] ${blueprint.metadata.description ? "text-kumo-subtle" : "text-kumo-inactive italic"}`}>
-              {blueprint.metadata.description || "No description"}
-            </p>
-          </div>
-        </div>
+      <BlueprintThumbnail blueprint={blueprint} />
 
-        <div className="mt-auto flex items-end justify-between gap-3 pt-3">
-          {badges.length > 0 ? (
-            <div className="flex min-w-0 flex-wrap gap-1">
+      <div className="flex flex-1 items-start gap-2.5 px-3 py-2.5">
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
+          <BlueprintIcon size={15} weight="regular" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+            {blueprint.metadata.title}
+          </p>
+          <p
+            className={`mt-0.5 line-clamp-1 text-[12px] leading-4 tracking-[-0.2px] ${
+              blueprint.metadata.description ? "text-kumo-subtle" : "italic text-kumo-inactive"
+            }`}
+          >
+            {blueprint.metadata.description || "No description"}
+          </p>
+          {badges.length > 0 && (
+            <div className="relative z-20 mt-2 flex flex-wrap gap-1">
               {badges.map((badge) => (
                 <BindingBadge
                   key={badge.vendorKey ?? badge.type}
@@ -178,40 +212,101 @@ function FeaturedBlueprintCard({
                 />
               ))}
             </div>
-          ) : (
-            <span />
           )}
-          <ArrowRight
-            size={14}
-            weight="bold"
-            className="shrink-0 text-kumo-inactive opacity-0 transition-[opacity,transform,color] duration-150 ease-out group-hover:translate-x-0.5 group-hover:text-kumo-default group-hover:opacity-100"
-          />
         </div>
       </div>
     </div>
   );
 }
 
-function EmptySection({
-  title,
-  message,
-  icon: Icon,
+function FeaturedBlueprintRow({
+  blueprint,
+  vendorDescriptions,
 }: {
-  title: string;
-  message: string;
-  icon: Icon;
+  blueprint: BlueprintPublicInfo;
+  vendorDescriptions: VendorMap;
 }) {
+  const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 3);
+
   return (
-    <div className="rounded-2xl border border-dashed border-kumo-line bg-kumo-base px-4 py-8 text-center">
-      <div className="mx-auto grid h-10 w-10 place-items-center rounded-2xl bg-kumo-tint text-kumo-subtle">
-        <Icon size={20} weight="duotone" />
+    <Link
+      to="/blueprint/$id"
+      params={{ id: blueprint.id }}
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+    >
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
+        <BlueprintIcon size={16} weight="regular" />
       </div>
-      <p className="mt-3 text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-        {title}
-      </p>
-      <p className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-        {message}
-      </p>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
+          {blueprint.metadata.title}
+        </p>
+        <p
+          className={`mt-0.5 line-clamp-1 text-[12px] leading-4 tracking-[-0.2px] ${
+            blueprint.metadata.description ? "text-kumo-subtle" : "italic text-kumo-inactive"
+          }`}
+        >
+          {blueprint.metadata.description || "No description"}
+        </p>
+      </div>
+      {badges.length > 0 && (
+        <div className="hidden shrink-0 items-center gap-1 lg:flex">
+          {badges.map((badge) => (
+            <BindingBadge
+              key={badge.vendorKey ?? badge.type}
+              badge={badge}
+              vendorDescriptions={vendorDescriptions}
+            />
+          ))}
+        </div>
+      )}
+    </Link>
+  );
+}
+
+function LoadingSkeleton({ view }: { view: "grid" | "list" }) {
+  if (view === "list") {
+    return (
+      <div className="flex flex-col gap-0.5">
+        {[1, 2, 3, 4, 5].map((i) => (
+          <div key={i} className="h-[58px] animate-pulse rounded-lg bg-kumo-elevated" />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div className="grid grid-cols-1 gap-4 px-3 sm:grid-cols-2 lg:grid-cols-3">
+      {[1, 2, 3, 4, 5, 6].map((i) => (
+        <div
+          key={i}
+          className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base"
+        >
+          <div className="aspect-[16/9] w-full animate-pulse bg-kumo-elevated" />
+          <div className="flex items-start gap-2.5 px-3 py-2.5">
+            <div className="h-8 w-8 shrink-0 animate-pulse rounded-lg bg-kumo-elevated" />
+            <div className="flex-1 space-y-2 py-1">
+              <div className="h-2.5 w-2/3 animate-pulse rounded bg-kumo-elevated" />
+              <div className="h-2 w-full animate-pulse rounded bg-kumo-elevated" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmptySection({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
+      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
+        <BookOpen size={18} />
+      </div>
+      <div>
+        <p className="text-sm font-medium text-kumo-default">{title}</p>
+        <p className="mx-auto mt-1 max-w-sm text-[13px] leading-[18px] text-kumo-subtle">
+          {message}
+        </p>
+      </div>
     </div>
   );
 }

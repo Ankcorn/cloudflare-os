@@ -13,7 +13,7 @@ import { makeBlueprintFilename, saveStreamToFile } from './fileTransfers'
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
 import ResourceConfiguratorHost from './ResourceConfiguratorHost'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
-import { SectionEyebrow } from './components/SectionEyebrow'
+import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { formatDocumentTitle, useDocumentTitle } from './useDocumentTitle'
 
 interface Props {
@@ -772,10 +772,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
 
   return (
-    <div className="relative min-h-[calc(100vh-3.5rem-1px)] overflow-hidden bg-kumo-base">
-      <BlueprintPageTexture />
-
-      <div className="relative mx-auto w-full max-w-[1040px] px-4 py-10 sm:px-8 sm:py-14">
+    <div className="min-h-full bg-kumo-base">
+      <div className="mx-auto w-full max-w-5xl px-6 pb-16 pt-10 sm:px-10">
         <button
           type="button"
           onClick={() => {
@@ -799,11 +797,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 Featured
               </span>
             )}
-            <h1 className="m-0 text-[32px] leading-[1.05] font-semibold tracking-[-1.2px] text-kumo-default sm:text-[42px]">
+            <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default">
               {meta.title}
             </h1>
             {meta.description && (
-              <p className="mt-4 max-w-[700px] text-[16px] leading-6 font-normal tracking-[-0.3px] text-kumo-subtle">
+              <p className="mt-3 max-w-[640px] text-[15px] leading-[22px] font-normal tracking-[-0.25px] text-kumo-subtle">
                 {meta.description}
               </p>
             )}
@@ -829,7 +827,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   type="button"
                   onClick={handleStartConfigure}
                   disabled={createDisabled}
-                  className="inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-full bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-white transition-[opacity,transform,background-color] duration-150 ease-out hover:bg-kumo-brand-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
+                  className="press inline-flex h-10 w-full cursor-pointer items-center justify-center rounded-lg bg-kumo-brand px-4 text-[14px] leading-5 font-semibold tracking-[-0.25px] text-white transition-colors duration-150 ease-out hover:bg-kumo-brand-hover disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {creating ? 'Creating...' : primaryActionLabel}
                 </button>
@@ -842,7 +840,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   aria-label={isAuthenticated ? 'Add blueprint to library' : 'Log in to add blueprint to library'}
                   onClick={handleAddToLibrary}
                   disabled={addingToLibrary || loadingLibraryState}
-                  className="inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full border border-kumo-line bg-kumo-base p-0 text-kumo-subtle transition-[background-color,border-color,color,opacity,transform] duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-60 disabled:active:scale-100"
+                  className="press inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base p-0 text-kumo-subtle transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Plus size={17} weight="bold" />
                 </button>
@@ -854,36 +852,36 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 render={(
                   <WorkshopIconButton
                     aria-label="More blueprint actions"
-                    className="!h-10 !w-10 shrink-0 rounded-full border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
+                    className="!h-10 !w-10 shrink-0 rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
                   >
                     <DotsThree size={18} weight="bold" />
                   </WorkshopIconButton>
                 )}
               />
-              <DropdownMenu.Content className="!z-[1100] !min-w-[190px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(82,16,0,0.10)]">
+              <DropdownMenu.Content className={MENU_CONTENT}>
                 <DropdownMenu.Item
-                  icon={<DownloadSimple size={13} className="mr-2" weight="bold" />}
+                  icon={<DownloadSimple size={13} className="mr-2" />}
                   onClick={handleDownload}
                   disabled={downloading}
-                  className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+                  className={MENU_ITEM}
                 >
                   {downloading ? 'Downloading...' : 'Download archive'}
                 </DropdownMenu.Item>
 
                 <DropdownMenu.Item
-                  icon={<PushPin size={13} className="mr-2" weight={isPinned ? 'fill' : 'bold'} />}
+                  icon={<PushPin size={13} className="mr-2" weight={isPinned ? 'fill' : 'regular'} />}
                   onClick={handleTogglePinned}
                   disabled={updatingPinned}
-                  className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+                  className={MENU_ITEM}
                 >
                   {updatingPinned ? 'Updating...' : (isPinned ? 'Unpin blueprint' : 'Pin blueprint')}
                 </DropdownMenu.Item>
 
                 {ownBlueprintSummary?.gadgetId && ownBlueprintSummary.gadgetTitle !== 'Deleted Gadget' && (
                   <DropdownMenu.Item
-                    icon={<ArrowSquareOut size={13} className="mr-2" weight="bold" />}
+                    icon={<ArrowSquareOut size={13} className="mr-2" />}
                     onClick={() => window.open(`/gadget/${ownBlueprintSummary.gadgetId}`, '_blank', 'noopener,noreferrer')}
-                    className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+                    className={MENU_ITEM}
                   >
                     Go to gadget
                   </DropdownMenu.Item>
@@ -893,10 +891,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   <>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
-                      icon={<Trash size={13} className="mr-2" weight="bold" />}
+                      icon={<Trash size={13} className="mr-2" />}
                       variant="danger"
                       onClick={() => setShowDeleteConfirm(true)}
-                      className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
+                      className={MENU_ITEM_DANGER}
                     >
                       Delete blueprint
                     </DropdownMenu.Item>
@@ -908,22 +906,22 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                     <DropdownMenu.Separator />
                     {isUploadedBlueprint ? (
                       <DropdownMenu.Item
-                        icon={<Trash size={13} className="mr-2" weight="bold" />}
+                        icon={<Trash size={13} className="mr-2" />}
                         variant="danger"
                         onClick={() => setShowDeleteConfirm(true)}
-                        className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
+                        className={MENU_ITEM_DANGER}
                       >
                         Delete blueprint
                       </DropdownMenu.Item>
                     ) : (
                       <DropdownMenu.Item
-                        icon={<Trash size={13} className="mr-2" weight="bold" />}
+                        icon={<Trash size={13} className="mr-2" />}
                         variant="danger"
                         onClick={handleRemoveFromLibrary}
                         disabled={removingFromLibrary}
-                        className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] transition-colors data-highlighted:bg-kumo-danger-tint"
+                        className={MENU_ITEM_DANGER}
                       >
-                        {removingFromLibrary ? 'Removing...' : 'Remove from Library'}
+                        {removingFromLibrary ? 'Removing...' : 'Remove from library'}
                       </DropdownMenu.Item>
                     )}
                   </>
@@ -933,10 +931,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   <>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
-                      icon={<Star size={13} className="mr-2" weight={isFeatured ? 'fill' : 'bold'} />}
+                      icon={<Star size={13} className="mr-2" weight={isFeatured ? 'fill' : 'regular'} />}
                       onClick={handleToggleFeatured}
                       disabled={updatingFeatured}
-                      className="!h-auto rounded-md !px-2.5 !py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-default transition-colors data-highlighted:bg-kumo-tint"
+                      className={MENU_ITEM}
                     >
                       {updatingFeatured ? 'Updating...' : (isFeatured ? 'Unfeature blueprint' : 'Feature blueprint')}
                     </DropdownMenu.Item>
@@ -951,7 +949,14 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         <main className="space-y-6">
           {bindingEntries.length > 0 ? (
             <section>
-              <SectionEyebrow label="Required connections" count={bindingEntries.length} />
+              <div className="mb-2 flex items-center gap-2 px-1">
+                <h2 className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+                  Required connections
+                </h2>
+                <span className="text-[12px] font-medium tracking-[-0.1px] text-kumo-inactive">
+                  {bindingEntries.length}
+                </span>
+              </div>
               <div className="mb-3 px-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                 {readyCount === bindingEntries.length
                   ? 'Everything is ready. You can change any connection before creating the Gadget.'
@@ -1113,7 +1118,7 @@ function BlueprintScreenshotHero({
         render={(
           <button
             type="button"
-            className="group relative block w-full cursor-zoom-in overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_12px_32px_-28px_rgba(82,16,0,0.28)] transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_14px_34px_-26px_rgba(82,16,0,0.34)] active:scale-[0.995]"
+            className="group relative block w-full cursor-zoom-in overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_12px_32px_-28px_rgba(20,17,16,0.22)] transition-[border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_14px_34px_-26px_rgba(20,17,16,0.28)] active:scale-[0.995]"
             aria-label={`Open larger screenshot of ${title}`}
           >
             <img
@@ -1155,23 +1160,6 @@ function BlueprintScreenshotHero({
   )
 }
 
-function BlueprintPageTexture() {
-  return (
-    <div
-      className="pointer-events-none absolute inset-0 h-[320px]"
-      style={{
-        backgroundImage:
-          'radial-gradient(circle, var(--color-kumo-line) 1px, transparent 1px)',
-        backgroundSize: '24px 24px',
-        maskImage:
-          'linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)',
-        WebkitMaskImage:
-          'linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0) 80%)',
-      }}
-    />
-  )
-}
-
 function BlueprintStatePage({
   title,
   message,
@@ -1186,10 +1174,9 @@ function BlueprintStatePage({
   onAction?: () => void
 }) {
   return (
-    <div className="relative min-h-[calc(100vh-3.5rem-1px)] overflow-hidden bg-kumo-base">
-      <BlueprintPageTexture />
-      <div className="relative mx-auto flex min-h-[calc(100vh-3.5rem-1px)] w-full max-w-[1040px] items-center justify-center px-4 py-12 sm:px-8">
-        <div className="w-full max-w-md rounded-2xl border border-kumo-line bg-kumo-base px-6 py-8 text-center shadow-[0_8px_20px_-18px_rgba(82,16,0,0.16)]">
+    <div className="min-h-full bg-kumo-base">
+      <div className="mx-auto flex min-h-[60vh] w-full max-w-[1040px] items-center justify-center px-4 py-12 sm:px-8">
+        <div className="w-full max-w-md rounded-2xl border border-kumo-line bg-kumo-base px-6 py-8 text-center shadow-[0_8px_20px_-18px_rgba(20,17,16,0.14)]">
           {loading && (
             <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
           )}
@@ -1224,28 +1211,23 @@ function BindingIconTile({
   vendor?: { id: string, description: VendorDescription, supportedResources: SupportedResource[] }
 }) {
   let icon: ReactNode
-  let color = 'var(--color-kumo-tint)'
   let fallback = binding.type[0]?.toUpperCase() ?? '?'
 
   if (binding.type === 'gatekeeper') {
-    color = vendor?.description.color ?? color
     fallback = vendor?.description.displayName[0]?.toUpperCase() ?? binding.gatekeeperName[0]?.toUpperCase() ?? '?'
     icon = vendor?.description.logo?.url ? (
-      <img src={vendor.description.logo.url} alt="" className="h-6 w-6 object-contain" />
+      <img src={vendor.description.logo.url} alt="" className="h-5 w-5 object-contain" />
     ) : (
-      <span className="text-[15px] font-semibold text-kumo-strong">{fallback}</span>
+      <span className="text-[13px] font-semibold text-kumo-subtle">{fallback}</span>
     )
   } else if (binding.type === 'aiModel') {
-    icon = <Robot size={20} weight="bold" className="text-kumo-subtle" />
+    icon = <Robot size={16} className="text-kumo-subtle" />
   } else {
-    icon = <Lightning size={20} weight="bold" className="text-kumo-subtle" />
+    icon = <Lightning size={16} className="text-kumo-subtle" />
   }
 
   return (
-    <div
-      className="grid h-11 w-11 shrink-0 place-items-center rounded-xl"
-      style={{ backgroundColor: color }}
-    >
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
       {icon}
     </div>
   )
@@ -1332,7 +1314,7 @@ function BlueprintBindingSummaryCard({
       <button
         type="button"
         onClick={onConfigure}
-        className="inline-flex h-8 cursor-pointer items-center justify-center rounded-full border border-kumo-line bg-kumo-base px-3 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-[background-color,border-color,transform] duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint active:scale-[0.98]"
+        className="press inline-flex h-8 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base px-3 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-default transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint"
       >
         {actionLabel}
       </button>
