@@ -1,7 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { DotsThree, PushPin, ShareNetwork, Trash, Pencil } from '@phosphor-icons/react'
 import { DropdownMenu } from '@cloudflare/kumo'
-import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from '../menuStyles'
+import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from '../menuStyles'
 import { useState, useEffect, useRef } from 'react'
 import type { GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
 
@@ -101,7 +101,7 @@ export default function SidebarGadgetRow({
                   </button>
                 }
               />
-              <DropdownMenu.Content className={MENU_CONTENT}>
+              <DropdownMenu.Content className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
                 <DropdownMenu.Item
                   onClick={startRename}
                   className={MENU_ITEM}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useRouterState } from '@tanstack/react-router'
 import { List, X } from '@phosphor-icons/react'
 import TopBarNotice from '../../TopBarNotice'
 import Sidebar from './Sidebar'
@@ -43,6 +44,16 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
   }, [mobileOpen])
+
+  // Close the mobile drawer on navigation. Links in the drawer (primary nav, Gatekeepers, the user
+  // menu, workspace rows) otherwise navigate while leaving the drawer covering the page — so on a
+  // phone it looks like nothing happened. Watching the pathname catches every navigation source
+  // without prop-drilling a close callback through the whole rail. No-op on desktop, where the
+  // drawer is never open.
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  useEffect(() => {
+    setMobileOpen(false)
+  }, [pathname])
 
   // Global ⌘K / Ctrl+K opens the command palette; the rail's search button opens it via a custom
   // event so it doesn't have to prop-drill into the palette.

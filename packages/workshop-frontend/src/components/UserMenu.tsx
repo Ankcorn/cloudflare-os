@@ -2,7 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useAvatar } from '../useAvatar'
-import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
+import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './menuStyles'
 
 export default function UserMenu() {
   const { authenticatedApi, logout, currentUser, isAdmin } = useAuthenticatedApi()
@@ -31,7 +31,7 @@ export default function UserMenu() {
           </button>
         }
       />
-      <DropdownMenu.Content className={MENU_CONTENT}>
+      <DropdownMenu.Content className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
         <DropdownMenu.Item
           onClick={() => navigate({ to: '/profile' })}
           className={MENU_ITEM}
