@@ -1,14 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon, List, X } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../AuthContext'
-import { useServerConfig } from '../ServerConfigContext'
+import { useSiteName } from '../ServerConfigContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
 import TopBarNotice from '../TopBarNotice'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
-  const siteName = (useServerConfig()?.siteName ?? '').trim() || 'gadgets'
+  const siteName = useSiteName()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const headerRef = useRef<HTMLElement>(null)

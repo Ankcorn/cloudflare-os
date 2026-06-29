@@ -16,7 +16,7 @@ import {
   DotsThreeVertical,
 } from '@phosphor-icons/react'
 import AddModelModal from '../AddModelModal'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from '../components/menuStyles'
 
 export const Route = createFileRoute('/providers')({ component: ProvidersPage })
@@ -131,7 +131,7 @@ function Notice({ children }: { children: React.ReactNode }) {
 // ─── main page ────────────────────────────────────────────────────────────────
 
 function ProvidersPage() {
-  useDocumentTitle(formatDocumentTitle('AI Providers'))
+  useDocumentTitle('AI Providers')
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()

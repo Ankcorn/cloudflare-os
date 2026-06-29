@@ -8,7 +8,7 @@ import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phos
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
-import { formatDocumentTitle, useDocumentTitle } from './useDocumentTitle'
+import { useDocumentTitle } from './useDocumentTitle'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -85,7 +85,7 @@ function PasswordField({
 }
 
 export default function SettingsPage() {
-  useDocumentTitle(formatDocumentTitle('Profile'))
+  useDocumentTitle('Profile')
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()

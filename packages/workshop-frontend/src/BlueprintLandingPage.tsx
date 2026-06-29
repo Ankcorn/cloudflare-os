@@ -14,7 +14,7 @@ import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser
 import ResourceConfiguratorHost from './ResourceConfiguratorHost'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
-import { formatDocumentTitle, useDocumentTitle } from './useDocumentTitle'
+import { useDocumentTitle } from './useDocumentTitle'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -33,7 +33,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   const toasts = useKumoToastManager()
 
   const [blueprint, setBlueprint] = useState<BlueprintPublicInfo | null>(null)
-  useDocumentTitle(blueprint ? formatDocumentTitle(blueprint.metadata.title) : undefined)
+  useDocumentTitle(blueprint?.metadata.title)
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState<string | null>(null)

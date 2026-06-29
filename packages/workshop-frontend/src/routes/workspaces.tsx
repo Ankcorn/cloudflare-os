@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { Plus } from '@phosphor-icons/react'
 import GadgetList from '../components/GadgetList'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 
 // Full workspace listing. The sidebar surfaces Favorites + a handful of Recent workspaces; this is
 // the "see them all" destination linked from the rail.
@@ -10,7 +10,7 @@ export const Route = createFileRoute('/workspaces')({
 })
 
 function WorkspacesPage() {
-  useDocumentTitle(formatDocumentTitle('Workspaces'))
+  useDocumentTitle('Workspaces')
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="flex items-end justify-between gap-4 px-3 pb-3 pt-10">

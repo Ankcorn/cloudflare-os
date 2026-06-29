@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { Compass } from '@phosphor-icons/react'
 import BlueprintList from '../components/BlueprintList'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 
 // "Blueprints" — the user's own + saved blueprints, laid out like the Workspaces page. Discovering
 // new blueprints lives on the separate Explore page (linked here and from the rail's bottom nav).
@@ -10,7 +10,7 @@ export const Route = createFileRoute('/blueprints')({
 })
 
 function BlueprintsRoutePage() {
-  useDocumentTitle(formatDocumentTitle('Blueprints'))
+  useDocumentTitle('Blueprints')
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="flex items-end justify-between gap-4 px-3 pb-3 pt-10">

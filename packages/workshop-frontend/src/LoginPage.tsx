@@ -5,7 +5,8 @@ import { PublicApi } from '@gadgets/workshop-shared/api'
 import { Hexagon } from '@phosphor-icons/react'
 import { Input, Button, Banner, Loader } from '@cloudflare/kumo'
 import { hashPassword } from './passwordHash'
-import { useServerConfig } from './ServerConfigContext'
+import { useServerConfig, useSiteName } from './ServerConfigContext'
+import { useDocumentTitle } from './useDocumentTitle'
 import { useConnectionLost } from './RpcContext'
 import OAuthButtons from './components/auth/OAuthButtons'
 
@@ -21,7 +22,9 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const serverConfig = useServerConfig()
+  const siteName = useSiteName()
   const connectionLost = useConnectionLost()
+  useDocumentTitle('Sign in')
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -86,7 +89,7 @@ export default function LoginPage({ rpcStub, onLoginSuccess }: LoginPageProps) {
           <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-brand mb-3">
             <Hexagon size={20} className="text-white" weight="bold" />
           </div>
-          <h1 className="text-xl font-semibold text-kumo-default">Gadgets Workshop</h1>
+          <h1 className="text-xl font-semibold text-kumo-default">{siteName}</h1>
           <p className="text-sm text-kumo-subtle mt-1">Sign in to your account</p>
         </div>
 

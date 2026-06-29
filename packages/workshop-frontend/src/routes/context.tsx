@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { BookOpen, Sparkle, type Icon as PhosphorIcon } from '@phosphor-icons/react'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 import ComingSoonPreview from '../components/ComingSoonPreview'
 
 // Context & Skills. The knowledge/skills surface isn't built into the rail yet — agents read
@@ -55,7 +55,7 @@ function ContextRow({ item }: { item: ContextItem }) {
 }
 
 function ContextPage() {
-  useDocumentTitle(formatDocumentTitle('Context & Skills'))
+  useDocumentTitle('Context & Skills')
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="px-3 pb-4 pt-10">

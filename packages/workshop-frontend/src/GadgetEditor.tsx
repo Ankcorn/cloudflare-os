@@ -36,7 +36,7 @@ import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/
 import { TabButton } from './components/TabButton'
 import { useActions } from './useActions'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
-import { formatDocumentTitle, useDocumentTitle } from './useDocumentTitle'
+import { useDocumentTitle } from './useDocumentTitle'
 
 // ─── console log subscriber ───────────────────────────────────────────────────
 
@@ -149,7 +149,7 @@ export default function GadgetEditor() {
   // ── core state ──────────────────────────────────────────────────────────────
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
-  useDocumentTitle(metadata ? formatDocumentTitle(metadata.title) : undefined)
+  useDocumentTitle(metadata?.title)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)

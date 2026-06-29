@@ -15,7 +15,7 @@ import {
   Trash,
   type Icon as PhosphorIcon,
 } from '@phosphor-icons/react'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 import ViewToggle from '../components/ViewToggle'
 import ComingSoonPreview from '../components/ComingSoonPreview'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from '../components/menuStyles'
@@ -294,7 +294,7 @@ function FilterChip({
 type Filter = 'all' | OutputType
 
 function OutputsPage() {
-  useDocumentTitle(formatDocumentTitle('Outputs'))
+  useDocumentTitle('Outputs')
   const toasts = useKumoToastManager()
 
   const [view, setView] = useState<'grid' | 'list'>(() => {
