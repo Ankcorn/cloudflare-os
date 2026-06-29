@@ -16,7 +16,7 @@ import {
   getStoredSelectedModel,
   persistSelectedModel,
 } from "../modelSelection";
-import { formatDocumentTitle, useDocumentTitle } from "../useDocumentTitle";
+import { useDocumentTitle } from "../useDocumentTitle";
 
 export const Route = createFileRoute("/")({ component: HomePage });
 
@@ -24,7 +24,7 @@ export const Route = createFileRoute("/")({ component: HomePage });
 // in the AppShell rail, so this page focuses on a single thing: composing the first message of a
 // new gadget — a centered column with a hero, the prompt composer, and a few task suggestions.
 function HomePage() {
-  useDocumentTitle(formatDocumentTitle("Home"));
+  useDocumentTitle("Home");
 
   const { authenticatedApi } = useAuthenticatedApi();
   const navigate = useNavigate();

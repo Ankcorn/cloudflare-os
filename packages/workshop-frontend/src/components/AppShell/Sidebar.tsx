@@ -11,7 +11,7 @@ import {
   SquaresFour,
   Stack,
 } from '@phosphor-icons/react'
-import { useServerConfig } from '../../ServerConfigContext'
+import { useSiteName } from '../../ServerConfigContext'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
 import {
@@ -38,7 +38,7 @@ export default function Sidebar({
   collapsed: boolean
   onToggleCollapsed: () => void
 }) {
-  const siteName = (useServerConfig()?.siteName ?? '').trim() || 'gadgets'
+  const siteName = useSiteName()
 
   return (
     <aside

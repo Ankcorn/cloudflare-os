@@ -21,7 +21,7 @@ import {
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
 import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -437,7 +437,7 @@ type ModalTarget =
   | null
 
 function ConnectorsPage() {
-  useDocumentTitle(formatDocumentTitle('Gatekeepers'))
+  useDocumentTitle('Gatekeepers')
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()

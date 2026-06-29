@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { Clock } from '@phosphor-icons/react'
-import { formatDocumentTitle, useDocumentTitle } from '../useDocumentTitle'
+import { useDocumentTitle } from '../useDocumentTitle'
 import ComingSoonPreview from '../components/ComingSoonPreview'
 
 // Scheduled Tasks. The feature itself isn't built yet — it'll surface cron / event-triggered runs
@@ -52,7 +52,7 @@ function TaskRow({ task }: { task: ScheduledTask }) {
 }
 
 function ScheduledPage() {
-  useDocumentTitle(formatDocumentTitle('Scheduled tasks'))
+  useDocumentTitle('Scheduled tasks')
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="px-3 pb-4 pt-10">

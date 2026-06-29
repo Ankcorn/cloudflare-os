@@ -10,6 +10,12 @@ export function useServerConfig(): ServerConfig | null {
   return useContext(ServerConfigContext)
 }
 
+// Convenience: the admin-configured site name, falling back to the default while config is still
+// loading or when the admin hasn't set one.
+export function useSiteName(): string {
+  return (useContext(ServerConfigContext)?.siteName ?? '').trim() || 'gadgets'
+}
+
 // Convenience: the gatekeeper vendors offered as sign-in methods (empty until config loads / none).
 export function useAuthVendors(): AuthVendorInfo[] {
   return useContext(ServerConfigContext)?.authVendors ?? []

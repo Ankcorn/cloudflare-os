@@ -5,7 +5,8 @@ import { PublicApi } from "@gadgets/workshop-shared/api";
 import { Hexagon } from "@phosphor-icons/react";
 import { Input, Button, Banner } from "@cloudflare/kumo";
 import { hashPassword } from "./passwordHash";
-import { useServerConfig } from "./ServerConfigContext";
+import { useServerConfig, useSiteName } from "./ServerConfigContext";
+import { useDocumentTitle } from "./useDocumentTitle";
 import OAuthButtons from "./components/auth/OAuthButtons";
 
 interface SignupPageProps {
@@ -14,6 +15,8 @@ interface SignupPageProps {
 
 export default function SignupPage({ rpcStub }: SignupPageProps) {
   const serverConfig = useServerConfig();
+  const siteName = useSiteName();
+  useDocumentTitle("Create account");
   const authVendors = serverConfig?.authVendors ?? [];
   const signupsEnabled = serverConfig?.signupsEnabled ?? true;
   // The password create-account form requires both password auth AND open signups.
@@ -97,7 +100,7 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
             <Hexagon size={20} className="text-white" weight="bold" />
           </div>
           <h1 className="text-xl font-semibold text-kumo-default">
-            Gadgets Workshop
+            {siteName}
           </h1>
           <p className="text-sm text-kumo-subtle mt-1">Create your account</p>
         </div>
