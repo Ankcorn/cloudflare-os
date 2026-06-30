@@ -2430,12 +2430,8 @@ class OverseerImpl implements AgentHooks {
     // further round-trips through the owner's user DO. The account capability stays encapsulated in
     // that DO — only the class reference crosses out.
     //
-    // Provision the accounts concurrently: on a freshly-created gadget this would otherwise be ~2
-    // serial RPCs per singleton (the getSingletonGatekeeperClass round trip plus addGatekeeper's
-    // describe()). Cap'n Web batches the same-tick getSingletonGatekeeperClass calls into one round
-    // trip, and addGatekeeper allocates its id synchronously (before its first await), so concurrent
-    // adds never collide — ids just land in completion order, which is fine since getAlwaysAvailable-
-    // Capsules orders capsules by id and records key on accountId/vendorId, not id.
+    // Provision concurrently so Cap'n Web can batch the owner-DO class lookups; addGatekeeper assigns
+    // ids before awaiting, so concurrent adds don't collide.
     await Promise.all(toAdd.map(async account => {
       // Best-effort and isolated per account: a single failing account (e.g. its
       // getSingletonGatekeeperClass throws) must not block the others or the rest of open().
@@ -3382,16 +3378,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Make singleton gatekeepers (e.g. the Context Library) available to the agent as unnamed
     // capsules. Idempotent and best-effort, so a library hiccup never blocks opening the gadget.
-    // On the very first open we block so the agent's first turn already sees the capsules;
-    // afterwards we reconcile in the background to keep cross-DO latency off every open (a freshly
-    // opted-in or disconnected singleton then lands on a subsequent turn rather than this one).
+    // On the very first open we block so the agent's first turn sees the capsules; later opens let the
+    // reconcile run in the background to keep cross-DO latency off the hot path.
     let ensureCapsules = this.impl.ensureAmbientCapsules().catch((err) => {
       console.error("Failed to ensure singleton gatekeeper capsules:", err);
     });
     if (firstOpen) {
       await ensureCapsules;
-    } else {
-      this.ctx.waitUntil(ensureCapsules);
     }
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
