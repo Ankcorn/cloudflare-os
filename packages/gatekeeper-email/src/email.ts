@@ -55,11 +55,11 @@ type Env = Cloudflare.Env & {
 }
 
 function getBaseUrl(env: Env) {
-  return env.BASE_URL || "http://localhost:8787/gatekeeper/email";
+  return (env.BASE_URL || "http://localhost:8787/gatekeeper/email").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env) {
-  let path = new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
   return path === "/" ? "" : path;
 }
 

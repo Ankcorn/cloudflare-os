@@ -347,11 +347,12 @@ function constantTimeEqual(a: string, b: string): boolean {
 }
 
 function getBaseUrl(env: Env): string {
-  return env.BASE_URL ?? "http://localhost:8787/gatekeeper/github";
+  return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/github").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env): string {
-  return new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 function ensureConfigured(env: Env): void {
