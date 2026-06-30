@@ -1,4 +1,4 @@
-import { AdminApi, AdminResourceVendor, AdminSettingsView, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -6,6 +6,7 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from './admin-config.js';
+import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 
@@ -154,7 +155,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Merge a partial update into the admin config and mirror it to KV. Callers (AdminApiImpl) validate
   // scalar values; this just persists atomically.
   async updateAdminConfig(patch: Partial<AdminConfig>): Promise<void> {
-    let next = { ...this.storage.adminConfig.get(), ...patch };
+    // Merge over DEFAULT_ADMIN_CONFIG so a config persisted before a field was added gets that field
+    // backfilled on the next write (rather than carrying the stale shape forward).
+    let next = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get(), ...patch };
     this.storage.adminConfig.put(next);
     await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
   }
@@ -167,7 +170,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Data gatekeeper) only reveal their resources to users with the right permission — so without it
   // they'd be hidden from the admin Gatekeepers tab.
   async getSettings(adminUserId: string): Promise<AdminSettingsView> {
-    let config = this.storage.adminConfig.get();
+    // Fill in any fields missing from a config persisted before they were added (e.g.
+    // ambientGatekeeperModes), so reads are robust without requiring a prior write.
+    let config = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
     return {
       signupsEnabled: config.signupsEnabled,
       siteName: config.siteName,
@@ -189,12 +194,26 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     await this.updateAdminConfig({ disabledResources: map });
   }
 
-  // Enable/disable an entire gatekeeper atomically (read-modify-write within the DO).
-  async setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void> {
+  // Set a gatekeeper's availability atomically (read-modify-write within the DO). Routes by kind: an
+  // auto-provisioning ("ambient") gatekeeper stores its three-state mode in ambientGatekeeperModes
+  // (default stored as absence); an ordinary gatekeeper stores a binary enabled/disabled in
+  // disabledGatekeepers and rejects the ambient-only 'optional'.
+  async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
     vendorId = vendorId.toLowerCase();
-    let disabled = new Set(this.storage.adminConfig.get().disabledGatekeepers);
-    if (enabled) disabled.delete(vendorId); else disabled.add(vendorId);
-    await this.updateAdminConfig({ disabledGatekeepers: [...disabled] });
+    let vendor = this.vendors.get(vendorId);
+    let autoProvisions = !!vendor && (await vendor.describe()).autoProvisionsAccount === true;
+    if (autoProvisions) {
+      let modes = { ...this.storage.adminConfig.get().ambientGatekeeperModes };
+      if (mode === DEFAULT_AMBIENT_GATEKEEPER_MODE) delete modes[vendorId]; else modes[vendorId] = mode;
+      await this.updateAdminConfig({ ambientGatekeeperModes: modes });
+    } else {
+      if (mode === "optional") {
+        throw new Error(`"${vendorId}" is not an auto-provisioning gatekeeper; use 'enabled' or 'disabled'.`);
+      }
+      let disabled = new Set(this.storage.adminConfig.get().disabledGatekeepers);
+      if (mode === "enabled") disabled.delete(vendorId); else disabled.add(vendorId);
+      await this.updateAdminConfig({ disabledGatekeepers: [...disabled] });
+    }
   }
 
   // Admin view of every bound gatekeeper's resource types, annotated with their enabled state.
@@ -212,6 +231,17 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             vendor.describe(),
             vendor.getSupportedResources({ userId: adminUserId }),
           ]);
+          if (description.autoProvisionsAccount) {
+            // Auto-provisioning ("ambient") gatekeeper: a three-state mode, no resources to toggle.
+            let mode = ambientGatekeeperMode(config, id);
+            return {
+              vendorId: id,
+              displayName: description.displayName,
+              logo: description.logo,
+              autoProvisions: true,
+              ambientMode: mode,
+            };
+          }
           if (supportedResources.length === 0) {
             // Nothing to toggle for this gatekeeper.
             return null;
@@ -221,6 +251,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             vendorId: id,
             displayName: description.displayName,
             logo: description.logo,
+            autoProvisions: false,
             enabled: !disabledGatekeeperSet.has(id),
             resources: supportedResources.map(r => ({
               urlPattern: r.urlPattern,
@@ -237,7 +268,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       })());
     }
 
-    return (await Promise.all(promises)).filter((v): v is AdminResourceVendor => v !== null);
+    let vendors = (await Promise.all(promises)).filter((v): v is AdminResourceVendor => v !== null);
+    // Show auto-provisioned ("ambient") gatekeepers first; preserve the existing order otherwise.
+    vendors.sort((a, b) => Number(b.autoProvisions) - Number(a.autoProvisions));
+    return vendors;
   }
 }
 
@@ -282,8 +316,11 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
     return this.admin.setResourceEnabled(vendorId, urlPattern, enabled);
   }
 
-  setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void> {
-    return this.admin.setGatekeeperEnabled(vendorId, enabled);
+  setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
+    if (!isAmbientGatekeeperMode(mode)) {
+      throw new Error(`Invalid gatekeeper mode: ${mode}`);
+    }
+    return this.admin.setGatekeeperMode(vendorId, mode);
   }
 
   async setAnnouncement(text: string): Promise<void> {

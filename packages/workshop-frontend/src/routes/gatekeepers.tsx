@@ -13,6 +13,7 @@ import {
 import ViewToggle from '../components/ViewToggle'
 import { RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
+import { refreshGatekeeperApps } from '../useGatekeeperApps'
 import { EmptyState } from '../components/EmptyState'
 import ConnectConnectorModal from '../components/ConnectConnectorModal'
 import {
@@ -20,7 +21,7 @@ import {
   SupportedResource,
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper'
-import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import { ConnectedAccountsSubscriber, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 
 export const Route = createFileRoute('/gatekeepers')({
@@ -451,6 +452,10 @@ function ConnectorsPage() {
   const [vendors, setVendors] = useState<VendorEntry[]>([])
   const [accountsLoaded, setAccountsLoaded] = useState(false)
   const [vendorsLoaded, setVendorsLoaded] = useState(false)
+  // Auto-provisioning ("ambient") gatekeepers set to "optional" that the user can opt into. They're
+  // shown in the same "Available" section and opened through the same modal as OAuth vendors; the
+  // only difference is that confirming adds the account directly (no OAuth redirect).
+  const [addable, setAddable] = useState<GatekeeperVendorInfo[]>([])
   const [loadError, setLoadError] = useState(false)
 
   const [modalTarget, setModalTarget] = useState<ModalTarget>(null)
@@ -472,6 +477,15 @@ function ConnectorsPage() {
 
     setAccountsLoaded(false)
     setVendorsLoaded(false)
+
+    authenticatedApi
+      .listAddableGatekeepers()
+      .then((list) => {
+        if (!cancelled) setAddable(list)
+      })
+      .catch((err) => {
+        console.error('Failed to load addable gatekeepers:', err)
+      })
 
     authenticatedApi
       .listGatekeeperVendors()
@@ -561,13 +575,20 @@ function ConnectorsPage() {
 
   const handleConfirmConnect = async (resourceUrlPatterns?: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'connect') return
+    const vendorId = modalTarget.vendorId
     setConnecting(true)
     try {
-      const { url } = await authenticatedApi.connectAccount(
-        modalTarget.vendorId,
-        resourceUrlPatterns,
-      )
-      window.open(url, '_blank', 'noopener,noreferrer')
+      if (isTargetAmbient) {
+        // Ambient gatekeeper: mint the account directly, no OAuth redirect. It then appears under
+        // "Connected" via the subscription and drops out of "Available".
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+        setAddable((prev) => prev.filter((g) => g.id !== vendorId))
+        // If the gatekeeper provides a management UI, its nav entry should appear without a reload.
+        refreshGatekeeperApps(authenticatedApi)
+      } else {
+        const { url } = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
       handleCloseModal()
     } catch (err) {
       console.error('Failed to connect account:', err)
@@ -605,6 +626,11 @@ function ConnectorsPage() {
     setDisconnecting(true)
     try {
       await authenticatedApi.disconnectAccount(modalTarget.accountId)
+      // If this was an opt-in ambient account, it's now removable and should return to "Available";
+      // re-fetch the addable list so it reappears there immediately (no refresh needed).
+      authenticatedApi.listAddableGatekeepers().then(setAddable).catch(() => {})
+      // Drop its nav entry too, if it provided a management UI.
+      refreshGatekeeperApps(authenticatedApi)
       handleCloseModal()
     } catch (err) {
       console.error('Failed to disconnect account:', err)
@@ -647,17 +673,28 @@ function ConnectorsPage() {
     })
   }, [accounts, vendors, searchLower])
 
+  // Connectable vendors = OAuth/resource gatekeepers plus opt-in ambient ones, rendered identically.
+  // An ambient vendor is recognized by `description.autoProvisionsAccount`, which routes the connect
+  // action to a direct (no-OAuth) add instead.
+  const availableVendors = useMemo<VendorEntry[]>(
+    () => [
+      ...vendors,
+      ...addable,
+    ],
+    [vendors, addable],
+  )
+
   const filteredAvailable = useMemo(() => {
     const matchesSearch = (text: string | undefined) =>
       !searchLower || (text ?? '').toLowerCase().includes(searchLower)
 
-    return vendors.filter(
+    return availableVendors.filter(
       (v) =>
         matchesSearch(v.description.displayName) ||
         matchesSearch(v.description.tagline) ||
         v.supportedResources.some((r) => matchesSearch(r.title)),
     )
-  }, [vendors, searchLower])
+  }, [availableVendors, searchLower])
 
   const activeAccount: AccountEntry | undefined =
     modalTarget?.kind === 'manage'
@@ -665,14 +702,18 @@ function ConnectorsPage() {
       : undefined
   const activeVendor: VendorEntry | undefined =
     modalTarget?.kind === 'connect'
-      ? vendors.find((v) => v.id === modalTarget.vendorId)
+      ? availableVendors.find((v) => v.id === modalTarget.vendorId)
       : activeAccount
-      ? vendors.find((v) => v.id === activeAccount.vendorId) ?? {
+      ? availableVendors.find((v) => v.id === activeAccount.vendorId) ?? {
           id: activeAccount.vendorId,
           description: activeAccount.vendorDescription,
           supportedResources: activeAccount.supportedResources,
         }
       : undefined
+
+  // True when the connect modal targets an ambient gatekeeper (added directly, no OAuth flow).
+  const isTargetAmbient =
+    modalTarget?.kind === 'connect' && !!activeVendor?.description.autoProvisionsAccount
 
   const sectionGridClass =
     view === 'list' ? 'flex flex-col gap-0.5' : 'grid gap-3 sm:grid-cols-2'
@@ -778,6 +819,7 @@ function ConnectorsPage() {
           <section className="mb-10">
             <SectionEyebrow label="Available" />
             <div className={sectionGridClass}>
+
               {filteredAvailable.map((vendor) => (
                 <ConnectorCard
                   key={vendor.id}
@@ -827,6 +869,7 @@ function ConnectorsPage() {
           supportedResources={activeVendor.supportedResources}
           logoUrl={activeVendor.description.logo?.url}
           color={activeVendor.description.color}
+          autoProvisions={isTargetAmbient}
           connecting={connecting}
           onConfirm={handleConfirmConnect}
           accountDescription={activeAccount?.accountDescription}

@@ -62,6 +62,72 @@ export type VendorDescription = {
   // provider-verified email (via GatekeeperUser.getAuthenticatedEmail()). The Workshop may offer
   // such a vendor as a login method, subject to its own auth allowlist. Defaults to false.
   providesAuth?: boolean;
+
+  // If set, this vendor can mint a connected account with no OAuth flow (see
+  // GatekeeperVendor.createAccount) and recommends the Workshop auto-provision one account per user.
+  // The account — not the vendor — declares whether it provides an agent singleton and/or a
+  // management UI (see AccountDescription.singleton / .providesUi).
+  autoProvisionsAccount?: boolean;
+}
+
+// Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
+// each time rather than baked into the account, since a user's admin status can change over time.
+export type AppUiContext = {
+  isAdmin: boolean;
+}
+
+// The agent catalog is bounded discovery metadata a gatekeeper exposes via
+// Gatekeeper.getAgentCatalog() so the agent can see *what* is reachable through a session (e.g. the
+// titles of the Context Library collections it can search) without first reading everything. It is
+// shown to the agent as untrusted data, so entries carry no authority and are size-capped.
+
+// One discoverable item within a gatekeeper's session.
+export type AgentCatalogEntry = {
+  // Opaque, gatekeeper-defined identifier the agent passes back to the session to act on this item.
+  id: string;
+  // Short human/agent-readable label (e.g. a collection name).
+  title: string;
+  // One-line description of what the item is, to help the agent decide if it's relevant.
+  description: string;
+};
+
+// The discovery metadata returned for one gatekeeper session.
+export type AgentCatalog = {
+  // The discoverable items, already truncated to the requested/maximum count.
+  entries: AgentCatalogEntry[];
+  // True if entries were dropped to fit the limit, so the agent knows the list is partial.
+  truncated?: boolean;
+};
+
+// Parameters the Workshop passes when requesting a catalog.
+export type AgentCatalogRequest = {
+  // Maximum number of entries to return. The gatekeeper must also enforce AGENT_CATALOG_MAX_ENTRIES.
+  limit: number;
+};
+
+// Hard caps the Workshop enforces on any catalog, regardless of what the gatekeeper returns, since
+// the catalog is injected into the agent's context as untrusted data and must stay bounded.
+export const AGENT_CATALOG_MAX_ENTRIES = 25;
+export const AGENT_CATALOG_MAX_ID_LENGTH = 256;
+export const AGENT_CATALOG_MAX_TITLE_LENGTH = 100;
+export const AGENT_CATALOG_MAX_DESCRIPTION_LENGTH = 400;
+
+// Helper for gatekeepers to produce a well-formed AgentCatalog: clamps the entry count to the
+// smaller of the request's limit and AGENT_CATALOG_MAX_ENTRIES, truncates each field to its cap, and
+// sets `truncated` when entries were dropped. Gatekeepers should call this rather than hand-rolling
+// the limits.
+export function boundAgentCatalog(
+    entries: AgentCatalogEntry[], request: AgentCatalogRequest): AgentCatalog {
+  let requestedLimit = Number.isFinite(request.limit) ? Math.max(0, Math.floor(request.limit)) : 0;
+  let limit = Math.min(requestedLimit, AGENT_CATALOG_MAX_ENTRIES);
+  return {
+    entries: entries.slice(0, limit).map(entry => ({
+      id: entry.id.slice(0, AGENT_CATALOG_MAX_ID_LENGTH),
+      title: entry.title.slice(0, AGENT_CATALOG_MAX_TITLE_LENGTH),
+      description: entry.description.slice(0, AGENT_CATALOG_MAX_DESCRIPTION_LENGTH),
+    })),
+    truncated: entries.length > limit,
+  };
 }
 
 // Describes a connected user account on an external service, for display purposes.
@@ -81,6 +147,16 @@ export type AccountDescription = {
   // usable and which need an additional grant. If omitted, treat the account as having every
   // resource granted (legacy accounts, or gatekeepers with no grantable resource types).
   grantedResourceUrlPatterns?: string[];
+
+  // If set, this account provides an agent singleton: a gatekeeper (see
+  // GatekeeperUser.getSingletonGatekeeperClass) that the Workshop installs into the owner's gadgets
+  // and whose session it auto-provides as an unnamed capsule. `tsType` names the session's interface
+  // as returned by the gatekeeper's getTypeScriptTypes().
+  singleton?: { tsType: string };
+
+  // If set, this account has a full-page management UI (see GatekeeperUser.startAppUi). The Workshop
+  // surfaces it as a nav entry / page using this title.
+  providesUi?: { title: string; icon?: AvatarImage };
 }
 
 // Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe().
@@ -266,13 +342,22 @@ export interface ResourceConfiguratorHost extends RpcTarget {
   forwardScroll(deltaX: number, deltaY: number): void;
 }
 
-export type ResourceConfiguratorFrame = {
-  // Complete HTML for the resource selection/configuration UI. Workshop hosts it in a sandboxed iframe.
+// A self-contained sandboxed UI served by a gatekeeper: complete HTML hosted in a
+// sandbox="allow-scripts" iframe, plus an arbitrary gatekeeper-defined capability exposed to the
+// iframe over a MessagePort RPC session. Used both for the small resource-configurator form
+// (startResourceConfigurator, hosted in the connect modal) and for full-page gatekeeper management
+// apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page).
+export type GatekeeperUiFrame = {
+  // Complete HTML for the UI. Workshop hosts it in a sandboxed iframe.
   iframeHtml: string;
 
-  // Capability exposed to the iframe for any RPCs needed by UI.
+  // Capability exposed to the iframe for any RPCs needed by the UI.
   ui: RpcStub<RpcTarget>;
 }
+
+// Legacy alias for GatekeeperUiFrame: the established return type of startResourceConfigurator,
+// referenced by every gatekeeper implementation. Kept to avoid a repo-wide rename.
+export type ResourceConfiguratorFrame = GatekeeperUiFrame;
 
 // The root interface of an Adapter, as provided to the Gadget Workshop.
 //
@@ -347,6 +432,14 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
   // TODO: Should we somehow distinguish stable vs. unstable types? Unstable are safe to use in
   //   one-off situations only.
   getTypeScriptTypes(): Promise<string>;
+
+  // Mint a NEW connected account, with no OAuth flow. Safe to expose on this public interface: it
+  // only *creates* accounts — it cannot look up or return an existing account — and it takes no
+  // arguments, so it carries no user identity. The Workshop persists the returned account (like an
+  // OAuth-connected account) and treats it as the authority thereafter. Present only on vendors that
+  // set VendorDescription.autoProvisionsAccount; callers gate on that flag rather than probing, since
+  // RPC stubs cannot report optional-method presence.
+  createAccount?(): Promise<Fetcher<GatekeeperUser>>;
 }
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {
@@ -441,6 +534,28 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // SECURITY: As with connectAccount(), any returned URL must include a cryptographic nonce.
   ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
 
+  // ---------------------------------------------------------------------------
+  // Singleton / management-UI capabilities. Present only on accounts created by
+  // GatekeeperVendor.createAccount() whose describe() sets AccountDescription.singleton and/or
+  // .providesUi. The Workshop gates calls on those declaration flags rather than probing the stub,
+  // since RPC stubs cannot reliably report whether an optional method exists.
+
+  // Get a Durable Object class implementing the account's agent singleton, for accounts whose
+  // describe() sets AccountDescription.singleton. The Workshop installs this gatekeeper into the
+  // owner's gadgets like any other gatekeeper — as a Facet under the Overseer — and auto-provides
+  // its session to the agent as an unnamed capsule. Because it is a normal Gatekeeper, the session
+  // (Gatekeeper.startSession) and catalog (Gatekeeper.getAgentCatalog) run gadget-side in the
+  // gatekeeper's own worker with no round-trip back through this account DO; every read is still
+  // authorized as an observation via the ApprovalQueue, exactly like any gatekeeper.
+  //
+  // The returned class is imbued (via `ctx.props`) with whatever the account needs to serve the
+  // singleton (e.g. the account id and sharing domain).
+  getSingletonGatekeeperClass?(): Promise<DurableObjectClass<Gatekeeper<any>>>;
+
+  // The account's full-page management UI (iframe HTML + ui capability). `context.isAdmin` is passed
+  // fresh per open (not baked into the account) so admin-gated features reflect current status.
+  startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
+
   // TODO:
   // - Query whether account has scope to access a particular URL.
 }
@@ -476,6 +591,17 @@ export interface Gatekeeper<Session> extends DurableObject {
   // simulation -- it is really up to the gatekeeper author to decide what is appropriate for the
   // particular API.
   startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<Session>;
+
+  // Bounded, user-specific metadata the agent uses to discover entries reachable through this
+  // gatekeeper's session, without paging the full session API. Implemented only by gatekeepers
+  // whose session benefits from a discovery index (e.g. an agent singleton like the Context
+  // Library); most gatekeepers omit it. Catalog access is an observation, so the implementation
+  // must authorize it via `authorizer.authorizeObservation()` before returning metadata. Returns
+  // null when there is no catalog. Use `boundAgentCatalog()` to enforce the size limits.
+  getAgentCatalog?(
+    request: AgentCatalogRequest,
+    authorizer: RpcStub<ObservationAuthorizer>,
+  ): Promise<AgentCatalog | null>;
 
   // ---------------------------------------------------------------------------
   // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
@@ -526,15 +652,7 @@ export interface Gatekeeper<Session> extends DurableObject {
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}>;
 }
 
-// Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
-// action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
-// actually required, the gatekeeper must still submit all actions and wait for apply() to be
-// called before applying them.
-export interface ApprovalQueue extends RpcTarget {
-  // TODO: Method to indicate that the gadget tried to perform an action that the gatekeeper itself
-  //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
-  //   system should direct the user to the right UI to authorize the action.
-
+export interface ObservationAuthorizer extends RpcTarget {
   // Check whether the gadget should be permitted to make an observation (that is, to read some
   // data from an external service). The gatekeeper calls this on every read operation, and must
   // wait for the response before returning anything to the gadget. The method will return normally
@@ -546,6 +664,16 @@ export interface ApprovalQueue extends RpcTarget {
   // as the operation is strictly read-only, and the call is made before actually returning any
   // data to the gadget, this is OK.
   authorizeObservation(description: ObservationDescription): Promise<void>;
+}
+
+// Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
+// action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
+// actually required, the gatekeeper must still submit all actions and wait for apply() to be
+// called before applying them.
+export interface ApprovalQueue extends ObservationAuthorizer {
+  // TODO: Method to indicate that the gadget tried to perform an action that the gatekeeper itself
+  //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
+  //   system should direct the user to the right UI to authorize the action.
 
   // Submit an action for approval.
   //

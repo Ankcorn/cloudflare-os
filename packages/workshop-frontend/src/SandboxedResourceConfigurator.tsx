@@ -2,14 +2,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { ResourceConfiguratorFrame, ResourceConfiguratorHost, ResourceConfiguratorIframe } from '@gadgets/workshop-shared/gatekeeper'
+import { createRateLimitedCapability } from './rateLimitedCapability'
 
 // Upper bound on iframe height. Sized to leave room for a typical configurator form plus an open
 // autocomplete popup, while staying within a reasonable viewport even on short screens.
 const MAX_CONFIGURATOR_HEIGHT = 720
 const MIN_CONFIGURATOR_HEIGHT = 80
-const MAX_CONFIGURATOR_RPC_CONCURRENCY = 4
-const MAX_CONFIGURATOR_RPC_CALLS_PER_MINUTE = 120
-const MAX_CONFIGURATOR_RPC_PENDING_CALLS = 32
 // Cap on each scroll delta forwarded from the iframe, so a misbehaving iframe can't post
 // extreme values to scroll-jack the host modal.
 const SCROLL_FORWARD_MAX_DELTA = 1000
@@ -17,66 +15,6 @@ const COLLECT_VALUES_TIMEOUT_MS = 5000
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
-}
-
-function createRateLimitedConfigurator(configurator: any): any {
-  type QueuedCall = {
-    method: string
-    args: unknown[]
-    resolve: (value: unknown) => void
-    reject: (reason?: unknown) => void
-  }
-
-  const startedCalls: number[] = []
-  const queue: QueuedCall[] = []
-  let inFlight = 0
-
-  const pruneCallWindow = () => {
-    const cutoff = Date.now() - 60_000
-    while (startedCalls.length > 0 && startedCalls[0] < cutoff) startedCalls.shift()
-  }
-
-  const drain = () => {
-    pruneCallWindow()
-    while (inFlight < MAX_CONFIGURATOR_RPC_CONCURRENCY && queue.length > 0) {
-      if (startedCalls.length >= MAX_CONFIGURATOR_RPC_CALLS_PER_MINUTE) {
-        queue.shift()?.reject(new Error('Resource configurator made too many requests.'))
-        continue
-      }
-
-      const call = queue.shift()!
-      if (typeof configurator?.[call.method] !== 'function') {
-        call.reject(new Error(`Resource configurator method is not available: ${call.method}`))
-        continue
-      }
-
-      startedCalls.push(Date.now())
-      inFlight++
-      Promise.resolve()
-        .then(() => configurator[call.method](...call.args))
-        .then(call.resolve, call.reject)
-        .finally(() => {
-          inFlight--
-          drain()
-        })
-    }
-  }
-
-  return new Proxy(new (class extends RpcTarget {})(), {
-    get(_target, property) {
-      if (property === 'then') return undefined
-      if (property === Symbol.dispose) return undefined
-      if (typeof property !== 'string') return undefined
-      return (...args: unknown[]) => new Promise((resolve, reject) => {
-        if (queue.length + inFlight >= MAX_CONFIGURATOR_RPC_PENDING_CALLS) {
-          reject(new Error('Resource configurator has too many pending requests.'))
-          return
-        }
-        queue.push({ method: property, args, resolve, reject })
-        drain()
-      })
-    },
-  })
 }
 
 class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfiguratorHost {
@@ -90,7 +28,15 @@ class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfigur
     private readonly getInitialResourceImpl: () => { resourceUrl: string; resourceUrlPattern: string } | null,
   ) {
     super()
-    this.#gatekeeper = createRateLimitedConfigurator(configurator)
+    // The configurator form is short-lived, so a burst past the per-minute cap is always a bug:
+    // reject rather than throttle. (No resume timer is created in reject mode, so no dispose needed.)
+    this.#gatekeeper = createRateLimitedCapability(configurator, {
+      maxConcurrency: 4,
+      maxCallsPerMinute: 120,
+      maxPendingCalls: 32,
+      onRateLimit: 'reject',
+      label: 'Resource configurator',
+    }).capability
   }
 
   get gatekeeper(): RpcStub<RpcTarget> {

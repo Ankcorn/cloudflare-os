@@ -1,6 +1,7 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnectedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnectedAccountsSubscriber, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api';
+import { Gatekeeper, GatekeeperUser, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
@@ -18,7 +19,31 @@ type ConnectedAccountRecord = {
   vendorId: string;   // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
   credentialExpiresAt?: Date;    // When credentials are expected to expire, if known.
   credentialsExpired?: boolean;  // Set true by async notification from gatekeeper.
+  // True if the Workshop created this account automatically via GatekeeperVendor.createAccount()
+  // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
+  // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
+  autoProvisioned?: boolean;
 };
+
+// Metadata about an auto-provisioned account that provides an agent singleton and/or a management UI.
+// Returned to the overseer (ambient capsules / catalog) and the management-UI listing.
+export type ProvidedAccountInfo = {
+  accountId: number;
+  vendorId: string;
+  description: AccountDescription;   // carries `singleton` / `providesUi` declarations
+};
+
+// The singleton/UI methods (createAccount on GatekeeperVendor; getSingletonGatekeeperClass /
+// startAppUi on GatekeeperUser) are optional on their interfaces. We don't need to probe whether a
+// method is present — we already know from the declaration flags (autoProvisionsAccount /
+// description.singleton / .providesUi) that we gated on — but TypeScript still can't call an optional
+// method on the mapped stub type directly, so we view the stub through a plain shape that marks the
+// needed method required. These are derived from the source interfaces (Pick + Required) rather than
+// re-declared, so they can't drift. They are intentionally NOT wrapped in Service/Fetcher: a plain
+// shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
+// usable directly, the way the runtime stub actually behaves.
+type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
+type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -833,7 +858,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
-      : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
+      : Promise<GatekeeperVendorInfo[]> {
     let options = {
       userId: this.storage.profile.get().id
     };
@@ -843,7 +868,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let config = await readAdminConfig(this.env);
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
-    let promises: Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}|null>[] = [];
+    let promises: Promise<GatekeeperVendorInfo | null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
       if (disabledGatekeeperSet.has(id)) {
@@ -896,6 +921,185 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return {url};
   }
 
+  // Iterate every connected-account record. A deserialization failure (currently possible when a
+  // record's account stub points at a gatekeeper worker that's no longer bound) is allowed to
+  // propagate rather than be swallowed: that's a runtime bug to fix (it should yield a stub that
+  // fails on invoke, not throw here), and silently skipping records would also mask other failures.
+  *#connectedAccountRecords(): Generator<ConnectedAccountRecord> {
+    let nextAccountId = this.storage.nextAccountId.get();
+    for (let id = 0; id < nextAccountId; id++) {
+      let rec = this.storage.connectedAccounts.get(id);
+      if (rec) yield rec;
+    }
+  }
+
+  // Whether this user already has a connected account for the given vendor.
+  #hasAccountForVendor(vendorId: string): boolean {
+    for (let rec of this.#connectedAccountRecords()) {
+      if (rec.vendorId === vendorId) return true;
+    }
+    return false;
+  }
+
+  // Resolve every bound vendor that auto-provisions an account (VendorDescription.autoProvisionsAccount),
+  // describing them in parallel and dropping any whose describe() fails. Shared discovery step for both
+  // listing and auto-provisioning ambient gatekeepers; callers apply their own admin-mode filter.
+  async #ambientVendors():
+      Promise<Array<{vendorId: string, vendor: Service<GatekeeperVendor>, description: VendorDescription}>> {
+    let described = await Promise.all([...this.vendors].map(async ([vendorId, vendor]) => {
+      try {
+        let description = await vendor.describe();
+        return description.autoProvisionsAccount ? {vendorId, vendor, description} : null;
+      } catch (err) {
+        console.error(`Failed to describe vendor "${vendorId}":`, err);
+        return null;
+      }
+    }));
+    return described.filter(v => v !== null);
+  }
+
+  // The ambient gatekeepers the user can opt into now: mode "optional" and not yet added. Backs the
+  // Connectors "Available" section. ("enabled" ones are already provisioned; "disabled" ones aren't
+  // offered.)
+  async listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
+    let config = await readAdminConfig(this.env);
+    return (await this.#ambientVendors())
+        .filter(({vendorId}) =>
+            ambientGatekeeperMode(config, vendorId) === "optional" && !this.#hasAccountForVendor(vendorId))
+        // Same shape as listGatekeeperVendors; ambient gatekeepers expose no resources.
+        .map(({vendorId, description}) => ({id: vendorId, description, supportedResources: []}));
+  }
+
+  // Per-vendor dedup of concurrent provisionAmbientAccount() calls — same DO-input-gate race as
+  // #ensureAccountsPromise (see its comment below), e.g. a double-click on "Add". Cleared on completion.
+  #provisionPromises = new Map<string, Promise<void>>();
+
+  // Opt into an ambient gatekeeper on demand: mint its connected account for this user (no OAuth).
+  // Only when the vendor's mode isn't "disabled" and the user has no account yet. Idempotent.
+  provisionAmbientAccount(vendorId: string): Promise<void> {
+    vendorId = vendorId.toLowerCase();
+    let inFlight = this.#provisionPromises.get(vendorId);
+    if (inFlight) return inFlight;
+    let promise = this.#provisionAmbientAccount(vendorId)
+        .finally(() => { this.#provisionPromises.delete(vendorId); });
+    this.#provisionPromises.set(vendorId, promise);
+    return promise;
+  }
+
+  async #provisionAmbientAccount(vendorId: string): Promise<void> {
+    let vendor = this.vendors.get(vendorId);
+    if (!vendor) throw new Error("No such service: " + vendorId);
+
+    if (ambientGatekeeperMode(await readAdminConfig(this.env), vendorId) === "disabled") {
+      throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
+    }
+
+    let description = await vendor.describe();
+    if (!description.autoProvisionsAccount) {
+      throw new Error(`The "${vendorId}" gatekeeper can't be added this way.`);
+    }
+
+    if (this.#hasAccountForVendor(vendorId)) return;  // already added
+
+    await this.#createAutoProvisionedAccount(vendorId, vendor);
+  }
+
+  // Mint a vendor's connected account with no OAuth flow and persist it as auto-provisioned. The
+  // caller must have already confirmed the vendor sets autoProvisionsAccount (so createAccount is
+  // present) and that the user has no account for it yet.
+  async #createAutoProvisionedAccount(vendorId: string, vendor: Service<GatekeeperVendor>): Promise<void> {
+    let account = await (vendor as unknown as AccountCreatorStub).createAccount();
+    // Resolve the description before allocating the id, so a describe() failure doesn't burn a slot.
+    let description = await account.describe();
+    let accountId = this.storage.nextAccountId.get();
+    this.storage.nextAccountId.put(accountId + 1);
+    this.storage.connectedAccounts.put({
+      id: accountId,
+      account,
+      description,
+      vendorId,
+      autoProvisioned: true,
+    });
+  }
+
+  // Dedup concurrent #ensureAutoProvisionedAccounts() calls. The provisioning loop awaits cross-worker
+  // RPCs (describe/createAccount), which releases the DO input gate; without this, two overlapping
+  // calls (e.g. the nav listing apps while a gadget opens) could both see "not provisioned" and
+  // create duplicate accounts. Cleared on completion so a later call re-checks (e.g. for a gatekeeper
+  // bound after this DO started).
+  #ensureAccountsPromise?: Promise<void>;
+
+  // Ensure an auto-provisioned connected account exists for every bound vendor that requests it
+  // (VendorDescription.autoProvisionsAccount) and is permitted by the provisioning policy. Idempotent
+  // and best-effort: a single failing vendor never blocks the others. Creates at most one account per
+  // vendor. Deduped via #ensureAccountsPromise (above); callers reach it through listProvidedAccounts.
+  #ensureAutoProvisionedAccounts(): Promise<void> {
+    return (this.#ensureAccountsPromise ??=
+      this.#provisionMissingAccounts().finally(() => { this.#ensureAccountsPromise = undefined; }));
+  }
+
+  async #provisionMissingAccounts(): Promise<void> {
+    // Which vendors already have an auto-provisioned account?
+    let provisioned = new Set<string>();
+    for (let rec of this.#connectedAccountRecords()) {
+      if (rec.autoProvisioned) provisioned.add(rec.vendorId);
+    }
+
+    let config = await readAdminConfig(this.env);
+    for (let {vendorId, vendor} of await this.#ambientVendors()) {
+      if (provisioned.has(vendorId)) continue;
+      // Only "enabled" (forced) vendors are auto-provisioned for everyone. "optional" vendors are
+      // added on demand by the user (provisionAmbientAccount); "disabled" ones never.
+      if (!shouldAutoProvisionAccount(config, vendorId)) continue;
+
+      try {
+        await this.#createAutoProvisionedAccount(vendorId, vendor);
+      } catch (err) {
+        console.error(`Failed to auto-provision account for vendor "${vendorId}":`, err);
+      }
+    }
+  }
+
+  // Ensure the user's auto-provisioned accounts exist (idempotent; see #ensureAutoProvisionedAccounts),
+  // then list those that declare an agent singleton and/or a management UI. Folding the ensure in lets
+  // callers (gadget open, app nav) provision and read the accounts back in a single round trip to this
+  // DO. Callers filter on `description.singleton` (ambient capsules / catalog) or
+  // `description.providesUi` (management-UI listing).
+  async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
+    await this.#ensureAutoProvisionedAccounts();
+    let config = await readAdminConfig(this.env);
+    let result: ProvidedAccountInfo[] = [];
+    for (let rec of this.#connectedAccountRecords()) {
+      if (!rec.description.singleton && !rec.description.providesUi) continue;
+      // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
+      // or management UI. (Its data is preserved, so re-enabling restores it.)
+      if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
+      result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+    }
+    return result;
+  }
+
+  // Get the gatekeeper class implementing a singleton account's agent session. The overseer installs
+  // this gatekeeper into the owner's gadgets (as a Facet) like any other gatekeeper, so the session
+  // and catalog run gadget-side in the gatekeeper's own worker — no further round-trips through this
+  // DO. The account capability stays encapsulated here; only the class reference crosses out.
+  async getSingletonGatekeeperClass(accountId: number)
+      : Promise<DurableObjectClass<Gatekeeper<any>> | null> {
+    let record = this.storage.connectedAccounts.get(accountId);
+    // Present only when description.singleton is set; gate on that, then call through the derived
+    // SingletonAccountStub view (see its definition for why the cast is needed).
+    if (!record?.description.singleton) return null;
+    return (record.account as unknown as SingletonAccountStub).getSingletonGatekeeperClass();
+  }
+
+  // Open the full-page management UI for an account that declares one. `context.isAdmin` is supplied
+  // fresh by the caller so admin-gated features reflect the user's current status.
+  async startAccountAppUi(accountId: number, context: AppUiContext): Promise<GatekeeperUiFrame> {
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!record?.description.providesUi) throw new Error("No such app.");
+    return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+  }
+
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
@@ -919,6 +1123,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
     async function notifyAdd(record: ConnectedAccountRecord) {
+      // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
+      // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
+      // nothing to manage, and "disabled" ones are dormant, so both are hidden.
+      if (record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) !== "optional") {
+        return;
+      }
       if (disabledGatekeeperSet.has(record.vendorId)) {
         return;  // Whole gatekeeper disabled by admin.
       }
@@ -1027,6 +1237,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async disconnectAccount(accountId: number): Promise<void> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
+      if (account.autoProvisioned) {
+        // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
+        if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {
+          throw new Error("This account is provided automatically and can't be disconnected.");
+        }
+        // An opt-in ("optional") ambient account: the user added it, so let them remove it. revoke()
+        // gives the gatekeeper a chance to delete its own per-user storage (e.g. the account's
+        // private collections DO) — it's its cleanup hook, not just OAuth revocation. Best-effort:
+        // a gatekeeper that throws (or has nothing to revoke) must not block the user's disconnect.
+        try {
+          await account.account.revoke();
+        } catch (err) {
+          console.error(`revoke() failed disconnecting "${account.vendorId}" account ${accountId}:`, err);
+        }
+        this.storage.connectedAccounts.delete(accountId);
+        return;
+      }
       await account.account.revoke();
       this.storage.connectedAccounts.delete(accountId);
       // Disconnecting the Cloudflare account also clears the AI Gateway billing state (selected

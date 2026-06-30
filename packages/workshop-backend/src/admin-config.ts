@@ -8,7 +8,7 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { BannerConfig, DEFAULT_BANNER_COLOR, isBannerColor } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, DEFAULT_BANNER_COLOR, isAmbientGatekeeperMode, isBannerColor } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY } from "./blueprint-archive.js";
 
@@ -31,6 +31,10 @@ export type AdminConfig = {
   disabledResources: Record<string, string[]>;
   // Fully-disabled gatekeeper vendor ids.
   disabledGatekeepers: string[];
+  // Per-vendor provisioning mode for auto-provisioning ("ambient") gatekeepers (e.g. the Context
+  // Library). Absent ⇒ the default ("optional", see provisioning-policy.ts). Only meaningful for
+  // vendors that declare autoProvisionsAccount.
+  ambientGatekeeperModes: Record<string, AmbientGatekeeperMode>;
 };
 
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
@@ -42,6 +46,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   accentColor: "",
   disabledResources: {},
   disabledGatekeepers: [],
+  ambientGatekeeperModes: {},
 };
 
 function strings(value: unknown): string[] {
@@ -59,6 +64,12 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
         if (list.length > 0) disabledResources[vendorId] = list;
       }
     }
+    let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
+    if (p.ambientGatekeeperModes && typeof p.ambientGatekeeperModes === "object") {
+      for (let [vendorId, mode] of Object.entries(p.ambientGatekeeperModes)) {
+        if (isAmbientGatekeeperMode(mode)) ambientGatekeeperModes[vendorId.toLowerCase()] = mode;
+      }
+    }
     return {
       signupsEnabled: typeof p.signupsEnabled === "boolean" ? p.signupsEnabled : true,
       siteName: typeof p.siteName === "string" ? p.siteName : "",
@@ -71,6 +82,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
       accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
       disabledResources,
       disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
+      ambientGatekeeperModes,
     };
   } catch {
     return { ...DEFAULT_ADMIN_CONFIG };
