@@ -15,6 +15,9 @@ interface ConnectConnectorModalProps {
   supportedResources: SupportedResource[]
   logoUrl?: string
   color?: string
+  // True for an auto-provisioning ("ambient") gatekeeper: confirming adds it directly (no OAuth
+  // redirect), so the call-to-action reads "Add …" rather than "Continue to …".
+  autoProvisions?: boolean
   onOpenChange: (open: boolean) => void
   connecting?: boolean
   // Connect mode: invoked with the `urlPattern`s of the grantable resources the user chose to
@@ -39,6 +42,7 @@ export default function ConnectConnectorModal({
   supportedResources,
   logoUrl,
   color,
+  autoProvisions = false,
   onOpenChange,
   connecting = false,
   onConfirm,
@@ -297,7 +301,7 @@ export default function ConnectConnectorModal({
             </div>
           )}
 
-          {!isManage && (
+          {!isManage && !autoProvisions && (
             <div
               className="relative mt-5 overflow-hidden rounded-lg border border-kumo-line px-4 py-3"
               style={{
@@ -421,7 +425,11 @@ export default function ConnectConnectorModal({
                   disabled={connecting || (granular && noneSelected)}
                   className="min-w-[140px]"
                 >
-                  {connecting
+                  {autoProvisions
+                    ? connecting
+                      ? 'Adding...'
+                      : `Add ${vendorDescription.displayName}`
+                    : connecting
                     ? 'Opening...'
                     : `Continue to ${vendorDescription.displayName}`}
                 </WorkshopButton>

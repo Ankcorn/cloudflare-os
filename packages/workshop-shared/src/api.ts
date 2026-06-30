@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -232,8 +232,7 @@ export interface AuthenticatedApi extends RpcTarget {
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
   // List all third-party services that this account can connect to.
-  listGatekeeperVendors(filter?: GatekeeperVendorFilter)
-      : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]>;
+  listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]>;
 
   // Connect this account to a specific account on a third-party service. Returns the URL which
   // should be opened in a new tab in the user's browser to complete the authorization. When the
@@ -250,6 +249,18 @@ export interface AuthenticatedApi extends RpcTarget {
   // them, or no url if nothing was needed. The updated grant is observable via
   // subscribeConnectedAccounts().
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}>;
+
+  // List the auto-provisioning ("ambient") gatekeepers the user can opt into right now: those set to
+  // 'optional' by the admin that the user hasn't added yet. Rendered as an "Available" section on the
+  // Connectors page. ('enabled' ones are already provisioned; 'disabled' ones aren't offered.) Returns
+  // the same shape as listGatekeeperVendors (with no resources) so the connect UI handles both
+  // identically, routing on `description.autoProvisionsAccount`.
+  listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]>;
+
+  // Opt into an ambient gatekeeper: mint its connected account for this user (no OAuth flow). Only
+  // works while the vendor's mode is 'optional' (or 'enabled') and the user has no account yet; the
+  // new account then appears via subscribeConnectedAccounts(). Throws otherwise.
+  provisionAmbientAccount(vendorId: string): Promise<void>;
 
   // Subscribe to the list of third-party accounts connected to the user's account.
   //
@@ -338,6 +349,18 @@ export interface AuthenticatedApi extends RpcTarget {
   // is updated and subscribers are notified with credentialsValid: true.
   reconnectAccount(accountId: number): Promise<{url: string}>;
 
+  // --- Gatekeeper management apps ---
+
+  // List the gatekeepers that expose a full-page management UI (VendorDescription.providesUi) and are
+  // available to this user. The Workshop renders a nav entry + page per entry. Independent of whether
+  // the gatekeeper is a singleton.
+  listGatekeeperApps(): Promise<GatekeeperAppInfo[]>;
+
+  // Get the app frame (self-contained iframe HTML + the gatekeeper's `ui` capability) for the given
+  // gatekeeper id, or null if there is no such UI-providing gatekeeper. The Workshop hosts the HTML
+  // in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC session.
+  getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null>;
+
   // --- Deployment admin ---
 
   // Whether the current user is a deployment admin. Used by the client to decide whether to show
@@ -353,6 +376,27 @@ export interface AuthenticatedApi extends RpcTarget {
   // TODO:
   // - Edit permissions on a connected account.
 }
+
+// Describes a gatekeeper's management app, for the Workshop nav + page.
+export type GatekeeperAppInfo = {
+  // The vendor id (the GATEKEEPER_<ID> binding suffix, lowercased), used as the URL slug at
+  // /gatekeepers/$id. This is the vendor, not a specific account: it assumes one management-UI
+  // account per vendor per user, which holds for today's auto-provisioned singletons.
+  id: string;
+  // Title for the nav entry / page header.
+  title: string;
+  // Optional icon.
+  icon?: AvatarImage;
+};
+
+// ---------------------------------------------------------------------------
+// Context Library — pluggable separate worker (packages/gatekeeper-context)
+// ---------------------------------------------------------------------------
+//
+// The Context Library lives in its own Worker, bound as the auto-provisioned gatekeeper
+// GATEKEEPER_CONTEXT. Core implements none of its logic and owns none of its types (those live in
+// the gatekeeper package): the account mints a management capability (the iframe app's `ui`, treated
+// opaquely here) and a read session (the agent read-path, auto-provided as an unnamed capsule).
 
 // Maximum length (characters) of the admin announcement / banner text.
 export const MAX_ANNOUNCEMENT_LENGTH = 2000;
@@ -395,15 +439,37 @@ export type AdminResource = {
   enabled: boolean;
 };
 
-// A bound gatekeeper and its resource types, for the admin resource-config UI.
+// Provisioning mode for an auto-provisioning ("ambient") gatekeeper — one that mints a connected
+// account with no OAuth flow (VendorDescription.autoProvisionsAccount), e.g. the Context Library:
+//   - 'disabled': not available; no account is provisioned and any existing one is dormant.
+//   - 'optional': users opt in from the Connectors page; not forced on anyone (the default).
+//   - 'enabled':  auto-provisioned for every user (forced); they can't remove it.
+export const AMBIENT_GATEKEEPER_MODES = ['disabled', 'optional', 'enabled'] as const;
+export type AmbientGatekeeperMode = typeof AMBIENT_GATEKEEPER_MODES[number];
+
+export function isAmbientGatekeeperMode(value: unknown): value is AmbientGatekeeperMode {
+  return AMBIENT_GATEKEEPER_MODES.includes(value as AmbientGatekeeperMode);
+}
+
+// A bound gatekeeper in the admin gatekeeper-config UI, discriminated by `autoProvisions`:
+//   - an ordinary OAuth/resource gatekeeper has a binary `enabled` flag and `resources` to toggle;
+//   - an auto-provisioning ("ambient") gatekeeper has a three-state `ambientMode` and no resources.
 export type AdminResourceVendor = {
   vendorId: string;
   displayName: string;
   logo?: AvatarImage;
-  // Whether the whole gatekeeper is enabled. When false, its resources are unavailable regardless of
-  // their individual enabled flags.
-  enabled: boolean;
-  resources: AdminResource[];
+} & (
+  | { autoProvisions: false; enabled: boolean; resources: AdminResource[] }
+  | { autoProvisions: true; ambientMode: AmbientGatekeeperMode }
+);
+
+// A connectable third-party service: its vendor id, display metadata, and the resource types it
+// offers (empty for an auto-provisioning gatekeeper like the Context Library). Returned by both
+// listGatekeeperVendors and listAddableGatekeepers so the connect UI treats both uniformly.
+export type GatekeeperVendorInfo = {
+  id: string;
+  description: VendorDescription;
+  supportedResources: SupportedResource[];
 };
 
 // Maximum length (characters) of the admin-authored agent system-prompt instructions.
@@ -454,9 +520,12 @@ export interface AdminApi {
   // agent; it doesn't revoke a capability a gadget already holds.
   setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void>;
 
-  // Enable or disable an entire gatekeeper (its connectors/resources). Like resource disabling, it
-  // doesn't revoke capabilities a gadget already holds.
-  setGatekeeperEnabled(vendorId: string, enabled: boolean): Promise<void>;
+  // Set a gatekeeper's availability. For an auto-provisioning ("ambient") gatekeeper, `mode` is the
+  // full three-state (disabled / optional / enabled); for an ordinary gatekeeper only 'disabled' /
+  // 'enabled' are valid ('optional' is rejected). Soft enforcement: it doesn't revoke a capability a
+  // gadget already holds, and 'disabled' leaves an ambient account's data dormant rather than deleting
+  // it.
+  setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void>;
 
   // Set the top-bar notice (centered text in the top navigation bar). Pass "" to clear. Rejects over
   // MAX_ANNOUNCEMENT_LENGTH.
@@ -1632,6 +1701,13 @@ export type GatekeeperCreationSpec = {
   // without requiring a live lookup.
   modelProvider?: string;
   modelName?: string;
+} | {
+  // A singleton gatekeeper account (e.g. the Context Library) auto-provided to every gadget as an
+  // unnamed capsule so the agent can read/search it in code. Not user-configured, so excluded from
+  // blueprints; re-added automatically if missing.
+  type: "ambient";
+  vendorId: string;        // the singleton gatekeeper's id (GATEKEEPER_<ID> suffix, lowercased)
+  accountId: number;       // the owner's connected-account id for this singleton (in their user DO)
 };
 
 // User-provided metadata controlling how a gatekeeper binding should appear in blueprints.

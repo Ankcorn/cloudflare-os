@@ -1,11 +1,12 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, isTextLikeAttachmentMimeType } from '@gadgets/workshop-shared/api';
-import { ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
+import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import * as Y from "yjs";
 import { streamText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
+import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
@@ -16,6 +17,23 @@ export type AiChatAgentContext = {
   // If present, this chat was spawned using a spawner, and this was the spawner config at the
   // time.
   spawnerConfig?: AgentSpawnerConfig;
+
+  // The always-available capsules' gatekeeper ids, frozen (and ordered) at the chat's first turn so
+  // their env indices stay stable for the chat's lifetime. See getAlwaysAvailableCapsules.
+  alwaysAvailableCapsuleIds?: number[];
+
+  // Cached discovery catalogs for the always-available capsules, keyed per gatekeeper. Regenerable:
+  // re-fetched when missing/stale (see getAlwaysAvailableCapsules).
+  alwaysAvailableCatalogs?: AgentCatalogSnapshot[];
+};
+
+// A capsule the agent has available in every chat without the user pasting it into a message (e.g.
+// the read session of a connected account that provides a singleton). Surfaced as an unnamed env[N]
+// capsule and promotable to a named binding like any other capsule.
+export type AlwaysAvailableCapsule = {
+  gatekeeperId: number;
+  title: string;
+  catalog: AgentCatalog | null;
 };
 
 // Describes a capsule entry — either a gatekeeper reference or a value capsule from a
@@ -37,6 +55,9 @@ export interface AgentHooks {
   describeBinding(bindingName: string): Promise<string>;
   describeCapsule(name: string, gatekeeperId: number): Promise<string>;
   saveCapsuleAsBinding(gatekeeperId: number, bindingName: string): void;
+  // The capsules to surface to the agent in every chat this turn, without the user pasting them in
+  // (provisioned gadget-side before the turn — see OverseerImpl.ensureAmbientCapsules).
+  getAlwaysAvailableCapsules(chatId: number): Promise<AlwaysAvailableCapsule[]>;
   executeCodeMode(chatId: number, code: string, context: AiChatAgentContext,
                    initiator: AiChatAuthorInfo, initiatorModelId: string,
                    capsules?: CapsuleEntry[], onOutputText?: (delta: string) => void): Promise<string>;
@@ -796,6 +817,28 @@ export async function runAgent(
   // Map gatekeeper IDs that are already in `capsules` back to their index.
   let seenCapsuleGatekeeperIds = new Map<number, number>();
 
+  // Always-available capsules (e.g. the Context Library) take the FIRST env slots, env[0..k-1], so
+  // their indices stay stable for the whole chat; user/message capsules are numbered after them
+  // (env[k..]). getAlwaysAvailableCapsules returns a set frozen at the chat's first turn, so a later
+  // opt-in / disconnect / admin change never renumbers an in-flight chat. (Assigning them last would
+  // shift their indices whenever the user adds a capsule, but the chat history isn't renumbered.)
+  // They describe the agent's environment, so they're announced in the system prompt (slot 1, below)
+  // alongside the bindings list rather than as a synthetic user turn; the content is fixed for the
+  // chat (indices frozen above, catalogs cached), so it stays in the cacheable prefix.
+  let alwaysAvailableResourcesPrompt = "";
+  let alwaysAvailableCapsules = await hooks.getAlwaysAvailableCapsules(chatId);
+  if (alwaysAvailableCapsules.length > 0) {
+    capsules = [];
+    let resources: Array<{title: string, envIndex: number, catalog: AgentCatalog | null}> = [];
+    for (let capsule of alwaysAvailableCapsules) {
+      let idx = capsules.length;
+      capsules.push({ type: "gatekeeper", gatekeeperId: capsule.gatekeeperId });
+      seenCapsuleGatekeeperIds.set(capsule.gatekeeperId, idx);
+      resources.push({ title: capsule.title, envIndex: idx, catalog: capsule.catalog });
+    }
+    alwaysAvailableResourcesPrompt = formatAlwaysAvailableResourcesPrompt(resources);
+  }
+
   for (let msg of chatMessages) {
     switch (msg.type) {
       case "message": {
@@ -1318,7 +1361,9 @@ export async function runAgent(
     modelMessages[0].content = instanceInstructions
         ? `${SPAWNER_SYSTEM_PROMPT}\n\n${instanceInstructions}`
         : SPAWNER_SYSTEM_PROMPT;
-    modelMessages[1].content = systemPromptBindings;
+    modelMessages[1].content = alwaysAvailableResourcesPrompt
+        ? `${systemPromptBindings}\n\n${alwaysAvailableResourcesPrompt}`
+        : systemPromptBindings;
   } else {
     // This is a regular coding agent.
 
@@ -1371,7 +1416,10 @@ export async function runAgent(
           `can; use listConnectableResources to learn a vendor's resource URL patterns first). The ` +
           `user accepts or denies in the chat. If they accept, you'll be resumed and the resource ` +
           `becomes available as a capsule; if they deny, your turn ends and you wait for the user's ` +
-          `next message. Connectable vendors:\n` +
+          `next message.\n` +
+          `If one of these services likely holds information relevant to the task, consider ` +
+          `requesting a connection and reading from it before you answer, instead of answering from ` +
+          `guesswork — a connection often gives you the real information. Connectable vendors:\n` +
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
@@ -1379,7 +1427,9 @@ export async function runAgent(
     modelMessages[0].content = instanceInstructions
         ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
         : SYSTEM_PROMPT;
-    modelMessages[1].content = `${systemPromptFiles}\n\n${systemPromptBindings}${systemPromptConnections}`;
+    modelMessages[1].content =
+        `${systemPromptFiles}\n\n${systemPromptBindings}${systemPromptConnections}` +
+        (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : "");
   }
 
   let maxOutputTokens: number | undefined;
@@ -1755,7 +1805,8 @@ export async function runAgent(
   }
 
   if (agentContext.spawnerConfig) {
-    // Restrict to a narrower set of tools.
+    // Restrict sub-agents to a narrower set of tools: they can inspect and call bindings in code
+    // (which is how they read reference knowledge), but not the full editing/connection surface.
     tools = {
       describeBinding: tools.describeBinding,
       executeCode: tools.executeCode,

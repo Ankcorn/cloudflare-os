@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, AdminApi } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, GatekeeperVendorFilter, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api';
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
@@ -12,7 +12,7 @@ import { readAdminConfig } from "./admin-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { SupportedResource, VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -41,8 +41,8 @@ export { UserDurableObject, GatekeeperConnectCallbackImpl };
 
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
-    CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback, AgentSelfLoopback,
-    TransientStubLoopback };
+    CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,
+    AgentSelfLoopback, TransientStubLoopback };
 
 // Declare optional environment variables here since they may be omitted from wrangler.jsonc.
 type Env = Cloudflare.Env & {
@@ -61,10 +61,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     this.overseers = this.ctx.exports.OverseerDurableObject;
     this.adminSettings = this.ctx.exports.AdminSettings;
+    this.users = this.ctx.exports.UserDurableObject;
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  private users: DurableObjectNamespace<UserDurableObject>;
 
   #isAdmin(): boolean {
     let name = this.user.id.name;
@@ -241,8 +243,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listGadgets();
   }
 
-  listGatekeeperVendors(filter?: GatekeeperVendorFilter)
-      : Promise<{id: string, description: VendorDescription, supportedResources: SupportedResource[]}[]> {
+  listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]> {
     return this.user.listGatekeeperVendors(filter);
   }
 
@@ -252,6 +253,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
     return this.user.ensureAccountResources(accountId, resourceUrlPatterns);
+  }
+
+  listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
+    return this.user.listAddableGatekeepers();
+  }
+
+  provisionAmbientAccount(vendorId: string): Promise<void> {
+    return this.user.provisionAmbientAccount(vendorId);
   }
 
   subscribeConnectedAccounts(
@@ -430,6 +439,35 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async deleteOrphanedBlueprint(blueprintId: string): Promise<void> {
     return this.user.deleteOwnedBlueprint(blueprintId);
+  }
+
+  // --- Gatekeeper management apps ---
+
+  // The management apps available to the current user: their connected accounts that declare a
+  // top-level UI (AccountDescription.providesUi). The app id is the gatekeeper's routing id (its
+  // vendor id, e.g. "context"), so each app is hosted at /gatekeepers/<vendorId>. UI-providing
+  // accounts are auto-provisioned singletons (one per vendor), so the vendor id identifies them.
+  async listGatekeeperApps(): Promise<GatekeeperAppInfo[]> {
+    // listProvidedAccounts provisions auto-provisioned accounts first (idempotent), so their apps
+    // appear in the nav even before the user opens a gadget — in a single round trip.
+    let accounts = await this.user.listProvidedAccounts();
+    return accounts
+        .filter(account => account.description.providesUi)
+        .map(account => ({
+          id: account.vendorId,
+          title: account.description.providesUi!.title,
+          icon: account.description.providesUi!.icon,
+        }));
+  }
+
+  async getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null> {
+    // Self-sufficient: listProvidedAccounts provisions auto-provisioned accounts first (idempotent),
+    // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
+    let accounts = await this.user.listProvidedAccounts();
+    let app = accounts.find(account => account.vendorId === id && account.description.providesUi);
+    if (!app) return null;
+    // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
+    return this.user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
   }
 
   // --- Deployment admin ---

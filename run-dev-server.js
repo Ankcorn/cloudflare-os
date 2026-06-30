@@ -65,6 +65,13 @@ function findGatekeepers(parentDir) {
 }
 
 const gatekeepers = findGatekeepers(PACKAGES_DIR);
+
+// The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
+// like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
+// autoProvisionsAccount, so core auto-provisions one Context account per user. The only extra
+// wiring it needs is a sharingDomain in its binding props (see below).
+const CONTEXT_GATEKEEPER_NAME = "gatekeeper-context";
+
 const configuratorUiWatchers = [];
 
 for (const gk of gatekeepers) {
@@ -203,11 +210,17 @@ for (const gk of gatekeepers) {
   }
 
   for (const gk of gatekeepers) {
-    config.services.push({
+    const binding = {
       binding: bindingName(gk),
       service: gk.name,
       entrypoint: "GatekeeperVendor",
-    });
+    };
+    // The Context gatekeeper namespaces each workshop's data by a "sharingDomain" carried in its
+    // binding props (see packages/gatekeeper-context/src/domain.ts). Dev uses a single domain.
+    if (gk.name === CONTEXT_GATEKEEPER_NAME) {
+      binding.props = { sharingDomain: "dev" };
+    }
+    config.services.push(binding);
   }
 
   if (useWorkersAi) {

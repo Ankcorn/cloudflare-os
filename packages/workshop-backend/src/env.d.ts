@@ -25,6 +25,10 @@ declare global {
       // User avatar storage.
       AVATARS: KVNamespace;                // Workers KV for user avatar images
 
+      // Note: gatekeeper service bindings (GATEKEEPER_*) are intentionally NOT declared here. Core
+      // discovers them generically by scanning env for the GATEKEEPER_ prefix (buildGatekeeperVendorMap)
+      // and never references a specific gatekeeper by name, so naming one here would be wrong.
+
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
       PRODUCT_ANALYTICS?: import("cloudflare:pipelines").Pipeline<ProductAnalyticsRecord>;

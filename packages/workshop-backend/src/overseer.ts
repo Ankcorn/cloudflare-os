@@ -1,14 +1,14 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway";
-import { AgentHooks, AiChatAgentContext, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
+import { AgentHooks, AiChatAgentContext, AlwaysAvailableCapsule, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
 import { readAdminConfig } from "./admin-config";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord } from "./user";
@@ -16,6 +16,7 @@ import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
@@ -119,6 +120,12 @@ type QueuedAgentCallback = {
 
 type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 
+// getAgentCatalog is optional on Gatekeeper; ambient capsules always implement it. After confirming
+// the gatekeeper is an ambient capsule, we view its facet through this derived (Pick + Required)
+// shape to call it — same optional-method-on-a-stub pattern as user.ts's SingletonAccountStub.
+type CatalogGatekeeperFacet =
+    Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "getAgentCatalog">>>;
+
 type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
   included?: boolean;
 };
@@ -149,6 +156,7 @@ function connectionTypeFromCreationSpec(
     case "gatekeeper": return "gatekeeper";
     case "aiModel": return "ai_model";
     case "agentSpawner": return "agent_spawner";
+    case "ambient": return undefined;   // auto-provided, not a user-initiated connection
     case undefined: return undefined;
   }
 }
@@ -2072,8 +2080,9 @@ class OverseerImpl implements AgentHooks {
         let outstandingDescriptions: string[] = [];
         // Scan chat messages to find method names and compute capsule indices for
         // the outstanding callbacks. Capsule indices are assigned sequentially
-        // across all capsule types (gatekeeper + value) in message order.
-        let capsuleIdx = 0;
+        // across all capsule types (gatekeeper + value) in message order — after the
+        // always-available capsules, which occupy the first env[0..k-1] slots (see runAgent).
+        let capsuleIdx = this.getChatAgentContext(chatId).alwaysAvailableCapsuleIds?.length ?? 0;
         let reloadedMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
         for (let msg of reloadedMessages) {
           if (msg.type === "agentCallback") {
@@ -2371,6 +2380,150 @@ class OverseerImpl implements AgentHooks {
   }
 
   // =======================================================================================
+  // Singleton gatekeepers (e.g. the Context Library), provisioned as ambient capsules
+  // =======================================================================================
+
+  #ownerUserDo() {
+    if (!this.ownerId) throw new Error("Gadget is not initialized.");
+    return this.users.get(this.users.idFromString(this.ownerId));
+  }
+
+  // Ensure every singleton account the gadget owner has (e.g. the Context Library) is provisioned
+  // for this gadget as an *unnamed* gatekeeper record, so the agent receives it as a capsule (env[N])
+  // it can read in executeCode — search/list/read recorded as observations — and optionally promote
+  // to a named binding via saveCapsuleAsBinding if its persistent code needs it. (Most gadgets never
+  // call the library programmatically, so a named binding would just be noise.) Idempotent:
+  // provisioned once per gadget and re-added if missing. Called on open(), before any agent turn.
+  //
+  // The session is reached through the owner's stored connected account, not by asserting the owner's
+  // identity to the vendor — so the capability is the account the user actually holds.
+  async ensureAmbientCapsules(): Promise<void> {
+    if (!this.ownerId) return;
+    let ownerDo = this.#ownerUserDo();
+    // listProvidedAccounts ensures the owner's auto-provisioned singleton accounts exist first, so this
+    // single round trip both provisions them and reads them back before we wire up capsules.
+    let accounts = (await ownerDo.listProvidedAccounts())
+        .filter(account => account.description.singleton?.tsType);
+
+    // Reconcile existing ambient capsule records against the owner's current singleton accounts. Each
+    // record is keyed to a specific accountId; if that account is gone (disconnected) or was replaced
+    // (an optional account removed and re-added with a new accountId), the record is stale and would
+    // point the capsule at a deleted account — so remove it. Snapshot the list since we mutate it.
+    let currentAccountId = new Map(accounts.map(account => [account.vendorId, account.accountId]));
+    let bound = new Set<string>();
+    // Snapshot before iterating, since removeGatekeeper() mutates the collection.
+    let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
+    for (let gk of existingGatekeepers) {
+      if (gk.creationSpec?.type !== "ambient") continue;
+      if (currentAccountId.get(gk.creationSpec.vendorId) === gk.creationSpec.accountId) {
+        bound.add(gk.creationSpec.vendorId);
+      } else {
+        this.removeGatekeeper(gk.id);
+      }
+    }
+    let toAdd = accounts.filter(account => !bound.has(account.vendorId));
+    if (toAdd.length === 0) return;
+
+    // Each singleton account provides a normal Gatekeeper class (imbued via ctx.props with whatever
+    // it needs — e.g. account id and sharing domain). We install it as a Facet exactly like any other
+    // gatekeeper, so its session and catalog run gadget-side in the gatekeeper's own worker with no
+    // further round-trips through the owner's user DO. The account capability stays encapsulated in
+    // that DO — only the class reference crosses out.
+    //
+    // Provision the accounts concurrently: on a freshly-created gadget this would otherwise be ~2
+    // serial RPCs per singleton (the getSingletonGatekeeperClass round trip plus addGatekeeper's
+    // describe()). Cap'n Web batches the same-tick getSingletonGatekeeperClass calls into one round
+    // trip, and addGatekeeper allocates its id synchronously (before its first await), so concurrent
+    // adds never collide — ids just land in completion order, which is fine since getAlwaysAvailable-
+    // Capsules orders capsules by id and records key on accountId/vendorId, not id.
+    await Promise.all(toAdd.map(async account => {
+      // Best-effort and isolated per account: a single failing account (e.g. its
+      // getSingletonGatekeeperClass throws) must not block the others or the rest of open().
+      try {
+        let cls = await ownerDo.getSingletonGatekeeperClass(account.accountId);
+        if (!cls) return;
+        // Provision as an unnamed record (no setSuggestedBindingName): it's delivered to the agent as
+        // a capsule, not a named env binding. The agent can promote it later with saveCapsuleAsBinding.
+        await this.addGatekeeper(
+            cls,
+            {type: "ambient", vendorId: account.vendorId, accountId: account.accountId});
+      } catch (err) {
+        console.error(`Failed to provision ambient capsule for vendor "${account.vendorId}":`, err);
+      }
+    }));
+  }
+
+  // The singleton gatekeepers to surface to the agent as unnamed capsules (provisioned by
+  // ensureAmbientCapsules before the turn), each with its progressive-discovery catalog.
+  //
+  // The set and order are *frozen* per chat: captured on the chat's first turn and reused thereafter,
+  // so the agent's env[] indices for these capsules stay stable for the chat's lifetime even though
+  // the gadget's ambient records can change later (opt-in / disconnect / admin mode). A capsule that
+  // was later disconnected is still listed (so its index slot doesn't shift) but becomes inert; new
+  // singletons the owner gains only appear in chats started afterwards.
+  async getAlwaysAvailableCapsules(chatId: number): Promise<AlwaysAvailableCapsule[]> {
+    let liveById = new Map<number, GatekeeperRecord>();
+    for (let gatekeeper of this.storage.gatekeepers.list()) {
+      if (gatekeeper.creationSpec?.type === "ambient") liveById.set(gatekeeper.id, gatekeeper);
+    }
+
+    let context = this.getChatAgentContext(chatId);
+    let dirty = false;
+    if (context.alwaysAvailableCapsuleIds === undefined) {
+      // Freeze the set + order on first use. Ordered by gatekeeper id (immutable) for determinism.
+      context.alwaysAvailableCapsuleIds = [...liveById.keys()].toSorted((a, b) => a - b);
+      dirty = true;
+    }
+    let frozenIds = context.alwaysAvailableCapsuleIds;
+
+    let {snapshots, changed} = await completeAgentCatalogSnapshot(
+        context.alwaysAvailableCatalogs,
+        frozenIds,
+        async gatekeeperId => {
+          let record = liveById.get(gatekeeperId);
+          if (!record) return null;  // disconnected since the chat froze its set — no catalog.
+          try {
+            using authorizer = new RpcStub<ObservationAuthorizer>(new ApprovalQueueImpl(
+                this, gatekeeperId, {from: "agent", chatId}));
+            // The catalog comes from the installed gatekeeper facet (gadget-side), authorized as an
+            // observation via the approval queue. getAgentCatalog is optional on Gatekeeper; ambient
+            // capsules always implement it (the agent relies on it for discovery), so we view the
+            // facet through CatalogGatekeeperFacet (derived from the contract) to call it directly.
+            // The DurableObjectStub proxy unstubifies the RpcStub param to its target type; the
+            // native stub forwards transparently at runtime.
+            let facet = this.getGatekeeperFacet(gatekeeperId) as unknown as CatalogGatekeeperFacet;
+            let catalog = await facet.getAgentCatalog(
+                {limit: AGENT_CATALOG_MAX_ENTRIES},
+                authorizer as unknown as ObservationAuthorizer);
+            return catalog ? normalizeAgentCatalog(catalog) : null;
+          } catch (error) {
+            console.error(`Failed to load agent catalog for ${record.resourceTitle}:`, error);
+            return null;
+          }
+        });
+    if (changed) {
+      context.alwaysAvailableCatalogs = snapshots;
+      dirty = true;
+    }
+    if (dirty) {
+      // The catalog load above is async, so the chat could have been deleted meanwhile. Don't
+      // resurrect its per-chat storage: deleteChat is the single cleanup point (see its comment) and
+      // removes chatMeta, so a missing chatMeta means the chat is gone.
+      if (this.storage.chatMeta.get(chatId)) {
+        this.storage.chatContext.put(context);
+      }
+    }
+
+    let catalogs = new Map(snapshots.map(entry => [entry.gatekeeperId, entry.catalog]));
+    // Emit a capsule for every frozen id, in frozen order, so the index slots are stable.
+    return frozenIds.map(gatekeeperId => ({
+      gatekeeperId,
+      title: liveById.get(gatekeeperId)?.resourceTitle ?? "(unavailable)",
+      catalog: catalogs.get(gatekeeperId) ?? null,
+    }));
+  }
+
+  // =======================================================================================
   // Blueprint helpers
   // =======================================================================================
 
@@ -2380,6 +2533,11 @@ class OverseerImpl implements AgentHooks {
 
     for (let gk of this.storage.gatekeepers.list()) {
       if (!gk.bindingName) continue;
+
+      // Singleton gatekeepers (e.g. the Context Library) are auto-provided to every gadget, not
+      // user-configured, so they're excluded from blueprints (re-added automatically on open). This
+      // also covers an ambient capsule the agent promoted to a named binding via saveCapsuleAsBinding.
+      if (gk.creationSpec?.type === "ambient") continue;
 
       // Annotation is optional. When absent, the binding is included with an empty
       // description and no resource suggestion. Legacy records may carry an `included:
@@ -3177,7 +3335,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async open(userId: string, profileId: string,
              notifyClosed: NativeRpcStub<() => void>,
              shareKey?: string): Promise<Overseer> {
-    if (!this.impl.ownerId) {
+    let firstOpen = !this.impl.ownerId;
+    if (firstOpen) {
       // This Overseer hasn't been initialized yet.
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
@@ -3219,6 +3378,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {
       this.impl.ownerProfileId = profileId;
+    }
+
+    // Make singleton gatekeepers (e.g. the Context Library) available to the agent as unnamed
+    // capsules. Idempotent and best-effort, so a library hiccup never blocks opening the gadget.
+    // On the very first open we block so the agent's first turn already sees the capsules;
+    // afterwards we reconcile in the background to keep cross-DO latency off every open (a freshly
+    // opted-in or disconnected singleton then lands on a subsequent turn rather than this one).
+    let ensureCapsules = this.impl.ensureAmbientCapsules().catch((err) => {
+      console.error("Failed to ensure singleton gatekeeper capsules:", err);
+    });
+    if (firstOpen) {
+      await ensureCapsules;
+    } else {
+      this.ctx.waitUntil(ensureCapsules);
     }
 
     let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
@@ -4013,6 +4186,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listGatekeepers(): Promise<GatekeeperMetadata[]> {
     let promises = [...this.impl.storage.gatekeepers.list()]
+        // Only named bindings appear here. Ambient capsules are auto-provided unnamed, so this
+        // excludes them — but if the agent promotes one to a named binding (saveCapsuleAsBinding) it
+        // belongs here like any other binding, so we filter on the name alone, not the creationSpec.
         .filter(gk => gk.bindingName !== undefined)
         .map(async (gatekeeper) => {
       return {
@@ -4879,6 +5055,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async deleteChat(chatId: number): Promise<void> {
     this.impl.storage.chatMeta.delete(chatId);
+    this.impl.storage.chatContext.delete(chatId);
     this.impl.deleteChatDraftUpdates(chatId);
 
     // Delete the chat's messages and the attachment content referenced by them. Attachment metadata

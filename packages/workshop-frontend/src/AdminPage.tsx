@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminResourceVendor, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
@@ -150,7 +150,7 @@ export default function AdminPage() {
     // Optimistic update.
     setResourceVendors((prev) =>
       prev.map((v) =>
-        v.vendorId !== vendorId
+        v.vendorId !== vendorId || v.autoProvisions
           ? v
           : { ...v, resources: v.resources.map((r) => (r.urlPattern === urlPattern ? { ...r, enabled } : r)) }
       )
@@ -175,10 +175,32 @@ export default function AdminPage() {
     const key = `gk\u0000${vendorId}`
     setResourceBusy((prev) => new Set(prev).add(key))
     setResourceVendors((prev) =>
-      prev.map((v) => (v.vendorId === vendorId ? { ...v, enabled } : v))
+      prev.map((v) => (v.vendorId === vendorId && !v.autoProvisions ? { ...v, enabled } : v))
     )
     try {
-      await admin.api.setGatekeeperEnabled(vendorId, enabled)
+      await admin.api.setGatekeeperMode(vendorId, enabled ? 'enabled' : 'disabled')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Update failed'
+      toasts.add({ title: message, variant: 'error' })
+      await reloadResources().catch(() => {})
+    } finally {
+      setResourceBusy((prev) => {
+        const next = new Set(prev)
+        next.delete(key)
+        return next
+      })
+    }
+  }
+
+  const handleGatekeeperMode = async (vendorId: string, mode: AmbientGatekeeperMode) => {
+    if (!admin) return
+    const key = `gk\u0000${vendorId}`
+    setResourceBusy((prev) => new Set(prev).add(key))
+    setResourceVendors((prev) =>
+      prev.map((v) => (v.vendorId === vendorId && v.autoProvisions ? { ...v, ambientMode: mode } : v))
+    )
+    try {
+      await admin.api.setGatekeeperMode(vendorId, mode)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Update failed'
       toasts.add({ title: message, variant: 'error' })
@@ -663,29 +685,96 @@ export default function AdminPage() {
       {/* Gatekeeper resources */}
       {activeTab === 'gatekeepers' && (
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeeper resources</h2>
+          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeepers</h2>
           <p className="text-sm text-kumo-subtle mb-5">
-            Turn individual resource types on or off for each connected service. Disabled resources
-            are hidden from the connect UI, the resource picker, and agents. This doesn&rsquo;t revoke
-            access a gadget already holds.
+            Turn connectors and resource types on or off for each service. Auto-provisioned
+            gatekeepers (like the Context Library) have three modes &mdash; disabled, optional, or
+            enabled for everyone. Changes are soft: they don&rsquo;t revoke access a gadget already
+            holds.
           </p>
 
           {resourceVendors.length === 0 && (
             <p className="text-sm text-kumo-subtle">
-              No gatekeepers with configurable resources are installed on this deployment.
+              No configurable gatekeepers are installed on this deployment.
             </p>
           )}
 
           <div className="space-y-6">
             {resourceVendors.map((vendor) => {
               const gkKey = `gk\u0000${vendor.vendorId}`
+
+              // Auto-provisioned ("ambient") gatekeepers use a three-state mode and have no resources.
+              if (vendor.autoProvisions) {
+                const mode = vendor.ambientMode ?? 'optional'
+                const options: { value: AmbientGatekeeperMode; label: string; hint: string }[] = [
+                  { value: 'disabled', label: 'Disabled', hint: 'Off for everyone' },
+                  { value: 'optional', label: 'Optional', hint: 'Users can add it themselves' },
+                  { value: 'enabled', label: 'Enabled', hint: 'On for everyone automatically' },
+                ]
+                return (
+                  <div key={vendor.vendorId}>
+                    <div className="flex items-center gap-3 mb-2 px-3 py-2 rounded-lg bg-kumo-tint/50">
+                      {vendor.logo && (
+                        <img
+                          src={vendor.logo.url}
+                          alt=""
+                          className={`w-5 h-5 object-contain transition-[filter,opacity] ${mode === 'disabled' ? 'grayscale opacity-40' : ''}`}
+                        />
+                      )}
+                      <h3 className={`flex-1 text-sm font-semibold ${mode === 'disabled' ? 'text-kumo-subtle' : 'text-kumo-default'}`}>
+                        {vendor.displayName}
+                      </h3>
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
+                        auto-provisioned
+                      </span>
+                    </div>
+                    <div className="flex gap-2 px-3 py-1">
+                      {options.map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          disabled={resourceBusy.has(gkKey)}
+                          onClick={() => handleGatekeeperMode(vendor.vendorId, opt.value)}
+                          className={`flex-1 rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 ${
+                            mode === opt.value
+                              ? 'border-kumo-brand bg-kumo-brand/10'
+                              : 'border-kumo-line hover:bg-kumo-tint'
+                          }`}
+                        >
+                          <span className="block text-sm font-medium text-kumo-default">{opt.label}</span>
+                          <span className="block text-xs text-kumo-subtle mt-0.5">{opt.hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )
+              }
+
               return (
               <div key={vendor.vendorId}>
-                <div className="flex items-center gap-3 mb-2 px-3 py-2 rounded-lg bg-kumo-tint/50">
+                {/* The whole header row is a toggle target; the Switch stops propagation so it
+                    doesn't double-fire. */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => !resourceBusy.has(gkKey) && handleGatekeeperToggle(vendor.vendorId, !vendor.enabled)}
+                  onKeyDown={(e) => {
+                    if (e.currentTarget !== e.target) return
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      if (!resourceBusy.has(gkKey)) handleGatekeeperToggle(vendor.vendorId, !vendor.enabled)
+                    }
+                  }}
+                  className="flex cursor-pointer items-center gap-3 mb-2 px-3 py-2 rounded-lg bg-kumo-tint/50 hover:bg-kumo-tint transition-colors"
+                >
                   {vendor.logo && (
-                    <img src={vendor.logo.url} alt="" className="w-5 h-5 object-contain" />
+                    <img
+                      src={vendor.logo.url}
+                      alt=""
+                      className={`w-5 h-5 object-contain transition-[filter,opacity] ${vendor.enabled ? '' : 'grayscale opacity-40'}`}
+                    />
                   )}
-                  <h3 className="flex-1 text-sm font-semibold text-kumo-default">
+                  <h3 className={`flex-1 text-sm font-semibold ${vendor.enabled ? 'text-kumo-default' : 'text-kumo-subtle'}`}>
                     {vendor.displayName}
                     {!vendor.enabled && (
                       <span className="ml-2 text-[10px] font-medium px-1.5 py-0.5 rounded-md bg-kumo-tint text-kumo-subtle border border-kumo-line">
@@ -696,11 +785,13 @@ export default function AdminPage() {
                   <span className="text-xs text-kumo-subtle">
                     {vendor.enabled ? 'Enabled' : 'Off'}
                   </span>
-                  <Switch
-                    checked={vendor.enabled}
-                    disabled={resourceBusy.has(gkKey)}
-                    onCheckedChange={(enabled) => handleGatekeeperToggle(vendor.vendorId, enabled)}
-                  />
+                  <span onClick={(e) => e.stopPropagation()}>
+                    <Switch
+                      checked={vendor.enabled}
+                      disabled={resourceBusy.has(gkKey)}
+                      onCheckedChange={(enabled) => handleGatekeeperToggle(vendor.vendorId, enabled)}
+                    />
+                  </span>
                 </div>
                 {/* Resources are hidden while the gatekeeper is disabled — they can't be used
                     until it's re-enabled. */}
@@ -711,7 +802,17 @@ export default function AdminPage() {
                       return (
                         <div
                           key={resource.urlPattern}
-                          className="flex items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-kumo-tint transition-colors"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => !resourceBusy.has(key) && handleResourceToggle(vendor.vendorId, resource.urlPattern, !resource.enabled)}
+                          onKeyDown={(e) => {
+                            if (e.currentTarget !== e.target) return
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              if (!resourceBusy.has(key)) handleResourceToggle(vendor.vendorId, resource.urlPattern, !resource.enabled)
+                            }
+                          }}
+                          className="flex cursor-pointer items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-kumo-tint transition-colors"
                         >
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium text-kumo-default truncate">
@@ -719,13 +820,15 @@ export default function AdminPage() {
                             </p>
                             <p className="text-xs text-kumo-subtle mt-0.5">{resource.description}</p>
                           </div>
-                          <Switch
-                            checked={resource.enabled}
-                            disabled={resourceBusy.has(key)}
-                            onCheckedChange={(enabled) =>
-                              handleResourceToggle(vendor.vendorId, resource.urlPattern, enabled)
-                            }
-                          />
+                          <span onClick={(e) => e.stopPropagation()}>
+                            <Switch
+                              checked={resource.enabled}
+                              disabled={resourceBusy.has(key)}
+                              onCheckedChange={(enabled) =>
+                                handleResourceToggle(vendor.vendorId, resource.urlPattern, enabled)
+                              }
+                            />
+                          </span>
                         </div>
                       )
                     })}

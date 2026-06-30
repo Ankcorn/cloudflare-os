@@ -21,6 +21,7 @@ import { Route as ContextRouteImport } from './routes/context'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as ChatIdRouteImport } from './routes/chat.$id'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
@@ -85,6 +86,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
+  id: '/gatekeepers_/$appId',
+  path: '/gatekeepers/$appId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const GadgetIdRoute = GadgetIdRouteImport.update({
   id: '/gadget/$id',
   path: '/gadget/$id',
@@ -117,6 +123,7 @@ export interface FileRoutesByFullPath {
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
+  '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -134,6 +141,7 @@ export interface FileRoutesByTo {
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
+  '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -152,6 +160,7 @@ export interface FileRoutesById {
   '/blueprint/$id': typeof BlueprintIdRoute
   '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
+  '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -171,6 +180,7 @@ export interface FileRouteTypes {
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
+    | '/gatekeepers/$appId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -188,6 +198,7 @@ export interface FileRouteTypes {
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
+    | '/gatekeepers/$appId'
   id:
     | '__root__'
     | '/'
@@ -205,6 +216,7 @@ export interface FileRouteTypes {
     | '/blueprint/$id'
     | '/chat/$id'
     | '/gadget/$id'
+    | '/gatekeepers_/$appId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -223,6 +235,7 @@ export interface RootRouteChildren {
   BlueprintIdRoute: typeof BlueprintIdRoute
   ChatIdRoute: typeof ChatIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
+  GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -311,6 +324,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/gatekeepers_/$appId': {
+      id: '/gatekeepers_/$appId'
+      path: '/gatekeepers/$appId'
+      fullPath: '/gatekeepers/$appId'
+      preLoaderRoute: typeof GatekeepersAppIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/gadget/$id': {
       id: '/gadget/$id'
       path: '/gadget/$id'
@@ -351,6 +371,7 @@ const rootRouteChildren: RootRouteChildren = {
   BlueprintIdRoute: BlueprintIdRoute,
   ChatIdRoute: ChatIdRoute,
   GadgetIdRoute: GadgetIdRoute,
+  GatekeepersAppIdRoute: GatekeepersAppIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

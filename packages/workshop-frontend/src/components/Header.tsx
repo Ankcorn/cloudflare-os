@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon, List, X } from '@phosphor-icons/react'
 import { useOptionalAuthenticatedApi } from '../AuthContext'
+import { useGatekeeperApps } from '../useGatekeeperApps'
 import { useSiteName } from '../ServerConfigContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
@@ -8,6 +9,7 @@ import TopBarNotice from '../TopBarNotice'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
+  const gatekeeperApps = useGatekeeperApps()
   const siteName = useSiteName()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
@@ -67,6 +69,7 @@ export default function Header() {
               to="/gatekeepers"
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
+              activeOptions={{ exact: true }}
             >
               Gatekeepers
             </Link>
@@ -77,6 +80,17 @@ export default function Header() {
             >
               Explore
             </Link>
+            {gatekeeperApps.map((app) => (
+              <Link
+                key={app.id}
+                to="/gatekeepers/$appId"
+                params={{ appId: app.id }}
+                className={navLinkClass}
+                activeProps={{ className: navLinkActiveClass }}
+              >
+                {app.title}
+              </Link>
+            ))}
           </nav>
         </div>
 
@@ -119,6 +133,7 @@ export default function Header() {
               onClick={closeMobileMenu}
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
+              activeOptions={{ exact: true }}
             >
               Gatekeepers
             </Link>
@@ -130,6 +145,18 @@ export default function Header() {
             >
               Explore
             </Link>
+            {gatekeeperApps.map((app) => (
+              <Link
+                key={app.id}
+                to="/gatekeepers/$appId"
+                params={{ appId: app.id }}
+                onClick={closeMobileMenu}
+                className={navLinkClass}
+                activeProps={{ className: navLinkActiveClass }}
+              >
+                {app.title}
+              </Link>
+            ))}
 
             {auth && (
               <>
