@@ -48,11 +48,12 @@ type Env = Cloudflare.Env & {
 };
 
 function getBaseUrl(env: Env) {
-  return env.BASE_URL || "http://localhost:8787/gatekeeper/<name>";
+  return (env.BASE_URL || "http://localhost:8787/gatekeeper/<name>").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env) {
-  return new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 const SELF_CLOSING_HTML = `<!DOCTYPE html>

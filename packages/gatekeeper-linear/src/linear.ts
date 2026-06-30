@@ -168,11 +168,12 @@ function badRequest(message: string): Response {
 }
 
 function getBaseUrl(env: Env): string {
-  return env.BASE_URL ?? "http://localhost:8787/gatekeeper/linear";
+  return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/linear").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env): string {
-  return new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 function clampPageSize(size?: number): number {

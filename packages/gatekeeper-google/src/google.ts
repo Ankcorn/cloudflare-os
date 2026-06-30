@@ -119,11 +119,12 @@ function validateGmailQueryForGrouping(query: string): void {
 }
 
 function getBaseUrl(env: Env) {
-  return env.BASE_URL || "http://localhost:8787/gatekeeper/google";
+  return (env.BASE_URL || "http://localhost:8787/gatekeeper/google").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env) {
-  return new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 // =======================================================================================

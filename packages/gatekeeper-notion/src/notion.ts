@@ -119,11 +119,12 @@ type StoredAccountInfo = {
 };
 
 function getBaseUrl(env: Env): string {
-  return env.BASE_URL || "http://localhost:8787/gatekeeper/notion";
+  return (env.BASE_URL || "http://localhost:8787/gatekeeper/notion").replace(/\/+$/, "");
 }
 
 function getBasePath(env: Env): string {
-  return new URL(getBaseUrl(env)).pathname;
+  const path = new URL(getBaseUrl(env)).pathname;
+  return path === "/" ? "" : path;
 }
 
 function hexEncode(bytes: Uint8Array): string {
