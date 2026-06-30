@@ -519,6 +519,10 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);

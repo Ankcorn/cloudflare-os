@@ -1103,6 +1103,10 @@ export class HomeAssistantGatekeeperImpl
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(
     approvalQueue: RpcStub<ApprovalQueue>,
   ): Promise<HomeAssistantSession | Area | Label | Device | Entity> {

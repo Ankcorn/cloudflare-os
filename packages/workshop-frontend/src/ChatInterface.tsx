@@ -38,6 +38,7 @@ import {
   File as FileIcon,
   PencilSimple,
   Brain,
+  ShieldCheck,
   Terminal,
   Globe,
   MagnifyingGlass,
@@ -70,6 +71,8 @@ import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gateke
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
+import PreApprovalDialog from "./components/PreApprovalDialog";
+import { usePreApprovalPrompt } from "./usePreApprovalPrompt";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
@@ -1417,6 +1420,9 @@ export const ChatInput = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  canPreApprove = false,
+  onOpenPreApproval,
+  onGatekeeperAttached,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1457,6 +1463,13 @@ export const ChatInput = ({
   onStop?: () => void;
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
+  /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
+  canPreApprove?: boolean;
+  /** Open the pre-approval dialog (owned by the parent). */
+  onOpenPreApproval?: () => void;
+  /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
+   * pre-approval catalog and proactively offer to pre-approve its actions. */
+  onGatekeeperAttached?: () => void;
 }) => {
   const toasts = useKumoToastManager();
   const [inputValue, setInputValue] = useState("");
@@ -1967,6 +1980,8 @@ export const ChatInput = ({
       const [id, description] = await Promise.all([gk.getId(), gk.describe()]);
       insertCapsuleAt(attachCursorPosRef.current, id, description);
       setAttachModalOpen(false);
+      // A new connection may bring auto-approvable actions; let the parent offer to pre-approve.
+      onGatekeeperAttached?.();
     } finally {
       gk[Symbol.dispose]();
     }
@@ -2487,6 +2502,17 @@ export const ChatInput = ({
                   </span>
                   <span className="flex-1">Upload file</span>
                 </DropdownMenu.Item>
+                {canPreApprove && onOpenPreApproval && (
+                  <DropdownMenu.Item
+                    onClick={onOpenPreApproval}
+                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+                  >
+                    <span className="mr-2 inline-flex h-4 w-4 items-center justify-center text-kumo-inactive">
+                      <ShieldCheck size={14} />
+                    </span>
+                    <span className="flex-1">Pre-approve actions</span>
+                  </DropdownMenu.Item>
+                )}
               </DropdownMenu.Content>
             </DropdownMenu>
             <button
@@ -3012,6 +3038,9 @@ interface ChatInterfaceProps {
   // Called after an auto-approval rule is enabled from the chat thread, so other views (the
   // Connections rule list) can refresh without a tab switch or reload.
   onAutoApproveChange?: () => void;
+  // Bumped by the parent when auto-approval state changes elsewhere (e.g. a rule removed on the
+  // Connections tab), so the pre-approval candidate list (and the "+" menu option) stays in sync.
+  autoApproveReloadTrigger?: number;
   sidebarMode?: boolean;
   sidebarWidth?: number;
   onSidebarResize?: (width: number) => void;
@@ -3178,6 +3207,7 @@ function ChatInterface({
   onChatCountChange,
   onAgentActiveChange,
   onAutoApproveChange,
+  autoApproveReloadTrigger,
   sidebarMode,
   sidebarWidth = 280,
   onSidebarResize,
@@ -3225,6 +3255,26 @@ function ChatInterface({
     title: string;
   } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Pre-approval prompt: lists auto-approvable action kinds not yet covered by a rule. Opened on
+  // demand from the chat "+" menu, and proactively when a newly connected gatekeeper brings some.
+  const preApproval = usePreApprovalPrompt(overseer, onAutoApproveChange);
+  const [preApprovalOpen, setPreApprovalOpen] = useState(false);
+  // Re-fetch candidates when auto-approval state changes elsewhere (e.g. a rule removed on the
+  // Connections tab) so the "+" menu offers it again. Guard the initial 0 -- the hook already
+  // fetches on mount, no need to double up.
+  useEffect(() => {
+    if (autoApproveReloadTrigger) void preApproval.refresh();
+  }, [autoApproveReloadTrigger, preApproval.refresh]);
+  const handleGatekeeperConnected = useCallback(() => {
+    // Recompute pre-approval candidates after a connect so the "+" menu reflects any already-bound
+    // gatekeepers. We deliberately do NOT auto-open the dialog here: a freshly-connected gatekeeper
+    // is still an unnamed capsule (the agent binds it later), so it has no pre-approvable actions yet
+    // and refresh() can't surface it. Proactive auto-open at the right moment (binding/hook-enable)
+    // is handled in a follow-up PR.
+    void preApproval.refresh();
+  }, [preApproval.refresh]);
+
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
   );
@@ -4515,6 +4565,8 @@ function ChatInterface({
         gatekeeperId: id,
       });
       setConnectionAccept(null);
+      // A newly accepted connection may bring auto-approvable actions; offer to pre-approve them.
+      void handleGatekeeperConnected();
     } catch (err) {
       console.error("Failed to finalize connection:", err);
       toasts.add({ title: "Failed to add connection", variant: "error" });
@@ -5295,6 +5347,9 @@ function ChatInterface({
             onModelChange={handleModelChange}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
+            canPreApprove={preApproval.candidates.length > 0}
+            onOpenPreApproval={() => setPreApprovalOpen(true)}
+            onGatekeeperAttached={handleGatekeeperConnected}
             minRows={2}
             newChat
           />
@@ -6060,6 +6115,9 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
+                    canPreApprove={preApproval.candidates.length > 0}
+                    onOpenPreApproval={() => setPreApprovalOpen(true)}
+                    onGatekeeperAttached={handleGatekeeperConnected}
                     blockedReason={
                       hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
@@ -6168,6 +6226,17 @@ function ChatInterface({
       <OutOfCreditsModal
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}
+      />
+      <PreApprovalDialog
+        open={preApprovalOpen}
+        candidates={preApproval.candidates}
+        isProcessing={preApproval.isProcessing}
+        onOpenChange={setPreApprovalOpen}
+        onConfirm={async (selected) => {
+          await preApproval.preApprove(selected)
+          setPreApprovalOpen(false)
+        }}
+        onDismiss={() => setPreApprovalOpen(false)}
       />
     </div>
   );

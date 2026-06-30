@@ -29,9 +29,12 @@ interface ConnectionsProps {
   isVisible?: boolean
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
   reloadTrigger?: number
+  // Called after an auto-approval rule changes here (e.g. removed), so other views (the chat's
+  // pre-approval "+" menu) can refresh without a reload.
+  onAutoApproveChange?: () => void
 }
 
-export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger, onAutoApproveChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorLogos = useVendorLogos(authenticatedApi)
@@ -116,6 +119,8 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     try {
       await overseer.removeAutoApprovedActionKind(bindingName, tag)
       await loadGatekeepers()
+      // Let other views (the chat's pre-approval "+" menu) know this kind is pre-approvable again.
+      onAutoApproveChange?.()
     } catch (err) {
       console.error('Failed to disable auto-approval rule:', err)
       toasts.add({ title: 'Failed to disable auto-approval', variant: 'error' })

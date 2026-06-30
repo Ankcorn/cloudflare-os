@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
   GmailSession, GmailThread, GmailMessage,
@@ -1461,6 +1461,10 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GmailSession> {
     let selfEmail = await this.#getSelfEmail();
@@ -1754,6 +1758,12 @@ type GoogleDocGatekeeperImplProps = {
   documentId: string;
 }
 
+// All Google Doc edits (replaceText, appendText, ...) are grouped under a single action kind
+const EDIT_DOCUMENT_ACTION: ActionKind = {
+  tag: "editDocument",
+  label: "Document edits",
+};
+
 @validateRpc()
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
@@ -1787,6 +1797,10 @@ export class GoogleDocGatekeeperImpl
 
   async getTypeScriptTypes(): Promise<string> {
     return DOCS_TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [EDIT_DOCUMENT_ACTION];
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
@@ -2036,7 +2050,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
           `**New:** ${newPreview}`,
         implementsRevert: false,
         // Group all document edits under one tag
-        actionKind: { tag: "editDocument", label: "Document edits" },
+        actionKind: EDIT_DOCUMENT_ACTION,
         autoApprovable: true,
       });
     } catch (error) {
@@ -2067,7 +2081,7 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
         description: `Append content to the end of the document:\n\n${preview}`,
         implementsRevert: false,
         // Same "editDocument" tag as replaceText
-        actionKind: { tag: "editDocument", label: "Document edits" },
+        actionKind: EDIT_DOCUMENT_ACTION,
         autoApprovable: true,
       });
     } catch (error) {
@@ -2132,6 +2146,10 @@ export class BigQueryGatekeeperImpl
 
   async getTypeScriptTypes(): Promise<string> {
     return BIGQUERY_TYPES_CODE;
+  }
+
+  async getAutoApprovableActions() {
+    return [];
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<BigQuerySession> {
