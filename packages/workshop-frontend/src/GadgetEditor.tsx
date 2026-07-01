@@ -884,6 +884,7 @@ export default function GadgetEditor() {
                    onChatCountChange={handleChatCountChange}
                    onAgentActiveChange={handleAgentActiveChange}
                    onAutoApproveChange={() => setAutoApproveReloadTrigger(t => t + 1)}
+                   autoApproveReloadTrigger={autoApproveReloadTrigger}
                    onHasAnyCodeChange={setHasAnyProposedChanges}
                    onSelectedChatHasProposedChangesChange={setSelectedChatHasProposedChanges}
                  />
@@ -1016,6 +1017,7 @@ export default function GadgetEditor() {
                   overseer={overseer.stub}
                   authenticatedApi={authenticatedApi}
                   onConnectionsChange={() => setUiReloadTrigger(t => t + 1)}
+                  onAutoApproveChange={() => setAutoApproveReloadTrigger(t => t + 1)}
                   isVisible={activeTab === 'connections'}
                   onHasGatekeepersChange={setHasBindings}
                   reloadTrigger={autoApproveReloadTrigger}

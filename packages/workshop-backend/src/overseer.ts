@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -4475,6 +4475,31 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return result;
   }
 
+  async listPreApprovableActions(): Promise<PreApprovableAction[]> {
+    // TODO: a single gatekeeper failing (e.g. a rejected RPC) currently fails the whole catalog,
+    // since we let getAutoApprovableActions() reject. Eventually we should isolate per-gatekeeper
+    // failures and surface them to the UI (e.g. return the actions we could gather plus a list of
+    // gatekeepers we couldn't reach) so one bad connection doesn't hide everyone else's actions.
+    let perGatekeeper = [...this.impl.storage.gatekeepers.list()]
+        .filter((gk): gk is typeof gk & { bindingName: string } => gk.bindingName !== undefined)
+        .map(async (gk): Promise<PreApprovableAction[]> => {
+      let facet = this.impl.getGatekeeperFacet(gk.id);
+      let kinds = await facet.getAutoApprovableActions();
+      return kinds.map(actionKind => ({
+        bindingName: gk.bindingName,
+        // resourceTitle is a denormalized cache of the gatekeeper's describe().title, populated in a
+        // second step after the record is first persisted (see addGatekeeper). It can be absent if
+        // that describe() failed, or for records predating the field, so fall back to a placeholder.
+        resourceTitle: gk.resourceTitle || "(title unavailable)",
+        actionKind,
+        alreadyEnabled:
+            this.impl.storage.autoApproveTags.get(`${gk.id}:${actionKind.tag}`) !== undefined,
+      }));
+    });
+
+    return (await Promise.all(perGatekeeper)).flat();
+  }
+
   // Find a pending connectionRequest message by id. The request id encodes the chat id as a prefix
   // (`${chatId}:...`) so we only scan that thread's messages.
   #findConnectionRequest(requestId: string): AiChatMessage & {type: "connectionRequest"} {
@@ -5530,6 +5555,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async updateCode(_update: Uint8Array, _chatId?: number): Promise<void> { this.#deny(); }
   async listGatekeepers(): Promise<GatekeeperMetadata[]> { this.#deny(); }
+  async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeper(_bindingName: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
@@ -5790,6 +5816,10 @@ export class AgentSpawnerGatekeeper
 
   async getTypeScriptTypes(): Promise<string> {
     return AGENT_SPAWNER_BINDING_TYPES;
+  }
+
+  async getAutoApprovableActions() {
+    return [];
   }
 
   async startSession(approvalQueue: NativeRpcStub<ApprovalQueue>)

@@ -577,6 +577,13 @@ export interface Gatekeeper<Session> extends DurableObject {
   // API space of the vendor, which may support many kinds of resources.
   getTypeScriptTypes(): Promise<string>;
 
+  // Catalog of action kinds this gatekeeper MAY auto-apply without per-action review, for
+  // pre-approval UIs that must list them before any action has been submitted. Each entry is the
+  // {tag, label} an action of that kind carries on its ActionDescription.actionKind. This is the
+  // *potential* set; the per-action `autoApprovable` verdict is still the binding gate at apply
+  // time. Gatekeepers with no auto-approvable actions return [].
+  getAutoApprovableActions(): Promise<ActionKind[]>;
+
   // Get the capability representing this resource's RPC interface which will be provided to the
   // Gadget.
   //

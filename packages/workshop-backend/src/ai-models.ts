@@ -210,6 +210,10 @@ export class LanguageModelGatekeeper
     return AI_MODEL_BINDING_TYPES;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator);

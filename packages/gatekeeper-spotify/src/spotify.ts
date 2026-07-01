@@ -1004,6 +1004,10 @@ export class SpotifyGatekeeperImpl extends DurableObject<Env, SpotifyGatekeeperI
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<SpotifyAccountSession | SpotifyPlaylist> {
     const queue = approvalQueue.dup();
     if (this.ctx.props.resourceKind === "playlist") {

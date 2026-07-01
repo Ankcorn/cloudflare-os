@@ -3137,6 +3137,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async submitActionForApproval(
     approvalQueue: RpcStub<ApprovalQueue>,
     action: GitHubAction,

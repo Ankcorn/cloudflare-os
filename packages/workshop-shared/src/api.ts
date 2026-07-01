@@ -990,6 +990,12 @@ export interface Overseer extends RpcTarget {
   // List the currently-enabled auto-approval rules.
   listAutoApprovedActionKinds(): Promise<Array<{ bindingName: string; actionKind: ActionKind }>>;
 
+  // List action kinds across all connected gatekeepers that could be pre-approved for auto-apply,
+  // for the proactive pre-approval UI. Surfaces them before any action has been submitted so an
+  // unattended gadget (e.g. one with an enabled hook) doesn't stall waiting for approval. Each entry
+  // marks whether an auto-approval rule is `alreadyEnabled`.
+  listPreApprovableActions(): Promise<PreApprovableAction[]>;
+
   // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
   // is responsible for having actually created the gatekeeper (via newGatekeeper()) and passes the
   // resulting gatekeeper id. The gatekeeper is surfaced to the agent as a chat-scoped capsule (the
@@ -1674,6 +1680,17 @@ export type GatekeeperMetadata = {
   bindingName: string;
   resourceTitle: string;
   vendorId?: string;
+};
+
+// An action kind that could be pre-approved for auto-application on a specific connection, surfaced
+// before any action has been submitted so an unattended gadget doesn't stall waiting for approval.
+// Aggregated from each gatekeeper's getAutoApprovableActions(); `alreadyEnabled` reflects whether an
+// auto-approval rule for this (bindingName, actionKind.tag) is already in place.
+export type PreApprovableAction = {
+  bindingName: string;
+  resourceTitle: string;
+  actionKind: ActionKind;
+  alreadyEnabled: boolean;
 };
 
 // =======================================================================================

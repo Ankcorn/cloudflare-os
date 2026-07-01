@@ -617,6 +617,10 @@ export class NotionItemGatekeeperImpl extends DurableObject<Env, NotionItemGatek
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(
     approvalQueue: RpcStub<ApprovalQueue>,
   ): Promise<NotionPageSession | NotionDatabaseSession> {
@@ -678,6 +682,10 @@ export class NotionWorkspaceGatekeeperImpl
 
   async getTypeScriptTypes(): Promise<string> {
     return TYPES_CODE;
+  }
+
+  async getAutoApprovableActions() {
+    return [];
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<NotionWorkspaceSession> {

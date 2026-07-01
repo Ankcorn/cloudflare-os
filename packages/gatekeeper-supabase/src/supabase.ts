@@ -909,6 +909,10 @@ export class SupabaseGatekeeperImpl extends DurableObject<Env, SupabaseGatekeepe
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<SupabaseProject | SupabaseOrganization> {
     const context = this.#makeContext(approvalQueue);
     if (this.ctx.props.resourceKind === "project") {

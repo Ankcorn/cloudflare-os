@@ -21,6 +21,8 @@ import {
   BlueprintBindingCard,
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
+import PreApprovalDialog from './components/PreApprovalDialog'
+import { usePreApprovalPrompt } from './usePreApprovalPrompt'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -29,9 +31,12 @@ interface ConnectionsProps {
   isVisible?: boolean
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
   reloadTrigger?: number
+  // Called after an auto-approval rule changes here (e.g. removed), so other views (the chat's
+  // pre-approval "+" menu) can refresh without a reload.
+  onAutoApproveChange?: () => void
 }
 
-export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger }: ConnectionsProps) {
+export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger, onAutoApproveChange }: ConnectionsProps) {
   const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorLogos = useVendorLogos(authenticatedApi)
@@ -47,6 +52,10 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   // Keyed `${bindingName}:${actionKind.tag}` -- the rule has no numeric id.
   const [togglingRules, setTogglingRules] = useState<Set<string>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
+  // Proactive pre-approval: after connecting a resource, offer to pre-approve its auto-approvable
+  // actions. Scoped to the just-connected binding so we don't re-nag about other connections.
+  const [preApprovalOpen, setPreApprovalOpen] = useState(false)
+  const [preApprovalBinding, setPreApprovalBinding] = useState<string | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
@@ -67,6 +76,13 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       setLoading(false)
     }
   }
+
+  // Drives the pre-approval dialog. onChange fires after a pre-approve write so this tab's own
+  // auto-approval rule list refreshes and other views (the chat "+" menu) can too.
+  const preApproval = usePreApprovalPrompt(overseer, () => {
+    void loadGatekeepers()
+    onAutoApproveChange?.()
+  })
 
   const handleToggleHook = async (id: number, enabled: boolean) => {
     // Optimistically reflect the new state.
@@ -116,6 +132,8 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     try {
       await overseer.removeAutoApprovedActionKind(bindingName, tag)
       await loadGatekeepers()
+      // Let other views (the chat's pre-approval "+" menu) know this kind is pre-approvable again.
+      onAutoApproveChange?.()
     } catch (err) {
       console.error('Failed to disable auto-approval rule:', err)
       toasts.add({ title: 'Failed to disable auto-approval', variant: 'error' })
@@ -498,10 +516,19 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         existingBindings={gatekeepers.map(g => g.bindingName)}
         onCreated={async (gk) => {
           try {
-            await gk.setSuggestedBindingName()
+            // Naming the binding immediately (vs. leaving it an unnamed capsule) is what makes its
+            // auto-approvable actions visible to listPreApprovableActions below.
+            const bindingName = await gk.setSuggestedBindingName()
             toasts.add({ title: 'Connection created successfully', variant: 'success' })
             await loadGatekeepers()
             onConnectionsChange?.()
+            // If this new connection brings any not-yet-approved auto-approvable actions, offer to
+            // pre-approve them right away, scoped to just this binding.
+            const candidates = await preApproval.refresh()
+            if (candidates.some((c) => c.bindingName === bindingName)) {
+              setPreApprovalBinding(bindingName)
+              setPreApprovalOpen(true)
+            }
           } finally {
             gk[Symbol.dispose]()
           }
@@ -516,6 +543,18 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
           toasts.add({ title: 'Blueprint settings saved.', variant: 'success' })
           setAnnotationTarget(null)
         }}
+      />
+
+      <PreApprovalDialog
+        open={preApprovalOpen}
+        candidates={preApproval.candidates.filter((c) => c.bindingName === preApprovalBinding)}
+        isProcessing={preApproval.isProcessing}
+        onOpenChange={setPreApprovalOpen}
+        onConfirm={async (selected) => {
+          await preApproval.preApprove(selected)
+          setPreApprovalOpen(false)
+        }}
+        onDismiss={() => setPreApprovalOpen(false)}
       />
     </div>
   )

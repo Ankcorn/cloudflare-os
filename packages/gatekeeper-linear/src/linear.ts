@@ -1235,6 +1235,10 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
     return TYPES_CODE;
   }
 
+  async getAutoApprovableActions() {
+    return [];
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<LinearWorkspace | LinearTeam | LinearIssue> {
     switch (this.ctx.props.resourceKind) {
       case "team":
