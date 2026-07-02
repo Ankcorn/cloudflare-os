@@ -1,13 +1,16 @@
 import { RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { BigQueryApi } from "./bigquery-api";
+import { GoogleCalendarApi } from "./calendar-api";
 import { GoogleAccessToken } from "./google-api";
 import type { BigQueryConfiguratorRpc } from "./configurator/bigquery-configurator-types";
+import type { CalendarConfiguratorRpc } from "./configurator/calendar-configurator-types";
 import type { GmailConfiguratorRpc } from "./configurator/gmail-configurator-types";
 import type { GoogleDocConfiguratorRpc } from "./configurator/google-doc-configurator-types";
 
 type ConfiguratorOption = { value: string; title: string; subtitle?: string; meta?: string };
 const googleTokenGetters = new WeakMap<object, () => Promise<GoogleAccessToken>>();
+const calendarConfiguratorCaches = new WeakMap<object, Promise<ConfiguratorOption[]>>();
 const bigQueryConfiguratorCaches = new WeakMap<object, Map<string, ConfiguratorOption[]>>();
 const BIGQUERY_CONFIGURATOR_CACHE_MAX_ENTRIES = 200;
 const BIGQUERY_CONFIGURATOR_EMPTY_LIST_OPTIONS = { maxPages: 1, maxResults: 200 };
@@ -26,6 +29,11 @@ function googleToken(target: object): Promise<GoogleAccessToken> {
 async function bigQueryApi(target: object): Promise<BigQueryApi> {
   let token = await googleToken(target);
   return new BigQueryApi(() => Promise.resolve(token.token));
+}
+
+async function calendarApi(target: object): Promise<GoogleCalendarApi> {
+  let token = await googleToken(target);
+  return new GoogleCalendarApi(() => Promise.resolve(token.token));
 }
 
 async function cachedBigQueryOptions(
@@ -59,6 +67,36 @@ function optionMatches(parts: (string | undefined)[], query: string): boolean {
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
 @validateRpc()
 export class GmailConfiguratorUI extends RpcTarget implements GmailConfiguratorRpc {}
+
+// RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
+export class CalendarConfiguratorUI extends RpcTarget implements CalendarConfiguratorRpc {
+  constructor(getToken: () => Promise<GoogleAccessToken>) {
+    super();
+    googleTokenGetters.set(this, getToken);
+  }
+
+  async listCalendars(query: string): Promise<ConfiguratorOption[]> {
+    let options = calendarConfiguratorCaches.get(this);
+    if (!options) {
+      options = (async () => {
+        let api = await calendarApi(this);
+        let calendars = await api.listCalendars({ maxResults: 250 });
+        return calendars.map(calendar => ({
+          value: calendar.id,
+          title: calendar.summary,
+          subtitle: calendar.primary ? "Primary calendar" : calendar.id,
+          meta: calendar.accessRole,
+        }));
+      })();
+      // Don't let a transient API error poison the cache permanently.
+      options.catch(() => calendarConfiguratorCaches.delete(this));
+      calendarConfiguratorCaches.set(this, options);
+    }
+    let resolved = await options;
+    return resolved.filter(option => optionMatches([option.title, option.subtitle, option.value], query));
+  }
+}
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
 @validateRpc()

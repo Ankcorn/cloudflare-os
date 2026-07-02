@@ -14,15 +14,27 @@ import {
   BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryProject,
   BigQueryQueryOptions, BigQueryQueryResult, BigQuerySession, BigQueryTable,
 } from "./bigquery-types";
+import {
+  calendarEventOverlaps, calendarEventSortKey, eventPatchToGoogle, GoogleCalendarApi,
+  validateCalendarTimeWindow,
+} from "./calendar-api";
+import type {
+  CalendarAvailabilityMode, CalendarEvent, CalendarEventDraft, CalendarEventPatch,
+  CalendarListEventsOptions, CalendarSendUpdates, CalendarTime, GoogleCalendarCapabilities,
+  GoogleCalendarInfo, GoogleCalendarSession, PersonAvailability,
+} from "./calendar-types";
 import TYPES_CODE from "./types.txt";
 import DOCS_TYPES_CODE from "./docs-types.txt";
 import BIGQUERY_TYPES_CODE from "./bigquery-types.txt";
+import CALENDAR_TYPES_CODE from "./calendar-types.txt";
 import {
   BigQueryConfiguratorUI,
+  CalendarConfiguratorUI,
   GmailConfiguratorUI,
   GoogleDocConfiguratorUI,
 } from "./google-configurators";
 import BIGQUERY_CONFIGURATOR_HTML from "./generated/bigquery-configurator-ui.txt";
+import CALENDAR_CONFIGURATOR_HTML from "./generated/calendar-configurator-ui.txt";
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
@@ -197,6 +209,14 @@ const GOOGLE_DOC_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
+const GOOGLE_CALENDAR_RESOURCE: SupportedResource = {
+  urlPattern: "https://calendar.google.com/calendar/:calendarId/*",
+  title: "Google Calendar",
+  description:
+      "Read and manage a Google Calendar.",
+  grantable: true,
+};
+
 const BIGQUERY_RESOURCE: SupportedResource = {
   urlPattern: `https://${BIGQUERY_HOST}/:projectId/*`,
   title: "BigQuery",
@@ -218,6 +238,14 @@ const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
       "https://www.googleapis.com/auth/documents",
       // Read-only Drive file metadata, used to power the doc picker when connecting a Google Doc.
       "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ],
+  },
+  {
+    resource: GOOGLE_CALENDAR_RESOURCE,
+    scopes: [
+      // Read-only calendar list, used to power the calendar picker when connecting a calendar.
+      "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+      "https://www.googleapis.com/auth/calendar.events",
     ],
   },
   {
@@ -358,11 +386,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://google.com",
       logo: { url: GOOGLE_LOGO_URL },
       color: "#e8f0fe",
-      tagline: "Draft replies, edit docs, and analyze data",
+      tagline: "Draft replies, edit docs, manage calendars, and analyze data",
       description:
-          "Connect your Google account to give Gadgets access to Gmail, Google Docs, and " +
-          "BigQuery. Build agents that triage email, draft and edit documents, or run analytics " +
-          "queries on your data.",
+          "Connect your Google account to give Gadgets access to Gmail, Google Docs, " +
+          "Google Calendar, and BigQuery. Build agents that triage email, draft and edit " +
+          "documents, find focus time, schedule meetings, or run analytics queries on your data.",
       providesAuth: true,
     };
   }
@@ -395,7 +423,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return [TYPES_CODE, DOCS_TYPES_CODE, BIGQUERY_TYPES_CODE].join("\n");
+    return [TYPES_CODE, DOCS_TYPES_CODE, CALENDAR_TYPES_CODE, BIGQUERY_TYPES_CODE].join("\n");
   }
 }
 
@@ -641,6 +669,25 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {class: this.ctx.exports.GoogleDocGatekeeperImpl({props}), resource: GOOGLE_DOC_RESOURCE};
     }
 
+    if (parsed.hostname === "calendar.google.com" && parsed.pathname.startsWith("/calendar/")) {
+      let calendarId = decodeURIComponent(parsed.pathname.split("/")[2] ?? "");
+      if (!calendarId) {
+        throw new Error("Invalid Google Calendar URL: no calendar ID found");
+      }
+      // Default to the least-privilege scope unless the URL explicitly opts into all calendars.
+      let availabilityMode: CalendarAvailabilityMode =
+          parsed.searchParams.get("availability") === "allVisible" ? "allVisible" : "thisCalendar";
+      let props: GoogleCalendarGatekeeperImplProps = {
+        userObjectId: this.ctx.props.userObjectId,
+        calendarId,
+        availabilityMode,
+      };
+      return {
+        class: this.ctx.exports.GoogleCalendarGatekeeperImpl({props}),
+        resource: GOOGLE_CALENDAR_RESOURCE,
+      };
+    }
+
     if (parsed.hostname === BIGQUERY_HOST) {
       if (parsed.protocol !== "https:") {
         throw new Error(`BigQuery resource URLs must use https: ${url}`);
@@ -726,6 +773,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: GMAIL_CONFIGURATOR_HTML,
         ui: new RpcStub(new GmailConfiguratorUI()),
+      };
+    }
+
+    if (resourceUrlPattern === GOOGLE_CALENDAR_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: CALENDAR_CONFIGURATOR_HTML,
+        ui: new RpcStub(new CalendarConfiguratorUI(getToken)),
       };
     }
 
@@ -2087,6 +2141,472 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
     } catch (error) {
       this.#pendingActions.remove(actionId);
       this.#simulationCache.current = undefined;
+      throw error;
+    }
+  }
+}
+
+// =======================================================================================
+// Google Calendar Gatekeeper
+// =======================================================================================
+
+type GoogleCalendarActionBase = {
+  calendarId: string;
+  submittedAt: number;
+  sendUpdates: CalendarSendUpdates;
+}
+
+type GoogleCalendarCreateAction = GoogleCalendarActionBase & {
+  type: "createEvent";
+  event: CalendarEventDraft;
+}
+
+type GoogleCalendarUpdateAction = GoogleCalendarActionBase & {
+  type: "updateEvent";
+  eventId: string;
+  patch: CalendarEventPatch;
+}
+
+type GoogleCalendarAction = GoogleCalendarCreateAction | GoogleCalendarUpdateAction;
+
+type GoogleCalendarRevertInfo =
+  | {
+      type: "createdEvent";
+      calendarId: string;
+      eventId: string;
+      sendUpdates: CalendarSendUpdates;
+    }
+  | {
+      type: "updatedEvent";
+      calendarId: string;
+      eventId: string;
+      // Prior values of exactly the fields that were changed, so the edit can be patched back.
+      previous: CalendarEventPatch;
+      sendUpdates: CalendarSendUpdates;
+    };
+
+type GoogleCalendarGatekeeperImplProps = {
+  userObjectId: string;
+  calendarId: string;
+  availabilityMode: CalendarAvailabilityMode;
+}
+
+function previewCalendarTime(time: CalendarTime): string {
+  if (time.kind === "date") return time.date;
+  return time.dateTime.toISOString();
+}
+
+function pendingCalendarEventFromDraft(
+  id: number,
+  action: GoogleCalendarCreateAction,
+  opts: CalendarListEventsOptions,
+): CalendarEvent {
+  return {
+    id: `pending:create:${id}`,
+    title: action.event.title,
+    start: action.event.start,
+    end: action.event.end,
+    status: "confirmed",
+    ...(action.event.location ? {location: action.event.location} : {}),
+    ...(opts.includeDescriptions && action.event.description ? {description: action.event.description} : {}),
+    ...(action.event.attendees ? {attendees: action.event.attendees} : {}),
+    ...(action.event.transparency ? {transparency: action.event.transparency} : {}),
+    ...(action.event.visibility ? {visibility: action.event.visibility} : {}),
+    pending: true,
+  };
+}
+
+// Apply a pending updateEvent's patch onto a fetched event in place, so listEvents() reflects the
+// edit before it's approved.
+function applyCalendarPatchToEvent(
+  event: CalendarEvent,
+  patch: CalendarEventPatch,
+  opts: CalendarListEventsOptions,
+): void {
+  if (patch.title !== undefined) event.title = patch.title;
+  if (patch.start !== undefined) event.start = patch.start;
+  if (patch.end !== undefined) event.end = patch.end;
+  if (patch.location !== undefined) event.location = patch.location;
+  if (patch.transparency !== undefined) event.transparency = patch.transparency;
+  if (patch.visibility !== undefined) event.visibility = patch.visibility;
+  if (patch.description !== undefined && opts.includeDescriptions) {
+    event.description = patch.description;
+  }
+  if (patch.attendees !== undefined) {
+    event.attendees = patch.attendees;
+  }
+}
+
+// Build the undo patch for an updateEvent.
+function priorCalendarPatch(oldEvent: CalendarEvent, patch: CalendarEventPatch): CalendarEventPatch {
+  let previous: CalendarEventPatch = {};
+  if (patch.title !== undefined) previous.title = oldEvent.title;
+  if (patch.start !== undefined) previous.start = oldEvent.start;
+  if (patch.end !== undefined) previous.end = oldEvent.end;
+  if (patch.location !== undefined) previous.location = oldEvent.location ?? "";
+  if (patch.description !== undefined) previous.description = oldEvent.description ?? "";
+  if (patch.transparency !== undefined) previous.transparency = oldEvent.transparency ?? "opaque";
+  if (patch.visibility !== undefined) previous.visibility = oldEvent.visibility ?? "default";
+  if (patch.attendees !== undefined) {
+    previous.attendees = (oldEvent.attendees ?? []).map(a => ({
+      email: a.email,
+      ...(a.displayName ? {displayName: a.displayName} : {}),
+      ...(a.optional ? {optional: a.optional} : {}),
+    }));
+  }
+  return previous;
+}
+
+function summarizeCalendarPatch(patch: CalendarEventPatch): string {
+  let parts: string[] = [];
+  if (patch.title !== undefined) parts.push(`title \u2192 "${patch.title}"`);
+  if (patch.start !== undefined) parts.push(`start \u2192 ${previewCalendarTime(patch.start)}`);
+  if (patch.end !== undefined) parts.push(`end \u2192 ${previewCalendarTime(patch.end)}`);
+  if (patch.location !== undefined) parts.push(`location \u2192 "${patch.location}"`);
+  if (patch.description !== undefined) parts.push("description");
+  if (patch.attendees !== undefined) {
+    parts.push(`attendees \u2192 ${patch.attendees.map(a => a.email).join(", ") || "(none)"}`);
+  }
+  if (patch.transparency !== undefined) parts.push(`transparency \u2192 ${patch.transparency}`);
+  if (patch.visibility !== undefined) parts.push(`visibility \u2192 ${patch.visibility}`);
+  return parts.length ? parts.join("; ") : "(no changes)";
+}
+
+function applyPendingCalendarActions(
+  events: CalendarEvent[],
+  pending: {id: number, action: GoogleCalendarAction}[],
+  opts: CalendarListEventsOptions,
+): CalendarEvent[] {
+  let byId = new Map(events.map(event => [event.id, {...event}]));
+  let added: CalendarEvent[] = [];
+
+  for (let {id, action} of pending) {
+    if (action.type === "createEvent") {
+      let event = pendingCalendarEventFromDraft(id, action, opts);
+      if (calendarEventOverlaps(event, opts.timeMin, opts.timeMax)) added.push(event);
+    } else if (action.type === "updateEvent") {
+      let existing = byId.get(action.eventId);
+      if (existing) {
+        applyCalendarPatchToEvent(existing, action.patch, opts);
+        existing.pending = true;
+        if (!calendarEventOverlaps(existing, opts.timeMin, opts.timeMax)) {
+          byId.delete(action.eventId);
+        }
+      }
+    } else {
+      const _exhaustive: never = action;
+      void _exhaustive;
+    }
+  }
+
+  return [...byId.values(), ...added]
+      .toSorted((a, b) => calendarEventSortKey(a) - calendarEventSortKey(b));
+}
+
+function validateEventTimes(start: CalendarTime, end: CalendarTime): void {
+  if (start.kind !== end.kind) {
+    throw new Error("Event start and end must both be all-day (date) or both be timed (dateTime).");
+  }
+  let startMs = start.kind === "date" ? Date.parse(start.date) : start.dateTime.valueOf();
+  let endMs = end.kind === "date" ? Date.parse(end.date) : end.dateTime.valueOf();
+  if (!(endMs > startMs)) throw new Error("Event end must be after start.");
+}
+
+function summarizePeople(people: string[]): string {
+  if (people.length <= 5) return people.join(", ");
+  return `${people.slice(0, 5).join(", ")}, and ${people.length - 5} more`;
+}
+
+export class GoogleCalendarGatekeeperImpl
+    extends DurableObject<Env, GoogleCalendarGatekeeperImplProps>
+    implements Gatekeeper<GoogleCalendarSession> {
+  #accessToken: GoogleAccessToken | undefined;
+
+  // Revert data for already-applied actions, keyed by action id. The overseer no longer round-trips
+  // revert info through applyAction()/revertAction(), so we persist it in our own storage.
+  #revertKey(actionId: number): string {
+    return `revert:info:${actionId}`;
+  }
+
+  async #getAccessToken(): Promise<string> {
+    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
+      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+      this.#accessToken = await stub.getAccessToken();
+    }
+    return this.#accessToken.token;
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let calendar = await api.getCalendar(this.ctx.props.calendarId);
+    let availability = this.ctx.props.availabilityMode === "allVisible"
+        ? " Availability lookup covers all calendars visible to the account."
+        : " Availability lookup is limited to this calendar.";
+    return {
+      url: `https://calendar.google.com/calendar/u/0/r?cid=${encodeURIComponent(this.ctx.props.calendarId)}`,
+      title: `Calendar: ${calendar.summary}`,
+      snippet: `Google Calendar: ${calendar.summary}.${availability}`,
+      suggestedBindingName: "GOOGLE_CALENDAR",
+      tsType: "GoogleCalendarSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return CALENDAR_TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
+      : Promise<GoogleCalendarSession> {
+    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let pendingActions = new PendingActionStore<GoogleCalendarAction>(this.ctx.storage.kv);
+    return new GoogleCalendarSessionImpl(
+      api,
+      this.ctx.props.calendarId,
+      this.ctx.props.availabilityMode,
+      approvalQueue.dup(),
+      pendingActions,
+    );
+  }
+
+  async applyAction(actionId: number): Promise<void> {
+    let pendingActions = new PendingActionStore<GoogleCalendarAction>(this.ctx.storage.kv);
+    let action = pendingActions.get(actionId);
+    if (!action) {
+      throw new Error(`Unknown pending Google Calendar action: ${actionId}`);
+    }
+
+    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    switch (action.type) {
+      case "createEvent": {
+        let created = await api.createEvent(action.calendarId, action.event, action.sendUpdates);
+        pendingActions.remove(actionId);
+        this.ctx.storage.kv.put<GoogleCalendarRevertInfo>(this.#revertKey(actionId), {
+          type: "createdEvent",
+          calendarId: action.calendarId,
+          eventId: created.id,
+          sendUpdates: action.sendUpdates,
+        });
+        return;
+      }
+      case "updateEvent": {
+        let oldEvent = await api.getEvent(action.calendarId, action.eventId);
+        let previous = priorCalendarPatch(oldEvent, action.patch);
+        await api.patchEvent(
+          action.calendarId, action.eventId,
+          eventPatchToGoogle(action.patch), action.sendUpdates);
+        pendingActions.remove(actionId);
+        this.ctx.storage.kv.put<GoogleCalendarRevertInfo>(this.#revertKey(actionId), {
+          type: "updatedEvent",
+          calendarId: action.calendarId,
+          eventId: action.eventId,
+          previous,
+          sendUpdates: action.sendUpdates,
+        });
+        return;
+      }
+      default: {
+        const _exhaustive: never = action;
+        throw new Error(`unknown action type: ${String(_exhaustive)}`);
+      }
+    }
+  }
+
+  async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
+    let pendingActions = new PendingActionStore<GoogleCalendarAction>(this.ctx.storage.kv);
+    pendingActions.remove(actionId);
+  }
+
+  async revertAction(actionId: number)
+      : Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
+    let revertInfo =
+        this.ctx.storage.kv.get<GoogleCalendarRevertInfo>(this.#revertKey(actionId));
+    if (!revertInfo) {
+      return {
+        message: "This Google Calendar action can no longer be reverted automatically. " +
+            "Undo it manually from Google Calendar.",
+      };
+    }
+
+    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    switch (revertInfo.type) {
+      case "createdEvent":
+        await api.deleteEvent(revertInfo.calendarId, revertInfo.eventId, revertInfo.sendUpdates);
+        break;
+      case "updatedEvent":
+        await api.patchEvent(
+          revertInfo.calendarId, revertInfo.eventId,
+          eventPatchToGoogle(revertInfo.previous), revertInfo.sendUpdates);
+        break;
+      default: {
+        const _exhaustive: never = revertInfo;
+        void _exhaustive;
+      }
+    }
+    this.ctx.storage.kv.delete(this.#revertKey(actionId));
+  }
+
+  async setHook(_hook: Fetcher | null): Promise<void> {
+    // No hooks for Google Calendar.
+  }
+}
+
+class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSession {
+  #api: GoogleCalendarApi;
+  #calendarId: string;
+  #availabilityMode: CalendarAvailabilityMode;
+  #approvalQueue: RpcStub<ApprovalQueue>;
+  #pendingActions: PendingActionStore<GoogleCalendarAction>;
+
+  constructor(
+    api: GoogleCalendarApi,
+    calendarId: string,
+    availabilityMode: CalendarAvailabilityMode,
+    approvalQueue: RpcStub<ApprovalQueue>,
+    pendingActions: PendingActionStore<GoogleCalendarAction>,
+  ) {
+    super();
+    this.#api = api;
+    this.#calendarId = calendarId;
+    this.#availabilityMode = availabilityMode;
+    this.#approvalQueue = approvalQueue;
+    this.#pendingActions = pendingActions;
+  }
+
+  async getCapabilities(): Promise<GoogleCalendarCapabilities> {
+    return {availabilityMode: this.#availabilityMode};
+  }
+
+  async getCalendar(): Promise<GoogleCalendarInfo> {
+    let calendar = await this.#api.getCalendar(this.#calendarId);
+    await this.#approvalQueue.authorizeObservation({
+      title: "Read Google Calendar metadata",
+      description: `Read metadata for Google Calendar ${calendar.summary} (${calendar.id}).`,
+    });
+    return calendar;
+  }
+
+  async listEvents(opts: CalendarListEventsOptions): Promise<CalendarEvent[]> {
+    validateCalendarTimeWindow(opts.timeMin, opts.timeMax, 366);
+    let events = await this.#api.listEvents(this.#calendarId, opts);
+    let simulated = applyPendingCalendarActions(events, this.#pendingActions.list(), opts);
+
+    await this.#approvalQueue.authorizeObservation({
+      title: "List Google Calendar events",
+      description:
+          `List ${simulated.length} event(s) on calendar ${this.#calendarId} from ` +
+          `${opts.timeMin.toISOString()} to ${opts.timeMax.toISOString()}.` +
+          (opts.includeDescriptions ? " Event descriptions are included." : ""),
+    });
+
+    return simulated;
+  }
+
+  async checkAvailability(opts: {
+    people: string[];
+    timeMin: Date;
+    timeMax: Date;
+    timeZone?: string;
+  }): Promise<PersonAvailability[]> {
+    validateCalendarTimeWindow(opts.timeMin, opts.timeMax, 90);
+    let people = [...new Set(opts.people.map(person => person.trim()).filter(Boolean))];
+    if (people.length === 0) throw new Error("At least one person or calendar is required.");
+    if (people.length > 50) throw new Error("At most 50 people/calendars can be checked at once.");
+
+    let foreign = people.filter(id => id !== this.#calendarId);
+    if (foreign.length > 0 && this.#availabilityMode === "thisCalendar") {
+      throw new Error(
+          "This connection only allows availability for the bound calendar. Reconnect with " +
+          "\"All calendars visible to me\" to check other calendars' availability.");
+    }
+
+    await this.#approvalQueue.authorizeObservation({
+      title: "Check Google Calendar availability",
+      description:
+          `Check free/busy availability for ${summarizePeople(people)} from ` +
+          `${opts.timeMin.toISOString()} to ${opts.timeMax.toISOString()}. ` +
+          "Only busy time blocks are returned; event details are not read.",
+      ...(foreign.length > 0 ? {prohibitAllSharing: true} : {}),
+    });
+
+    return await this.#api.freeBusy({...opts, people});
+  }
+
+  async createEvent(
+    event: CalendarEventDraft,
+    opts?: { sendUpdates?: CalendarSendUpdates },
+  ): Promise<void> {
+    if (!event.title.trim()) throw new Error("Event title is required.");
+    validateEventTimes(event.start, event.end);
+    let action: GoogleCalendarAction = {
+      type: "createEvent",
+      calendarId: this.#calendarId,
+      submittedAt: Date.now(),
+      sendUpdates: opts?.sendUpdates ?? "all",
+      event,
+    };
+    let actionId = this.#pendingActions.submit(action);
+
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Create calendar event: ${event.title}`,
+        description:
+            `Create event **${event.title}** on calendar ${this.#calendarId} from ` +
+            `${previewCalendarTime(event.start)} to ${previewCalendarTime(event.end)}.` +
+            (event.attendees?.length ? ` Attendees: ${event.attendees.map(a => a.email).join(", ")}.` : "") +
+            ` Send updates: ${action.sendUpdates}.`,
+        implementsRevert: true,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
+  }
+
+  async updateEvent(
+    eventId: string,
+    patch: CalendarEventPatch,
+    opts?: { sendUpdates?: CalendarSendUpdates },
+  ): Promise<void> {
+    if (!eventId.trim()) throw new Error("eventId is required.");
+    if (Object.keys(patch).length === 0) throw new Error("patch must change at least one field.");
+    if (patch.start !== undefined || patch.end !== undefined) {
+      // Validate the resulting start/end pair. If only one side is patched, fetch the event to
+      // get the other side.
+      let start = patch.start;
+      let end = patch.end;
+      if (start === undefined || end === undefined) {
+        let current = await this.#api.getEvent(this.#calendarId, eventId);
+        start ??= current.start;
+        end ??= current.end;
+      }
+      validateEventTimes(start, end);
+    }
+    let action: GoogleCalendarAction = {
+      type: "updateEvent",
+      calendarId: this.#calendarId,
+      submittedAt: Date.now(),
+      sendUpdates: opts?.sendUpdates ?? "all",
+      eventId,
+      patch,
+    };
+    let actionId = this.#pendingActions.submit(action);
+
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Update calendar event ${eventId}`,
+        description:
+            `Update event ${eventId} on calendar ${this.#calendarId}: ` +
+            `${summarizeCalendarPatch(patch)}. ` +
+            `Send updates: ${action.sendUpdates}.`,
+        implementsRevert: true,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
       throw error;
     }
   }

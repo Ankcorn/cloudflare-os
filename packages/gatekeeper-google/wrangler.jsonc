@@ -18,6 +18,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": [ "BigQueryGatekeeperImpl" ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [ "GoogleCalendarGatekeeperImpl" ]
     }
   ],
 }
