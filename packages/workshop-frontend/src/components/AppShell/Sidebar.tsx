@@ -12,6 +12,7 @@ import {
   Stack,
 } from '@phosphor-icons/react'
 import { useSiteName } from '../../ServerConfigContext'
+import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
 import {
@@ -39,6 +40,10 @@ export default function Sidebar({
   onToggleCollapsed: () => void
 }) {
   const siteName = useSiteName()
+  // Gatekeeper-served management apps the user can reach now (one per gatekeeper that provides a UI
+  // and is connected / enabled for everyone). Disabled or not-yet-connected ones aren't returned, so
+  // they simply don't appear. The set is fully dynamic — no gatekeeper is hardcoded.
+  const gatekeeperApps = useGatekeeperApps()
 
   return (
     <aside
@@ -138,13 +143,45 @@ export default function Sidebar({
               icon={<Clock size={14} weight="regular" />}
               collapsed={collapsed}
             />
-            {/* Placeholder destination for now (frosted "coming soon" mock). */}
-            <SidebarItem
-              to="/context"
-              label="Context & Skills"
-              icon={<BookOpen size={14} weight="regular" />}
-              collapsed={collapsed}
-            />
+            {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
+            {gatekeeperApps.map((app) => {
+              // Escape the icon URL for safe interpolation into a CSS url("…") string.
+              const maskUrl = app.icon
+                ? `url("${app.icon.url.replace(/[\\"]/g, '\\$&')}")`
+                : undefined
+              return (
+              <SidebarItem
+                key={app.id}
+                to="/gatekeepers/$appId"
+                params={{ appId: app.id }}
+                label={app.title}
+                icon={
+                  maskUrl ? (
+                    // Render the (monochrome) app icon as a CSS mask filled with the row's current
+                    // text color, so it tints like the Phosphor icons — subtle by default, accent
+                    // when active, darker on hover.
+                    <span
+                      aria-hidden
+                      className="h-3.5 w-3.5 bg-current"
+                      style={{
+                        maskImage: maskUrl,
+                        WebkitMaskImage: maskUrl,
+                        maskRepeat: 'no-repeat',
+                        WebkitMaskRepeat: 'no-repeat',
+                        maskPosition: 'center',
+                        WebkitMaskPosition: 'center',
+                        maskSize: 'contain',
+                        WebkitMaskSize: 'contain',
+                      }}
+                    />
+                  ) : (
+                    <BookOpen size={14} weight="regular" />
+                  )
+                }
+                collapsed={collapsed}
+              />
+              )
+            })}
             <SidebarItem
               to="/explore"
               label="Explore"

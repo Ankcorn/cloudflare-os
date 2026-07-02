@@ -921,14 +921,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return {url};
   }
 
-  // Iterate every connected-account record. A deserialization failure (currently possible when a
-  // record's account stub points at a gatekeeper worker that's no longer bound) is allowed to
-  // propagate rather than be swallowed: that's a runtime bug to fix (it should yield a stub that
-  // fails on invoke, not throw here), and silently skipping records would also mask other failures.
+  // Iterate every connected-account record, skipping any that fails to load. A record can fail to
+  // deserialize when its account stub points at a gatekeeper Worker that's no longer bound in this
+  // deployment (workerd throws "Stub refers to a service that doesn't exist"). Skipping it keeps one
+  // stale account from breaking listing, provisioning, and opt-in for all the others — the same
+  // resilience subscribeConnectedAccounts relies on (it iterates through this).
   *#connectedAccountRecords(): Generator<ConnectedAccountRecord> {
     let nextAccountId = this.storage.nextAccountId.get();
     for (let id = 0; id < nextAccountId; id++) {
-      let rec = this.storage.connectedAccounts.get(id);
+      let rec: ConnectedAccountRecord | undefined;
+      try {
+        rec = this.storage.connectedAccounts.get(id);
+      } catch (err) {
+        console.error(
+            `Skipping connected account #${id}: failed to load. The gatekeeper Worker binding it ` +
+            `was connected to may no longer exist in this deployment.`, err);
+        continue;
+      }
       if (rec) yield rec;
     }
   }
@@ -1194,31 +1203,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       subscriber[Symbol.dispose]();
     };
 
-    let promises: Promise<void>[] = [];
-
-    // We enumerate connected accounts by id rather than via `connectedAccounts.list()` so that a
-    // single corrupt/unreadable record doesn't poison the iterator and prevent us from surfacing
-    // any of the others. The most common cause of a record failing to load is that the
-    // GatekeeperUser stub it holds points at a Worker binding that no longer exists in the
-    // current deployment config (e.g. a gatekeeper that was removed from wrangler.jsonc since
-    // the account was originally connected). In that case workerd throws
-    // "Stub refers to a service that doesn't exist: ..." when deserializing the stored value.
-    let nextAccountId = this.storage.nextAccountId.get();
-    for (let id = 0; id < nextAccountId; id++) {
-      let record: ConnectedAccountRecord | undefined;
-      try {
-        record = connectedAccounts.get(id);
-      } catch (err) {
-        console.error(
-            `Skipping connected account #${id}: failed to load. The gatekeeper Worker ` +
-            `binding it was connected to may no longer exist in this deployment.`, err);
-        continue;
-      }
-      if (!record) continue;
-      promises.push((async () => {
-        await notifyAdd(record);
-      })());
-    }
+    // #connectedAccountRecords() skips any record that fails to load, so a single stale account
+    // (e.g. one whose gatekeeper Worker is no longer bound) doesn't prevent surfacing the others.
+    let promises = [...this.#connectedAccountRecords()].map(record => notifyAdd(record));
 
     connectedAccounts.subscribe(dbSubscriber);
 

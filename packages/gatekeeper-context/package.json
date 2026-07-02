@@ -1,0 +1,38 @@
+{
+  "name": "@gadgets/gatekeeper-context",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "wrangler deploy",
+    "build:app": "node build-app.mjs",
+    "typecheck:app": "tsc -p tsconfig.app.json",
+    "build": "tsc -p tsconfig.app.json && node build-app.mjs && tsc"
+  },
+  "dependencies": {
+    "@gadgets/typed-storage": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "^0.8.0",
+    "capnweb-validate": "0.2.1"
+  },
+  "devDependencies": {
+    "@cloudflare/kumo": "^2.2.1",
+    "@emoji-mart/data": "^1.2.1",
+    "@mdxeditor/editor": "^4.0.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@tailwindcss/vite": "^4.3.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "emoji-mart": "^5.6.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.3",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "wrangler": "^4.92.0"
+  }
+}
