@@ -25,9 +25,15 @@ export default function SidebarItem({
   collapsed = false,
   matchPrefix = false,
 }: SidebarItemProps) {
-  // Resolve the active path manually so we can style the icon as well as the row.
+  // Resolve the active path manually so we can style the icon as well as the row. For parameterized
+  // routes (e.g. "/gatekeepers/$appId"), substitute the params so the resolved path can match.
   const pathname = useRouterState({ select: (s) => s.location.pathname })
-  const target = typeof to === 'string' ? to : ''
+  let target = typeof to === 'string' ? to : ''
+  if (params) {
+    for (const [key, value] of Object.entries(params as Record<string, string>)) {
+      target = target.replaceAll(`$${key}`, String(value))
+    }
+  }
   const isActive = matchPrefix
     ? pathname === target || pathname.startsWith(target + '/')
     : pathname === target
