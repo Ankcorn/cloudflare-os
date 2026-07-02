@@ -10,7 +10,7 @@ import type {
   VendorDescription, AccountDescription, AgentCatalog, AgentCatalogRequest,
   AppUiContext, GatekeeperUser, GatekeeperUiFrame, ApprovalQueue, ObservationAuthorizer,
   GatekeeperConnectCallback, GatekeeperConnectOptions, SupportedResource,
-  Gatekeeper, ResourceDescription,
+  Gatekeeper, ResourceDescription, ActionKind,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { LibraryReadSession } from "./library-read.js";
 import { ContextApiImpl, loadEnabledContextCollections } from "./context-api.js";
@@ -215,6 +215,11 @@ export class ContextGatekeeper
       });
     }
     return catalog;
+  }
+
+  // Read-only gatekeeper: no side-effecting actions, so nothing is ever auto-approvable.
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
   }
 
   // Read-only gatekeeper: no actions are submitted, so these callbacks should never run.
