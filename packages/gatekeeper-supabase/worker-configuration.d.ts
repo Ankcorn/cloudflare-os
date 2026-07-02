@@ -5,7 +5,7 @@ interface __BaseEnv_Env {
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
-		mainModule: typeof import("./.wrangler/validate/src/supabase");
+		mainModule: typeof import("./src/supabase");
 		durableNamespaces: "UserAccount" | "SupabaseGatekeeperImpl";
 	}
 	interface Env extends __BaseEnv_Env {}
