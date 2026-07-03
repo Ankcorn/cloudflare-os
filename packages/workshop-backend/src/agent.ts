@@ -42,6 +42,33 @@ export type CapsuleEntry =
   | { type: "gatekeeper"; gatekeeperId: number }
   | { type: "value"; messageSequence: number };
 
+// Resolves a `describeBinding` tool argument (a binding name or capsule index) to its
+// human-readable description. Shared by the live tool and the replay path so the two can't drift.
+//
+// Some models refer to capsules by string (e.g. `"0"`) rather than number, so integer-string names
+// are coerced to a capsule index. Numeric names resolve against `capsules`; all other names resolve
+// as ordinary bindings via `hooks.describeBinding`.
+async function resolveBindingDescription(
+    name: string | number,
+    capsules: CapsuleEntry[] | undefined,
+    hooks: Pick<AgentHooks, "describeBinding" | "describeCapsule">): Promise<string> {
+  // Some models refer to capsules by string (e.g. "0") rather than number; coerce integer strings.
+  if (typeof name === "string" && /^(?:0|[1-9]\d*)$/.test(name)) name = +name;
+  if (typeof name !== "number") return hooks.describeBinding(name);
+
+  let entry = capsules?.[name];
+  if (!entry) throw new Error(`No such capsule binding env[${name}].`);
+  switch (entry.type) {
+    case "gatekeeper":
+      return hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
+    case "value":
+      return `env[${name}] is a value capsule containing agent callback arguments. ` +
+          `Access it directly as env[${name}] in executeCode.`;
+    default:
+      return entry satisfies never;
+  }
+}
+
 // Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
 // dependencies.
 // TODO(cleanup): This is getting a bit large, and there's a lot of state that is passed into the
@@ -1024,34 +1051,12 @@ export async function runAgent(
                     value: {success: true, changeId: nextChangeId},
                   };
                   break;
-                case "describeBinding": {
-                  let name = toolCall.input.name;
-                  let value: string;
-                  if (typeof name === "number") {
-                    let entry = capsules?.[name];
-                    if (!entry) {
-                      throw new Error(`No such capsule binding env[${name}].`);
-                    } else switch (entry.type) {
-                      case "gatekeeper":
-                        value = await hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
-                        break;
-                      case "value":
-                        value = `env[${name}] is an agent callback capsule. ` +
-                            `Access the callback arguments as env[${name}].args in executeCode. ` +
-                            `Call env[${name}].resolve(value) to return a value, ` +
-                            `or env[${name}].reject(error) to reject with an error.`;
-                        break;
-                      default:
-                        entry satisfies never;
-                        value = "";  // make TS happy below
-                    }
-                  } else {
-                    value = await hooks.describeBinding(name);
-                  }
-
-                  toolOutput = { type: "text", value };
+                case "describeBinding":
+                  toolOutput = {
+                    type: "text",
+                    value: await resolveBindingDescription(toolCall.input.name, capsules, hooks),
+                  };
                   break;
-                }
                 case "setBindingHook":
                   // obsolete, but may appear in old chat logs
                   toolOutput = {
@@ -1626,31 +1631,7 @@ export async function runAgent(
       }),
       execute: async ({name}, {toolCallId}) => {
         try {
-          // Some models don't get that they should refer to capsules by number, not a string.
-          // Help them out by converting integer strings to numbers.
-          if (typeof name === "string" && /^(?:0|[1-9]\d*)$/.test(name)) {
-            name = +name;
-          }
-
-          if (typeof name === "number") {
-            let entry = capsules?.[name];
-            if (!entry) {
-              throw new Error(`No such capsule binding env[${name}].`);
-            } else switch (entry.type) {
-              case "gatekeeper":
-                return await hooks.describeCapsule(`env[${name}]`, entry.gatekeeperId);
-              case "value":
-                // TODO: Maybe replay the value's summary? Better yet, can we obtain the argumnets'
-                //     types from somewhere? (Don't forget to update the replay code, too.)
-                return `env[${name}] is a value capsule containing agent callback ` +
-                    `arguments. Access it directly as env[${name}] in executeCode.`;
-              default:
-                entry satisfies never;
-                return "";  // never actually happens
-            }
-          } else {
-            return await hooks.describeBinding(name);
-          }
+          return await resolveBindingDescription(name, capsules, hooks);
         } catch (error) {
           toolCallNotes.set(toolCallId, {
             error: `${error}`
