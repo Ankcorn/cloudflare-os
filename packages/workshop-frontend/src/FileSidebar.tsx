@@ -391,7 +391,7 @@ function FileRow({
           />
           <DropdownMenu.Content
             onClick={(event) => event.stopPropagation()}
-            className="!z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]"
+            className="themed-floating-shadow !z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1"
           >
             <DropdownMenu.Item
               icon={<Pencil size={12} className="mr-2" />}

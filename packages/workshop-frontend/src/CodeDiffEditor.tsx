@@ -4,10 +4,11 @@ import { Columns, Rows } from '@phosphor-icons/react'
 import type { editor } from 'monaco-editor'
 import type * as Y from 'yjs'
 import { MonacoBinding } from 'y-monaco'
-import { GADGETS_CODE_THEME, defineGadgetsCodeTheme, monoFont } from './components/monacoTheme'
+import { defineGadgetsCodeTheme, getGadgetsCodeTheme, monoFont } from './components/monacoTheme'
 import { buildDiffModel, type DiffModel } from './diff/diffModel'
 import { renderDiffLayer, renderSplitDiffLayer } from './diff/diffRenderer'
 import { getLanguage } from './getLanguage'
+import { useTheme } from './ThemeContext'
 import './CodeDiffEditor.css'
 
 interface CodeDiffEditorProps {
@@ -52,6 +53,7 @@ export default function CodeDiffEditor({
   readOnly = false,
   height = '100%',
 }: CodeDiffEditorProps) {
+  const { resolvedThemeMode } = useTheme()
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const originalEditorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof import('monaco-editor') | null>(null)
@@ -79,6 +81,7 @@ export default function CodeDiffEditor({
   // Deletion-block keys the user has expanded past truncation.
   const [expandedDeletions, setExpandedDeletions] = useState<Set<string>>(new Set())
   const splitDiff = canSplitDiff && diffLayoutPreference === 'split'
+  const codeTheme = getGadgetsCodeTheme(resolvedThemeMode)
 
   const originalValue = useMemo(
     () => originalYText?.toString() ?? '',
@@ -444,10 +447,10 @@ export default function CodeDiffEditor({
             style={{ fontFamily: monoFont }}
           >
             {model.status !== 'Modified' && (
-              <span className="text-[10px] font-medium text-[#796c63]">{model.status}</span>
+              <span className="text-[10px] font-medium text-kumo-subtle">{model.status}</span>
             )}
-            <span className="text-[#cf222e]">-{model.deletions}</span>
-            <span className="text-[#1a7f37]">+{model.additions}</span>
+            <span className="text-kumo-danger">-{model.deletions}</span>
+            <span className="text-kumo-success">+{model.additions}</span>
           </div>
         </div>
 
@@ -460,7 +463,7 @@ export default function CodeDiffEditor({
                 defaultValue=""
                 beforeMount={defineGadgetsCodeTheme}
                 onMount={handleOriginalEditorDidMount}
-                theme={GADGETS_CODE_THEME}
+                theme={codeTheme}
                 options={{
                   ...commonEditorOptions,
                   readOnly: true,
@@ -482,7 +485,7 @@ export default function CodeDiffEditor({
               defaultValue=""
               beforeMount={defineGadgetsCodeTheme}
               onMount={handleEditorDidMount}
-              theme={GADGETS_CODE_THEME}
+              theme={codeTheme}
               options={{
                 ...commonEditorOptions,
                 readOnly: readOnly || !modifiedYText,

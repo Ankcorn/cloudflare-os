@@ -156,7 +156,7 @@ export default function ConnectConnectorModal({
     <div className="mt-0.5 flex items-center gap-1.5 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
       <span
         className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-          credentialsValid ? 'bg-[#2a8e3a]' : 'bg-kumo-danger'
+          credentialsValid ? 'bg-kumo-success' : 'bg-kumo-danger'
         }`}
         aria-hidden
       />
