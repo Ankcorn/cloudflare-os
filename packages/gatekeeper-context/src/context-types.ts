@@ -149,6 +149,7 @@ export type EnabledCollectionInfo = {
   description: string;
   icon?: string;
   source: "private" | "public";
+  lastUpdated: Date;
 };
 
 // ---------------------------------------------------------------------------
@@ -241,6 +242,12 @@ export function isTextContentType(contentType: string): boolean {
 // Whether a content type is an image we can preview / embed as a data: URI.
 export function isImageContentType(contentType: string): boolean {
   return contentType.startsWith("image/");
+}
+
+// Whether a content type is Markdown, which the document viewer renders as prose in View mode
+// (all other text is shown as source). Everything else falls back to the source editor.
+export function isMarkdownContentType(contentType: string): boolean {
+  return contentType === "text/markdown";
 }
 
 // ---------------------------------------------------------------------------

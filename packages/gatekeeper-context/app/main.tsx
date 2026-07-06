@@ -7,14 +7,23 @@ import { RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import type { RpcStub } from 'capnweb'
 import type { ContextApi } from '../src/context-types'
 import ContextLibraryPage from './ContextLibraryPage'
-import { ContextApiProvider } from './bridge'
+import { ContextApiProvider, PresentationProvider, type PresentAck } from './bridge'
+import { applyThemeMode, type ResolvedThemeMode } from './theme'
 import './styles.css'
 
-// The iframe exposes no capabilities back to the host.
-class AppIframe extends RpcTarget {}
+// The only capability the iframe exposes back to the host: a receiver for theme-mode pushes.
+class AppIframe extends RpcTarget {
+  setThemeMode(mode: ResolvedThemeMode): void {
+    applyThemeMode(mode)
+  }
+}
 
 interface HostCapability extends RpcTarget {
   readonly ui: RpcStub<ContextApi>
+  // Grow the iframe to a full-viewport overlay for app-level modals (`true`) or restore it (`false`).
+  setPresenting(active: boolean): Promise<PresentAck>
+  // Returns the current resolved theme mode and calls back on `receiver` whenever it changes.
+  subscribeTheme(receiver: AppIframe): Promise<ResolvedThemeMode>
 }
 
 function main() {
@@ -25,15 +34,20 @@ function main() {
   // Opaque-origin iframes can't name their parent origin. The parent accepts this handshake only from
   // this frame + null origin; the message only transfers a private port.
   window.parent.postMessage({ type: 'handshake' }, '*', [port2])
-  const host = newMessagePortRpcSession<HostCapability>(port1, new AppIframe())
+  const iframe = new AppIframe()
+  const host = newMessagePortRpcSession<HostCapability>(port1, iframe)
+  // The initial mode comes back from the call; later changes arrive via iframe.setThemeMode().
+  host.subscribeTheme(iframe).then(applyThemeMode).catch(() => {})
 
   createRoot(root).render(
     <ContextApiProvider value={host.ui}>
-      <TooltipProvider>
-        <Toasty>
-          <ContextLibraryPage />
-        </Toasty>
-      </TooltipProvider>
+      <PresentationProvider setPresenting={(active) => host.setPresenting(active)}>
+        <TooltipProvider>
+          <Toasty>
+            <ContextLibraryPage />
+          </Toasty>
+        </TooltipProvider>
+      </PresentationProvider>
     </ContextApiProvider>,
   )
 }

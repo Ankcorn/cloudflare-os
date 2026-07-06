@@ -72,52 +72,53 @@ const gatekeepers = findGatekeepers(PACKAGES_DIR);
 // wiring it needs is a sharingDomain in its binding props (see below).
 const CONTEXT_GATEKEEPER_NAME = "gatekeeper-context";
 
-const configuratorUiWatchers = [];
+// Rebuild each gatekeeper's generated UI (src/generated/*) on source change so edits show up on
+// reload; wrangler dev's `watch_dir: src` then re-bundles the worker.
+const devWatchers = [];
+let stoppingDevWatchers = false;
+
+// Spawn a persistent watcher.
+function spawnDevWatcher(label, command, args) {
+  const watcher = spawn(command, args, { stdio: "inherit", cwd: ROOT });
+  watcher.on("exit", (code, signal) => {
+    if (stoppingDevWatchers) return;
+    console.error(`${label} exited unexpectedly (code=${code}, signal=${signal}).`);
+  });
+  devWatchers.push(watcher);
+}
 
 for (const gk of gatekeepers) {
-  const configuratorUiPath = join(gk.dir, "src", "configurator");
-  if (!existsSync(configuratorUiPath)) continue;
+  // Configurator UI (compiled by build-gatekeeper-configurator.mjs).
+  if (existsSync(join(gk.dir, "src", "configurator"))) {
+    const script = join(ROOT, "scripts", "build-gatekeeper-configurator.mjs");
+    execFileSync(process.execPath, [script, gk.dir, "--quiet"], { stdio: "inherit", cwd: ROOT });
+    spawnDevWatcher(
+      `configurator UI watcher for ${gk.name}`,
+      process.execPath,
+      [script, gk.dir, "--watch", "--quiet"],
+    );
+  }
 
-  execFileSync(process.execPath, [
-    join(ROOT, "scripts", "build-gatekeeper-configurator.mjs"),
-    gk.dir,
-    "--quiet",
-  ], {
-    stdio: "inherit",
-    cwd: ROOT,
-  });
-
-  const watcher = spawn(process.execPath, [
-    join(ROOT, "scripts", "build-gatekeeper-configurator.mjs"),
-    gk.dir,
-    "--watch",
-    "--quiet",
-  ], {
-    stdio: "inherit",
-    cwd: ROOT,
-  });
-  watcher.on("exit", (code, signal) => {
-    if (stoppingConfiguratorUiWatchers) return;
-    console.error(
-        `configurator UI watcher for ${gk.name} exited unexpectedly ` +
-        `(code=${code}, signal=${signal}).`);
-  });
-  configuratorUiWatchers.push(watcher);
+  // Single-file app UI (Vite bundle written to src/generated/app.txt by build-app.mjs).
+  if (existsSync(join(gk.dir, "build-app.mjs"))) {
+    const script = join(gk.dir, "build-app.mjs");
+    execFileSync(process.execPath, [script], { stdio: "inherit", cwd: gk.dir });
+    spawnDevWatcher(`app UI watcher for ${gk.name}`, process.execPath, [script, "--watch"]);
+  }
 }
 
-let stoppingConfiguratorUiWatchers = false;
-function stopConfiguratorUiWatchers() {
-  stoppingConfiguratorUiWatchers = true;
-  for (const watcher of configuratorUiWatchers) watcher.kill();
+function stopDevWatchers() {
+  stoppingDevWatchers = true;
+  for (const watcher of devWatchers) watcher.kill();
 }
 
-process.on("exit", stopConfiguratorUiWatchers);
+process.on("exit", stopDevWatchers);
 process.on("SIGINT", () => {
-  stopConfiguratorUiWatchers();
+  stopDevWatchers();
   process.exit(130);
 });
 process.on("SIGTERM", () => {
-  stopConfiguratorUiWatchers();
+  stopDevWatchers();
   process.exit(143);
 });
 

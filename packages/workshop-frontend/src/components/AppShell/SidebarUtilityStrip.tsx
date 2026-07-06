@@ -44,16 +44,14 @@ function ThemeModeButton() {
 function StripLink({
   to,
   label,
-  matchPrefix,
   children,
 }: {
   to: '/gatekeepers'
   label: string
-  matchPrefix?: boolean
   children: React.ReactNode
 }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
-  const active = matchPrefix ? pathname === to || pathname.startsWith(to + '/') : pathname === to
+  const active = pathname === to
   return (
     <Tooltip content={label}>
       <Link
@@ -82,7 +80,7 @@ export default function SidebarUtilityStrip({ collapsed = false }: { collapsed?:
         collapsed ? 'flex-col justify-center gap-2 px-1.5' : '',
       ].join(' ')}
     >
-      <StripLink to="/gatekeepers" label="Gatekeepers" matchPrefix>
+      <StripLink to="/gatekeepers" label="Gatekeepers">
         <Plug size={15} />
       </StripLink>
       <div className={collapsed ? 'flex flex-col items-center gap-2' : 'ml-auto flex items-center gap-1'}>

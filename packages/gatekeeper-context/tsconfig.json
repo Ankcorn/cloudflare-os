@@ -12,7 +12,8 @@
     "noEmit": false,
     "baseUrl": ".",
     "paths": {
-      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
+      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"],
+      "@gadgets/typed-storage": ["../typed-storage/src/index.ts"]
     }
   },
   "include": ["src"],

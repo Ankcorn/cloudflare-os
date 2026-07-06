@@ -3,10 +3,9 @@ node_modules/
 
 # Build outputs
 dist/
-# Generated gatekeeper configurator UI bundles (built by build-gatekeeper-configurator.mjs).
-# Other generated artifacts under src/generated/ (e.g. gatekeeper-context's committed app.txt) are
-# intentionally tracked.
+# Generated gatekeeper UI bundles, rebuilt as a prerequisite of build/types:check/deploy
 packages/gatekeeper-*/src/generated/*-configurator-ui.txt
+packages/gatekeeper-*/src/generated/app.txt
 
 # TypeScript build info
 *.tsbuildinfo
