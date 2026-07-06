@@ -2847,6 +2847,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
         `Referenced tables: ${estimate.referencedTables.join(", ")}\n` +
         `Estimated bytes processed: ${estimate.bytesProcessed.toLocaleString()}\n` +
         `Maximum bytes billed: ${maxBytes.toLocaleString()}.`,
+      prohibitAllSharing: true,
     });
 
     let result = await this.#api.query(billingProject, sql, {
@@ -2877,6 +2878,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
       description:
         `Estimated bytes processed: ${estimate.bytesProcessed.toLocaleString()}\n` +
         `Referenced tables: ${estimate.referencedTables.join(", ") || "(none)"}`,
+      prohibitAllSharing: true,
     });
 
     return estimate;
@@ -2887,6 +2889,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     await this.#approvalQueue.authorizeObservation({
       title: "Get BigQuery project",
       description: `Returned the scoped project: \`${this.#scopedProjectId}\`.`,
+      prohibitAllSharing: true,
     });
     return result;
   }
@@ -2907,6 +2910,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
       await this.#approvalQueue.authorizeObservation({
         title: `List datasets in ${p}`,
         description: `Returned scoped dataset \`${p}.${this.#scopedDatasetId}\` (1 dataset).`,
+        prohibitAllSharing: true,
       });
       return [dataset];
     }
@@ -2915,6 +2919,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     await this.#approvalQueue.authorizeObservation({
       title: `List datasets in ${p}`,
       description: `Listed ${result.length} dataset(s) in \`${p}\`.`,
+      prohibitAllSharing: true,
     });
     return result;
   }
@@ -2940,6 +2945,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
       await this.#approvalQueue.authorizeObservation({
         title: `List tables in ${p}.${d}`,
         description: `Returned scoped table \`${p}.${d}.${this.#scopedTableId}\` (1 table).`,
+        prohibitAllSharing: true,
       });
       return [table];
     }
@@ -2948,6 +2954,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     await this.#approvalQueue.authorizeObservation({
       title: `List tables in ${p}.${d}`,
       description: `Listed ${result.length} table(s) in \`${p}.${d}\`.`,
+      prohibitAllSharing: true,
     });
     return result;
   }
@@ -2984,6 +2991,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
       title: `Describe ${p}.${d}.${t}`,
       description:
         `Described table \`${p}.${d}.${t}\` (${result.schema.length} columns).`,
+      prohibitAllSharing: true,
     });
     return result;
   }
