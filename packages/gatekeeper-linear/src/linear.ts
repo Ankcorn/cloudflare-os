@@ -574,11 +574,11 @@ export class UserAccount extends DurableObject<Env> {
     const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
     if (reconnecting) {
       this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored(new Date(grant.expiresAt));
+      await callback.credentialsRestored();
     } else {
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }), new Date(grant.expiresAt));
+        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
       } catch (err) {
         this.ctx.storage.kv.delete("grant");
         throw err;

@@ -445,10 +445,12 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   // Indicates the connection completed successfully.
   //
-  // `expiresAt`, if provided, indicates when the credentials are expected to expire. This allows
+  // `expiresAt`, if provided, indicates when the credentials are expected to stop being
+  // refreshable. Do not pass the expiry of a short-lived access token if the gatekeeper can
+  // refresh it transparently; that token-cache expiry is internal to the gatekeeper. This allows
   // the Workshop to proactively show the account as expired in the UI without waiting for an
   // operation to fail. If not provided, the system relies on the gatekeeper calling
-  // `credentialsExpired()` when a failure is detected.
+  // `credentialsExpired()` when a refresh or authorization failure is detected.
   complete(user: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void>;
 
   // Note: If the authorization flow fails, the error can be displayed directly to the user, and
@@ -463,7 +465,7 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   credentialsExpired(): Promise<void>;
 
   // Called when credentials have been restored (e.g., after a reconnect flow completes).
-  // `expiresAt` is the new expected expiration date, if known.
+  // `expiresAt` is the new expected refreshability expiration date, if known.
   credentialsRestored(expiresAt?: Date): Promise<void>;
 }
 

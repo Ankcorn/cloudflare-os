@@ -433,11 +433,11 @@ export class UserAccount extends DurableObject<Env> {
     const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
     if (reconnecting) {
       this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored(this.#expiresAtDate());
+      await callback.credentialsRestored();
     } else {
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }), this.#expiresAtDate());
+        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
       } catch (error) {
         this.ctx.storage.kv.delete("accessToken");
         this.ctx.storage.kv.delete("refreshToken");
@@ -454,11 +454,6 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put("accessToken", accessToken);
     this.ctx.storage.kv.put("refreshToken", refreshToken);
     this.ctx.storage.kv.put<number>("accessTokenExpiresAt", Date.now() + expiresIn * 1000);
-  }
-
-  #expiresAtDate(): Date | undefined {
-    const expiresAt = this.ctx.storage.kv.get<number>("accessTokenExpiresAt");
-    return expiresAt ? new Date(expiresAt) : undefined;
   }
 
   // Returns a valid access token (and its expiry), transparently refreshing when close to expiry.
