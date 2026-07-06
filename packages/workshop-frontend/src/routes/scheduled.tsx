@@ -44,7 +44,7 @@ function TaskRow({ task }: { task: ScheduledTask }) {
         Next: {task.next}
       </span>
       <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] tracking-[-0.2px] text-kumo-subtle">
-        <span className={`h-1.5 w-1.5 rounded-full ${task.active ? 'bg-[#2a8e3a]' : 'bg-kumo-inactive'}`} />
+        <span className={`h-1.5 w-1.5 rounded-full ${task.active ? 'bg-kumo-success' : 'bg-kumo-inactive'}`} />
         {task.active ? 'Active' : 'Paused'}
       </span>
     </div>

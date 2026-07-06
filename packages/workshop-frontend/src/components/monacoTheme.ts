@@ -12,17 +12,24 @@
  * adds line-level decorations on top.
  */
 
-export const GADGETS_CODE_THEME = 'gadgets-code-light'
+import type { ResolvedThemeMode } from '../theme'
+
+export const GADGETS_CODE_THEME_LIGHT = 'gadgets-code-light'
+export const GADGETS_CODE_THEME_DARK = 'gadgets-code-dark'
 
 export const monoFont =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
 
-let themeDefined = false
+let themesDefined = false
+
+export function getGadgetsCodeTheme(theme: ResolvedThemeMode): string {
+  return theme === 'dark' ? GADGETS_CODE_THEME_DARK : GADGETS_CODE_THEME_LIGHT
+}
 
 export function defineGadgetsCodeTheme(monaco: typeof import('monaco-editor')): void {
-  if (themeDefined) return
+  if (themesDefined) return
 
-  monaco.editor.defineTheme(GADGETS_CODE_THEME, {
+  monaco.editor.defineTheme(GADGETS_CODE_THEME_LIGHT, {
     base: 'vs',
     inherit: true,
     rules: [
@@ -69,5 +76,52 @@ export function defineGadgetsCodeTheme(monaco: typeof import('monaco-editor')): 
     },
   })
 
-  themeDefined = true
+  monaco.editor.defineTheme(GADGETS_CODE_THEME_DARK, {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'e8e6f0' },
+      { token: 'comment', foreground: '858396', fontStyle: 'italic' },
+      { token: 'keyword', foreground: 'd8b4fe' },
+      { token: 'storage', foreground: 'd8b4fe' },
+      { token: 'operator', foreground: 'b9b5c8' },
+      { token: 'string', foreground: '86efac' },
+      { token: 'number', foreground: 'fbbf24' },
+      { token: 'type', foreground: 'fbbf24' },
+      { token: 'class', foreground: 'fbbf24' },
+      { token: 'interface', foreground: 'fbbf24' },
+      { token: 'function', foreground: '93c5fd' },
+      { token: 'variable', foreground: 'e8e6f0' },
+      { token: 'variable.predefined', foreground: '93c5fd' },
+      { token: 'constant', foreground: 'fbbf24' },
+      { token: 'delimiter', foreground: 'b9b5c8' },
+      { token: 'tag', foreground: 'fca5a5' },
+      { token: 'attribute.name', foreground: 'fbbf24' },
+      { token: 'attribute.value', foreground: '86efac' },
+    ],
+    colors: {
+      'editor.background': '#16151f',
+      'editor.foreground': '#e8e6f0',
+      'editorLineNumber.foreground': '#6d6880',
+      'editorLineNumber.activeForeground': '#b9b5c8',
+      'editorCursor.foreground': '#e8e6f0',
+      'editor.selectionBackground': '#4b3d66',
+      'editor.inactiveSelectionBackground': '#352f4a',
+      'editor.selectionHighlightBackground': '#352f4a',
+      'editor.wordHighlightBackground': '#352f4a',
+      'editor.wordHighlightStrongBackground': '#4b3d66',
+      'editor.lineHighlightBackground': '#00000000',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorGutter.background': '#16151f',
+      'editorIndentGuide.background1': '#2a263b',
+      'editorIndentGuide.activeBackground1': '#423a5f',
+      'editorWhitespace.foreground': '#332d4d',
+      'editorOverviewRuler.border': '#00000000',
+      'scrollbarSlider.background': '#4b465f66',
+      'scrollbarSlider.hoverBackground': '#5d587399',
+      'scrollbarSlider.activeBackground': '#746d8fcc',
+    },
+  })
+
+  themesDefined = true
 }

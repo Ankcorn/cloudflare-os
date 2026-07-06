@@ -1,6 +1,7 @@
 @source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "@cloudflare/kumo/styles";
 @import "tailwindcss";
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
 
 @theme {
   /* ===== FONTS ===== */
@@ -139,6 +140,82 @@
     0 4px 12px 0 #00000005, 0 0 0px 0 #00000005, 0 2px 12px 0 #00000008;
 }
 
+[data-mode="dark"] {
+  /* Seal-inspired dark palette: violet-tinted surfaces around hue 285, not neutral black. */
+  --color-kumo-base: oklch(0.115 0.012 285);
+  --color-kumo-elevated: oklch(0.155 0.011 285);
+  --color-kumo-tint: oklch(0.225 0.025 285);
+  --color-kumo-overlay: oklch(0.155 0.011 285);
+  --color-kumo-recessed: oklch(0.1 0.012 285);
+  --color-kumo-control: oklch(0.155 0.011 285);
+  --color-kumo-contrast: var(--color-kumo-brand);
+  --color-kumo-strong: var(--color-kumo-brand-hover);
+  --color-kumo-fill: oklch(0.225 0.025 285);
+  --color-kumo-fill-hover: oklch(0.295 0.045 285);
+  --color-kumo-interact: oklch(0.34 0.022 285);
+  --color-kumo-line: oklch(0.34 0.022 285);
+  --color-kumo-ring: oklch(0.52 0.065 285);
+  --color-kumo-bubble-user: oklch(0.225 0.025 285);
+
+  --color-kumo-brand: #b84e00;
+  --color-kumo-brand-hover: #a54200;
+
+  --color-kumo-info: oklch(62.3% 0.214 259.815);
+  --color-kumo-info-tint: oklch(0.25 0.065 259.815);
+  --color-kumo-warning: oklch(55.5% 0.163 48.998);
+  --color-kumo-warning-tint: oklch(0.27 0.06 84.429);
+  --color-kumo-danger: oklch(50.5% 0.213 27.518);
+  --color-kumo-danger-tint: oklch(0.25 0.065 25.331);
+  --color-kumo-success: oklch(52.7% 0.154 150.069);
+  --color-kumo-success-tint: oklch(0.25 0.06 150.069);
+
+  --color-kumo-tip-shadow: #00000066;
+  --color-kumo-tip-stroke: oklch(0.34 0.022 285);
+
+  --text-color-kumo-default: oklch(0.92 0.01 285);
+  --text-color-kumo-default-hover: oklch(0.97 0.006 285);
+  --text-color-kumo-inverse: #ffffff;
+  --text-color-kumo-strong: oklch(0.92 0.01 285);
+  --text-color-kumo-subtle: oklch(0.66 0.02 285);
+  --text-color-kumo-inactive: oklch(0.58 0.025 285);
+  --text-color-kumo-brand: #ff8a5c;
+  --text-color-kumo-link: #ff8a5c;
+  --text-color-kumo-success: oklch(79.2% 0.209 151.711);
+  --text-color-kumo-danger: oklch(70.4% 0.191 22.216);
+  --text-color-kumo-warning: oklch(82.8% 0.189 84.429);
+
+  --color-accent-100: #b84e00;
+  --color-accent-200: #ff8a5c;
+  --color-background-100: oklch(0.115 0.012 285);
+  --color-background-200: oklch(0.155 0.011 285);
+  --color-background-300: oklch(0.225 0.025 285);
+  --color-foreground-100: oklch(0.92 0.01 285);
+  --color-foreground-200: oklch(0.78 0.018 285);
+  --color-foreground-300: oklch(0.66 0.02 285);
+  --color-border-100: oklch(0.34 0.022 285);
+  --color-border-100-50: oklch(0.34 0.022 285 / 0.5);
+  --color-selection-bg: color-mix(in srgb, var(--color-kumo-brand) 28%, transparent);
+  --color-selection-text: oklch(0.97 0.006 285);
+  --color-shadow-accent-light: #ff663355;
+  --color-shadow-accent-dark: #00000080;
+
+  --color-compute-100: oklch(74% 0.16 250);
+  --color-compute-200: oklch(0.25 0.065 250);
+  --color-storage-100: oklch(78% 0.22 325);
+  --color-storage-200: oklch(0.25 0.07 325);
+  --color-ai-100: oklch(79.2% 0.209 151.711);
+  --color-ai-200: oklch(0.25 0.06 150);
+  --color-media-100: oklch(78% 0.19 300);
+  --color-media-200: oklch(0.25 0.07 300);
+
+  --color-status-live: oklch(79.2% 0.209 151.711);
+  --color-status-draft: oklch(82.8% 0.189 84.429);
+  --color-status-building: oklch(74% 0.16 250);
+
+  --shadow-stack: 1px 6px 6px 0 #ffffff08 inset, 0 0 0 1px #ffffff05 inset,
+    0 18px 40px 0 #00000033, 0 4px 12px 0 #0000002e;
+}
+
 body {
   @apply m-0 antialiased;
   font-family: var(--font-sans);
@@ -210,6 +287,135 @@ html {
 .connection-chip:hover {
   border-color: var(--color-kumo-fill);
   background: var(--color-kumo-tint);
+}
+
+.themed-surface-inset {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 65%, transparent);
+}
+
+.themed-inset-outline {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-kumo-fill) 65%, transparent);
+}
+
+.themed-prompt-card-shadow {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 75%, transparent),
+    0 1px 2px rgba(20, 17, 16, 0.03),
+    0 10px 28px -16px rgba(20, 17, 16, 0.12);
+}
+
+.themed-prompt-card-shadow:focus-within {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 85%, transparent),
+    0 1px 2px rgba(20, 17, 16, 0.04),
+    0 14px 34px -14px rgba(20, 17, 16, 0.16);
+}
+
+.themed-user-bubble-shadow {
+  box-shadow:
+    0 1px 1px rgba(82, 16, 0, 0.03),
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill) 65%, transparent);
+}
+
+.themed-thumbnail-shadow {
+  box-shadow: 0 2px 14px rgba(20, 17, 16, 0.1);
+}
+
+.themed-floating-shadow {
+  box-shadow: 0 8px 20px rgba(82, 16, 0, 0.1);
+}
+
+.themed-floating-shadow-lg {
+  box-shadow: 0 14px 36px rgba(82, 16, 0, 0.1);
+}
+
+.themed-bottom-shadow {
+  box-shadow: 0 4px 10px -8px rgba(82, 16, 0, 0.1);
+}
+
+.themed-compact-shadow {
+  box-shadow: 0 8px 24px -20px rgba(82, 16, 0, 0.28);
+}
+
+.themed-compact-shadow:focus-within {
+  box-shadow: 0 10px 28px -20px rgba(82, 16, 0, 0.34);
+}
+
+.themed-card-hover-shadow:hover {
+  box-shadow: 0 8px 20px -16px rgba(82, 16, 0, 0.12);
+}
+
+.themed-row-hover-shadow:hover {
+  box-shadow: 0 8px 20px -18px rgba(82, 16, 0, 0.28);
+}
+
+.themed-accent-glow {
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--color-kumo-brand) 12%, transparent) 0%,
+    color-mix(in srgb, var(--color-kumo-tint) 38%, transparent) 38%,
+    transparent 70%
+  );
+}
+
+[data-mode="dark"] .themed-prompt-card-shadow {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill-hover) 42%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.24),
+    0 10px 28px -16px rgba(0, 0, 0, 0.45);
+}
+
+[data-mode="dark"] .themed-prompt-card-shadow:focus-within {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-fill-hover) 52%, transparent),
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 14px 34px -14px rgba(0, 0, 0, 0.55);
+}
+
+[data-mode="dark"] .themed-surface-inset {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-kumo-line) 80%, transparent);
+}
+
+[data-mode="dark"] .themed-inset-outline {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-kumo-line) 80%, transparent);
+}
+
+[data-mode="dark"] .themed-user-bubble-shadow {
+  box-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.15),
+    inset 0 1px 0 color-mix(in srgb, var(--color-kumo-line) 80%, transparent);
+}
+
+[data-mode="dark"] .themed-thumbnail-shadow {
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.34);
+}
+
+[data-mode="dark"] .themed-floating-shadow {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
+[data-mode="dark"] .themed-floating-shadow-lg {
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38);
+}
+
+[data-mode="dark"] .themed-bottom-shadow {
+  box-shadow: 0 4px 10px -8px rgba(0, 0, 0, 0.48);
+}
+
+[data-mode="dark"] .themed-compact-shadow {
+  box-shadow: 0 8px 24px -20px rgba(0, 0, 0, 0.5);
+}
+
+[data-mode="dark"] .themed-compact-shadow:focus-within {
+  box-shadow: 0 10px 28px -20px rgba(0, 0, 0, 0.62);
+}
+
+[data-mode="dark"] .themed-card-hover-shadow:hover {
+  box-shadow: 0 8px 20px -16px rgba(0, 0, 0, 0.55);
+}
+
+[data-mode="dark"] .themed-row-hover-shadow:hover {
+  box-shadow: 0 8px 20px -18px rgba(0, 0, 0, 0.58);
 }
 
 /* Keep global notifications above dialogs, which use z-indexes up to 1200. */

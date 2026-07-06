@@ -97,7 +97,7 @@ function RoleMenu({
         container={container}
         align="end"
         sideOffset={6}
-        className="!z-[1100] !w-[300px] !min-w-0 rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)] !ring-kumo-line"
+        className="themed-floating-shadow-lg !z-[1100] !w-[300px] !min-w-0 rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 !ring-kumo-line"
       >
         {ROLE_OPTIONS.map(role => (
           <DropdownMenu.Item
@@ -557,9 +557,9 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
           ) : (
           <>
-          <div className={`sticky top-0 z-10 bg-kumo-base pb-3 transition-shadow duration-200 ${scrolled ? 'border-b border-kumo-line/60 shadow-[0_4px_10px_-8px_rgba(82,16,0,0.10)]' : ''}`}>
+          <div className={`sticky top-0 z-10 bg-kumo-base pb-3 transition-shadow duration-200 ${scrolled ? 'themed-bottom-shadow border-b border-kumo-line/60' : ''}`}>
           <div
-            className="grid min-h-12 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 shadow-[0_8px_24px_-20px_rgba(82,16,0,0.28)] transition-[border-color,box-shadow] focus-within:border-kumo-fill focus-within:shadow-[0_10px_28px_-20px_rgba(82,16,0,0.34)] sm:flex sm:overflow-hidden"
+            className="themed-compact-shadow grid min-h-12 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 transition-[border-color,box-shadow] focus-within:border-kumo-fill sm:flex sm:overflow-hidden"
             data-keeper-ignore="true"
             data-1p-ignore="true"
             data-lpignore="true"
@@ -608,7 +608,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           <div className="mt-2">
             {(showLinkComposer || newShareLink) ? (
               newShareLink ? (
-                <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5 shadow-[0_8px_24px_-20px_rgba(82,16,0,0.28)] share-fade-in">
+                <div className="themed-compact-shadow flex flex-wrap items-center gap-3 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5 share-fade-in">
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-kumo-tint text-kumo-subtle">
                       {newShareLinkCopied ? <Check size={15} weight="bold" /> : <Link size={15} />}
                     </div>
@@ -635,7 +635,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                     </WorkshopIconButton>
                 </div>
               ) : (
-                <div className="flex h-12 items-center gap-2 overflow-hidden rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 shadow-[0_8px_24px_-20px_rgba(82,16,0,0.28)] transition-[border-color,box-shadow] focus-within:border-kumo-fill focus-within:shadow-[0_10px_28px_-20px_rgba(82,16,0,0.34)] share-fade-in">
+                <div className="themed-compact-shadow flex h-12 items-center gap-2 overflow-hidden rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 transition-[border-color,box-shadow] focus-within:border-kumo-fill share-fade-in">
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-kumo-tint text-kumo-subtle">
                       <Link size={15} />
                     </div>
@@ -669,7 +669,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                 type="button"
                 onClick={() => setShowLinkComposer(true)}
                 disabled={sharingProhibited}
-                className="flex h-12 w-full cursor-pointer items-center justify-center gap-1.5 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 text-[13px] font-medium text-kumo-subtle shadow-[0_8px_24px_-20px_rgba(82,16,0,0.28)] transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-elevated/60 hover:text-kumo-default active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+                className="themed-compact-shadow flex h-12 w-full cursor-pointer items-center justify-center gap-1.5 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 text-[13px] font-medium text-kumo-subtle transition-[background-color,color,transform] duration-150 ease-out hover:bg-kumo-elevated/60 hover:text-kumo-default active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Link size={14} /> Create a share link
               </button>

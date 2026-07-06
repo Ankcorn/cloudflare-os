@@ -5,9 +5,10 @@ import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
 import { ServerConfigContext } from './ServerConfigContext'
+import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
-import { applyAccentColor } from './theme'
+import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,7 @@ let currentStub = startConnection();
 currentStub.onRpcBroken(handleBroken);
 
 const router = createRouter()
+applyStoredThemeMode()
 
 function AppWithConnection() {
   const [rpcState, setRpcState] = useState<{stub: RpcStub<PublicApi>; connectionLost: boolean}>({
@@ -144,12 +146,14 @@ function AppWithConnection() {
   }, [serverConfig?.accentColor]);
 
   return (
-    <RpcContext.Provider value={rpcState}>
-      <ServerConfigContext.Provider value={serverConfig}>
-        <AnnouncementBanner />
-        <RouterProvider router={router} />
-      </ServerConfigContext.Provider>
-    </RpcContext.Provider>
+    <ThemeProvider>
+      <RpcContext.Provider value={rpcState}>
+        <ServerConfigContext.Provider value={serverConfig}>
+          <AnnouncementBanner />
+          <RouterProvider router={router} />
+        </ServerConfigContext.Provider>
+      </RpcContext.Provider>
+    </ThemeProvider>
   );
 }
 

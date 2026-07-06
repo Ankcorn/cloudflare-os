@@ -5,8 +5,8 @@
   left: 0;
   width: min(420px, 100%);
   z-index: 1000;
-  background: white;
-  border: 1px solid #e8e8e8;
+  background: var(--color-kumo-overlay);
+  border: 1px solid var(--color-kumo-line);
   border-radius: 8px;
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.1);
   padding: 8px 8px 4px;
@@ -19,8 +19,8 @@
   left: 0;
   width: min(420px, 100%);
   z-index: 1000;
-  background: white;
-  border: 1px solid #e8e8e8;
+  background: var(--color-kumo-overlay);
+  border: 1px solid var(--color-kumo-line);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   padding: 8px 8px 4px;
@@ -32,4 +32,12 @@
   margin-bottom: 4px;
   display: block;
   padding: 0 8px;
+}
+
+[data-mode="dark"] .capsuleOverlay {
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.32);
+}
+
+[data-mode="dark"] .capsuleOverlayBelow {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
 }

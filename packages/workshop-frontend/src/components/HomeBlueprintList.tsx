@@ -198,7 +198,7 @@ export default function HomeBlueprintList() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 placeholder="Search blueprints..."
-                className="h-9 w-full rounded-xl border border-kumo-line bg-kumo-base/70 pl-9 pr-4 text-sm text-kumo-default placeholder:text-kumo-inactive transition-[background-color,border-color,box-shadow] duration-150 ease-out focus:border-kumo-brand focus:bg-kumo-base focus:outline-none focus:ring-[3px] focus:ring-black/5"
+                className="h-9 w-full rounded-xl border border-kumo-line bg-kumo-base/70 pl-9 pr-4 text-sm text-kumo-default placeholder:text-kumo-inactive transition-[background-color,border-color,box-shadow] duration-150 ease-out focus:border-kumo-brand focus:bg-kumo-base focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
               />
             </div>
             <Tooltip
@@ -269,7 +269,7 @@ function BlueprintRow({
     <Link
       to="/blueprint/$id"
       params={{ id: blueprint.id }}
-      className="group mr-4 flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-[background-color,border-color,box-shadow,transform] duration-150 ease-out hover:border-kumo-line hover:bg-kumo-base hover:shadow-[0_8px_20px_-18px_rgba(82,16,0,0.28)] active:scale-[0.995] sm:mr-6"
+      className="themed-row-hover-shadow group mr-4 flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 transition-[background-color,border-color,box-shadow,transform] duration-150 ease-out hover:border-kumo-line hover:bg-kumo-base active:scale-[0.995] sm:mr-6"
     >
       <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-gradient-to-br ${getGradient(blueprint.id)}`}>
         <Hexagon size={14} className="text-white/70" weight="bold" />

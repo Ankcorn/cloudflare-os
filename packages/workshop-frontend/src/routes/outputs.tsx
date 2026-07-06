@@ -149,7 +149,7 @@ function OutputThumbnail({ type }: { type: OutputType }) {
   return (
     <div className="absolute inset-0 bg-kumo-tint">
       {/* The "page" floats like a Google-Docs preview, bleeding off the bottom edge. */}
-      <div className="absolute left-1/2 top-4 h-[calc(100%-1rem)] w-[78%] -translate-x-1/2 overflow-hidden rounded-t-[6px] bg-white shadow-[0_2px_14px_rgba(20,17,16,0.10)] ring-1 ring-black/[0.04]">
+      <div className="themed-thumbnail-shadow absolute left-1/2 top-4 h-[calc(100%-1rem)] w-[78%] -translate-x-1/2 overflow-hidden rounded-t-[6px] bg-kumo-base ring-1 ring-kumo-line/20">
         <div className="h-full w-full p-3.5">
           {type === 'document' && <DocumentPreview />}
           {type === 'spreadsheet' && <SpreadsheetPreview />}
@@ -360,7 +360,7 @@ function OutputsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search outputs…"
-            className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-black/5"
+            className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
           />
         </div>
       </div>

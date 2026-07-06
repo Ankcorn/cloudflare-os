@@ -1213,7 +1213,7 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
         </span>
       </button>
       {open && (
-        <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+        <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
           <ToolCallDetails toolCall={tc} />
         </div>
       )}
@@ -1255,7 +1255,7 @@ const NestedObservationRow = memo(function NestedObservationRow({
         </span>
       </button>
       {open && (
-        <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+        <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
           <ObservationDetails observation={observation} />
         </div>
       )}
@@ -1335,11 +1335,11 @@ const ToolGroupRow = memo(function ToolGroupRow({
       </button>
       {open && (
         group.calls.length === 1 && group.observations.length === 0 ? (
-          <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+          <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
             <ToolCallDetails toolCall={group.calls[0]} />
           </div>
         ) : group.calls.length === 0 && group.observations.length === 1 ? (
-          <div className="ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+          <div className="themed-surface-inset ml-8 mt-1 space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3">
             <ObservationDetails observation={group.observations[0]} />
           </div>
         ) : (
@@ -2284,7 +2284,7 @@ export const ChatInput = ({
       {pendingConsoleLogCount > 0 && (
         <div className="pointer-events-none absolute inset-x-4 -top-10 z-10 flex justify-center">
           <div
-            className={`pointer-events-auto flex items-center gap-2 rounded-full border px-3 py-1.5 text-[12px] leading-4 tracking-[-0.2px] shadow-[0_8px_20px_rgba(82,16,0,0.10)] ${logBannerClass}`}
+            className={`themed-floating-shadow pointer-events-auto flex items-center gap-2 rounded-full border px-3 py-1.5 text-[12px] leading-4 tracking-[-0.2px] ${logBannerClass}`}
           >
             <Tooltip
               content={
@@ -2324,15 +2324,15 @@ export const ChatInput = ({
           with a soft neutral shadow so the composer reads as a distinct surface instead of blending
           into the canvas; the lift intensifies a touch on focus. */}
       <div
-        className="relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-control shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(20,17,16,0.03),0_10px_28px_-16px_rgba(20,17,16,0.12)] transition-shadow duration-150 ease-out focus-within:shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_1px_2px_rgba(20,17,16,0.04),0_14px_34px_-14px_rgba(20,17,16,0.16)]"
+        className="themed-prompt-card-shadow relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-control transition-shadow duration-150 ease-out"
         onDragEnter={handleAttachmentDragEnter}
         onDragOver={handleAttachmentDragOver}
         onDragLeave={handleAttachmentDragLeave}
         onDrop={handleAttachmentDrop}
       >
         {isAttachmentDragActive && (
-          <div className={`pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-2xl border-2 border-dashed p-4 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.55)] backdrop-blur-[1px] transition-[opacity,transform] duration-150 ease-out ${canAttachMore ? "border-kumo-brand/55 bg-kumo-brand/10" : "border-kumo-warning/60 bg-kumo-warning/10"}`}>
-            <div className={`flex items-center gap-2 rounded-full border bg-kumo-base/90 px-3 py-2 text-[13px] font-medium leading-4 tracking-[-0.2px] text-kumo-default shadow-[0_10px_30px_rgba(82,16,0,0.14)] ${canAttachMore ? "border-kumo-brand/25" : "border-kumo-warning/30"}`}>
+          <div className={`themed-inset-outline pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-2xl border-2 border-dashed p-4 backdrop-blur-[1px] transition-[opacity,transform] duration-150 ease-out ${canAttachMore ? "border-kumo-brand/55 bg-kumo-brand/10" : "border-kumo-warning/60 bg-kumo-warning/10"}`}>
+            <div className={`themed-floating-shadow flex items-center gap-2 rounded-full border bg-kumo-base/90 px-3 py-2 text-[13px] font-medium leading-4 tracking-[-0.2px] text-kumo-default ${canAttachMore ? "border-kumo-brand/25" : "border-kumo-warning/30"}`}>
               <span className={`grid h-7 w-7 place-items-center rounded-full ${canAttachMore ? "bg-kumo-brand/12 text-kumo-brand" : "bg-kumo-warning/15 text-kumo-warning"}`}>
                 <FileIcon size={16} weight="duotone" />
               </span>
@@ -2479,7 +2479,7 @@ export const ChatInput = ({
                   </button>
                 }
               />
-              <DropdownMenu.Content collisionPadding={16} className="!z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+              <DropdownMenu.Content collisionPadding={16} className="themed-floating-shadow-lg !z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
                 {onToggleThinkingTraces && (
                   <DropdownMenu.Item
                     onClick={onToggleThinkingTraces}
@@ -2544,7 +2544,7 @@ export const ChatInput = ({
                     </button>
                   }
                 />
-                <DropdownMenu.Content className="!z-[1100] !min-w-[190px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1 shadow-[0_14px_36px_rgba(82,16,0,0.10)]">
+                <DropdownMenu.Content className="themed-floating-shadow-lg !z-[1100] !min-w-[190px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
                   {models.map((model) => {
                     const active = selectedModel === model.id;
                     return (
@@ -4789,7 +4789,7 @@ function ChatInterface({
     const isProc = processingConnections.has(msg.requestId);
 
     const stateLabel = isAccepted ? "Connected" : isDenied ? "Denied" : null;
-    const stateLabelCls = isDenied ? "text-kumo-danger" : "text-green-600 dark:text-green-400";
+    const stateLabelCls = isDenied ? "text-kumo-danger" : "text-kumo-success";
     const scope = msg.resourceTitle ?? msg.resourceUrl;
 
     return (
@@ -4869,7 +4869,7 @@ function ChatInterface({
       const stateLabelCls = isDeleted
         ? "text-kumo-inactive"
         : log.enabled
-          ? "text-green-600 dark:text-green-400"
+          ? "text-kumo-success"
           : "text-kumo-subtle";
 
       return (
@@ -4971,7 +4971,7 @@ function ChatInterface({
             </span>
           </button>
           {open && (
-            <div className="ml-8 mt-1 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] text-kumo-subtle shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
+            <div className="themed-surface-inset ml-8 mt-1 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] text-kumo-subtle">
               <MarkdownMessage message={log.description.description} />
             </div>
           )}
@@ -5147,7 +5147,7 @@ function ChatInterface({
               </button>
             }
           />
-          <DropdownMenu.Content className="!z-[1100] !min-w-[200px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]">
+          <DropdownMenu.Content className="themed-floating-shadow !z-[1100] !min-w-[200px] rounded-lg border border-kumo-line bg-kumo-base p-1">
             {chatListScopes.map((scope) => {
               const active = chatListScope === scope.value;
               return (
@@ -5297,7 +5297,7 @@ function ChatInterface({
                         />
                         <DropdownMenu.Content
                           onClick={(event) => event.stopPropagation()}
-                          className="!z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_8px_20px_rgba(82,16,0,0.10)]"
+                          className="themed-floating-shadow !z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1"
                         >
                           <DropdownMenu.Item
                             icon={<Pencil size={12} className="mr-2" />}
@@ -5616,7 +5616,7 @@ function ChatInterface({
                         {msg.type === "message" && (
                           msg.author.type === "user" ? (
                             <div className="group/message relative flex flex-col items-end">
-                              <div className={`w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default shadow-[0_1px_1px_rgba(82,16,0,0.03),inset_0_1px_0_rgba(255,255,255,0.55)] ${styles.markdownContent}`}>
+                              <div className={`themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
                                 {msg.attachments && msg.attachments.length > 0 && (
                                   <ChatAttachmentGrid
                                     attachments={msg.attachments}
@@ -6061,7 +6061,7 @@ function ChatInterface({
                                       {detailCalls.map((toolCall) => (
                                         <div
                                           key={`stream-tool-${toolCall.toolCallId}`}
-                                          className="space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]"
+                                          className="themed-surface-inset space-y-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3"
                                         >
                                           {toolCall.code && (
                                             <>
@@ -6131,7 +6131,7 @@ function ChatInterface({
                       const lastActiveChange = lastDurablePendingChange;
                       if (!lastActiveChange) return null;
                       return (
-                        <div className="relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">
+                        <div className="themed-surface-inset relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
                           <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
                             Accept changes to save them to the gadget.

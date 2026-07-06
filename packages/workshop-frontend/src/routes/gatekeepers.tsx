@@ -112,7 +112,7 @@ function ConnectorCard({
   const statusDot =
     state === 'connected' ? (
       <span
-        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-[#2a8e3a] ring-2 ring-kumo-base"
+        className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-kumo-success ring-2 ring-kumo-base"
         aria-hidden
       />
     ) : state === 'expired' ? (
@@ -751,7 +751,7 @@ function ConnectorsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search gatekeepers…"
-              className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-black/5"
+              className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
             />
           </div>
           <ViewToggle view={view} onChange={setView} />

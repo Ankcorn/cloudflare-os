@@ -1295,7 +1295,7 @@ function BlueprintBindingSummaryCard({
           </h3>
           <span className={`rounded-full px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.1px] ${
             assignment
-              ? 'bg-[rgba(42,142,58,0.10)] text-[#2a8e3a]'
+              ? 'bg-kumo-success-tint text-kumo-success'
               : suggestion
                 ? 'bg-kumo-tint text-kumo-subtle'
                 : 'bg-[rgba(255,72,1,0.10)] text-kumo-brand'
