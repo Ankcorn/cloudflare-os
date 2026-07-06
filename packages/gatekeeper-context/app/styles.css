@@ -1,6 +1,15 @@
 @source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "@cloudflare/kumo/styles";
 @import "tailwindcss";
+@custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
 
 @theme {
   /* ===== FONTS ===== */
@@ -20,30 +29,30 @@
 
   /* ===== KUMO SEMANTIC COLOR OVERRIDES ===== */
 
-  /* Background tokens — warm whites instead of cold neutrals */
-  --color-kumo-base: #fffdfb;
-  --color-kumo-elevated: #fffbf5;
-  --color-kumo-tint: #fef7ed;
-  --color-kumo-overlay: #fff9f2;
-  --color-kumo-recessed: #fef0e0;
-  --color-kumo-control: #fffdfb;
-  --color-kumo-contrast: #140400;
-  --color-kumo-fill: #ebd5c1;
-  --color-kumo-fill-hover: #e0c5aa;
-  --color-kumo-interact: #d4b08e;
+  /* Background tokens */
+  --color-kumo-base: #fcfcfb;
+  --color-kumo-elevated: #f8f8f7;
+  --color-kumo-tint: #f3f3f1;
+  --color-kumo-overlay: #fbfbfa;
+  --color-kumo-recessed: #efeeec;
+  --color-kumo-control: #ffffff;
+  --color-kumo-contrast: #14110f;
+  --color-kumo-fill: #e8e7e4;
+  --color-kumo-fill-hover: #dededb;
+  --color-kumo-interact: #cac8c3;
 
-  /* Brand — warm orange accent */
+  /* Brand — orange accent */
   --color-kumo-brand: #ff4801;
   --color-kumo-brand-hover: #e03f00;
 
-  /* Border / line tokens — warm */
-  --color-kumo-line: #ebd5c180;
-  --color-kumo-ring: #d4b08e;
+  /* Border / line tokens — neutral */
+  --color-kumo-line: #1411100f;
+  --color-kumo-ring: #cac8c3;
 
   /* Chat surface tokens */
-  --color-kumo-bubble-user: #ece4d6;
+  --color-kumo-bubble-user: #f1f0ee;
 
-  /* Status tints — keep functional colors, warm the tints */
+  /* Status tints */
   --color-kumo-info: oklch(62.3% 0.214 259.815);
   --color-kumo-info-tint: oklch(90% 0.06 250);
   --color-kumo-warning: oklch(79.5% 0.184 86.047);
@@ -54,16 +63,16 @@
   --color-kumo-success-tint: oklch(92% 0.08 150);
 
   /* Tooltip */
-  --color-kumo-tip-shadow: #ebd5c140;
+  --color-kumo-tip-shadow: #14111014;
   --color-kumo-tip-stroke: transparent;
 
-  /* Text color tokens — warm tones instead of cold oklch neutrals */
-  --text-color-kumo-default: #140400;
-  --text-color-kumo-default-hover: #1f0d06;
-  --text-color-kumo-inverse: #fffdfb;
-  --text-color-kumo-strong: #521000;
-  --text-color-kumo-subtle: oklch(55% 0.027 50);
-  --text-color-kumo-inactive: oklch(70% 0.015 50);
+  /* Text color tokens */
+  --text-color-kumo-default: #1c1a18;
+  --text-color-kumo-default-hover: #100f0d;
+  --text-color-kumo-inverse: #ffffff;
+  --text-color-kumo-strong: #100f0d;
+  --text-color-kumo-subtle: oklch(52% 0.006 60);
+  --text-color-kumo-inactive: oklch(66% 0.005 60);
   --text-color-kumo-brand: #ff4801;
   --text-color-kumo-link: #ff4801;
   --text-color-kumo-success: oklch(72.3% 0.219 149.579);
@@ -73,14 +82,14 @@
   /* ===== CUSTOM BRAND TOKENS ===== */
   --color-accent-100: #ff4801;
   --color-accent-200: #ff7038;
-  --color-background-100: #fffdfb;
-  --color-background-200: #fffbf5;
-  --color-background-300: #fef7ed;
-  --color-foreground-100: #521000;
-  --color-foreground-200: #521000;
-  --color-foreground-300: #140400;
-  --color-border-100: #ebd5c1;
-  --color-border-100-50: #ebd5c180;
+  --color-background-100: #fcfcfb;
+  --color-background-200: #f8f8f7;
+  --color-background-300: #f3f3f1;
+  --color-foreground-100: #100f0d;
+  --color-foreground-200: #100f0d;
+  --color-foreground-300: #1c1a18;
+  --color-border-100: #e8e7e4;
+  --color-border-100-50: #1411100f;
   --color-selection-bg: #ffe9e0;
   --color-selection-text: #ff500a;
   --color-shadow-accent-light: #ffa683;
@@ -120,12 +129,90 @@
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --ease-out: cubic-bezier(0, 0, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  /* Stronger ease-out for entrances / press feedback. */
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
   --default-transition-duration: 0.15s;
   --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* Shadows */
   --shadow-stack: 1px 6px 6px 0 #fff3 inset, 0 0 0px 0 #ffffff59 inset,
     0 4px 12px 0 #00000005, 0 0 0px 0 #00000005, 0 2px 12px 0 #00000008;
+}
+
+/* Dark palette, kept in sync with workshop-frontend/src/styles.css so the app matches the host. */
+[data-mode="dark"] {
+  --color-kumo-base: oklch(0.115 0.012 285);
+  --color-kumo-elevated: oklch(0.155 0.011 285);
+  --color-kumo-tint: oklch(0.225 0.025 285);
+  --color-kumo-overlay: oklch(0.155 0.011 285);
+  --color-kumo-recessed: oklch(0.1 0.012 285);
+  --color-kumo-control: oklch(0.155 0.011 285);
+  --color-kumo-contrast: var(--color-kumo-brand);
+  --color-kumo-strong: var(--color-kumo-brand-hover);
+  --color-kumo-fill: oklch(0.225 0.025 285);
+  --color-kumo-fill-hover: oklch(0.295 0.045 285);
+  --color-kumo-interact: oklch(0.34 0.022 285);
+  --color-kumo-line: oklch(0.34 0.022 285);
+  --color-kumo-ring: oklch(0.52 0.065 285);
+  --color-kumo-bubble-user: oklch(0.225 0.025 285);
+
+  --color-kumo-brand: #b84e00;
+  --color-kumo-brand-hover: #a54200;
+
+  --color-kumo-info: oklch(62.3% 0.214 259.815);
+  --color-kumo-info-tint: oklch(0.25 0.065 259.815);
+  --color-kumo-warning: oklch(55.5% 0.163 48.998);
+  --color-kumo-warning-tint: oklch(0.27 0.06 84.429);
+  --color-kumo-danger: oklch(50.5% 0.213 27.518);
+  --color-kumo-danger-tint: oklch(0.25 0.065 25.331);
+  --color-kumo-success: oklch(52.7% 0.154 150.069);
+  --color-kumo-success-tint: oklch(0.25 0.06 150.069);
+
+  --color-kumo-tip-shadow: #00000066;
+  --color-kumo-tip-stroke: oklch(0.34 0.022 285);
+
+  --text-color-kumo-default: oklch(0.92 0.01 285);
+  --text-color-kumo-default-hover: oklch(0.97 0.006 285);
+  --text-color-kumo-inverse: #ffffff;
+  --text-color-kumo-strong: oklch(0.92 0.01 285);
+  --text-color-kumo-subtle: oklch(0.66 0.02 285);
+  --text-color-kumo-inactive: oklch(0.58 0.025 285);
+  --text-color-kumo-brand: #ff8a5c;
+  --text-color-kumo-link: #ff8a5c;
+  --text-color-kumo-success: oklch(79.2% 0.209 151.711);
+  --text-color-kumo-danger: oklch(70.4% 0.191 22.216);
+  --text-color-kumo-warning: oklch(82.8% 0.189 84.429);
+
+  --color-accent-100: #b84e00;
+  --color-accent-200: #ff8a5c;
+  --color-background-100: oklch(0.115 0.012 285);
+  --color-background-200: oklch(0.155 0.011 285);
+  --color-background-300: oklch(0.225 0.025 285);
+  --color-foreground-100: oklch(0.92 0.01 285);
+  --color-foreground-200: oklch(0.78 0.018 285);
+  --color-foreground-300: oklch(0.66 0.02 285);
+  --color-border-100: oklch(0.34 0.022 285);
+  --color-border-100-50: oklch(0.34 0.022 285 / 0.5);
+  --color-selection-bg: color-mix(in srgb, var(--color-kumo-brand) 28%, transparent);
+  --color-selection-text: oklch(0.97 0.006 285);
+  --color-shadow-accent-light: #ff663355;
+  --color-shadow-accent-dark: #00000080;
+
+  --color-compute-100: oklch(74% 0.16 250);
+  --color-compute-200: oklch(0.25 0.065 250);
+  --color-storage-100: oklch(78% 0.22 325);
+  --color-storage-200: oklch(0.25 0.07 325);
+  --color-ai-100: oklch(79.2% 0.209 151.711);
+  --color-ai-200: oklch(0.25 0.06 150);
+  --color-media-100: oklch(78% 0.19 300);
+  --color-media-200: oklch(0.25 0.07 300);
+
+  --color-status-live: oklch(79.2% 0.209 151.711);
+  --color-status-draft: oklch(82.8% 0.189 84.429);
+  --color-status-building: oklch(74% 0.16 250);
+
+  --shadow-stack: 1px 6px 6px 0 #ffffff08 inset, 0 0 0 1px #ffffff05 inset,
+    0 18px 40px 0 #00000033, 0 4px 12px 0 #0000002e;
 }
 
 body {
@@ -135,9 +222,89 @@ body {
   color: var(--text-color-kumo-default);
 }
 
+/* While a modal presents as a full-viewport overlay (see bridge.ts), go transparent so the dimmed
+   Workshop shows through behind the Dialog scrim. */
+html.ctx-presenting,
+html.ctx-presenting body,
+html.ctx-presenting #root {
+  background: transparent !important;
+}
+
 ::selection {
   background-color: var(--color-selection-bg);
   color: var(--color-selection-text);
+}
+
+/* Press feedback: subtle scale-down on :active. */
+.press {
+  transition: transform 140ms var(--ease-out-strong);
+}
+.press:active {
+  transform: scale(0.97);
+}
+
+/* Fade-up entrance for the New Collection page, applied per-field with an incremental delay. */
+@keyframes ctx-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.ctx-rise {
+  animation: ctx-rise 260ms var(--ease-out-strong) both;
+}
+
+/* Reading-surface entrance: rendered prose fades, lifts, and unblurs on mount. */
+@keyframes ctx-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+.ctx-fade {
+  animation: ctx-fade 200ms var(--ease-out-strong) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .press {
+    transition: none;
+  }
+  .press:active {
+    transform: none;
+  }
+  .ctx-rise {
+    animation: none;
+  }
+  .ctx-fade {
+    animation: none;
+  }
+}
+
+/* Thin scrollbar: a 4px kumo-line thumb over a transparent track. */
+.ctx-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-kumo-line) transparent;
+}
+.ctx-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.ctx-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-kumo-line);
+  border-radius: 4px;
+}
+.ctx-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Tailwind v4 no longer sets cursor:pointer on buttons. */
@@ -152,7 +319,6 @@ code {
   font-family: var(--font-mono);
 }
 
-/* Smooth scrolling */
 html {
   scroll-behavior: smooth;
 }
@@ -163,59 +329,13 @@ html {
   line-height: var(--text-sm--line-height) !important;
 }
 
-/* ---------------------------------------------------------------------------
-   MDXEditor (Context markdown editor) — match Kumo theme and stop the
-   toolbar from overflowing horizontally.
-   --------------------------------------------------------------------------- */
-.kb-mdx-wrap {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-.kb-mdx-wrap .mdxeditor {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  background: transparent;
-  --basePageBg: transparent;
-  font-family: inherit;
-}
-/* Toolbar: Kumo colors, wrapping layout. */
-.kb-mdx-wrap .mdxeditor-toolbar {
-  background: var(--color-kumo-base) !important;
-  border: 0 !important;
-  border-bottom: 1px solid var(--color-kumo-line) !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-  flex-wrap: wrap !important;
-  overflow: visible !important;
-  gap: 2px;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 8px;
-}
-/* Content area fills remaining height and scrolls vertically only. */
-.kb-mdx-wrap .mdxeditor [class*="contentEditable"],
-.kb-mdx-wrap .mdxeditor-root-contenteditable {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  color: var(--text-color-kumo-default);
-}
-.kb-mdx-wrap .mdxeditor .cm-editor {
-  background: transparent;
-}
-
-/* ---------------------------------------------------------------------------
-   Typography for the rendered markdown content. Tailwind's preflight resets
-   headings (font-size/weight: inherit) and lists (list-style: none), which
-   flattens the WYSIWYG view, so restore sensible styles scoped to the editor
-   content. (.kb-mdx-content is the contentEditable class.)
-   --------------------------------------------------------------------------- */
+/* Typography for the rendered markdown preview. Tailwind's preflight flattens headings and lists,
+   so restore sensible styles scoped to .kb-mdx-content. */
 .kb-mdx-content {
+  min-width: 0;
+  max-width: 100%;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .kb-mdx-content h1,
 .kb-mdx-content h2,
@@ -264,7 +384,6 @@ html {
   border: 0;
   border-top: 1px solid var(--color-kumo-line);
 }
-/* Inline code (fenced code blocks are rendered by CodeMirror, styled above). */
 .kb-mdx-content code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.875em;
@@ -272,7 +391,51 @@ html {
   padding: 0.1em 0.35em;
   border-radius: 4px;
 }
+/* Let inline code wrap (long identifiers) so it never forces a page-level horizontal scrollbar;
+   fenced code keeps its own scroll. */
+.kb-mdx-content :not(pre) > code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* Fenced code blocks in the rendered preview. */
+.kb-mdx-content pre {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 12px 14px;
+  background: var(--color-kumo-tint);
+  border: 1px solid var(--color-kumo-line);
+  border-radius: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  font-size: 0.8125em;
+  line-height: 1.6;
+}
+.kb-mdx-content pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+.kb-mdx-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+/* Trim the leading/trailing margins so the prose sits flush inside its padded column. */
+.kb-mdx-content > :first-child {
+  margin-top: 0;
+}
+.kb-mdx-content > :last-child {
+  margin-bottom: 0;
+}
 .kb-mdx-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   margin: 0.6em 0;
 }

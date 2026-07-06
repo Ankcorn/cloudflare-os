@@ -35,6 +35,7 @@ export async function loadEnabledContextCollections(
       description: collection.description,
       icon: collection.icon,
       source: "private",
+      lastUpdated: collection.lastUpdated,
     });
   }
   for (let collection of publicCollections) {
@@ -46,6 +47,7 @@ export async function loadEnabledContextCollections(
       description: collection.description,
       icon: collection.icon,
       source: "public",
+      lastUpdated: collection.lastUpdated,
     });
   }
   return result;
