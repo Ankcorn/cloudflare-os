@@ -44,6 +44,7 @@ To enable support for external APIs, you must do further configuration to regist
 * [Email Workers](packages/gatekeeper-email/README.md)
 * [Home Assistant](packages/gatekeeper-homeassistant/README.md)
 * [Spotify](packages/gatekeeper-spotify/README.md)
+* [ZoomInfo API](packages/gatekeeper-zoominfo/README.md)
 
 # Running as a public, multi-user service
 
