@@ -152,7 +152,14 @@ export default function ResourcePicker({
       setVendorsLoading(true)
       try {
         const vendorList = await authenticatedApi.listGatekeeperVendors()
-        setAllVendors(vendorList.map(v => ({
+        const unavailable = vendorList.filter(v => v.unavailable)
+        if (unavailable.length > 0) {
+          toasts.add({
+            title: `Some services are temporarily unavailable: ${unavailable.map(v => v.id).join(', ')}`,
+            variant: 'warning',
+          })
+        }
+        setAllVendors(vendorList.filter(v => !v.unavailable).map(v => ({
           id: v.id,
           description: v.description,
           supportedResources: v.supportedResources,

@@ -177,6 +177,20 @@ function makeUserStorage(storage: DurableObjectStorage) {
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
 
+function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
+  return {
+    id,
+    unavailable: true,
+    description: {
+      displayName: id,
+      url: "",
+      tagline: "Temporarily unavailable",
+      description: "This gatekeeper could not be loaded.",
+    },
+    supportedResources: [],
+  };
+}
+
 async function checkGatekeeperVendorFilter(
     vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
     filter: GatekeeperVendorFilter): Promise<boolean> {
@@ -875,11 +889,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         continue;  // Whole gatekeeper disabled by admin.
       }
       promises.push((async () => {
-        try {
-          if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
-            return null;
-          }
+        if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
+          return null;
+        }
 
+        try {
           let [description, supportedResources] = await Promise.all([
             vendor.describe(),
             vendor.getSupportedResources(options),
@@ -894,7 +908,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           return {id, description, supportedResources: enabledResources};
         } catch (err) {
           console.error(`Failed to load gatekeeper vendor ${id}:`, err);
-          return null;
+          return unavailableGatekeeperVendorInfo(id);
         }
       })());
     }
