@@ -73,6 +73,11 @@ type ConnectionType = {
   iconUrl?: string
   logoUrl?: string
   accent?: string
+  // Fixed glyph color for icon-on-accent tiles. The `accent` background is a
+  // hard-coded light color that doesn't flip with the theme, so a theme-aware
+  // token like `text-kumo-strong` (near-white in dark mode) would vanish on it.
+  // Pin the glyph to a dark color that reads on the light tile in both themes.
+  iconColor?: string
   resourceUrlPattern?: string
   // Whether this resource type is independently grantable.
   grantable?: boolean
@@ -101,6 +106,7 @@ const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
     description: 'Expose a selected model to this gadget as a capability.',
     icon: Sparkle,
     accent: '#f6edff',
+    iconColor: '#7c3aed',
   },
   {
     id: 'agent-spawner',
@@ -111,6 +117,7 @@ const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
     description: 'Allow this gadget to start new AI agent conversations with selected tools.',
     icon: Robot,
     accent: '#f2f0ff',
+    iconColor: '#7c3aed',
   },
 ]
 
@@ -955,7 +962,12 @@ function ConnectionTypeRow({
         {iconUrl ? (
           <img src={iconUrl} alt="" className="h-6 w-6 object-contain" />
         ) : Icon ? (
-          <Icon size={19} weight="duotone" className="text-kumo-strong" />
+          <Icon
+            size={19}
+            weight="duotone"
+            className={connection.iconColor ? undefined : 'text-kumo-strong'}
+            style={connection.iconColor ? { color: connection.iconColor } : undefined}
+          />
         ) : (
           <Database size={19} weight="duotone" className="text-kumo-strong" />
         )}
@@ -1029,7 +1041,12 @@ function ConnectionGroupRow({
           {iconUrl ? (
             <img src={iconUrl} alt="" className="h-6 w-6 object-contain" />
           ) : Icon ? (
-            <Icon size={19} weight="duotone" className="text-kumo-strong" />
+            <Icon
+              size={19}
+              weight="duotone"
+              className={representative.iconColor ? undefined : 'text-kumo-strong'}
+              style={representative.iconColor ? { color: representative.iconColor } : undefined}
+            />
           ) : (
             <Database size={19} weight="duotone" className="text-kumo-strong" />
           )}
