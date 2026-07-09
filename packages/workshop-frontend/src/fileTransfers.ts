@@ -33,7 +33,7 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
     link.click()
     link.remove()
   } finally {
-    URL.revokeObjectURL(url)
+    window.setTimeout(() => URL.revokeObjectURL(url), 100)
   }
 }
 

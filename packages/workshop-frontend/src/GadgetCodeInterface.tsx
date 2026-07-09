@@ -795,7 +795,7 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       ? computeFileChangeStatuses(filesMapRef.current, previewFilesMap, displayedFiles, changedFiles)
       : undefined
   }, [changedFiles, displayedFiles, isDiffMode, previewFilesMap])
-  const activeFileDownloadable = activeFile ? getDownloadYText(activeFile) !== null : false
+  const activeFileDownloadable = activeFile ? displayedFiles.includes(activeFile) : false
   const activeFileModeLabel = isEditingLocked
     ? 'Reviewing changes in'
     : isDiffMode

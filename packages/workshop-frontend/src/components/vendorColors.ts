@@ -21,9 +21,11 @@ const VENDOR_ICON_DARK_BACKGROUNDS: Record<string, string> = {
 }
 
 export function getVendorIconBackground(vendorId: string, mode: 'light' | 'dark'): string {
+  const key = vendorId.toLowerCase()
+
   if (mode === 'dark') {
-    return VENDOR_ICON_DARK_BACKGROUNDS[vendorId] ?? '#cad5f0'
+    return VENDOR_ICON_DARK_BACKGROUNDS[key] ?? '#cad5f0'
   }
 
-  return VENDOR_ICON_BACKGROUNDS[vendorId] ?? '#f0f4ff'
+  return VENDOR_ICON_BACKGROUNDS[key] ?? '#f0f4ff'
 }
