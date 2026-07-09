@@ -19,22 +19,25 @@ function ThemeModeButton() {
   const nextMode = nextThemeMode(themeMode)
 
   return (
-    <Tooltip content={`${label}. Switch to ${nextMode}.`}>
-      <button
-        type="button"
-        aria-label={`${label}. Switch to ${nextMode}.`}
-        onClick={() => setThemeMode(nextMode)}
-        className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-elevated"
-      >
-        {themeMode === 'system' ? (
-          <Desktop size={15} />
-        ) : themeMode === 'dark' ? (
-          <Moon size={15} />
-        ) : (
-          <Sun size={15} />
-        )}
-      </button>
-    </Tooltip>
+    <Tooltip
+      content={`${label}. Switch to ${nextMode}.`}
+      render={(
+        <button
+          type="button"
+          aria-label={`${label}. Switch to ${nextMode}.`}
+          onClick={() => setThemeMode(nextMode)}
+          className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-elevated"
+        >
+          {themeMode === 'system' ? (
+            <Desktop size={15} />
+          ) : themeMode === 'dark' ? (
+            <Moon size={15} />
+          ) : (
+            <Sun size={15} />
+          )}
+        </button>
+      )}
+    />
   )
 }
 
