@@ -22,7 +22,7 @@ export default function ComingSoonPreview({
       </div>
 
       <div className="absolute inset-0 z-10 flex items-start justify-center bg-kumo-base/55 px-6 pt-16 backdrop-blur-[3px] sm:pt-20">
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-kumo-line bg-kumo-base px-6 py-5 text-center shadow-[0_12px_32px_-20px_rgba(20,17,16,0.22)]">
+        <div className="themed-compact-shadow flex flex-col items-center gap-3 rounded-2xl border border-kumo-line bg-kumo-base px-6 py-5 text-center">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
             <Icon size={18} />
           </div>

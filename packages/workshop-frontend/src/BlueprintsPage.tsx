@@ -177,7 +177,7 @@ function FeaturedBlueprintCard({
   const badges = uniqueBindingBadges(blueprint.metadata.bindings).slice(0, 2);
 
   return (
-    <div className="press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill hover:shadow-[0_8px_22px_-16px_rgba(20,17,16,0.16)]">
+    <div className="themed-card-hover-shadow press group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill">
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}

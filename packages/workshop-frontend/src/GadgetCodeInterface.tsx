@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
+import { DownloadSimple } from '@phosphor-icons/react'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
 import { RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
 import type { FileChangeStatus, FileSidebarHandle } from './FileSidebar'
-import { WorkshopButton } from './components/WorkshopControls'
+import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import CodeEditor from './CodeEditor'
 import CodeDiffEditor from './CodeDiffEditor'
 import type { StreamingProposedChanges } from './ChatInterface'
+import { saveTextToFile } from './fileTransfers'
 
 // RpcTarget implementation for receiving code updates from the server
 class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
@@ -61,9 +63,10 @@ interface GadgetCodeInterfaceProps {
 }
 
 function didFileChange(originalMap: Y.Map<Y.Text>, previewMap: Y.Map<Y.Text>, filename: string) {
-  const originalText = originalMap.get(filename)?.toString() || ''
-  const previewText = previewMap.get(filename)?.toString() || ''
-  return originalText !== previewText
+  const original = originalMap.get(filename)
+  const preview = previewMap.get(filename)
+  if (!original || !preview) return original !== preview
+  return original.toString() !== preview.toString()
 }
 
 function computeChangedFiles(originalMap: Y.Map<Y.Text>, previewMap: Y.Map<Y.Text>) {
@@ -759,6 +762,25 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
     ? previewFilesMap.get(activeFile) || null
     : null
 
+  const getDownloadYText = useCallback((filename: string): Y.Text | null => {
+    const previewMap = streamingFilesMapRef.current ?? (branchMode ? editableFilesMapRef.current : null)
+    if (previewMap) {
+      return previewMap.get(filename) ?? null
+    }
+
+    return filesMapRef.current.get(filename) ?? null
+  }, [branchMode])
+
+  const handleFileDownload = useCallback((filename: string) => {
+    const ytext = getDownloadYText(filename)
+    if (!ytext) {
+      toasts.add({ title: `Could not download ${filename}`, variant: 'error' })
+      return
+    }
+
+    saveTextToFile(filename, ytext.toString())
+  }, [getDownloadYText, toasts])
+
   // Determine if we're in diff mode
   const isDiffMode = branchMode || (streamingProposedChanges !== undefined && streamingYdocRef.current !== null)
 
@@ -773,6 +795,12 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
       ? computeFileChangeStatuses(filesMapRef.current, previewFilesMap, displayedFiles, changedFiles)
       : undefined
   }, [changedFiles, displayedFiles, isDiffMode, previewFilesMap])
+  const activeFileDownloadable = activeFile ? getDownloadYText(activeFile) !== null : false
+  const activeFileModeLabel = isEditingLocked
+    ? 'Reviewing changes in'
+    : isDiffMode
+      ? 'Editing changes in'
+      : 'Editing'
 
   if (loading) {
     return (
@@ -812,45 +840,64 @@ export default function GadgetCodeInterface({ overseer, height = '100%', onCodeC
           onFileCreate={handleFileCreate}
           onFileDelete={handleFileDelete}
           onFileRename={handleFileRename}
+          onFileDownload={handleFileDownload}
         />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {isReady && !loading && displayedFiles.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center bg-kumo-base px-6 text-center">
-              <div className="max-w-[360px]">
-                <p className="m-0 text-[15px] leading-[22px] font-semibold tracking-[-0.3px] text-kumo-default">
-                  No files yet
-                </p>
-                <p className="mt-1.5 mb-0 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
-                  Keep building with the agent in chat and files will appear here as it works, or create one yourself.
-                </p>
-                <div className="mt-4 flex justify-center">
-                  <WorkshopButton
-                    onClick={() => fileSidebarRef.current?.openCreateModal()}
-                    disabled={isEditingLocked}
-                    tone="primary"
-                    className="!h-8"
-                  >
-                    New file
-                  </WorkshopButton>
+        <div className="flex flex-col bg-kumo-base" style={{ flex: 1, minWidth: 0 }}>
+          {activeFile && (
+            <div className="flex h-9 shrink-0 items-center justify-between gap-3 border-b border-kumo-line bg-kumo-base px-3">
+              <div className="min-w-0 text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                {activeFileModeLabel} <span className="font-mono font-medium text-kumo-default">{activeFile}</span>
+              </div>
+              <WorkshopIconButton
+                aria-label={`Download ${activeFile}`}
+                title="Download file"
+                onClick={() => handleFileDownload(activeFile)}
+                disabled={!activeFileDownloadable}
+                className="!h-6 !w-6"
+              >
+                <DownloadSimple size={14} weight="bold" />
+              </WorkshopIconButton>
+            </div>
+          )}
+          <div className="min-h-0 flex-1">
+            {isReady && !loading && displayedFiles.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center bg-kumo-base px-6 text-center">
+                <div className="max-w-[360px]">
+                  <p className="m-0 text-[15px] leading-[22px] font-semibold tracking-[-0.3px] text-kumo-default">
+                    No files yet
+                  </p>
+                  <p className="mt-1.5 mb-0 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
+                    Keep building with the agent in chat and files will appear here as it works, or create one yourself.
+                  </p>
+                  <div className="mt-4 flex justify-center">
+                    <WorkshopButton
+                      onClick={() => fileSidebarRef.current?.openCreateModal()}
+                      disabled={isEditingLocked}
+                      tone="primary"
+                      className="!h-8"
+                    >
+                      New file
+                    </WorkshopButton>
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : isDiffMode ? (
-            <CodeDiffEditor
-              filename={activeFile}
-              originalYText={activeFileYText}
-              modifiedYText={activeFileModifiedYText}
-              readOnly={isEditingLocked}
-              height="100%"
-            />
-          ) : (
-            <CodeEditor
-              filename={activeFile}
-              ytext={isDiffMode ? activeFileModifiedYText : activeFileYText}
-              isReady={isReady}
-              height="100%"
-            />
-          )}
+            ) : isDiffMode ? (
+              <CodeDiffEditor
+                filename={activeFile}
+                originalYText={activeFileYText}
+                modifiedYText={activeFileModifiedYText}
+                readOnly={isEditingLocked}
+                height="100%"
+              />
+            ) : (
+              <CodeEditor
+                filename={activeFile}
+                ytext={isDiffMode ? activeFileModifiedYText : activeFileYText}
+                isReady={isReady}
+                height="100%"
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>

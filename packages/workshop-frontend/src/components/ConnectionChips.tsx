@@ -3,6 +3,8 @@ import { Link } from '@tanstack/react-router'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useState, useEffect } from 'react'
 import { logoComponents } from './ConnectionLogos'
+import { getVendorIconBackground } from './vendorColors'
+import { useTheme } from '../ThemeContext'
 import { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, VendorDescription, SupportedResource } from '@gadgets/workshop-shared/gatekeeper'
 import { RpcTarget } from 'capnweb'
@@ -11,11 +13,11 @@ interface ConnectedAccount {
   id: number
   name: string
   logo: string
-  bgColor: string
 }
 
 export default function ConnectionChips() {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { resolvedThemeMode } = useTheme()
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([])
 
   useEffect(() => {
@@ -32,7 +34,6 @@ export default function ConnectionChips() {
           id,
           name: description.displayName ?? description.uniqueName ?? vendor.displayName,
           logo: logoKey,
-          bgColor: '#f4ecf5',
         })
         if (!cancelled) setAccounts(Array.from(accountMap.values()))
       }
@@ -70,7 +71,7 @@ export default function ConnectionChips() {
           >
             <div
               className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0"
-              style={{ backgroundColor: account.bgColor }}
+              style={{ backgroundColor: getVendorIconBackground(account.logo, resolvedThemeMode) }}
             >
               {LogoComponent ? (
                 <LogoComponent size={12} />

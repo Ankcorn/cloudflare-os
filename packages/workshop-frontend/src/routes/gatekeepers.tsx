@@ -201,7 +201,7 @@ function ConnectorCard({
       tabIndex={0}
       onClick={onClick}
       onKeyDown={handleKeyDown}
-      className="group grid w-full cursor-pointer grid-cols-[48px_1fr_auto] items-center gap-4 rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5 text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_8px_20px_-16px_rgba(20,17,16,0.1)] active:scale-[0.995]"
+      className="themed-card-hover-shadow group grid w-full cursor-pointer grid-cols-[48px_1fr_auto] items-center gap-4 rounded-2xl border border-kumo-line bg-kumo-base px-5 py-5 text-left transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill active:scale-[0.995]"
     >
       <div className="self-start">
         <div className="relative">
@@ -370,7 +370,7 @@ function ConnectorsHeroDiagram({
             onMouseLeave={() => setHoveredSource(null)}
             onFocus={() => setHoveredSource(index)}
             onBlur={() => setHoveredSource(null)}
-            className={`absolute grid h-11 w-11 place-items-center rounded-2xl border border-kumo-line bg-kumo-base transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_8px_20px_-16px_rgba(20,17,16,0.14)] ${sourceNodes[index].className}`}
+            className={`themed-card-hover-shadow absolute grid h-11 w-11 place-items-center rounded-2xl border border-kumo-line bg-kumo-base transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill ${sourceNodes[index].className}`}
           >
             <VendorIconTile
               logoUrl={node.logoUrl}
@@ -388,7 +388,7 @@ function ConnectorsHeroDiagram({
               key={index}
               onMouseEnter={() => setHoveredSource(index)}
               onMouseLeave={() => setHoveredSource(null)}
-              className={`absolute h-11 w-11 rounded-2xl border border-kumo-line bg-kumo-elevated transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill hover:shadow-[0_8px_20px_-16px_rgba(20,17,16,0.14)] ${node.className}`}
+              className={`themed-card-hover-shadow absolute h-11 w-11 rounded-2xl border border-kumo-line bg-kumo-elevated transition-[border-color,transform,box-shadow] duration-150 ease-out hover:-translate-y-px hover:border-kumo-fill ${node.className}`}
             />
           ))}
         </>
@@ -397,12 +397,12 @@ function ConnectorsHeroDiagram({
       <div className="group absolute left-[176px] top-[58px] z-20">
         <button
           type="button"
-          className="grid h-[52px] w-[52px] place-items-center rounded-2xl border border-kumo-line bg-kumo-base text-kumo-brand transition-[border-color,box-shadow] hover:border-kumo-fill hover:shadow-[0_8px_24px_-18px_rgba(20,17,16,0.18)] focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
+          className="themed-card-hover-shadow grid h-[52px] w-[52px] place-items-center rounded-2xl border border-kumo-line bg-kumo-base text-kumo-brand transition-[border-color,box-shadow] hover:border-kumo-fill focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base"
           aria-label="Gatekeeper keeps Gadget access limited to connected resources"
         >
           <ShieldCheck size={21} weight="duotone" />
         </button>
-        <div className="pointer-events-none absolute left-1/2 top-[-108px] z-30 w-[228px] origin-bottom -translate-x-1/2 translate-y-1 scale-[0.98] rounded-2xl border border-kumo-line bg-kumo-base p-3 text-left opacity-0 shadow-[0_18px_44px_-30px_rgba(20,17,16,0.26)] transition-[opacity,transform] delay-0 duration-150 ease-out group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100 group-hover:delay-100 group-focus-within:translate-y-0 group-focus-within:scale-100 group-focus-within:opacity-100 group-focus-within:delay-100">
+        <div className="themed-floating-shadow-lg pointer-events-none absolute left-1/2 top-[-108px] z-30 w-[228px] origin-bottom -translate-x-1/2 translate-y-1 scale-[0.98] rounded-2xl border border-kumo-line bg-kumo-base p-3 text-left opacity-0 transition-[opacity,transform] delay-0 duration-150 ease-out group-hover:translate-y-0 group-hover:scale-100 group-hover:opacity-100 group-hover:delay-100 group-focus-within:translate-y-0 group-focus-within:scale-100 group-focus-within:opacity-100 group-focus-within:delay-100">
           <div className="flex items-start gap-2.5">
             <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-kumo-tint text-kumo-brand">
               <ShieldCheck size={16} weight="duotone" />

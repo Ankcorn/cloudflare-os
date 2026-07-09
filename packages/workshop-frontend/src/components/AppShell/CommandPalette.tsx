@@ -319,7 +319,7 @@ export default function CommandPalette({
       }}
     >
       <div className="absolute inset-0 bg-black/20" aria-hidden="true" onMouseDown={onClose} />
-      <div className="relative w-full max-w-xl overflow-hidden rounded-xl border border-kumo-line bg-kumo-base shadow-[0_16px_48px_rgba(20,17,16,0.18)]">
+      <div className="themed-floating-shadow-lg relative w-full max-w-xl overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
         <div className="flex items-center gap-2.5 border-b border-kumo-line px-3.5">
           <MagnifyingGlass size={16} className="shrink-0 text-kumo-inactive" />
           <input

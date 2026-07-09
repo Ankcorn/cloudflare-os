@@ -715,6 +715,18 @@ html {
   border-color: var(--color-kumo-brand);
 }
 
+.file-row-active {
+  box-shadow: inset 3px 0 0 var(--color-kumo-brand);
+}
+
+@supports (color: color-mix(in srgb, black, white)) {
+  .file-row-active {
+    box-shadow:
+      inset 3px 0 0 var(--color-kumo-brand),
+      inset 0 0 0 1px color-mix(in srgb, var(--color-kumo-brand) 28%, transparent);
+  }
+}
+
 /* Make Kumo Select dropdown options match text-sm instead of the hardcoded text-base */
 [role="listbox"] [role="option"] {
   font-size: var(--text-sm) !important;
