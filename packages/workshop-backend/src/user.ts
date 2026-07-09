@@ -875,22 +875,27 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         continue;  // Whole gatekeeper disabled by admin.
       }
       promises.push((async () => {
-        if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
+        try {
+          if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
+            return null;
+          }
+
+          let [description, supportedResources] = await Promise.all([
+            vendor.describe(),
+            vendor.getSupportedResources(options),
+          ]);
+          let enabledResources =
+              filterEnabledResources(config, id, supportedResources);
+          if (enabledResources.length == 0) {
+            // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
+            return null;
+          }
+
+          return {id, description, supportedResources: enabledResources};
+        } catch (err) {
+          console.error(`Failed to load gatekeeper vendor ${id}:`, err);
           return null;
         }
-
-        let [description, supportedResources] = await Promise.all([
-          vendor.describe(),
-          vendor.getSupportedResources(options),
-        ]);
-        let enabledResources =
-            filterEnabledResources(config, id, supportedResources);
-        if (enabledResources.length == 0) {
-          // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
-          return null;
-        }
-
-        return {id, description, supportedResources: enabledResources};
       })());
     }
 
