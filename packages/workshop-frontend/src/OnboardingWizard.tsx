@@ -27,8 +27,10 @@ import {
 import AddModelModal from './AddModelModal'
 import { persistSelectedModel } from './modelSelection'
 import { logoComponents } from './components/ConnectionLogos'
+import { getVendorIconBackground } from './components/vendorColors'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import { invalidateAvatarCache } from './useAvatar'
+import { useTheme } from './ThemeContext'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -46,25 +48,10 @@ const VENDOR_LOGO_MAP: Record<string, string> = {
   figma: 'figma',
 }
 
-function getVendorColor(vendorId: string): string {
-  const colors: Record<string, string> = {
-    slack: '#f4ecf5',
-    discord: '#eef0ff',
-    jira: '#e6efff',
-    google: '#e8f0fe',
-    github: '#f0f0f0',
-    notion: '#f5f5f5',
-    linear: '#eeeffa',
-    figma: '#fef0ec',
-  }
-  return colors[vendorId] ?? '#f0f4ff'
-}
-
 interface VendorEntry {
   id: string
   description: VendorDescription
   logoKey: string
-  bgColor: string
 }
 
 // ─── component ──────────────────────────────────────────────────────────────────
@@ -75,6 +62,7 @@ export default function OnboardingWizard({
   onComplete: () => void
 }) {
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
+  const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
 
   // Wizard state
@@ -181,7 +169,6 @@ export default function OnboardingWizard({
             id: v.id,
             description: v.description,
             logoKey: VENDOR_LOGO_MAP[v.id] ?? v.id.toLowerCase(),
-            bgColor: getVendorColor(v.id),
           })),
         )
         // Resolve any accounts that arrived before the vendor list.
@@ -616,7 +603,7 @@ export default function OnboardingWizard({
                         >
                           <div
                             className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: vendor.bgColor }}
+                            style={{ backgroundColor: getVendorIconBackground(vendor.id, resolvedThemeMode) }}
                           >
                             {Logo ? (
                               <Logo size={16} />
@@ -748,32 +735,32 @@ interface ShowcaseFeature {
 const SHOWCASE_FEATURES: ShowcaseFeature[] = [
   {
     icon: Sparkle,
-    iconColor: 'text-[#8b5cf6]',
-    iconBg: 'bg-[#8b5cf6]/10',
+    iconColor: 'text-media-100',
+    iconBg: 'bg-media-200',
     title: 'Build apps or just chat',
     description:
       'Create full web apps, or keep it simple with agent-only conversations. Your call.',
   },
   {
     icon: UsersThree,
-    iconColor: 'text-[#06b6d4]',
-    iconBg: 'bg-[#06b6d4]/10',
+    iconColor: 'text-compute-100',
+    iconBg: 'bg-compute-200',
     title: 'Collaborate in real time',
     description:
       'Share a gadget with teammates and work on it together, live.',
   },
   {
     icon: Key,
-    iconColor: 'text-[#f59e0b]',
-    iconBg: 'bg-[#f59e0b]/10',
+    iconColor: 'text-kumo-warning',
+    iconBg: 'bg-kumo-warning-tint',
     title: 'Bring your own models',
     description:
       'Plug in personal API tokens from any provider to use the models you love.',
   },
   {
     icon: Plugs,
-    iconColor: 'text-[#ec4899]',
-    iconBg: 'bg-[#ec4899]/10',
+    iconColor: 'text-storage-100',
+    iconBg: 'bg-storage-200',
     title: 'AI meets your tools',
     description:
       'Have AI review a Google Doc, summarize Slack threads, triage Jira tickets, and more.',

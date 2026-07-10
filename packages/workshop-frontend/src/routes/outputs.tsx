@@ -215,7 +215,7 @@ function OutputCard({ item, onOpen }: { item: OutputItem; onOpen: () => void }) 
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      className="press group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill hover:shadow-[0_8px_22px_-16px_rgba(20,17,16,0.16)]"
+      className="themed-card-hover-shadow press group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill"
     >
       <div className="relative aspect-[4/3] w-full border-b border-kumo-line">
         <OutputThumbnail type={item.type} />

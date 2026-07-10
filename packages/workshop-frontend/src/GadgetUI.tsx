@@ -258,13 +258,10 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded
     return (
-      <div style={{
-        height,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        color: '#999'
-      }}>
+      <div
+        className="flex items-center justify-center text-kumo-subtle"
+        style={{ height }}
+      >
         <Text variant="secondary">
           Switch to this tab to load the Gadget UI
         </Text>

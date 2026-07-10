@@ -2,7 +2,7 @@
 // Blueprints, AI providers) uses the same compact, on-language menu instead of Kumo's larger
 // defaults. Kept tight (13px rows, small padding) to match the rest of the design system.
 export const MENU_CONTENT =
-  '!z-[1100] !min-w-[180px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(20,17,16,0.10)]'
+  'themed-floating-shadow !z-[1100] !min-w-[180px] rounded-lg border border-kumo-line bg-kumo-base p-1'
 
 // Kumo portals the menu to document.body and applies MENU_CONTENT's className to the *inner* popup,
 // not the portaled positioner wrapper that actually stacks against the page. Without a z-index on

@@ -21,6 +21,22 @@ type SaveFilePicker = (options: {
   }>
 }) => Promise<SaveFileHandle>
 
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    link.style.display = 'none'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 100)
+  }
+}
+
 export async function saveStreamToFile(
   stream: ReadableStream<Uint8Array>,
   filename: string,
@@ -45,18 +61,9 @@ export async function saveStreamToFile(
     return
   }
 
-  const blob = await new Response(stream).blob()
-  const url = URL.createObjectURL(blob)
+  triggerBlobDownload(await new Response(stream).blob(), filename)
+}
 
-  try {
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    link.style.display = 'none'
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-  } finally {
-    URL.revokeObjectURL(url)
-  }
+export function saveTextToFile(filename: string, content: string): void {
+  triggerBlobDownload(new Blob([content], { type: 'text/plain;charset=utf-8' }), filename)
 }
