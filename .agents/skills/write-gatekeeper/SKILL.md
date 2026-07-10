@@ -50,13 +50,21 @@ Design principles:
 - Use capability-based design principles: make it easy to limit authority in useful ways by simply limiting access to specific objects or allowing/blocking specific methods
 - Simplify API complexities that are not likely to matter to agents and gadgets; design for a more novice user and common use cases
 - Consider what URL patterns `getGatekeeperClassFor()` should match — each pattern maps to a resource granularity
-- Include JSDoc comments; these types serve as the agent's API documentation
+- Include JSDoc comments; these types serve as the agent's API documentation. See [Documenting the API](#documenting-the-api-typesdts) below.
+
+#### Documenting the API (`types.d.ts`)
+
+This JSDoc is the agent's sole documentation for the API, so keep it **narrowly focused on what the agent needs to use each method**: what it does, its parameters, the returned data shape, and any errors the caller must handle.
+
+Do NOT leak details the caller doesn't need to use the API — the approval queue (never mention `submitAction`/`applyAction`/approvals; correct simulation keeps this invisible), or gatekeeper internals (caching, DO storage, OAuth, syncing). Document those in the `.ts` implementation or PR, never in the agent-facing `.d.ts`.
 
 ### Step 3: STOP — Present API for review
 
 **Do not proceed without operator approval.**
 
 Present the proposed `types.d.ts` and explain the design: what resource granularities are supported, what Session methods do, and what trade-offs were made. The API is the most important and delicate part of a gatekeeper — getting it wrong means rebuilding. Wait for the operator to review and approve (or request changes) before continuing.
+
+Also confirm the JSDoc follows [Documenting the API](#documenting-the-api-typesdts) — no approval-queue or implementation details leaked in.
 
 ### Step 4: Implement
 
