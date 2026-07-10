@@ -491,12 +491,21 @@ function ConnectorsPage() {
       .listGatekeeperVendors()
       .then((vendorList) => {
         if (cancelled) return
+        const unavailable = vendorList.filter((v) => v.unavailable)
+        if (unavailable.length > 0) {
+          toasts.add({
+            title: `Some services are temporarily unavailable: ${unavailable.map((v) => v.id).join(', ')}`,
+            variant: 'warning',
+          })
+        }
         setVendors(
-          vendorList.map((v) => ({
-            id: v.id,
-            description: v.description,
-            supportedResources: v.supportedResources,
-          })),
+          vendorList
+            .filter((v) => !v.unavailable)
+            .map((v) => ({
+              id: v.id,
+              description: v.description,
+              supportedResources: v.supportedResources,
+            })),
         )
         setVendorsLoaded(true)
       })

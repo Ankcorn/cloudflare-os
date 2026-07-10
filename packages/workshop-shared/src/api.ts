@@ -470,6 +470,9 @@ export type GatekeeperVendorInfo = {
   id: string;
   description: VendorDescription;
   supportedResources: SupportedResource[];
+  // Present when a bound gatekeeper could not be queried. UIs should surface this to the user but
+  // not offer it as connectable.
+  unavailable?: boolean;
 };
 
 // Maximum length (characters) of the admin-authored agent system-prompt instructions.

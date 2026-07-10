@@ -177,6 +177,20 @@ function makeUserStorage(storage: DurableObjectStorage) {
 
 type UserStorage = ReturnType<typeof makeUserStorage>;
 
+function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
+  return {
+    id,
+    unavailable: true,
+    description: {
+      displayName: id,
+      url: "",
+      tagline: "Temporarily unavailable",
+      description: "This gatekeeper could not be loaded.",
+    },
+    supportedResources: [],
+  };
+}
+
 async function checkGatekeeperVendorFilter(
     vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
     filter: GatekeeperVendorFilter): Promise<boolean> {
@@ -879,18 +893,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           return null;
         }
 
-        let [description, supportedResources] = await Promise.all([
-          vendor.describe(),
-          vendor.getSupportedResources(options),
-        ]);
-        let enabledResources =
-            filterEnabledResources(config, id, supportedResources);
-        if (enabledResources.length == 0) {
-          // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
-          return null;
-        }
+        try {
+          let [description, supportedResources] = await Promise.all([
+            vendor.describe(),
+            vendor.getSupportedResources(options),
+          ]);
+          let enabledResources =
+              filterEnabledResources(config, id, supportedResources);
+          if (enabledResources.length == 0) {
+            // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
+            return null;
+          }
 
-        return {id, description, supportedResources: enabledResources};
+          return {id, description, supportedResources: enabledResources};
+        } catch (err) {
+          console.error(`Failed to load gatekeeper vendor ${id}:`, err);
+          return unavailableGatekeeperVendorInfo(id);
+        }
       })());
     }
 

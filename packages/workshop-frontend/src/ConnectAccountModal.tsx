@@ -42,7 +42,14 @@ export default function ConnectAccountModal({
       setVendorsLoading(true)
       try {
         const vendorList = await authenticatedApi.listGatekeeperVendors(filter)
-        setVendors(vendorList.map(v => ({ id: v.id, description: v.description })))
+        const unavailable = vendorList.filter(v => v.unavailable)
+        if (unavailable.length > 0) {
+          toasts.add({
+            title: `Some services are temporarily unavailable: ${unavailable.map(v => v.id).join(', ')}`,
+            variant: 'warning',
+          })
+        }
+        setVendors(vendorList.filter(v => !v.unavailable).map(v => ({ id: v.id, description: v.description })))
       } catch (error) {
         console.error('Failed to fetch vendors:', error)
         toasts.add({ title: 'Failed to load available services', variant: 'error' })
