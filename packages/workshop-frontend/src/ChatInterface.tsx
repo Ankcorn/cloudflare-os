@@ -3519,6 +3519,17 @@ function ChatInterface({
     ),
     [currentMessages],
   );
+  // A pending awaitDecision action also blocks the composer: the agent turn is suspended until the
+  // user approves or rejects it, so (like a connection request) further input must wait.
+  const hasPendingAwaitedAction = useMemo(
+    () => currentMessages.some(
+      (msg) => msg.type === "action" &&
+        msg.actionLog?.type === "action" &&
+        msg.actionLog.state === "pending" &&
+        msg.actionLog.description.awaitDecision === true,
+    ),
+    [currentMessages],
+  );
   const displayEntries = useMemo(
     () =>
       // Hide agent checkpoints; surface them as turn-level discard actions. User-saved
@@ -4982,6 +4993,9 @@ function ChatInterface({
     const isPending = state === "pending";
     const isApproved = state === "approved";
     const isRejected = state === "rejected";
+    // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
+    // present it as a prominent callout with its details expanded by default.
+    const isBlocking = isPending && log.description.awaitDecision === true;
     const showDescription = open;
     const metadata = [log.resourceTitle, log.bindingName]
       .filter(Boolean)
@@ -5009,6 +5023,108 @@ function ChatInterface({
             actionLabel: log.description.title,
           }
         : undefined;
+
+    // Approve/reject controls, shared between the subtle inline row and the blocking callout. The
+    // blocking callout emphasizes Approve as a filled primary button.
+    const approveButtonClass = isBlocking
+      ? "cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+      : "cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40";
+    const actionControls = isPending ? (
+      <>
+        {autoApproveTarget &&
+          !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag) && (
+          <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
+            <button
+              type="button"
+              onClick={() => setAutoApproveConfirm(autoApproveTarget)}
+              disabled={isProc}
+              className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Always approve
+            </button>
+          </Tooltip>
+        )}
+        <Tooltip content="Reject this action." asChild>
+          <button
+            type="button"
+            onClick={() => handleRejectAction(msg.actionId)}
+            disabled={isProc}
+            className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Reject
+          </button>
+        </Tooltip>
+        <Tooltip content="Approve this action." asChild>
+          <button
+            type="button"
+            onClick={() => handleApproveAction(msg.actionId)}
+            disabled={isProc}
+            className={approveButtonClass}
+          >
+            Approve
+          </button>
+        </Tooltip>
+      </>
+    ) : null;
+
+    // Resource/binding label, shown at the top of the blocking callout and at the bottom of the
+    // subtle inline row.
+    const resourceMeta = metadata ? (
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
+        {log.resourceTitle && (
+          <span className="min-w-0 truncate">
+            {safeResourceUrl ? (
+              <a
+                href={safeResourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:underline"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {log.resourceTitle}
+              </a>
+            ) : (
+              log.resourceTitle
+            )}
+          </span>
+        )}
+        {log.resourceTitle && log.bindingName && (
+          <span aria-hidden="true">·</span>
+        )}
+        {log.bindingName && (
+          <span className="font-mono text-[11px]">{log.bindingName}</span>
+        )}
+      </div>
+    ) : null;
+
+    // A blocking (awaitDecision) action suspends the agent turn, so present it as a prominent
+    // callout laid out like the connection-request card: a permissions icon, title + resource +
+    // details, and the approve/reject actions.
+    if (isBlocking) {
+      return (
+        <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+          <div className="rounded-2xl border border-kumo-brand/40 bg-kumo-brand/10 px-4 py-3">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-tint text-kumo-brand" aria-hidden="true">
+                <ShieldCheck size={20} weight="fill" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span className="font-medium text-kumo-default">Approve action</span>
+                  {resourceMeta}
+                </div>
+                <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                  <MarkdownMessage message={log.description.description} />
+                </div>
+              </div>
+              <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
+                {actionControls}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
@@ -5049,39 +5165,7 @@ function ChatInterface({
           </button>
           {isPending && (
             <div className="flex flex-shrink-0 items-center gap-2 text-[13px] leading-4">
-              {autoApproveTarget &&
-                !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag) && (
-                <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
-                  <button
-                    type="button"
-                    onClick={() => setAutoApproveConfirm(autoApproveTarget)}
-                    disabled={isProc}
-                    className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    Always approve
-                  </button>
-                </Tooltip>
-              )}
-              <Tooltip content="Reject this action." asChild>
-                <button
-                  type="button"
-                  onClick={() => handleRejectAction(msg.actionId)}
-                  disabled={isProc}
-                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Reject
-                </button>
-              </Tooltip>
-              <Tooltip content="Approve this action." asChild>
-                <button
-                  type="button"
-                  onClick={() => handleApproveAction(msg.actionId)}
-                  disabled={isProc}
-                  className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Approve
-                </button>
-              </Tooltip>
+              {actionControls}
             </div>
           )}
         </div>
@@ -5090,33 +5174,7 @@ function ChatInterface({
             <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
-            {metadata && (
-              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
-                {log.resourceTitle && (
-                  <span className="min-w-0 truncate">
-                    {safeResourceUrl ? (
-                      <a
-                        href={safeResourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="hover:underline"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {log.resourceTitle}
-                      </a>
-                    ) : (
-                      log.resourceTitle
-                    )}
-                  </span>
-                )}
-                {log.resourceTitle && log.bindingName && (
-                  <span aria-hidden="true">·</span>
-                )}
-                {log.bindingName && (
-                  <span className="font-mono text-[11px]">{log.bindingName}</span>
-                )}
-              </div>
-            )}
+            {resourceMeta}
           </div>
         )}
       </div>
@@ -6121,7 +6179,9 @@ function ChatInterface({
                     blockedReason={
                       hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
-                        : undefined
+                        : hasPendingAwaitedAction
+                          ? "Approve or reject the pending action above to continue."
+                          : undefined
                     }
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata?.hasProposedChanges) return null;

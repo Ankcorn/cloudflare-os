@@ -90,7 +90,8 @@ export interface AgentHooks {
                    capsules?: CapsuleEntry[], onOutputText?: (delta: string) => void): Promise<string>;
   activeAgentCallbackCount(chatId: number): number;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
-  consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined;
+  consumeCapturedActions(chatId: number)
+      : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
       totalTokens?: number, aiGatewayLogId?: string): void;
   emitChatStreamEvent(chatId: number, event: AiChatStreamEvent): void;
@@ -1326,6 +1327,10 @@ export async function runAgent(
   // turn ending (which would strand it, since there'd be no card to accept/deny and thus no resume).
   let connectionRequested = false;
 
+  // Latched by onStepFinish when this step submitted an awaitDecision action. stopWhen reads it
+  // after onStepFinish to end the turn until approval resumes it.
+  let awaitingActionDecision = false;
+
   let flushCapturedYdocChanges = () => {
     if (capturedYdocChanges.length === 0) {
       return;
@@ -1938,6 +1943,8 @@ export async function runAgent(
       // deny just leaves the turn ended.) A rejected requestConnection (e.g. unresolvable resource)
       // leaves this false so the agent can fix the request and retry in the same turn.
       () => connectionRequested,
+      // Wait for approval before continuing against state that may not reflect the action.
+      () => awaitingActionDecision,
       // Auto-terminate when callback-initiated and all callbacks have been resolved/rejected.
       ...(callbackInitiated ? [() => hooks.activeAgentCallbackCount(chatId) === 0] : []),
     ],
@@ -1984,6 +1991,9 @@ export async function runAgent(
         }
         if (capturedActions.accessedGadget) {
           msgs.push({type: "useGadget"});
+        }
+        if (capturedActions.awaitDecision) {
+          awaitingActionDecision = true;
         }
       }
 
