@@ -1,6 +1,7 @@
 /* ── Markdown content ─────────────────────────────────────────────────────── */
 .markdownContent {
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .markdownContent p { margin: 0.4em 0; }
 .markdownContent p:first-child { margin-top: 0; }
