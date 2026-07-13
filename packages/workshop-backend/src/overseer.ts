@@ -1446,9 +1446,10 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Maps chat ID to action numbers that were recently performed by that chat's agent. These are
-  // added to the chat log after the tool call returns.
-  #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean}>();
+  // Maps chat ID to action numbers recently performed by that chat's agent. These are drained into
+  // the chat log after the tool returns. `awaitDecision` is true if any captured action needs it.
+  #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean,
+                                      awaitDecision: boolean}>();
 
   // Maps chat ID to connectionRequest message bodies created by that chat's agent during the
   // current step. Spliced into the chat log after the tool call returns (see
@@ -1458,7 +1459,7 @@ class OverseerImpl implements AgentHooks {
   #getOrCreateCapturedActions(chatId: number) {
     let result = this.#capturedActions.get(chatId);
     if (!result) {
-      result = {actions: [], accessedGadget: false};
+      result = {actions: [], accessedGadget: false, awaitDecision: false};
       this.#capturedActions.set(chatId, result);
     }
     return result;
@@ -1687,13 +1688,18 @@ class OverseerImpl implements AgentHooks {
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
 
-    // If this action is auto-approvable and the user has opted in to auto-approving its action kind
-    // on this gatekeeper, schedule a drain to apply it (and any earlier auto-eligible pending actions)
-    // after submitAction returns. We defer via waitUntil rather than applying inline because
-    // applying calls back into the gatekeeper facet, which is still awaiting this submitAction --
-    // doing so inline risks a re-entrancy stall.
-    if (description.autoApprovable && description.actionKind &&
-        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined) {
+    // Same auto-approval gate as before, named because awaitDecision uses it too. The drain is
+    // deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
+    let willAutoApprove = !!(description.autoApprovable && description.actionKind &&
+        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined);
+
+    // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
+    // Auto-approved actions keep the seamless behavior the user opted into.
+    if (caller.from === "agent" && description.awaitDecision && !willAutoApprove) {
+      this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
+    }
+
+    if (willAutoApprove) {
       this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
     }
   }
@@ -3054,7 +3060,8 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  consumeCapturedActions(chatId: number): {actions: number[], accessedGadget: boolean} | undefined {
+  consumeCapturedActions(chatId: number)
+      : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined {
     let result = this.#capturedActions.get(chatId);
     this.#capturedActions.delete(chatId);
     return result;
@@ -4321,6 +4328,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     await this.impl.applyPendingAction(action, profile, false);
 
+    // If this was an awaited agent action, resume only after all awaited actions in the turn are
+    // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
+    if (action.caller.from === "agent" && action.description.awaitDecision) {
+      await this.#maybeResumeAfterActionDecision(action.caller.chatId);
+    }
+
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
     // gatekeeper, so cascade a drain (in-order) once this one is applied.
     this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
@@ -4402,6 +4415,47 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
   }
 
+  // Resume a turn suspended on awaitDecision once all awaited actions from that turn are approved.
+  // Scoping to the current turn prevents older rejected actions from blocking future resumes.
+  async #maybeResumeAfterActionDecision(chatId: number): Promise<void> {
+    let awaited: (ActionRecord & {type: "action"})[] = [];
+    for (let msg of this.impl.storage.chats.list(
+        {prefix: `${keyString(chatId)}.`, reverse: true})) {
+      // Stop at whatever started the current turn: a user/gadget message or a gadget callback.
+      // (agentNudge is mid-turn, so it isn't a boundary.)
+      if (msg.type === "agentCallback") break;
+      if (msg.type === "message" &&
+          (msg.author.type === "user" || msg.author.type === "gadget")) {
+        break;
+      }
+      if (msg.type === "action") {
+        let record = this.impl.storage.actions.get(msg.actionId);
+        if (record && record.type === "action" &&
+            record.caller.from === "agent" && record.description.awaitDecision) {
+          awaited.push(record);
+        }
+      }
+    }
+    awaited.reverse();  // Present titles chronologically.
+
+    // Only resume when every awaited action in the turn has been decided and all were approved.
+    if (awaited.length === 0) return;                       // No awaited action in current turn.
+    if (awaited.some(r => r.state === "pending")) return;   // Still waiting on a decision.
+    if (awaited.some(r => r.state === "rejected")) return;  // Denial leaves the turn ended.
+
+    // Persist one note for replay; raw action cards are not surfaced to the LLM. Concurrent
+    // approvals could both pass the gate above and append duplicate notes (the DO input gate is
+    // open across these awaits), but that's cosmetic — #resumeSuspendedAgent still starts one turn.
+    let titleList = awaited.map(r => `"${r.description.title}"`).join(", ");
+    let summary =
+        `The changes you submitted have been approved and applied: ${titleList}. ` +
+        `Reads now reflect them.`;
+    let author = await this.#getClientProfile();
+    this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+
+    await this.#resumeSuspendedAgent(chatId);
+  }
+
   async rejectAction(id: number): Promise<void> {
     let action = this.impl.storage.actions.get(id);
     if (!action) {
@@ -4428,6 +4482,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     action.appliedAt = new Date();
     action.resolvedBy = profile;
     this.impl.storage.actions.put(action);
+
+    // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
+    // sibling approval from resuming this turn.
   }
 
   // Enable auto-approval of actions carrying `actionKind` on the gatekeeper identified by
@@ -4516,11 +4573,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     throw new Error(`No such connection request: ${requestId}`);
   }
 
-  // Resume the agent on the given chat so it can react to an accepted connection request (only
-  // accept resumes; deny leaves the turn ended). Modeled on sendChatMessage: the accepted
-  // connectionRequest message itself (read from history) supplies the outcome the agent sees, so we
-  // don't append a separate user message here.
-  async #resumeAgentAfterConnection(chatId: number): Promise<void> {
+  // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
+  // connection, or all awaited actions approved). Denials intentionally don't call this.
+  async #resumeSuspendedAgent(chatId: number): Promise<void> {
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) return;  // Chat deleted.
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
@@ -4567,7 +4622,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     msg.timestamp = this.impl.getChatTimestamp();
     this.impl.storage.chats.put(msg);  // fires the subscriber update() → re-delivers the card
 
-    await this.#resumeAgentAfterConnection(msg.chatId);
+    await this.#resumeSuspendedAgent(msg.chatId);
   }
 
   async denyConnectionRequest(requestId: string): Promise<void> {
