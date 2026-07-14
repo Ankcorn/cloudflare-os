@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import {
-  ShareNetwork,
+  // SECURITY: sharing disabled — revert to re-enable.
+  // ShareNetwork,
   Pencil,
   Check,
   X,
@@ -577,6 +578,11 @@ export default function GadgetEditor() {
         if (err?.message?.includes('Invalid or expired share key')) {
           toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
         }
+        // SECURITY: sharing disabled — revert to re-enable.
+        // "Not Found" means the gadget doesn't exist or we're not the owner (deliberately
+        // indistinguishable; with sharing disabled, any non-owner hits this). Redirect home
+        // instead of showing the error page.
+        if (err?.message?.includes('Not Found')) { navigate({ to: '/' }); return }
         // "Not Found" is terminal — the gadget doesn't exist or we're no longer authorized
         // (deliberately indistinguishable). Show the generic error page rather than looping on
         // the reconnecting banner, even mid-session (e.g. after a removed collaborator's session
@@ -805,6 +811,7 @@ export default function GadgetEditor() {
             </span>
           </WorkshopIconButton>
 
+          {/* SECURITY: sharing disabled — revert to re-enable.
           <WorkshopIconButton
             onClick={() => setShareModalOpen(true)}
             title="Share gadget"
@@ -812,6 +819,7 @@ export default function GadgetEditor() {
           >
             <ShareNetwork size={15} />
           </WorkshopIconButton>
+          */}
 
           <WorkshopIconButton
             onClick={() => setBlueprintModalOpen(true)}
