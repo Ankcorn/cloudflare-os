@@ -3403,6 +3403,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
+      // SECURITY: sharing disabled — revert to re-enable.
+      // All gadget sharing is temporarily disabled. Reject any non-owner at the single
+      // authorization chokepoint before any share-key redemption or role computation. Throw
+      // "Not Found" (indistinguishable from a nonexistent gadget) so we don't acknowledge the
+      // gadget's existence. This blocks opening, reading chat history, subscribing, and sending
+      // messages for any gadget the caller doesn't own.
+      throw new Error("Not Found");
+
+      /* SECURITY: sharing disabled — original non-owner authorization path retained for revert.
       if (this.impl.storage.prohibitAllSharing.get()) {
         // `prohibitAllSharing` can only have been set when the gadget had no shares (see
         // `authorizeObservation`), and no new shares can be created while it's set, so any
@@ -3447,9 +3456,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           console.error(err);
         }
       })();
+      */
     }
 
-    if (role === "use") {
+    // SECURITY: sharing disabled — `role` is always "build" now (non-owners throw above), so the
+    // cast keeps this (dead) branch type-checking; revert to re-enable.
+    if ((role as CollaboratorRole) === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
       return new UseOverseerInterface(
           this.impl, owner, clientUser, profileId, notifyClosed.dup());
