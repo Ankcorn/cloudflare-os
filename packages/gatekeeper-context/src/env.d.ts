@@ -4,6 +4,8 @@ declare namespace Cloudflare {
   interface Env {
     // Public-collections snapshot KV.
     CONTEXT_COLLECTIONS: KVNamespace;
+    // Git-compatible backing repos for artifact-backed context collections.
+    ARTIFACTS: Artifacts;
   }
 
   interface GlobalProps {

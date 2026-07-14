@@ -4,8 +4,9 @@
 import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import {
-  ContextApi, ContextCollectionMetadata, ContextCollectionVisibility,
-  ContextDocument, ContextDocumentSummary, EnabledCollectionInfo,
+  ContextApi, ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
+  ContextDocument, ContextDocumentSummary, ContextGitTokenCreateResult, ContextGitTokenList,
+  DEFAULT_GIT_BRANCH, EnabledCollectionInfo,
 } from "./context-types.js";
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
@@ -117,9 +118,16 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
   // --- Collection management ---
 
   async createContextCollection(
-    title: string, description: string, visibility: ContextCollectionVisibility, icon?: string,
+    title: string,
+    description: string,
+    visibility: ContextCollectionVisibility,
+    icon?: string,
+    source: ContextCollectionContent["source"] = "web",
   ): Promise<ContextCollectionMetadata> {
     if (visibility === "public") this.#assertAdmin();
+    if (source !== "web" && source !== "git") {
+      throw new Error(`Unsupported collection source: ${source}`);
+    }
 
     let id = crypto.randomUUID();
     let metadata: ContextCollectionMetadata = {
@@ -131,10 +139,13 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
       created: new Date(),
       lastUpdated: new Date(),
       documentCount: 0,
+      content: source === "git"
+        ? { source, remote: "", branch: DEFAULT_GIT_BRANCH, lastRefreshedAt: new Date() }
+        : { source },
     };
 
     // Initialize before indexing; if this fails, nothing is reachable yet.
-    await this.#collection(id).initialize(metadata, this.domain, visibility === "private" ? this.accountId : "");
+    metadata = await this.#collection(id).initialize(metadata, this.domain, visibility === "private" ? this.accountId : "");
 
     // Private collections live in the owner's library; public ones live in the domain registry.
     try {
@@ -152,10 +163,34 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
   }
 
   async updateContextCollection(collectionId: string, options: {
-    title?: string; description?: string; icon?: string;
+    title?: string; description?: string; icon?: string; branch?: string;
   }): Promise<void> {
     await this.#assertCanWrite(collectionId);
     await this.#collection(collectionId).updateMetadata(options);
+  }
+
+  async syncContextCollectionArtifactSource(collectionId: string): Promise<void> {
+    // Only collection owners/admins can manually trigger an artifact
+    // sync. Read requests from non-owners/admins may trigger a
+    // stale-while-revalidate sync in the background, but they do not
+    // have direct control over this.
+    await this.#assertCanWrite(collectionId);
+    await this.#collection(collectionId).syncArtifactSource();
+  }
+
+  async createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult> {
+    await this.#assertCanWrite(collectionId);
+    return this.#collection(collectionId).createGitToken();
+  }
+
+  async listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList> {
+    await this.#assertCanWrite(collectionId);
+    return this.#collection(collectionId).listGitTokens();
+  }
+
+  async revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean> {
+    await this.#assertCanWrite(collectionId);
+    return this.#collection(collectionId).revokeGitToken(tokenId);
   }
 
   async deleteContextCollection(collectionId: string): Promise<void> {

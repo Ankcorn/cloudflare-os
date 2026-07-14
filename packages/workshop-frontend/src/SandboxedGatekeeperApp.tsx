@@ -263,6 +263,7 @@ export default function SandboxedGatekeeperApp({ frame }: {
       // allow-scripts: run the app's JS. allow-modals: its beforeunload unsaved-changes guard. Not
       // allow-same-origin (the frame stays an opaque origin), and the app's CSP keeps connect-src 'none'.
       sandbox="allow-scripts allow-modals"
+      allow="clipboard-write"
       title="Gatekeeper app"
       style={iframeStyleForOverlay(overlay)}
     />

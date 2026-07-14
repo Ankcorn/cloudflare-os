@@ -70,6 +70,13 @@ export type ContextReadResult = {
 
 // Collection visibility within a sharing domain.
 export type ContextCollectionVisibility = "public" | "private";
+export const DEFAULT_GIT_BRANCH = "main";
+
+export type ContextCollectionContent =
+  // Content in this collection is managed via the web UI.
+  | { source: "web" }
+  // Content in this collection is managed via git.
+  | { source: "git"; remote: string; branch: string; lastRefreshedAt: Date; commit?: string };
 
 export type ContextCollectionMetadata = {
   // Random hex ID.
@@ -91,6 +98,23 @@ export type ContextCollectionMetadata = {
 
   // Number of documents in this collection.
   documentCount: number;
+
+  content: ContextCollectionContent;
+};
+
+export type ContextGitTokenInfo = {
+  id: string;
+  expiresAt: string;
+};
+
+export type ContextGitTokenList = {
+  tokens: ContextGitTokenInfo[];
+};
+
+export type ContextGitTokenCreateResult = {
+  id: string;
+  plaintext: string;
+  remote: string;
 };
 
 // Collection summary for listings.
@@ -261,10 +285,15 @@ export interface ContextApi extends RpcTarget {
 
   createContextCollection(
     title: string, description: string, visibility: ContextCollectionVisibility, icon?: string,
+    source?: ContextCollectionContent["source"],
   ): Promise<ContextCollectionMetadata>;
   updateContextCollection(collectionId: string, options: {
-    title?: string; description?: string; icon?: string;
+    title?: string; description?: string; icon?: string; branch?: string;
   }): Promise<void>;
+  syncContextCollectionArtifactSource(collectionId: string): Promise<void>;
+  createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult>;
+  listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList>;
+  revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean>;
   deleteContextCollection(collectionId: string): Promise<void>;
   getContextCollectionMetadata(collectionId: string): Promise<ContextCollectionMetadata | null>;
   listContextDocuments(collectionId: string, prefix?: string): Promise<ContextDocumentSummary[]>;
