@@ -9,6 +9,7 @@
   "compatibility_date": "2026-02-02",
   "compatibility_flags": [
     "experimental",
+    "nodejs_compat",
     "allow_irrevocable_stub_storage"
   ],
 
@@ -30,6 +31,14 @@
     {
       "binding": "CONTEXT_COLLECTIONS",
       "preview_id": "gadgets-context-collections"
+    }
+  ],
+
+  "artifacts": [
+    {
+      "binding": "ARTIFACTS",
+      "namespace": "gatekeeper-context-collections",
+      "remote": true
     }
   ]
 }

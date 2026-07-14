@@ -16,7 +16,8 @@
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.8.0",
-    "capnweb-validate": "0.2.1"
+    "capnweb-validate": "0.2.1",
+    "isomorphic-git": "^1.38.6"
   },
   "devDependencies": {
     "@cloudflare/kumo": "^2.2.1",

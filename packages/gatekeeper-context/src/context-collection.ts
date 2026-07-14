@@ -4,14 +4,23 @@
 import { DurableObject } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
-  ContextCollectionMetadata, ContextCollectionVisibility,
-  ContextDocument, ContextDocumentSummary, DEFAULT_DOCUMENT_CONTENT_TYPE, MAX_DOCUMENT_BODY_BYTES,
+  ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
+  ContextDocument, ContextDocumentSummary, ContextGitTokenCreateResult, ContextGitTokenList,
+  DEFAULT_DOCUMENT_CONTENT_TYPE, DEFAULT_GIT_BRANCH, MAX_DOCUMENT_BODY_BYTES,
   contentTypeFromPath, isTextContentType,
 } from "./context-types.js";
 import { metadataToSummary } from "./collection-kv.js";
 import { domainName } from "./domain.js";
+import { readArtifactRepoDocuments } from "./artifact-sync.js";
 
 const MAX_DOCUMENT_PATH_LENGTH = 1024;
+// Git tokens created through the web UI are valid for one year,
+// the maximum TTL supported by Artifacts.
+const GIT_TOKEN_TTL_SECONDS = 31_536_000;
+// Background git refresh happens minutely at most.
+const GIT_REFRESH_MIN_INTERVAL_MS = 60_000;
+// Allow simple branch names made of alphanumerics, '/', '.', '_', and '-', but not leading/trailing '/'.
+const GIT_BRANCH_RE = /^(?!\/)(?!.*\/$)[A-Za-z0-9/._-]{1,255}$/;
 
 // Validate a document path before using it as a storage key.
 function validateDocumentPath(path: string): void {
@@ -57,6 +66,13 @@ type ContextRecord = {
   lastUpdated: Date;
 };
 
+// Old records that predate git-based collections won't have `content` set in storage.
+// Unset `content` is defaulted to { "source": "web" } at the API layer, which is why
+// we have different types for storage vs. API interface.
+type StoredContextCollectionMetadata = Omit<ContextCollectionMetadata, "content"> & {
+  content?: ContextCollectionContent;
+};
+
 function makeContextCollectionStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
@@ -67,7 +83,7 @@ function makeContextCollectionStorage(storage: DurableObjectStorage) {
       sharingDomain: "",
       // Private owner account id; empty for public collections.
       ownerAccountId: "",
-      metadata: <ContextCollectionMetadata>{
+      metadata: <StoredContextCollectionMetadata>{
         id: "",
         title: "",
         description: "",
@@ -75,6 +91,7 @@ function makeContextCollectionStorage(storage: DurableObjectStorage) {
         created: new Date(0),
         lastUpdated: new Date(0),
         documentCount: 0,
+        content: { source: "web" },
       },
     },
   });
@@ -84,6 +101,9 @@ type ContextCollectionStorage = ReturnType<typeof makeContextCollectionStorage>;
 
 export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: ContextCollectionStorage;
+  // Set when an artifact refresh operation is in flight. Additional refresh requests should
+  // await this promise when set instead of kicking off additional concurrent refreshes.
+  #artifactRefresh?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -106,32 +126,73 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     return ns.getByName(this.#domain());
   }
 
+  async #createArtifactRepo(metadata: ContextCollectionMetadata): Promise<string> {
+    // Artifact repo id is always set to collection id.
+    let created = await this.env.ARTIFACTS.create(metadata.id, {
+      setDefaultBranch: DEFAULT_GIT_BRANCH,
+    });
+
+    let repo = await this.env.ARTIFACTS.get(metadata.id);
+    // Artifacts auto-creates an initial write token when the repo is first
+    // created. We don't want or need this token, so we immediately revoke it.
+    await repo.revokeToken(created.token).catch((err) => {
+      console.warn("Failed to revoke initial Artifacts token for context collection.", {
+        collectionId: metadata.id,
+        error: err,
+      });
+    });
+    return created.remote;
+  }
+
   // Initialize a new collection. Private collections pass an owner; public collections pass "".
   // Rejects re-initialization so a (vanishingly unlikely) id reuse can't clobber existing content.
-  initialize(metadata: ContextCollectionMetadata, sharingDomain: string, ownerAccountId: string): void {
-    if (this.storage.metadata.get().id) {
+  async initialize(metadata: ContextCollectionMetadata, sharingDomain: string, ownerAccountId: string): Promise<ContextCollectionMetadata> {
+    if (this.getMetadata().id) {
       throw new Error("Collection already exists.");
     }
     this.storage.sharingDomain.put(sharingDomain);
     this.storage.ownerAccountId.put(ownerAccountId);
+    if (metadata.content.source === "git") {
+      metadata.content = {
+        source: "git",
+        remote: await this.#createArtifactRepo(metadata),
+        branch: metadata.content.branch,
+        lastRefreshedAt: metadata.created,
+      };
+    }
     this.storage.metadata.put(metadata);
+    return metadata;
   }
 
   getMetadata(): ContextCollectionMetadata {
-    return this.storage.metadata.get();
+    let meta = this.storage.metadata.get();
+    // Old storage records won't have `content` set, so we need to default these values in
+    // at the API layer.
+    return { ...meta, content: meta.content ?? { source: "web" } };
   }
 
   async updateMetadata(options: {
     title?: string;
     description?: string;
     icon?: string;
+    branch?: string;
   }): Promise<void> {
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     let changed = false;
 
     if (options.title !== undefined && options.title !== meta.title) { meta.title = options.title; changed = true; }
     if (options.description !== undefined && options.description !== meta.description) { meta.description = options.description; changed = true; }
     if (options.icon !== undefined && options.icon !== meta.icon) { meta.icon = options.icon; changed = true; }
+    if (options.branch !== undefined) {
+      if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
+      let branch = options.branch.trim();
+      if (!GIT_BRANCH_RE.test(branch)) throw new Error("Git branch is invalid.");
+      if (branch !== meta.content.branch) {
+        meta.content.branch = branch;
+        delete meta.content.commit;
+        changed = true;
+      }
+    }
 
     if (changed) {
       meta.lastUpdated = new Date();
@@ -142,7 +203,16 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   // --- Document CRUD ---
 
-  listContextDocuments(prefix?: string): ContextDocumentSummary[] {
+  #assertWebWritable(): void {
+    if (this.#isGitBased()) {
+      throw new Error("Git-based collections are read-only. All changes must be made through git.");
+    }
+  }
+
+  async listContextDocuments(prefix?: string): Promise<ContextDocumentSummary[]> {
+    // Trigger git mirror revalidation in the background on reads.
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+
     let options = prefix ? { prefix } : undefined;
     let result: ContextDocumentSummary[] = [];
     for (let record of this.storage.documents.list(options)) {
@@ -158,7 +228,10 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   }
 
   // Lenient read: bad/missing paths return null, not RPC errors. Mutations validate paths.
-  getContextDocument(path: string): ContextDocument | null {
+  async getContextDocument(path: string): Promise<ContextDocument | null> {
+    // Trigger git mirror revalidation in the background on reads.
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+
     let record = this.storage.documents.get(path);
     if (!record) return null;
     return {
@@ -174,6 +247,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async putContextDocument(
       path: string,
       doc: { description: string; body: string; contentType?: string }): Promise<void> {
+    this.#assertWebWritable();
     validateDocumentPath(path);
     // Enforce real UTF-8 bytes, not UTF-16 code units.
     let byteLength = new TextEncoder().encode(doc.body).length;
@@ -189,7 +263,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       path, name: baseName(path), description: doc.description, contentType, body: doc.body, lastUpdated: new Date(),
     });
 
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     if (isNew) meta.documentCount++;
     meta.lastUpdated = new Date();
     this.storage.metadata.put(meta);
@@ -197,6 +271,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   }
 
   async deleteContextDocument(path: string): Promise<void> {
+    this.#assertWebWritable();
     // Mutations reject invalid paths; reads stay lenient.
     validateDocumentPath(path);
     let existing = this.storage.documents.get(path);
@@ -204,7 +279,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
     this.storage.documents.delete(path);
 
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     meta.documentCount = Math.max(0, meta.documentCount - 1);
     meta.lastUpdated = new Date();
     this.storage.metadata.put(meta);
@@ -212,6 +287,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   }
 
   async moveContextDocument(from: string, to: string): Promise<void> {
+    this.#assertWebWritable();
     validateDocumentPath(from);
     validateDocumentPath(to);
     if (from === to) return;
@@ -253,16 +329,147 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       });
     }
 
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     meta.lastUpdated = new Date();
     this.storage.metadata.put(meta);
+    await this.#propagate();
+  }
+
+  // --- Artifact-backed projection ---
+
+  async syncArtifactSource(): Promise<void> {
+    if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
+    await this.#refreshArtifactSource();
+  }
+
+  async createGitToken(): Promise<ContextGitTokenCreateResult> {
+    let meta = this.getMetadata();
+    if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
+    let repo = await this.env.ARTIFACTS.get(meta.id);
+    let token = await repo.createToken("write", GIT_TOKEN_TTL_SECONDS);
+    return {
+      id: token.id,
+      plaintext: token.plaintext,
+      remote: meta.content.remote,
+    };
+  }
+
+  async listGitTokens(): Promise<ContextGitTokenList> {
+    if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
+    let meta = this.getMetadata();
+    let repo = await this.env.ARTIFACTS.get(meta.id);
+    let result = await repo.listTokens();
+    return {
+      tokens: result.tokens
+        // User-created tokens for mirror setup are always write tokens. This DO
+        // mints its own read tokens for cloning the repo into memory which we
+        // don't want to expose the user.
+        .filter(token => token.scope === "write" && token.state === "active")
+        .map(token => ({
+          id: token.id,
+          expiresAt: token.expiresAt,
+        })),
+    };
+  }
+
+  async revokeGitToken(tokenId: string): Promise<boolean> {
+    if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
+    let meta = this.getMetadata();
+    let repo = await this.env.ARTIFACTS.get(meta.id);
+    return repo.revokeToken(tokenId);
+  }
+
+  #isGitBased(): boolean {
+    return this.getMetadata().content.source === "git";
+  }
+
+  #startBackgroundArtifactRefresh(): void {
+    let content = this.getMetadata().content;
+    if (content.source !== "git") return;
+    if (Date.now() - content.lastRefreshedAt.getTime() < GIT_REFRESH_MIN_INTERVAL_MS) return;
+
+    void this.#refreshArtifactSource().catch((err) => {
+      console.warn("Failed to refresh git-based context collection in the background.", {
+        collectionId: this.getMetadata().id,
+        error: err,
+      });
+    });
+  }
+
+  #refreshArtifactSource(): Promise<void> {
+    if (this.#artifactRefresh) return this.#artifactRefresh;
+
+    let promise = this.#loadArtifactSnapshot().finally(() => {
+      if (this.#artifactRefresh === promise) this.#artifactRefresh = undefined;
+    });
+    this.#artifactRefresh = promise;
+    return promise;
+  }
+
+  #replaceArtifactDocuments(commit: string, documents: ContextDocument[]): void {
+    this.storage.transaction(() => {
+      for (let record of this.storage.documents.list()) {
+        this.storage.documents.delete(record.path);
+      }
+      for (let doc of documents) {
+        this.storage.documents.put(doc);
+      }
+
+      let meta = this.getMetadata();
+      meta.documentCount = documents.length;
+      meta.lastUpdated = new Date();
+      if (meta.content.source !== "git") throw new Error("Collection must be git-based.");
+      meta.content.commit = commit;
+      meta.content.lastRefreshedAt = new Date();
+      this.storage.metadata.put(meta);
+    });
+  }
+
+  #deleteArtifactDocuments(commit: string): void {
+    this.storage.transaction(() => {
+      for (let record of this.storage.documents.list()) {
+        this.storage.documents.delete(record.path);
+      }
+
+      let meta = this.getMetadata();
+      meta.documentCount = 0;
+      meta.lastUpdated = new Date();
+      if (meta.content.source !== "git") throw new Error("Collection must be git-based.");
+      meta.content.commit = commit;
+      meta.content.lastRefreshedAt = new Date();
+      this.storage.metadata.put(meta);
+    });
+  }
+
+  async #loadArtifactSnapshot(): Promise<void> {
+    const meta = this.getMetadata();
+    if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
+    const result = await readArtifactRepoDocuments(this.env.ARTIFACTS, meta.id, meta.content.remote, meta.content.branch, meta.content.commit);
+    if (!result.changed) {
+      // Nothing changed, just bump the refresh timestamp.
+      const latestMeta = this.getMetadata();
+      if (latestMeta.content.source !== "git") throw new Error("Collection is not git-based.");
+      latestMeta.content = { ...latestMeta.content, lastRefreshedAt: new Date() };
+      this.storage.metadata.put(latestMeta);
+      return;
+    }
+
+    if (result.commit) {
+      // The repo was updated to a new commit, stored documents need to be updated.
+      this.#replaceArtifactDocuments(result.commit, result.documents);
+    } else {
+      // The repo was updated to an empty state.
+      this.#deleteArtifactDocuments(result.commit);
+    }
     await this.#propagate();
   }
 
   // --- Search ---
 
   // Linear scan over one collection. Replace with an index if collection size makes it matter.
-  search(query: string, limit: number = 20): { path: string; name: string; description: string; snippet?: string; score: number }[] {
+  async search(query: string, limit: number = 20): Promise<{ path: string; name: string; description: string; snippet?: string; score: number }[]> {
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+
     let tokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
     if (tokens.length === 0) return [];
 
@@ -303,7 +510,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   // --- Deletion ---
 
   async deleteSelf(): Promise<void> {
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     let id = meta.id;
 
     if (id) {
@@ -314,11 +521,29 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       }
     }
 
+    if (meta.content.source === "git") {
+      await this.env.ARTIFACTS.delete(id).catch((err) => {
+        console.warn("Failed to delete Artifacts repo for context collection.", {
+          collectionId: id,
+          error: err,
+        });
+      });
+    }
+
     await this.ctx.storage.deleteAll();
   }
 
   // Account revocation clears the whole user-library index separately; don't update it per item.
   async deleteForRevokedOwner(): Promise<void> {
+    let meta = this.getMetadata();
+    if (meta.content.source === "git" && meta.id) {
+      await this.env.ARTIFACTS.delete(meta.id).catch((err) => {
+        console.warn("Failed to delete Artifacts repo while revoking context collection owner.", {
+          collectionId: meta.id,
+          error: err,
+        });
+      });
+    }
     await this.ctx.storage.deleteAll();
   }
 
@@ -326,7 +551,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   // Refresh this collection's denormalized summary in its index.
   async #propagate(): Promise<void> {
-    let meta = this.storage.metadata.get();
+    let meta = this.getMetadata();
     let summary = metadataToSummary(meta);
 
     if (meta.visibility === "public") {

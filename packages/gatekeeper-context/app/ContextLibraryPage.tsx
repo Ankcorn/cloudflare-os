@@ -3,6 +3,7 @@ import {
   BookOpen,
   Buildings,
   Clock,
+  GitBranch,
   Folder,
   FileText,
   Plus,
@@ -17,6 +18,7 @@ import {
   Eye,
   Lock,
   DotsThree,
+  Key,
   Image as ImageIcon,
   UploadSimple,
   FilePlus,
@@ -35,12 +37,16 @@ import {
 import type { ComponentProps, ReactElement, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type {
+  ContextCollectionContent,
   ContextCollectionMetadata,
   ContextCollectionVisibility,
   ContextDocumentSummary,
+  ContextGitTokenCreateResult,
+  ContextGitTokenInfo,
   EnabledCollectionInfo,
 } from "../src/context-types";
 import {
+  DEFAULT_GIT_BRANCH,
   contentTypeFromPath,
   isImageContentType,
   isMarkdownContentType,
@@ -64,7 +70,7 @@ import { yaml } from "@codemirror/lang-yaml";
 import { tags as t } from "@lezer/highlight";
 import type { Extension } from "@codemirror/state";
 import { useContextApi, usePresentWhileOpen, useResolvedThemeMode } from "./bridge";
-import { extractDescription } from "./description-extractors";
+import { extractDescription } from "../src/description-extractors";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -510,11 +516,11 @@ function FieldLabel({
 
 // Shared styling for the `…` overflow menus (file rows, folder rows, the tree's Add button).
 const MENU_CONTENT =
-  "!z-[1100] !min-w-[168px] rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(20,17,16,0.10)]";
+  "z-[1100]! min-w-[168px]! rounded-lg border border-kumo-line bg-kumo-base p-1 shadow-[0_10px_24px_rgba(20,17,16,0.10)]";
 const MENU_ITEM =
-  "!h-auto rounded-md !px-2.5 !py-1.5 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default data-highlighted:bg-kumo-tint";
+  "h-auto! rounded-md px-2.5! py-1.5! text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default data-highlighted:bg-kumo-tint";
 const MENU_ITEM_DANGER =
-  "!h-auto rounded-md !px-2.5 !py-1.5 text-[13px] leading-[18px] tracking-[-0.25px] data-highlighted:bg-kumo-danger-tint";
+  "h-auto! rounded-md px-2.5! py-1.5! text-[13px] leading-[18px] tracking-[-0.25px] data-highlighted:bg-kumo-danger-tint";
 
 // A `…`/`+` overflow menu with the shared chrome. Tree rows pass `stopPropagation` so a click on the
 // trigger or an item doesn't also select the row behind it.
@@ -676,6 +682,21 @@ const VISIBILITY_OPTIONS = [
   },
 ];
 
+const CONTENT_SOURCE_OPTIONS = [
+  {
+    value: "web" as const,
+    Icon: PencilSimple,
+    title: "Editable documents",
+    description: "Create, edit, and delete files through the Gadgets UI.",
+  },
+  {
+    value: "git" as const,
+    Icon: GitBranch,
+    title: "Git mirror",
+    description: "Push content from git using repository mirroring. All changes must be made through git.",
+  },
+];
+
 // Full-pane "create collection" destination (not a modal): you name it, then land inside it to add
 // documents. Quick edit / delete stay as modals.
 function CreateCollectionView({
@@ -690,6 +711,7 @@ function CreateCollectionView({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<ContextCollectionVisibility>("private");
+  const [source, setSource] = useState<ContextCollectionContent["source"]>("web");
   const [icon, setIcon] = useState(DEFAULT_COLLECTION_ICON);
   const [creating, setCreating] = useState(false);
   // Only admins may create public collections.
@@ -719,6 +741,7 @@ function CreateCollectionView({
         description.trim(),
         visibility,
         icon,
+        source,
       );
       toasts.add({ title: "Collection created", variant: "success" });
       onCreated(metadata.id);
@@ -763,8 +786,54 @@ function CreateCollectionView({
             <div className="ctx-rise" style={{ animationDelay: "120ms" }}>
               <CollectionDescriptionField value={description} onChange={setDescription} />
             </div>
+            <div className="ctx-rise" style={{ animationDelay: "160ms" }}>
+              <FieldLabel>Type</FieldLabel>
+              <div role="radiogroup" aria-label="Collection type" className="grid gap-2">
+                {CONTENT_SOURCE_OPTIONS.map(({
+                  value,
+                  Icon,
+                  title: optionTitle,
+                  description: optionDescription,
+                }) => {
+                  const selected = source === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setSource(value)}
+                      className={`press flex items-start gap-3 rounded-xl border-2 px-3 py-2.5 text-left transition-[border-color,background-color] duration-150 ease-out ${
+                        selected
+                          ? "border-kumo-brand/50 bg-kumo-brand/[0.05]"
+                          : "border-kumo-line bg-kumo-base hover:border-kumo-ring/60"
+                      }`}
+                    >
+                      <Icon
+                        size={16}
+                        weight={selected ? "fill" : "regular"}
+                        className={`mt-0.5 shrink-0 ${selected ? "text-kumo-brand" : "text-kumo-subtle"}`}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {optionTitle}
+                        </span>
+                        <span className="mt-0.5 block text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                          {optionDescription}
+                        </span>
+                      </span>
+                      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+                        {selected && (
+                          <Check size={13} weight="bold" className="text-kumo-brand" />
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             {isAdmin && (
-              <div className="ctx-rise" style={{ animationDelay: "180ms" }}>
+              <div className="ctx-rise" style={{ animationDelay: "200ms" }}>
                 <FieldLabel>Visibility</FieldLabel>
                 <div role="radiogroup" aria-label="Visibility" className="grid gap-2">
                   {VISIBILITY_OPTIONS.map(({
@@ -1049,15 +1118,22 @@ function MetaField({
 function CollectionOverview({
   metadata,
   canWrite,
+  refreshingSource,
+  onRefreshSource,
   onEditDetails,
+  onManageGitTokens,
   onDelete,
 }: {
   metadata: ContextCollectionMetadata;
   canWrite: boolean;
+  refreshingSource: boolean;
+  onRefreshSource: () => void;
   onEditDetails: () => void;
+  onManageGitTokens: () => void;
   onDelete: () => void;
 }) {
   const isPublic = metadata.visibility === "public";
+  const isSynced = metadata.content.source === "git";
   return (
     <div className="ctx-scroll @container min-h-0 flex-1 overflow-auto">
       <div className="mx-auto max-w-[850px] px-8 py-10 sm:px-11 sm:py-12">
@@ -1076,6 +1152,16 @@ function CollectionOverview({
             </div>
             {canWrite && (
               <div className="flex shrink-0 items-center gap-2">
+                {isSynced && (
+                  <WorkshopButton
+                    tone="secondary"
+                    className="h-9!"
+                    onClick={onRefreshSource}
+                    loading={refreshingSource}
+                  >
+                    Refresh
+                  </WorkshopButton>
+                )}
                 <KebabMenu
                   trigger={
                     <WorkshopIconButton
@@ -1094,6 +1180,15 @@ function CollectionOverview({
                   >
                     Edit details
                   </DropdownMenu.Item>
+                  {isSynced && (
+                    <DropdownMenu.Item
+                      icon={<Key size={13} className="mr-2" />}
+                      onClick={onManageGitTokens}
+                      className={MENU_ITEM}
+                    >
+                      Manage git tokens
+                    </DropdownMenu.Item>
+                  )}
                   <DropdownMenu.Separator />
                   <DropdownMenu.Item
                     icon={<Trash size={13} className="mr-2" />}
@@ -1118,8 +1213,10 @@ function CollectionOverview({
               {isPublic ? "Everyone (required)" : "Private to you"}
             </MetaField>
             <MetaField label="Documents">{metadata.documentCount}</MetaField>
-            <MetaField label="Updated" align="right">
-              {formatRelativeTime(metadata.lastUpdated)}
+            <MetaField label={isSynced ? "Refreshed" : "Updated"} align="right">
+              {metadata.content.source === "git"
+                ? formatRelativeTime(metadata.content.lastRefreshedAt)
+                : formatRelativeTime(metadata.lastUpdated)}
             </MetaField>
           </div>
         </header>
@@ -1150,7 +1247,9 @@ function CollectionOverview({
                   No files in this collection
                 </p>
                 <p className="mt-1 max-w-xl text-[13px] leading-5 tracking-[-0.2px] text-kumo-subtle">
-                  {canWrite
+                  {isSynced
+                    ? "This git mirror is empty. Mirror content from git, then refresh."
+                    : canWrite
                     ? "Use the + in the Files panel to create or upload skills or files. Agents use the names and descriptions to decide what to read."
                     : "This collection is empty."}
                 </p>
@@ -1193,6 +1292,7 @@ function CollectionSettingsModal({
   const [title, setTitle] = useState(metadata.title);
   const [description, setDescription] = useState(metadata.description);
   const [icon, setIcon] = useState(metadata.icon ?? DEFAULT_COLLECTION_ICON);
+  const [branch, setBranch] = useState(metadata.content.source === "git" ? metadata.content.branch : DEFAULT_GIT_BRANCH);
   const [confirmText, setConfirmText] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -1204,11 +1304,12 @@ function CollectionSettingsModal({
       setTitle(metadata.title);
       setDescription(metadata.description);
       setIcon(metadata.icon ?? DEFAULT_COLLECTION_ICON);
+      setBranch(metadata.content.source === "git" ? metadata.content.branch : DEFAULT_GIT_BRANCH);
       setConfirmText("");
       setSaving(false);
       setDeleting(false);
     }
-  }, [open, initialMode, metadata.title, metadata.description, metadata.icon]);
+  }, [open, initialMode, metadata.title, metadata.description, metadata.icon, metadata.content]);
 
   const busy = saving || deleting;
 
@@ -1216,19 +1317,23 @@ function CollectionSettingsModal({
   const hasChanges =
     title.trim() !== metadata.title ||
     description.trim() !== metadata.description ||
-    icon !== (metadata.icon ?? DEFAULT_COLLECTION_ICON);
+    icon !== (metadata.icon ?? DEFAULT_COLLECTION_ICON) ||
+    (metadata.content.source === "git" && branch.trim() !== metadata.content.branch);
 
   const handleSave = async () => {
     const updates: {
       title?: string;
       description?: string;
       icon?: string;
+      branch?: string;
     } = {};
     if (title.trim() !== metadata.title) updates.title = title.trim();
     if (description.trim() !== metadata.description)
       updates.description = description.trim();
     if (icon !== (metadata.icon ?? DEFAULT_COLLECTION_ICON))
       updates.icon = icon;
+    if (metadata.content.source === "git" && branch.trim() !== metadata.content.branch)
+      updates.branch = branch.trim();
     if (Object.keys(updates).length === 0) {
       onClose();
       return;
@@ -1272,7 +1377,7 @@ function CollectionSettingsModal({
       onOpenChangeComplete={onOpenChangeComplete}
     >
       <Dialog
-        className="!z-[1000] !w-[min(480px,calc(100vw-32px))] overflow-visible bg-kumo-base p-0 !top-[14%] !-translate-y-0"
+        className="z-[1000]! w-[min(480px,calc(100vw-32px))]! overflow-visible bg-kumo-base p-0 top-[14%]! translate-y-0!"
         size="sm"
       >
         {mode === "edit" ? (
@@ -1293,6 +1398,23 @@ function CollectionSettingsModal({
               <div>
                 <CollectionDescriptionField value={description} onChange={setDescription} />
               </div>
+              {metadata.content.source === "git" && (
+                <div>
+                  <FieldLabel>Git branch</FieldLabel>
+                  <WorkshopInput
+                    value={branch}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setBranch(e.target.value)}
+                    onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+                      if (e.key === "Enter" && hasChanges && title.trim()) void handleSave();
+                    }}
+                    placeholder={DEFAULT_GIT_BRANCH}
+                    className="w-full"
+                  />
+                  <p className="mt-1 text-[12px] leading-4 text-kumo-subtle">
+                    This branch to pull from when refreshing the collection.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center justify-end gap-2 border-t border-kumo-line px-4 py-3 sm:px-6">
@@ -1354,6 +1476,234 @@ function CollectionSettingsModal({
             </div>
           </>
         )}
+      </Dialog>
+    </Dialog.Root>
+  );
+}
+
+function GitTokenManagementModal({
+  open,
+  collectionId,
+  branch,
+  onClose,
+}: {
+  open: boolean;
+  collectionId: string;
+  branch: string;
+  onClose: () => void;
+}) {
+  const context = useContextApi();
+  const toasts = useKumoToastManager();
+  const toastsRef = useRef(toasts);
+  const { presenting, onOpenChangeComplete } = usePresentWhileOpen(open);
+
+  const [loadingTokens, setLoadingTokens] = useState(false);
+  const [creatingToken, setCreatingToken] = useState(false);
+  const [revokingToken, setRevokingToken] = useState<string | null>(null);
+  const [gitTokens, setGitTokens] = useState<ContextGitTokenInfo[]>([]);
+  const [newGitToken, setNewGitToken] = useState<ContextGitTokenCreateResult | null>(null);
+
+  toastsRef.current = toasts;
+
+  useEffect(() => {
+    if (open) {
+      setLoadingTokens(false);
+      setCreatingToken(false);
+      setRevokingToken(null);
+      setGitTokens([]);
+      setNewGitToken(null);
+    }
+  }, [open]);
+
+  const loadGitTokens = useCallback(async () => {
+    if (!open) return;
+    setLoadingTokens(true);
+    try {
+      const result = await context.listContextCollectionGitTokens(collectionId);
+      setGitTokens(result.tokens);
+    } catch (err) {
+      toastsRef.current.add({ title: `Failed to load Git tokens: ${(err as Error).message}`, variant: "error" });
+    } finally {
+      setLoadingTokens(false);
+    }
+  }, [open, context, collectionId]);
+
+  useEffect(() => {
+    void loadGitTokens();
+  }, [loadGitTokens]);
+
+  const handleCreateGitToken = async () => {
+    setCreatingToken(true);
+    try {
+      const token = await context.createContextCollectionGitToken(collectionId);
+      setNewGitToken(token);
+      await loadGitTokens();
+      toasts.add({ title: "Git token created", variant: "success" });
+    } catch (err) {
+      toasts.add({ title: `Failed to create Git token: ${(err as Error).message}`, variant: "error" });
+    } finally {
+      setCreatingToken(false);
+    }
+  };
+
+  const handleRevokeGitToken = async (tokenId: string) => {
+    setRevokingToken(tokenId);
+    try {
+      await context.revokeContextCollectionGitToken(collectionId, tokenId);
+      await loadGitTokens();
+      toasts.add({ title: "Git token revoked", variant: "success" });
+    } catch (err) {
+      toasts.add({ title: `Failed to revoke Git token: ${(err as Error).message}`, variant: "error" });
+    } finally {
+      setRevokingToken(null);
+    }
+  };
+
+  const copyToClipboard = (value: string, successTitle: string, errorTitle: string) =>
+    void navigator.clipboard
+      .writeText(value)
+      .then(() => toasts.add({ title: successTitle, variant: "success" }))
+      .catch(() => toasts.add({ title: errorTitle, variant: "error" }));
+
+  const busy = creatingToken || revokingToken !== null;
+
+  return (
+    <Dialog.Root
+      open={open && presenting}
+      onOpenChange={(next: boolean) => {
+        if (!busy && !next) onClose();
+      }}
+      onOpenChangeComplete={onOpenChangeComplete}
+    >
+      <Dialog
+        className="z-[1000]! w-[min(560px,calc(100vw-32px))]! overflow-visible bg-kumo-base p-0 top-[14%]! translate-y-0!"
+        size="sm"
+      >
+        <ModalHeader
+          title="Manage git tokens"
+        />
+
+        <div className="space-y-3 px-4 py-5 sm:px-6">
+          <div className="flex items-center justify-between gap-3">
+            <p className="max-w-sm text-[12px] leading-4 text-kumo-subtle">
+              Create a token to mirror content from an external git repository.
+            </p>
+            <WorkshopButton
+              tone="secondary"
+              className="h-8!"
+              onClick={handleCreateGitToken}
+              loading={creatingToken}
+              disabled={busy}
+            >
+              Create token
+            </WorkshopButton>
+          </div>
+
+          {newGitToken && (
+            <div className="space-y-3 rounded-lg border border-green-500/30 bg-green-500/5 px-3 py-3 text-[12px] leading-5 text-kumo-subtle">
+              <div>
+                <div className="font-medium text-kumo-default">Token created</div>
+                <p className="mt-0.5">
+                  Use these credentials to push content to your collection. The password is only shown once.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <div>
+                  <FieldLabel>Remote URL</FieldLabel>
+                  <div className="mt-1 flex gap-2">
+                    <input
+                      readOnly
+                      value={newGitToken.remote}
+                      className="min-w-0 flex-1 rounded border border-kumo-line bg-kumo-base px-2 py-1 font-mono text-[11px] text-kumo-default"
+                    />
+                    <WorkshopButton
+                      tone="secondary"
+                      className="h-8!"
+                      onClick={() => copyToClipboard(newGitToken.remote, "Remote URL copied", "Failed to copy remote URL")}
+                    >
+                      Copy
+                    </WorkshopButton>
+                  </div>
+                </div>
+                <div>
+                  <FieldLabel>Password</FieldLabel>
+                  <div className="mt-1 flex gap-2">
+                    <input
+                      readOnly
+                      type="password"
+                      value={newGitToken.plaintext}
+                      className="min-w-0 flex-1 rounded border border-kumo-line bg-kumo-base px-2 py-1 font-mono text-[11px] text-kumo-default"
+                    />
+                    <WorkshopButton
+                      tone="secondary"
+                      className="h-8!"
+                      onClick={() => copyToClipboard(newGitToken.plaintext, "Password copied", "Failed to copy password")}
+                    >
+                      Copy
+                    </WorkshopButton>
+                  </div>
+                </div>
+              </div>
+              <div className="border-t border-green-500/20 pt-3">
+                <div className="font-medium text-kumo-default">Configure GitLab mirroring</div>
+                <p className="mt-0.5">
+                  These steps are specific to GitLab. Other git providers may use different setup flows.
+                </p>
+                <ol className="mt-2 list-decimal space-y-1.5 pl-4">
+                  <li>Open your GitLab project and go to Settings &gt; Repository &gt; Mirroring repositories</li>
+                  <li>Click "Add new" button to open setup flow</li>
+                  <li>Set Git repository URL to the remote URL above</li>
+                  <li>Set Mirror direction to Push</li>
+                  <li>Set Authentication method to Username and Password</li>
+                  <li>Set Username to "gitlab"</li>
+                  <li>Set Password to the password above</li>
+                  <li>Select Mirror specific branches and type in "{branch}"</li>
+                  <li>Click "Mirror repository" button to finish</li>
+                  <li>Click "Update now" button to trigger an initial push</li>
+                </ol>
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-kumo-line bg-kumo-base">
+            {loadingTokens ? (
+              <div className="px-3 py-2 text-[12px] text-kumo-subtle">Loading tokens...</div>
+            ) : gitTokens.length === 0 ? (
+              <div className="px-3 py-2 text-[12px] text-kumo-subtle">No Git tokens yet.</div>
+            ) : (
+              <div className="divide-y divide-kumo-line">
+                {gitTokens.map((token) => (
+                  <div
+                    key={token.id}
+                    className={`flex items-center justify-between gap-3 px-3 py-2 text-[12px] ${newGitToken?.id === token.id ? "bg-green-500/5" : ""}`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-[11px] text-kumo-default">{token.id}</div>
+                      <div className="text-kumo-subtle">
+                        expires {new Date(token.expiresAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <WorkshopButton
+                      tone="secondary"
+                      className="h-8!"
+                      onClick={() => void handleRevokeGitToken(token.id)}
+                      loading={revokingToken === token.id}
+                      disabled={revokingToken !== null}
+                    >
+                      Revoke
+                    </WorkshopButton>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-kumo-line px-4 py-3 sm:px-6">
+          <WorkshopButton tone="secondary" className="h-9!" disabled={busy} onClick={onClose}>
+            Close
+          </WorkshopButton>
+        </div>
       </Dialog>
     </Dialog.Root>
   );
@@ -1790,12 +2140,14 @@ function CollectionEditor({
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsMode, setSettingsMode] = useState<"edit" | "delete">("edit");
+  const [gitTokensOpen, setGitTokensOpen] = useState(false);
   const openSettings = (m: "edit" | "delete") => {
     setSettingsMode(m);
     setSettingsOpen(true);
   };
   // Default read-only until access loads so edit controls never flash to viewers.
   const [canWrite, setCanWrite] = useState(false);
+  const [refreshingSource, setRefreshingSource] = useState(false);
 
   // Tree ⋮ deletes route through the same in-app confirmation dialog the document toolbar uses,
   // rather than a native confirm() that breaks out of the app chrome.
@@ -1844,6 +2196,7 @@ function CollectionEditor({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
+  const canEditDocuments = canWrite && metadata?.content.source !== "git";
 
   const loadDocs = useCallback(async () => {
     try {
@@ -1865,6 +2218,19 @@ function CollectionEditor({
   useEffect(() => {
     loadDocs();
   }, [loadDocs]);
+
+  const handleRefreshArtifactSource = async () => {
+    setRefreshingSource(true);
+    try {
+      await context.syncContextCollectionArtifactSource(collectionId);
+      await loadDocs();
+      toasts.add({ title: "Collection refreshed", variant: "success" });
+    } catch (err) {
+      toasts.add({ title: `Failed to refresh: ${(err as Error).message}`, variant: "error" });
+    } finally {
+      setRefreshingSource(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedPath) return;
@@ -2083,7 +2449,7 @@ function CollectionEditor({
   );
 
   const ctx: TreeCtx = {
-    canWrite,
+    canWrite: canEditDocuments,
     selectedPath,
     expanded,
     toggleFolder,
@@ -2151,6 +2517,15 @@ function CollectionEditor({
         />
       )}
 
+      {metadata?.content.source === "git" && (
+        <GitTokenManagementModal
+          open={gitTokensOpen}
+          collectionId={collectionId}
+          branch={metadata.content.branch}
+          onClose={() => setGitTokensOpen(false)}
+        />
+      )}
+
       {/* In-app confirmation for tree ⋮ deletes (files and folders). */}
       <Dialog.Root
         open={!!pendingDelete && deletePresentation.presenting}
@@ -2166,7 +2541,7 @@ function CollectionEditor({
         }}
       >
         <Dialog
-          className="!z-[1000] !w-[min(440px,calc(100vw-32px))] bg-kumo-base p-0 !top-[16%] !-translate-y-0"
+          className="z-[1000]! w-[min(440px,calc(100vw-32px))]! bg-kumo-base p-0 top-[16%]! translate-y-0!"
           size="sm"
         >
           <ModalHeader
@@ -2244,7 +2619,7 @@ function CollectionEditor({
             <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
               Files
             </span>
-            {canWrite && (
+            {canEditDocuments && (
               <>
             <KebabMenu
               trigger={
@@ -2317,7 +2692,9 @@ function CollectionEditor({
               <p className="px-2 py-2 text-[13px] text-kumo-subtle">Loading…</p>
             ) : docs.length === 0 && pendingFolders.size === 0 && !creating ? (
               <p className="px-2 py-2 text-[12px] leading-5 text-kumo-inactive">
-                {canWrite ? "No files yet. Use + to create or upload skills or files." : "No files yet."}
+                {metadata?.content.source === "git"
+                  ? "No files yet. Mirror content from git, then refresh."
+                  : canWrite ? "No files yet. Use + to create or upload skills or files." : "No files yet."}
               </p>
             ) : (
               <FolderView folder={tree} depth={0} ctx={ctx} />
@@ -2342,7 +2719,7 @@ function CollectionEditor({
                   key={selectedPath}
                   collectionId={collectionId}
                   path={selectedPath}
-                  readOnly={!canWrite}
+                  readOnly={!canEditDocuments}
                   initialMode={editOnOpenPath === selectedPath ? "edit" : "read"}
                   onDirtyChange={setDirty}
                   onChanged={loadDocs}
@@ -2359,7 +2736,10 @@ function CollectionEditor({
             <CollectionOverview
               metadata={metadata}
               canWrite={canWrite}
+              refreshingSource={refreshingSource}
+              onRefreshSource={handleRefreshArtifactSource}
               onEditDetails={() => openSettings("edit")}
+              onManageGitTokens={() => setGitTokensOpen(true)}
               onDelete={() => openSettings("delete")}
             />
           ) : null}
