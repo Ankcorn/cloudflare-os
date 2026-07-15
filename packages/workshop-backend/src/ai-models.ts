@@ -1,6 +1,6 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import { generateText, LanguageModel } from "ai";
+import { generateText, LanguageModel, wrapLanguageModel, type LanguageModelMiddleware } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -89,6 +89,24 @@ function getModelViaUserGateway(
   return gateway(createUnified()(`${providerPath}/${config.model}`));
 }
 
+// The Workers AI binding, unlike the REST providers, doesn't surface the AI Gateway log id through
+// the AI SDK, so republish `env.WORKERS_AI.aiGatewayLogId` into the `cf-aig-log-id` response header
+// that `onStepFinish` already consumes to attribute inference cost.
+function captureAiGatewayLogId(env: Cloudflare.Env): LanguageModelMiddleware {
+  return {
+    specificationVersion: "v3",
+    // Only the streaming path is wrapped: the binding sets the log id and returns the stream in the same tick,
+    // so the id is read before any concurrent run() can clobber it. Non-streaming awaits the body first (unsafe).
+    wrapStream: async ({ doStream }) => {
+      const result = await doStream();
+      const logId = env.WORKERS_AI.aiGatewayLogId;
+      if (!logId) return result;
+      const headers = { ...result.response?.headers, "cf-aig-log-id": logId };
+      return { ...result, response: { ...result.response, headers } };
+    },
+  };
+}
+
 // Platform free-tier path: route through the deployment's configured AI Gateway (platform-funded).
 // Used only for requests that are NOT billed to a connected user's account.
 function getModelViaGateway(
@@ -101,10 +119,13 @@ function getModelViaGateway(
   const metadata = buildMetadata(initiator);
 
   if (config.provider === "cloudflare") {
-    return createWorkersAI({
-      binding: env.WORKERS_AI,
-      gateway: { id: gwConfig.workersAiGateway, metadata },
-    })(config.model as any, { sessionAffinity });
+    return wrapLanguageModel({
+      model: createWorkersAI({
+        binding: env.WORKERS_AI,
+        gateway: { id: gwConfig.workersAiGateway, metadata },
+      })(config.model as any, { sessionAffinity }),
+      middleware: captureAiGatewayLogId(env),
+    });
   }
 
   let gatewayWrapper: AiGateway;

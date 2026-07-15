@@ -2003,7 +2003,6 @@ export async function runAgent(
         msgs.push(cr);
       }
 
-      // TODO: Figure out where to get cf-aig-log-id when using the Workers AI binding.
       hooks.addChatMessages(chatId, author, msgs,
           usage.totalTokens, response.headers?.["cf-aig-log-id"]);
 
