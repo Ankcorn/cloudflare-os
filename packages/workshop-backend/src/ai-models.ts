@@ -230,6 +230,15 @@ export class LanguageModelGatekeeper
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
+
+  async addObserver(_id: string, _user: Fetcher): Promise<void> {
+    // An AI model is not a restricted-access resource: nothing read through it identifies the
+    // observer or leaks private data, so any observer is permitted. No-op (never throws).
+  }
+
+  async removeObserver(_id: string): Promise<void> {
+    // No observer state is tracked (see addObserver). Idempotent no-op.
+  }
 }
 
 @validateRpc()

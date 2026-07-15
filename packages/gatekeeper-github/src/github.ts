@@ -1,5 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   type ActionDescription,
@@ -9,6 +9,7 @@ import {
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
@@ -1311,6 +1312,60 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
     return {};
+  }
+
+  // Mint a verifier representing this account, used by GitHubGatekeeperImpl.addObserver to confirm
+  // a prospective observer is allowed to read a bound repository (see that method). The verifier
+  // carries this user's own account id, so when the gatekeeper calls hasRepoAccess() the check runs
+  // against the observer's *own* GitHub token.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    const props: GitHubVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.GitHubVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier
+//
+// GitHub uses the "ACL check (single unit)" observer strategy: a binding is a single repository (or
+// a single issue/PR, which inherits the repo's ACL), so verifying an observer reduces to "can this
+// user read the repo?".
+//
+// The verifier is minted by the *observer's* connected account (GatekeeperUserImpl.getVerifier) and
+// carries that account's id, so `hasRepoAccess` queries GitHub with the observer's own token: if a
+// plain `GET /repos/{owner}/{repo}` succeeds, the observer has at least read access; GitHub returns
+// 404 (not 403) for repos a user can't see, so a 404 means "no access". The overseer only ever
+// hands this verifier back to a GitHub gatekeeper, so that gatekeeper may trust the boolean result.
+
+type GitHubVerifierProps = {
+  userObjectId: string;
+};
+
+// The non-standard method the GitHub gatekeeper calls on its own verifier (see addObserver). Not
+// part of the generic GatekeeperUserVerifier contract.
+export interface GitHubVerifierApi extends GatekeeperUserVerifier {
+  hasRepoAccess(owner: string, repo: string): Promise<boolean>;
+}
+
+@validateRpc()
+export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
+    implements GitHubVerifierApi {
+  async hasRepoAccess(owner: string, repo: string): Promise<boolean> {
+    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    const account = this.ctx.exports.UserAccount.get(id);
+    const api = new GitHubApi(async () => await account.getAccessToken());
+    try {
+      await api.getRepo(owner, repo);
+      return true;
+    } catch (error) {
+      // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
+      // 403 in some org-policy cases — either way the observer lacks read access.
+      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
+        return false;
+      }
+      throw error;
+    }
   }
 }
 
@@ -3691,6 +3746,27 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       options,
     };
   }
+
+  // Observer tracking: GitHub uses the "ACL check (single unit)" strategy. Every binding — repo,
+  // issue, or pull request — is scoped to one repository, and issues/PRs inherit the repo's
+  // permissions, so the repository is the atomic ACL unit. To admit an observer we simply confirm
+  // they can read that repo, using their own token via the verifier (see GitHubVerifier).
+  //
+  // Because the whole unit is verified up front, there is never a later observation a verified
+  // observer shouldn't see, so we set no excludeObservers and need not remember observers;
+  // removeObserver is an idempotent no-op. The overseer re-runs addObserver on every open, so loss
+  // of the observer's repo access is caught promptly.
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<GitHubVerifierApi>;
+    const { owner, repo } = this.ctx.props;
+    if (!(await verifier.hasRepoAccess(owner, repo))) {
+      throw new Error(
+        `This collaborator does not have read access to the GitHub repository ${owner}/${repo}, ` +
+        `so they cannot be allowed to observe data the Gadget read from it.`);
+    }
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 @validateRpc()

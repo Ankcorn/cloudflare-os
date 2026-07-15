@@ -1,6 +1,5 @@
 import { Link } from '@tanstack/react-router'
-// SECURITY: sharing disabled — ShareNetwork removed from import; revert to re-enable.
-import { DotsThree, PushPin, Trash, Pencil } from '@phosphor-icons/react'
+import { DotsThree, PushPin, ShareNetwork, Trash, Pencil } from '@phosphor-icons/react'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from '../menuStyles'
 import { useState, useEffect, useRef } from 'react'
@@ -21,8 +20,7 @@ export default function SidebarGadgetRow({
   collapsed = false,
   onTogglePin,
   onRename,
-  // SECURITY: sharing disabled — onShare unused while hidden; revert to re-enable.
-  // onShare,
+  onShare,
   onDelete,
 }: {
   gadget: GadgetMetadataWithTimestamps
@@ -117,14 +115,12 @@ export default function SidebarGadgetRow({
                   <PushPin size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
                   {gadget.pinned ? 'Unpin' : 'Pin to top'}
                 </DropdownMenu.Item>
-                {/* SECURITY: sharing disabled — revert to re-enable.
                 <DropdownMenu.Item
                   onClick={() => onShare(gadget)}
                   className={MENU_ITEM}
                 >
                   <ShareNetwork size={13} className="mr-2" /> Share
                 </DropdownMenu.Item>
-                */}
                 <DropdownMenu.Separator />
                 <DropdownMenu.Item
                   variant="danger"

@@ -1,7 +1,8 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   GatekeeperUser,
+  GatekeeperUserVerifier,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
   HookController,
@@ -444,7 +445,22 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
     return {};
   }
+
+  // Mint a verifier representing this account. The email gatekeeper uses the "low-stakes" observer
+  // strategy (see EmailGatekeeperImpl.addObserver): a mailbox here is a fresh address minted on the
+  // deployment's own domain specifically for the Gadget, so the Gadget's collaborators are the
+  // intended audience. The verifier carries no identity and is never consulted — but the overseer
+  // mints one on every open, so it must exist and not throw.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    return this.ctx.exports.EmailVerifier({});
+  }
 }
+
+// A trivial verifier with no methods, since the email gatekeeper's observer strategy is
+// "low-stakes" (no information-flow tracking). See EmailGatekeeperImpl.addObserver.
+@validateRpc()
+export class EmailVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
 
 // =======================================================================================
 
@@ -543,6 +559,14 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("Email gatekeeper has no actions to revert");
   }
+
+  // Observer tracking: the email gatekeeper uses the "low-stakes" strategy. Each mailbox is a fresh
+  // address minted on the deployment's own domain for this Gadget; there is no external ACL and no
+  // other party who "independently has access" to that inbox, so the Gadget's own collaborators are
+  // the natural audience. Any collaborator may observe: addObserver/removeObserver are no-ops and we
+  // never set excludeObservers on observations.
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 @validateRpc()

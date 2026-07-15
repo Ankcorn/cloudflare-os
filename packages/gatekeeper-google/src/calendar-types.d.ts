@@ -169,11 +169,13 @@ export interface GoogleCalendarSession {
   /**
    * Check free/busy availability for people or calendars. Returns only busy time blocks, never
    * event titles, descriptions, locations, attendees, or conferencing details.
+   * Calendar identifiers must be stable IDs or email addresses; the account-relative `primary`
+   * alias is not accepted.
    *
    * If this connection's availability mode is `thisCalendar`, only the bound calendar's own
-   * free/busy may be queried; querying anything else throws. Querying other calendars (mode
-   * `allVisible`) marks the result as owner-only: it is blocked on a shared gadget and prevents
-   * the gadget from being shared afterward.
+   * free/busy may be queried; querying anything else throws. With `allVisible`, collaborators can
+   * observe the result only when their chosen Google account can independently see free/busy for
+   * every calendar whose availability has been read.
    */
   checkAvailability(opts: {
     people: string[];

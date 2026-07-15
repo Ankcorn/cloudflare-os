@@ -42,7 +42,7 @@ export default {
             {
               value: "allVisible",
               title: "All calendars visible to me",
-              description: "Check availability for anyone visible to your account. The gadget can't be shared once it does.",
+              description: "Check anyone visible to your account. Collaborators must also be able to see their availability.",
             },
           ]}
           onChange={nextMode => {

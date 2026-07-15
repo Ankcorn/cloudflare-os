@@ -527,6 +527,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // Returns null when the account has no verified email or the vendor does not support auth.
   getAuthenticatedEmail(): Promise<string | null>;
 
+  // Get a `GatekeeperUserVerifier` representing this user.
+  getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>>;
+
   // Ensure the authorization for the listed grantable resource types (by `urlPattern`) is granted
   // on this account, expanding the grant if needed.
   //
@@ -561,6 +564,21 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // TODO:
   // - Query whether account has scope to access a particular URL.
 }
+
+// Opaque object representing the capability to verify whether a particular user is able to access
+// a particular Gatekeeper. Minted by `GatekeeperUser`, and then passed to
+// `Gatekeeper.addObserver()` and possibly other future interfaces.
+//
+// At present, this interface has no methods, because it is merely meant to be passed back to the
+// Gatekeeper that created it.
+//
+// IMPLEMENTATION NOTE: As of this writing, there is no runtime-supported way to "unwrap" a
+// `Fetcher` passed back to its implementer in order to extract the underlying `props`. This will
+// be added eventually. For now, we recommend that the `GatekeeperUserVerifier` implement a public
+// but non-standard method which the same gatekeeper's `addObserver()` implementations can call.
+// The overseer promises only to pass a `GatekeeperUserVerifier` object back to the same gatekeeper
+// that created it, so addObserver() can then call that non-standard method and trust the results.
+export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 
 // Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
 // specific Gadget.
@@ -611,6 +629,46 @@ export interface Gatekeeper<Session> extends DurableObject {
     request: AgentCatalogRequest,
     authorizer: RpcStub<ObservationAuthorizer>,
   ): Promise<AgentCatalog | null>;
+
+  // Informs the gatekeeper that a new user is being added to the Gadget with the potential to see
+  // all data that was read from this Gatekeeper in the past.
+  //
+  // `id` is a unique, stable, but opaque string chosen by the overseer to identify this user in
+  // the context of this gadget.
+  //
+  // The gatekeeper must verify that the given user is allowed to directly observe everything that
+  // has been observed through this gatekeeper in the past. If this is not the case, addObserver()
+  // must throw an exception.
+  //
+  // If this returns without throwing, the Gatekeeper must remember that this user is now an
+  // observer. If any future observation must be hidden from this observer, then the
+  // `ObservationDescription` must include the `excludeObservers` property to indicate who is not
+  // permitted to see the observation.
+  //
+  // `addObserver()` may be called again with the same user ID. If so, the gatekeeper should re-run
+  // the same verifications it would have done if the user were newly-added. The overseer may run
+  // this periodically to check if the user's access to the resource may have been revoked.
+  //
+  // For most gatekeepers, addObserver() should simply check that the user is allowed to read the
+  // target resource in general -- there's no actual need to check against a log of past
+  // observations. For gatekeepers that provide broad access to a user's resources, though, it may
+  // be unlikely that any other user could possibly have access to everything the gatekeeper provides.
+  // In these cases, logging what was actually observed makes things more useful.
+  //
+  // For example, imagine a gatekeeper that grants access to a user's email inbox. Full access to
+  // an inbox is extremely personal and usually no other user can possibly be permitted such broad
+  // access. However, if the Gadget itself carefully reads only emails addressed to a particular
+  // mailing list, then it is OK to reveal those observations to any member of the mailing list.
+  // The gatekeeper should ideally permit observers who are mailing list members.
+  addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void>;
+
+  // Notifies the gatekeeper that it can stop tracking the given observer, who was previously
+  // added using `addObserver()`. The gatekeeper no longer needs to verify whether each observation
+  // is safe for this observer.
+  //
+  // This method must be idempotent: If the gatekeeper is unaware that this user was ever added, it
+  // should just ignore the call rather than throw.
+  removeObserver(id: string): Promise<void>;
 
   // ---------------------------------------------------------------------------
   // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
@@ -825,6 +883,24 @@ export type ObservationDescription = {
   //   sensitive data as long as the recipients also have access to that same data, but this
   //   requires a more complex policy framework to compute.
   prohibitAllSharing?: boolean;
+
+  // If present, then this observation includes data that must not be revealed to the given
+  // observer IDs, who were previously added via `Gatekeeper.addObserver()`.
+  //
+  // If the call to authorizeObservation() succeeds, then the overseer is promising to ensure that
+  // these users will not see this observation. How it does this is up to the overseer, but in
+  // practice it may be one of:
+  // - The user had already been removed.
+  // - The overseer revoked the user's access synchronously (however, in practice, we don't do
+  //   this, because it would be weird UX).
+  // - The observation occurred in a specific agent thread, and the overseer can prevent the
+  //   observer from viewing that thread.
+  //
+  // If authorizeObservation() throws, then the gatekeeper should allow the exception to propagate
+  // out to the caller, blocking the observation from taking place at all. The overseer will
+  // throw in cases where it would not otherwise be able to prevent the given observer from seeing
+  // the observation.
+  excludeObservers?: string[];
 }
 
 // A stable, machine-readable tag for an action paired with its human-readable display name; the two

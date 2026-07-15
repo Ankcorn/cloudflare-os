@@ -12,9 +12,10 @@
 //     confluence-actions.ts.
 //  5. Caching — content responses are cached in DO storage (short TTL).
 //  6. Simulation — reads overlay pending actions so a Gadget sees its own writes immediately.
+//  7. Observer verification — all bindings track independently restricted spaces and content.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   type AccountDescription,
   type ApprovalQueue,
@@ -22,7 +23,9 @@ import {
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type ObservationDescription,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -72,6 +75,14 @@ import {
   type ContentParent,
 } from "./confluence-actions";
 import { ConfluenceConfiguratorUI } from "./confluence-configurators";
+import {
+  ConfluenceAccessChecker,
+  ConfluenceObserverTracker,
+  contentSets,
+  spaceSets,
+  type ConfluenceObservedSet,
+  type ConfluenceVerifierApi,
+} from "./confluence-observers";
 import type {
   Attachment,
   AttachmentDownload,
@@ -488,6 +499,51 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    const props: ConfluenceVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.ConfluenceVerifier({ props });
+  }
+}
+
+type ConfluenceVerifierProps = { userObjectId: string };
+
+// Persistent verifier entrypoint representing one connected Confluence account. The props identify
+// the observer's UserAccount DO, so every access question below is answered with that observer's
+// token. The overseer only returns this stub to Confluence gatekeepers.
+@validateRpc()
+export class ConfluenceVerifier extends WorkerEntrypoint<Env, ConfluenceVerifierProps>
+    implements ConfluenceVerifierApi {
+  #account() {
+    return this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+  }
+
+  #checker(): ConfluenceAccessChecker {
+    const account = () => this.#account();
+    return new ConfluenceAccessChecker(
+      async () => await account().getAccessToken(),
+      cloudId => new ConfluenceApi({
+        cloudId,
+        webBase: "",
+        getToken: async () => await account().getAccessToken(),
+        refresh: async () => await account().refreshCredentials(),
+      }),
+    );
+  }
+
+  hasSiteAccess(cloudId: string): Promise<boolean> {
+    return this.#checker().hasSiteAccess(cloudId);
+  }
+
+  hasSpaceAccess(cloudId: string, spaceIdOrKey: string): Promise<boolean> {
+    return this.#checker().hasSpaceAccess(cloudId, spaceIdOrKey);
+  }
+
+  hasContentAccess(cloudId: string, contentId: string): Promise<boolean> {
+    return this.#checker().hasContentAccess(cloudId, contentId);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -513,6 +569,7 @@ function makeApi(ctx: { exports: Cloudflare.Env }, props: BaseProps): Confluence
 export class ConfluenceSiteGatekeeperImpl extends DurableObject<Env, SiteGatekeeperProps>
     implements Gatekeeper<ConfluenceSiteSession> {
   #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
     const sites: AccessibleResource[] = await accountFor(this.ctx, this.ctx.props.userObjectId).getSites();
@@ -533,8 +590,22 @@ export class ConfluenceSiteGatekeeperImpl extends DurableObject<Env, SiteGatekee
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ConfluenceSiteSession> {
     const identity: AtlassianIdentity | null =
       await accountFor(this.ctx, this.ctx.props.userObjectId).getIdentity();
-    return new SiteSessionImpl(this.#store(), approvalQueue.dup(), this.ctx.props.webBase, identity);
+    return new SiteSessionImpl(
+      this.#store(), approvalQueue.dup(), this.ctx.props.webBase, identity,
+      sets => this.#tracker().prepareObservation(sets));
   }
+
+  // Site membership is the baseline for site metadata/current-user reads. The tracker separately
+  // verifies every restricted space and content item revealed through this broad binding.
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<ConfluenceVerifierApi>;
+    if (!(await verifier.hasSiteAccess(this.ctx.props.cloudId))) {
+      throw new Error("This collaborator does not have access to the bound Confluence site.");
+    }
+    await this.#tracker().addObserver(id, verifier);
+  }
+
+  async removeObserver(id: string): Promise<void> { this.#tracker().removeObserver(id); }
 
   async applyAction(action: number): Promise<void> { await applyStoredAction(this.#store(), action); }
   async rejectAction(action: number) { return rejectStoredAction(this.#store(), action); }
@@ -545,6 +616,7 @@ export class ConfluenceSiteGatekeeperImpl extends DurableObject<Env, SiteGatekee
 export class ConfluenceSpaceGatekeeperImpl extends DurableObject<Env, SpaceGatekeeperProps>
     implements Gatekeeper<ConfluenceSpaceSession> {
   #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
     const space = await this.#store().api.getSpaceByKey(this.ctx.props.spaceKey);
@@ -562,8 +634,22 @@ export class ConfluenceSpaceGatekeeperImpl extends DurableObject<Env, SpaceGatek
   async getAutoApprovableActions() { return []; }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ConfluenceSpaceSession> {
-    return new SpaceSessionImpl(this.#store(), approvalQueue.dup(), this.ctx.props.webBase, this.ctx.props.spaceKey);
+    return new SpaceSessionImpl(
+      this.#store(), approvalQueue.dup(), this.ctx.props.webBase, this.ctx.props.spaceKey,
+      sets => this.#tracker().prepareObservation(sets));
   }
+
+  // Space access is the baseline; pages and blog posts are tracked independently because
+  // Confluence content restrictions may be narrower than the containing space.
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<ConfluenceVerifierApi>;
+    if (!(await verifier.hasSpaceAccess(this.ctx.props.cloudId, this.ctx.props.spaceKey))) {
+      throw new Error("This collaborator does not have access to the bound Confluence space.");
+    }
+    await this.#tracker().addObserver(id, verifier);
+  }
+
+  async removeObserver(id: string): Promise<void> { this.#tracker().removeObserver(id); }
 
   async applyAction(action: number): Promise<void> { await applyStoredAction(this.#store(), action); }
   async rejectAction(action: number) { return rejectStoredAction(this.#store(), action); }
@@ -574,6 +660,7 @@ export class ConfluenceSpaceGatekeeperImpl extends DurableObject<Env, SpaceGatek
 export class ConfluenceContentGatekeeperImpl extends DurableObject<Env, ContentGatekeeperProps>
     implements Gatekeeper<ConfluenceContentSession> {
   #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
     const content = await this.#store().getContentResponse(this.ctx.props.contentId);
@@ -592,8 +679,22 @@ export class ConfluenceContentGatekeeperImpl extends DurableObject<Env, ContentG
   async getAutoApprovableActions() { return []; }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ConfluenceContentSession> {
-    return new ContentSessionImpl(this.#store(), approvalQueue.dup(), this.ctx.props.webBase, this.ctx.props.contentId);
+    return new ContentSessionImpl(
+      this.#store(), approvalQueue.dup(), this.ctx.props.webBase, this.ctx.props.contentId,
+      sets => this.#tracker().prepareObservation(sets));
   }
+
+  // Access to the bound page/blog post is the baseline. Child pages remain tracked sets because a
+  // descendant can have stricter restrictions than its parent.
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<ConfluenceVerifierApi>;
+    if (!(await verifier.hasContentAccess(this.ctx.props.cloudId, this.ctx.props.contentId))) {
+      throw new Error("This collaborator does not have access to the bound Confluence content.");
+    }
+    await this.#tracker().addObserver(id, verifier);
+  }
+
+  async removeObserver(id: string): Promise<void> { this.#tracker().removeObserver(id); }
 
   async applyAction(action: number): Promise<void> { await applyStoredAction(this.#store(), action); }
   async rejectAction(action: number) { return rejectStoredAction(this.#store(), action); }
@@ -636,6 +737,25 @@ function disposeQueue(stub: RpcStub<ApprovalQueue>): void {
   (stub as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
 }
 
+// Queue-independent so one hook can be threaded through every sub-session and cursor while the DO
+// remains the sole owner of durable observer state.
+type ObserveHook = (sets: ConfluenceObservedSet[]) => Promise<{
+  excludeObservers?: string[];
+  pendingSets: ConfluenceObservedSet[];
+  commit(): void;
+}>;
+
+// Combines data-set accounting with the existing approval-queue observation. Reads with no
+// independently protected set rely only on the binding baseline checked by addObserver().
+async function authorizeConfluenceObservation(
+  queue: RpcStub<ApprovalQueue>, observe: ObserveHook, sets: ConfluenceObservedSet[],
+  description: ObservationDescription,
+): Promise<void> {
+  const check = sets.length > 0 ? await observe(sets) : { pendingSets: [], commit() {} };
+  await queue.authorizeObservation({ ...description, excludeObservers: check.excludeObservers });
+  check.commit();
+}
+
 // ---------------------------------------------------------------------------------------------
 // Sessions
 
@@ -645,22 +765,24 @@ class SiteSessionImpl extends RpcTarget implements ConfluenceSiteSession {
   #approvalQueue: RpcStub<ApprovalQueue>;
   #webBase: string;
   #identity: AtlassianIdentity | null;
+  #observe: ObserveHook;
 
   constructor(
     store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, webBase: string,
-    identity: AtlassianIdentity | null,
+    identity: AtlassianIdentity | null, observe: ObserveHook,
   ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#webBase = webBase;
     this.#identity = identity;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() { disposeQueue(this.#approvalQueue); }
 
   async getMetadata(): Promise<SiteMetadata> {
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, [],
       observation("Read Confluence site info", "Read the connected Confluence site's name and URL."));
     return { name: this.#webBase.replace(/^https?:\/\//, "").replace(/\/wiki$/, ""), url: this.#webBase, cloudId: this.#store.api.cloudId };
   }
@@ -669,43 +791,46 @@ class SiteSessionImpl extends RpcTarget implements ConfluenceSiteSession {
     const limit = clampPageSize(options?.pageSize);
     return Promise.resolve(new PagedCursor<SpaceSummary>(async cursor => {
       const { results, nextCursor } = await this.#store.api.listSpaces({ type: options?.type, cursor, limit });
-      await this.#approvalQueue.authorizeObservation(
+      await authorizeConfluenceObservation(
+        this.#approvalQueue, this.#observe, spaceSets(results.map(s => s.id)),
         observation("List Confluence spaces", "List the spaces on the Confluence site."));
       return { items: results.map(s => spaceToMetadata(s, this.#webBase)), nextCursor };
     }));
   }
 
   async getSpace(keyOrIdOrUrl: string): Promise<ConfluenceSpaceSession> {
-    await this.#approvalQueue.authorizeObservation(
-      observation("Open Confluence space", "Open a Confluence space."));
     const ref = parseSpaceKeyOrId(keyOrIdOrUrl);
     // Resolve to the space's key (the session is keyed by key); numeric IDs and URLs are accepted.
     const space = "key" in ref
       ? await this.#store.api.getSpaceByKey(ref.key)
       : await this.#store.api.getSpaceById(ref.id);
-    return new SpaceSessionImpl(this.#store, this.#approvalQueue.dup(), this.#webBase, space.key);
+    await authorizeConfluenceObservation(
+      this.#approvalQueue, this.#observe, spaceSets([space.id]),
+      observation("Open Confluence space", "Open a Confluence space."));
+    return new SpaceSessionImpl(
+      this.#store, this.#approvalQueue.dup(), this.#webBase, space.key, this.#observe);
   }
 
   async getContent(idOrUrl: string): Promise<ConfluenceContentSession> {
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, [],
       observation("Open Confluence content", "Open a Confluence page or blog post."));
     const id = resolveHandle(this.#store, idOrUrl);
     if (!ConfluenceStore.isProvisional(id)) await this.#store.getContentResponse(id);
-    return new ContentSessionImpl(this.#store, this.#approvalQueue.dup(), this.#webBase, id);
+    return new ContentSessionImpl(
+      this.#store, this.#approvalQueue.dup(), this.#webBase, id, this.#observe);
   }
 
   search(options?: SearchOptions): Promise<Cursor<ContentSummary>> {
-    return Promise.resolve(searchCursor(this.#store, this.#approvalQueue, options));
+    return Promise.resolve(searchCursor(this.#store, this.#approvalQueue, this.#observe, options));
   }
 
   async getCurrentUser(): Promise<ConfluenceUser> {
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, [],
       observation("Read Confluence user", "Read the authorizing Confluence user's profile."));
     const id = this.#identity;
     return {
       accountId: id?.accountId ?? "unknown",
       displayName: id?.name,
-      email: id?.email,
       avatarUrl: id?.picture,
     };
   }
@@ -717,20 +842,25 @@ class SpaceSessionImpl extends RpcTarget implements ConfluenceSpaceSession {
   #approvalQueue: RpcStub<ApprovalQueue>;
   #webBase: string;
   #spaceKey: string;
+  #observe: ObserveHook;
 
-  constructor(store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, webBase: string, spaceKey: string) {
+  constructor(
+    store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, webBase: string, spaceKey: string,
+    observe: ObserveHook,
+  ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#webBase = webBase;
     this.#spaceKey = spaceKey;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() { disposeQueue(this.#approvalQueue); }
 
   async getMetadata(): Promise<SpaceMetadata> {
     const space = await this.#store.api.getSpaceByKey(this.#spaceKey);
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, [],
       observation("Read Confluence space", `Read metadata for Confluence space ${this.#spaceKey}.`));
     return spaceToMetadata(space, this.#webBase);
   }
@@ -752,15 +882,16 @@ class SpaceSessionImpl extends RpcTarget implements ConfluenceSpaceSession {
         : await this.#store.api.listPagesInSpace({ spaceId, depth: depth ?? "root", cursor, limit });
       const items = overlaySpaceContent(
         results.map(c => contentToSummary(c, this.#webBase)), this.#store, this.#spaceKey, type, !cursor);
-      await this.#approvalQueue.authorizeObservation(observation(
-        `List Confluence ${type === "blogpost" ? "blog posts" : "pages"}`,
-        `List the ${type === "blogpost" ? "blog posts" : "pages"} in space ${this.#spaceKey}.`));
+      await authorizeConfluenceObservation(
+        this.#approvalQueue, this.#observe, contentSets(items.map(item => item.id)), observation(
+          `List Confluence ${type === "blogpost" ? "blog posts" : "pages"}`,
+          `List the ${type === "blogpost" ? "blog posts" : "pages"} in space ${this.#spaceKey}.`));
       return { items, nextCursor };
     });
   }
 
   async getContent(idOrUrl: string): Promise<ConfluenceContentSession> {
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, [],
       observation("Open Confluence content", `Open a page or blog post in space ${this.#spaceKey}.`));
     const id = resolveHandle(this.#store, idOrUrl);
     if (!ConfluenceStore.isProvisional(id)) {
@@ -769,11 +900,13 @@ class SpaceSessionImpl extends RpcTarget implements ConfluenceSpaceSession {
         throw new ConfluenceApiError(404, "No such page or blog post in this space.");
       }
     }
-    return new ContentSessionImpl(this.#store, this.#approvalQueue.dup(), this.#webBase, id);
+    return new ContentSessionImpl(
+      this.#store, this.#approvalQueue.dup(), this.#webBase, id, this.#observe);
   }
 
   search(options?: SearchOptions): Promise<Cursor<ContentSummary>> {
-    return Promise.resolve(searchCursor(this.#store, this.#approvalQueue, options, this.#spaceKey));
+    return Promise.resolve(
+      searchCursor(this.#store, this.#approvalQueue, this.#observe, options, this.#spaceKey));
   }
 
   async createPage(options: CreatePageOptions): Promise<ConfluenceContentSession> {
@@ -795,7 +928,8 @@ class SpaceSessionImpl extends RpcTarget implements ConfluenceSpaceSession {
     await stageAction(this.#store, this.#approvalQueue, {
       type: "createContent", provisionalId, kind, parent, title, content, status: status ?? "current",
     });
-    return new ContentSessionImpl(this.#store, this.#approvalQueue.dup(), this.#webBase, provisionalId);
+    return new ContentSessionImpl(
+      this.#store, this.#approvalQueue.dup(), this.#webBase, provisionalId, this.#observe);
   }
 }
 
@@ -805,13 +939,18 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
   #approvalQueue: RpcStub<ApprovalQueue>;
   #webBase: string;
   #contentId: string;
+  #observe: ObserveHook;
 
-  constructor(store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, webBase: string, contentId: string) {
+  constructor(
+    store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, webBase: string, contentId: string,
+    observe: ObserveHook,
+  ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#webBase = webBase;
     this.#contentId = contentId;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() { disposeQueue(this.#approvalQueue); }
@@ -819,6 +958,7 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
   #isProvisional(): boolean { return ConfluenceStore.isProvisional(this.#store.resolveId(this.#contentId)); }
   #pending() { return this.#store.pendingForContent(this.#contentId); }
   #ref(): string { return this.#store.resolveId(this.#contentId); }
+  #sets(): ConfluenceObservedSet[] { return contentSets([this.#ref()]); }
 
   async #base(): Promise<ContentResponse | null> {
     return this.#isProvisional() ? null : await this.#store.getContentResponse(this.#contentId);
@@ -846,7 +986,7 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
     meta.title = simulateTitle(records, meta.title);
     const trashed = simulateTrashed(records);
     if (trashed !== undefined) meta.status = trashed ? "trashed" : "current";
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
       observation("Read Confluence content", `Read metadata for “${meta.title || "Untitled"}”.`));
     return meta;
   }
@@ -854,7 +994,7 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
   async getContent(): Promise<string> {
     const base = await this.#base();
     const markdown = simulateBody(base ? contentBodyMarkdown(base) : null, this.#pending());
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
       observation("Read Confluence content body", `Read the body of Confluence content ${this.#ref()}.`));
     return markdown;
   }
@@ -891,7 +1031,9 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
         nextCursor = res.nextCursor;
       }
       items = overlayChildPages(items, this.#store, this.#contentId, !cursor);
-      await this.#approvalQueue.authorizeObservation(
+      await authorizeConfluenceObservation(
+        this.#approvalQueue, this.#observe,
+        [...this.#sets(), ...contentSets(items.map(item => item.id))],
         observation("List Confluence child pages", `List the child pages of Confluence content ${this.#ref()}.`));
       return { items, nextCursor };
     }));
@@ -909,13 +1051,14 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
       parent: { type: "page", parentId: this.#contentId, spaceKey },
       title: options.title, content: options.content, status: options.status ?? "current",
     });
-    return new ContentSessionImpl(this.#store, this.#approvalQueue.dup(), this.#webBase, provisionalId);
+    return new ContentSessionImpl(
+      this.#store, this.#approvalQueue.dup(), this.#webBase, provisionalId, this.#observe);
   }
 
   async listLabels(): Promise<string[]> {
     const base = this.#isProvisional() ? [] : await this.#store.api.getLabels(this.#ref(), await this.#kind());
     const labels = simulateLabels(base, this.#pending());
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
       observation("Read Confluence labels", `Read the labels of Confluence content ${this.#ref()}.`));
     return labels;
   }
@@ -939,7 +1082,7 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
         nextCursor = res.nextCursor;
       }
       if (!cursor) items = simulateComments(items, this.#pending());
-      await this.#approvalQueue.authorizeObservation(
+      await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
         observation("Read Confluence comments", `Read the comments on Confluence content ${this.#ref()}.`));
       return { items, nextCursor };
     }));
@@ -952,9 +1095,10 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
   listAttachments(options?: ListOptions): Promise<Cursor<Attachment>> {
     const limit = clampPageSize(options?.pageSize);
     return Promise.resolve(new PagedCursor<Attachment>(async cursor => {
-      if (this.#isProvisional()) return { items: [], nextCursor: undefined };
-      const res = await this.#store.api.listAttachments(this.#ref(), await this.#kind(), { cursor, limit });
-      await this.#approvalQueue.authorizeObservation(
+      const res = this.#isProvisional()
+        ? { results: [], nextCursor: undefined }
+        : await this.#store.api.listAttachments(this.#ref(), await this.#kind(), { cursor, limit });
+      await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
         observation("List Confluence attachments", `List the attachments on Confluence content ${this.#ref()}.`));
       return { items: res.results.map(attachmentToAttachment), nextCursor: res.nextCursor };
     }));
@@ -981,7 +1125,7 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
       throw new ConfluenceApiError(413,
         `Attachment is ${data.byteLength} bytes, exceeding the ${MAX_ATTACHMENT_DOWNLOAD_BYTES}-byte download limit.`);
     }
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(this.#approvalQueue, this.#observe, this.#sets(),
       observation("Download Confluence attachment", `Download attachment “${info.title}”.`));
     return { filename: info.title, mediaType, data };
   }
@@ -1030,7 +1174,7 @@ function resolveHandle(store: ConfluenceStore, idOrUrl: string): string {
 }
 
 function searchCursor(
-  store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>,
+  store: ConfluenceStore, approvalQueue: RpcStub<ApprovalQueue>, observe: ObserveHook,
   options: SearchOptions | undefined, spaceKey?: string,
 ): Cursor<ContentSummary> {
   const limit = clampPageSize(options?.pageSize);
@@ -1038,7 +1182,8 @@ function searchCursor(
   return new PagedCursor<ContentSummary>(async cursor => {
     const { results, nextCursor } = await store.api.search(cql, { cursor, limit });
     const items = overlaySearch(results, store, !cursor, options?.type);
-    await approvalQueue.authorizeObservation(
+    await authorizeConfluenceObservation(
+      approvalQueue, observe, contentSets(items.map(item => item.id)),
       observation("Search Confluence", `Search Confluence for “${options?.cql ?? options?.text ?? ""}”.`));
     return { items, nextCursor };
   });

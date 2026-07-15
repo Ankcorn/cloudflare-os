@@ -8,12 +8,14 @@ Replace all `My`/`my`/`MY` prefixes with the service name.
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import {
   GatekeeperUser,
+  GatekeeperUserVerifier,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
   HookController,        // Remove if no hooks
   HookInitiator,         // Remove if no hooks
   ResourceDescription,
   ApprovalQueue,
+  ObservationDescription,
   VendorDescription,
   GatekeeperConnectCallback,
   AccountDescription,
@@ -274,6 +276,42 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {
     return {};
   }
+
+  // Mint a verifier representing this account (see Observers in SKILL.md). The overseer only ever
+  // hands it back to a gatekeeper of THIS vendor, so MyGatekeeperImpl.addObserver may trust it.
+  // For a strategy-D (low-stakes) gatekeeper, MyVerifier has no methods and this still works.
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    let props: MyVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.MyVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier — answers "can this observer access X?" against the OBSERVER's own credentials.
+// Remove the non-standard method (and make it a strategy-D no-op verifier) if any collaborator may
+// observe; keep/extend it for strategy B (single-unit ACL) or C (data-set tracking). See SKILL.md.
+
+type MyVerifierProps = {
+  userObjectId: string;
+};
+
+// A vendor-specific interface adding non-standard methods to the opaque GatekeeperUserVerifier.
+// addObserver casts the Fetcher back to this; the overseer's same-vendor guarantee makes that safe.
+export interface MyVerifierApi extends GatekeeperUserVerifier {
+  hasResourceAccess(resourceId: string): Promise<boolean>;
+}
+
+export class MyVerifier extends WorkerEntrypoint<Env, MyVerifierProps>
+    implements MyVerifierApi {
+  async hasResourceAccess(resourceId: string): Promise<boolean> {
+    let account = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    void account; void resourceId;
+    // TODO: query the service with the observer's own token. Return true on success; return false
+    // for access errors (e.g. 401/403/404); rethrow anything else so the open fails loudly rather
+    // than silently denying.
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +400,25 @@ export class MyGatekeeperImpl extends DurableObject<Env, MyGatekeeperImplProps>
     // TODO: Undo the action (look up what was done from own storage)
     throw new Error("Revert not implemented");
   }
+
+  // Observers (see SKILL.md "Observer verification"). This skeleton shows strategy B — ACL check on
+  // a single atomic resource. The overseer calls addObserver on EVERY open by every observer, so it
+  // re-verifies live access; throw to deny.
+  //   - Strategy A (private-only): `async addObserver() { throw new Error("...not shareable..."); }`
+  //   - Strategy D (low-stakes):   make both methods no-ops.
+  //   - Strategy C (data-set tracking): record observed sets + store verifiers, and route every read
+  //     through an authorizeSetObservation helper that sets `excludeObservers` (see SKILL.md).
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let verifier = user as unknown as Fetcher<MyVerifierApi>;
+    if (!(await verifier.hasResourceAccess(/* this.ctx.props.resourceId */ "TODO"))) {
+      throw new Error(
+        "This collaborator does not have access to the bound resource, so they cannot observe " +
+        "data the Gadget read from it.");
+    }
+  }
+
+  // Idempotent: ignore unknown ids. A no-op for strategy A/B (nothing is tracked).
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +554,7 @@ class MySessionImpl extends RpcTarget implements MySession {
 }
 ```
 
-Only Durable Object classes go in `new_sqlite_classes`. `MyHookControllerImpl` is a `WorkerEntrypoint`, so it needs no migration entry — but, like all entrypoints, it must be `export`ed from the worker's main module. If your hook uses a dedicated event-source DO to hold the `initiator`, add that DO here too.
+Only Durable Object classes go in `new_sqlite_classes`. `MyVerifier` and `MyHookControllerImpl` are `WorkerEntrypoint`s, so they need no migration entry — but, like all entrypoints, they must be `export`ed from the worker's main module (so `ctx.exports.MyVerifier(...)` resolves). If your hook uses a dedicated event-source DO to hold the `initiator`, add that DO here too.
 
 ## Creating the `types.txt` symlink
 

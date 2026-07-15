@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
@@ -148,6 +148,27 @@ type GatekeeperRecord = {
   // User-provided metadata for how this binding should appear in blueprints.
   // Absence means not yet configured.
   blueprintAnnotation?: BlueprintBindingAnnotation;
+};
+
+// Storage record describing a non-owner collaborator who has configured their gatekeeper accounts
+// and passed all `addObserver` checks -- i.e. is actually set up to observe data the Gadget has
+// read. This is distinct from the sharing table (which records the owner's *intent* that a user
+// have access): opening requires BOTH a reachable role in the sharing graph AND a complete
+// observer record. See observers-implementation-plan.md §3.
+type ObserverRecord = {
+  // The sharing-table key for this user (their profile.id). Primary key of the collection.
+  profileId: string;
+
+  // Random, opaque, stable-for-this-record handle passed to gatekeepers as `addObserver`'s `id`.
+  // We deliberately do NOT use profileId here, to avoid tempting gatekeeper authors to parse
+  // identity out of it -- identity is conveyed only via the verifier. The id need not survive
+  // removal/re-add: a user who loses and regains access gets a fresh record and a fresh id.
+  observerId: string;
+
+  // The account the user chose to satisfy each in-scope gatekeeper binding. Keyed by gatekeeper id
+  // (GatekeeperRecord.id). The accountId refers to a ConnectedAccountRecord in THIS user's own
+  // User DO.
+  accountChoices: { [gatekeeperId: number]: number };
 };
 
 function connectionTypeFromCreationSpec(
@@ -567,6 +588,18 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
           },
         },
       }),
+
+      // Non-owner collaborators who have configured their gatekeeper accounts and passed all
+      // `addObserver` checks. See `ObserverRecord`. The secondary index lets the forward-exclusion
+      // path (`authorizeObservation`) map an opaque observerId back to a profileId.
+      observers: collection<ObserverRecord>()({
+        primaryKey: "profileId",
+        uniqueIndexes: {
+          byObserverId(observer: ObserverRecord) {
+            return observer.observerId;
+          }
+        }
+      }),
     }
   });
 }
@@ -602,7 +635,7 @@ class OverseerImpl implements AgentHooks {
   // Per-chat in-memory state for running agents and pending agent callbacks.
   #liveChats = new Map<number, LiveChatContext>();
   #chatSubscribers: Set<RpcStub<AiChatSubscriber>> = new Set();
-  
+
   #autoApprovalDrainer: AutoApprovalDrainer;
 
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
@@ -1499,6 +1532,15 @@ class OverseerImpl implements AgentHooks {
       this.storage.prohibitAllSharing.put(true);
     }
 
+    // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
+    // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
+    // observer has already lost access in the sharing graph. If any named observer is still
+    // authorized, we cannot prevent them from seeing it, so we block the observation. See
+    // observers-implementation-plan.md §5 Step 5.
+    if (description.excludeObservers && description.excludeObservers.length > 0) {
+      await this.#enforceExcludeObservers(description.excludeObservers);
+    }
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -1604,6 +1646,41 @@ class OverseerImpl implements AgentHooks {
         this.storage.chatAttachmentContent.delete(content.fileId);
       }
     });
+  }
+
+  // Enforce an observation's `excludeObservers`. For each named opaque observerId:
+  //   - Map it back to a profileId via the byObserverId index. An unknown id is not an active
+  //     observer (e.g. already torn down), so it is ignored.
+  //   - If that profileId is still authorized in the sharing graph, we cannot guarantee they won't
+  //     see the observation (v1 has no per-thread hiding), so we throw to block it.
+  //   - If that profileId is no longer authorized, we allow the observation for them and delete
+  //     their observer record (best-effort removeObserver on all gatekeepers). They are no longer
+  //     set up to observe; if they regain access they reconfigure from scratch (Step 3).
+  // If no named observer is still authorized, the observation is allowed.
+  async #enforceExcludeObservers(observerIds: string[]): Promise<void> {
+    let sharing = await this.getSharingManager();
+
+    // Observers who are still authorized block the observation outright.
+    for (let observerId of observerIds) {
+      let observer = this.storage.observers.byObserverId.get(observerId);
+      if (!observer) continue;  // not an active observer -> ignore
+
+      if (sharing.getEffectiveRole(observer.profileId)) {
+        throw new Error(
+            "This observation was blocked because it contains data that a current collaborator " +
+            "is not permitted to see.");
+      }
+    }
+
+    // No still-authorized observer was named. Tear down any named observers who have already lost
+    // access, since they are no longer set up to observe.
+    let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
+    for (let observerId of observerIds) {
+      let observer = this.storage.observers.byObserverId.get(observerId);
+      if (!observer) continue;
+      this.storage.observers.delete(observer.profileId);
+      await this.#removeObserverFromGatekeepers(observerId, gatekeeperIds);
+    }
   }
 
   // Provides web-fetch with the Workers AI binding and AI Gateway config it needs to call
@@ -3251,6 +3328,196 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Selects the gatekeepers a non-owner observer with the given `role` must be verified against:
+  //   - "build" collaborators (full access): every account-requiring gatekeeper.
+  //   - "use" collaborators (UI only): only account-requiring gatekeepers with a `bindingName`,
+  //     since that is all the UI can invoke.
+  #inScopeGatekeepers(role: CollaboratorRole): GatekeeperRecord[] {
+    let result: GatekeeperRecord[] = [];
+    for (let gk of this.storage.gatekeepers.list()) {
+      if (role === "use" && !gk.bindingName) continue;
+      result.push(gk);
+    }
+    return result;
+  }
+
+  // Best-effort `removeObserver(observerId)` across the given gatekeeper ids. Never throws; logs
+  // and continues on error. An orphaned observer entry only ever causes superfluous future checks,
+  // never a data leak (the leak-relevant gate is authorizeObservation, which keys off the live
+  // sharing graph).
+  async #removeObserverFromGatekeepers(observerId: string, gatekeeperIds: number[]): Promise<void> {
+    await Promise.all(gatekeeperIds.map(async id => {
+      try {
+        await this.getGatekeeperFacet(id).removeObserver(observerId);
+      } catch (err) {
+        console.error("Failed to remove observer from gatekeeper", id, err);
+      }
+    }));
+  }
+
+  // Tear down observer records for collaborators who lost access as a result of a sharing change.
+  // For each affected collaborator who is now fully unauthorized (newRole === null) and has an
+  // observer record: best-effort removeObserver on all gatekeeper facets, then delete the record.
+  // All calls are best-effort -- an orphaned observer entry only causes superfluous future checks,
+  // never a data leak (the leak-relevant gate is authorizeObservation, keyed off the live sharing
+  // graph). See observers-implementation-plan.md §5 Step 6.
+  async tearDownLostObservers(affected: AffectedCollaborator[]): Promise<void> {
+    let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
+    for (let entry of affected) {
+      if (entry.newRole !== null) continue;  // downgraded but still has access -> keep record
+      let observer = this.storage.observers.get(entry.profile.id);
+      if (!observer) continue;
+      this.storage.observers.delete(observer.profileId);
+      await this.#removeObserverFromGatekeepers(observer.observerId, gatekeeperIds);
+    }
+  }
+
+  // Bring a non-owner `profileId` into compliance as an observer for their `role`, so that they may
+  // open the Gadget. May invoke `configureCb` to ask the user to choose connected accounts for
+  // gatekeeper bindings they haven't configured yet. Re-runs `addObserver` (re-verification) for
+  // already-configured bindings on every open, catching revocation of the user's underlying
+  // resource access promptly. Returns when fully verified; throws to deny access.
+  //
+  // See observers-implementation-plan.md §5 Step 3.
+  async ensureObserver(
+      profileId: string,
+      clientUser: DurableObjectStub<UserDurableObject>,
+      role: CollaboratorRole,
+      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+    // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
+    //    no observer record is needed (built-in gatekeepers never name observers in
+    //    excludeObservers).
+    let inScope = this.#inScopeGatekeepers(role);
+    if (inScope.length === 0) return;
+
+    // 2. Load any existing observer record, and build a working copy of its account choices.
+    let record = this.storage.observers.get(profileId);
+    let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
+
+    // Gatekeeper ids whose account choice came from the persisted record (vs. configured during
+    // this call). On a verification failure we only roll back observers we registered *this* call,
+    // leaving pre-existing registrations intact (rollback restores the pre-call state).
+    let preConfigured = new Set<number>(
+        inScope.filter(gk => gk.id in accountChoices).map(gk => gk.id));
+
+    let observerId = record?.observerId ?? crypto.randomUUID();
+    // Gatekeepers we successfully registered the observer with during this call.
+    let newlyAdded = new Set<number>();
+
+    // We may need to re-prompt the configuration modal if a previously-chosen account has since
+    // been disconnected (its verifier no longer resolves). Bound the number of such re-prompts to
+    // avoid looping against a misbehaving client.
+    let goneAccountReprompts = 0;
+    const MAX_GONE_ACCOUNT_REPROMPTS = 1;
+
+    try {
+      while (true) {
+        // 3. Determine uncovered bindings: in-scope gatekeepers with no account choice yet. On the
+        //    first open of a Gadget with any account-requiring binding, all bindings are uncovered,
+        //    so the modal appears once even when defaults are obvious. On a re-prompt, this is the
+        //    set of bindings whose chosen account turned out to be gone.
+        let uncovered = inScope.filter(gk => !(gk.id in accountChoices));
+
+        // 4. If there are uncovered bindings, ask the client to choose accounts for them.
+        if (uncovered.length > 0) {
+          if (!configureCb) {
+            // Non-interactive open (e.g. no UI). We can't configure, so deny.
+            throw new Error(
+                "To open this Gadget, you must choose connected accounts for the services it " +
+                "uses, but no configuration channel was provided.");
+          }
+
+          let needs: ObserverBindingNeed[] = uncovered.map(gk => ({
+            gatekeeperId: gk.id,
+            // creationSpec.type === "gatekeeper" is guaranteed by #inScopeGatekeepers.
+            vendorId: gk.creationSpec?.type === "gatekeeper" ? gk.creationSpec.vendorId : "",
+            resourceTitle: gk.resourceTitle || gk.bindingName || "Connection",
+            resourceUrl: gk.resourceUrl,
+          }));
+
+          let choices = await configureCb.configure(needs);
+          let uncoveredIds = new Set(uncovered.map(gk => gk.id));
+          for (let choice of choices) {
+            // Validate the choice.
+            if (!uncoveredIds.has(choice.gatekeeperId) || !Number.isSafeInteger(choice.accountId)) {
+              throw new Error(
+                  "The account choices returned by the client were invalid. Please try again.");
+            }
+
+            accountChoices[choice.gatekeeperId] = choice.accountId;
+          }
+
+          // The client must have supplied a choice for every uncovered binding.
+          let stillUncovered = uncovered.filter(gk => !(gk.id in accountChoices));
+          if (stillUncovered.length > 0) {
+            throw new Error(
+                "You must connect an account for every service this Gadget uses in order to open " +
+                "it.");
+          }
+        }
+
+        // 5. Verify all in-scope bindings (covered + newly chosen). For each, resolve the chosen
+        //    account's verifier and hand it to the gatekeeper's addObserver().
+        let goneAccounts: number[] = [];
+        let accessDeniedError: unknown;
+
+        await Promise.all(inScope.map(async gk => {
+          let accountId = accountChoices[gk.id];
+
+          let verifier = await clientUser.getVerifier(accountId);
+          if (!verifier) {
+            // Account gone -> re-prompt this binding.
+            goneAccounts.push(gk.id);
+            return;
+          }
+
+          try {
+            await this.getGatekeeperFacet(gk.id).addObserver(observerId, verifier);
+            if (!preConfigured.has(gk.id)) newlyAdded.add(gk.id);
+          } catch (err) {
+            if (accessDeniedError === undefined) accessDeniedError = err;
+          }
+        }));
+
+        if (accessDeniedError !== undefined) {
+          // The user is not (or no longer) allowed to observe everything read so far.
+          throw new Error(
+              "You are not permitted to observe all of the data this Gadget has accessed: " +
+              stringifyError(accessDeniedError));
+        }
+
+        if (goneAccounts.length > 0) {
+          // A chosen account is no longer connected. Drop the stale choices and re-prompt, unless
+          // we have already done so (or have no way to prompt), in which case deny.
+          if (!configureCb || goneAccountReprompts >= MAX_GONE_ACCOUNT_REPROMPTS) {
+            throw new Error(
+                "An account this Gadget needs is no longer connected. Reconnect it and try again.");
+          }
+          goneAccountReprompts++;
+          for (let id of goneAccounts) {
+            delete accountChoices[id];
+            // If we'd registered this observer for the binding in an earlier pass, it's moot now
+            // (the account is gone); leave any such registration to be re-confirmed after
+            // re-prompt.
+          }
+          continue;
+        }
+
+        // All in-scope bindings verified successfully.
+        break;
+      }
+    } catch (err) {
+      // Best-effort remove all the observers that were newly-added since we didn't persist the
+      // user's observer record.
+      await this.#removeObserverFromGatekeepers(observerId, [...newlyAdded]);
+      throw err;
+    }
+
+    // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
+    //    the record is the canonical moment the user becomes a configured observer.
+    this.storage.observers.put({profileId, observerId, accountChoices});
+  }
+
   // Get the owner's profile ID, using the in-memory cache when available. The owner's
   // profile ID never changes, so this is safe to cache for the lifetime of the DO instance.
   // The cache is populated eagerly when the owner calls open(), but if only collaborators
@@ -3337,7 +3604,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   // by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
   async open(userId: string, profileId: string,
              notifyClosed: NativeRpcStub<() => void>,
-             shareKey?: string): Promise<Overseer> {
+             shareKey?: string,
+             configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
     let firstOpen = !this.impl.ownerId;
     if (firstOpen) {
       // This Overseer hasn't been initialized yet.
@@ -3403,15 +3671,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
-      // SECURITY: sharing disabled — revert to re-enable.
-      // All gadget sharing is temporarily disabled. Reject any non-owner at the single
-      // authorization chokepoint before any share-key redemption or role computation. Throw
-      // "Not Found" (indistinguishable from a nonexistent gadget) so we don't acknowledge the
-      // gadget's existence. This blocks opening, reading chat history, subscribing, and sending
-      // messages for any gadget the caller doesn't own.
-      throw new Error("Not Found");
-
-      /* SECURITY: sharing disabled — original non-owner authorization path retained for revert.
       if (this.impl.storage.prohibitAllSharing.get()) {
         // `prohibitAllSharing` can only have been set when the gadget had no shares (see
         // `authorizeObservation`), and no new shares can be created while it's set, so any
@@ -3444,6 +3703,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       if (!effectiveRole) throw new Error("Not Found");
       role = effectiveRole;
 
+      // Verify the caller may observe everything this Gadget has read through its in-scope
+      // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
+      // role is confirmed, so it never reveals the Gadget's existence to an unauthorized user. The
+      // prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
+      await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
       let title = this.impl.storage.title.get();
@@ -3456,12 +3721,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           console.error(err);
         }
       })();
-      */
     }
 
-    // SECURITY: sharing disabled — `role` is always "build" now (non-owners throw above), so the
-    // cast keeps this (dead) branch type-checking; revert to re-enable.
-    if ((role as CollaboratorRole) === "use") {
+    if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
       return new UseOverseerInterface(
           this.impl, owner, clientUser, profileId, notifyClosed.dup());
@@ -5413,6 +5675,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
     let affected = (await this.impl.getSharingManager())
         .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
+    await this.impl.tearDownLostObservers(affected);
     // Only restart if someone actually lost access or was downgraded (kept users are already
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
     // disconnect everyone.
@@ -5430,6 +5694,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async revokeShareKey(keyId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
     let affected = (await this.impl.getSharingManager())
         .revokeShareKey(this.#sharingCaller(), keyId, keepUsers);
+    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
+    await this.impl.tearDownLostObservers(affected);
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     if (affected.length > 0) {
       this.impl.scheduleRevocationRestart();
@@ -5903,6 +6169,15 @@ export class AgentSpawnerGatekeeper
   revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
+  }
+
+  async addObserver(_id: string, _user: Fetcher): Promise<void> {
+    // The agent spawner is not a restricted-access resource: it reads nothing that identifies the
+    // observer or leaks private data, so any observer is permitted. No-op (never throws).
+  }
+
+  async removeObserver(_id: string): Promise<void> {
+    // No observer state is tracked (see addObserver). Idempotent no-op.
   }
 }
 

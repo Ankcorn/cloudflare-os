@@ -1,11 +1,12 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   type AccountDescription,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
@@ -646,6 +647,81 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // Mint a verifier representing this account, used by SupabaseGatekeeperImpl.addObserver to confirm
+  // a prospective observer may read a bound project (and, for org bindings, the org and each
+  // accessed project). The verifier carries this user's own account id, so the access checks run
+  // against the observer's *own* Supabase token.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    const props: SupabaseVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.SupabaseVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier
+//
+// Supabase uses the "ACL check (single unit)" strategy for project bindings and "data-set tracking
+// (by project)" for organization bindings (see SupabaseGatekeeperImpl observer methods). Both
+// reduce to two per-observer access questions answered against the observer's *own* token:
+//   - hasProjectAccess(refs): the Management API's `/v1/projects` returns exactly the projects the
+//     calling token can reach, so one response can check every requested ref.
+//   - hasOrgAccess(slug):    likewise `/v1/organizations` lists the orgs the token belongs to.
+// The overseer only ever hands this verifier back to a Supabase gatekeeper, which may therefore
+// trust the boolean results.
+
+type SupabaseVerifierProps = {
+  userObjectId: string;
+};
+
+// The non-standard methods the Supabase gatekeeper calls on its own verifier (see addObserver). Not
+// part of the generic GatekeeperUserVerifier contract.
+export interface SupabaseVerifierApi extends GatekeeperUserVerifier {
+  hasProjectAccess(refs: string[]): Promise<boolean[]>;
+  hasOrgAccess(slug: string): Promise<boolean>;
+}
+
+type ProjectObservationCheck = {
+  excludeObservers?: string[];
+  pendingProjects: string[];
+  commit(): void;
+};
+
+type ObservedProjectState = true | "pending" | "observed";
+
+@validateRpc()
+export class SupabaseVerifier extends WorkerEntrypoint<Env, SupabaseVerifierProps>
+    implements SupabaseVerifierApi {
+  #api(): SupabaseApi {
+    const account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return new SupabaseApi(async () => (await account.getAccessToken()).token);
+  }
+
+  async hasProjectAccess(refs: string[]): Promise<boolean[]> {
+    if (refs.length === 0) return [];
+    try {
+      const projects = await this.#api().listProjects();
+      const accessibleRefs = new Set(projects.map(project => project.ref));
+      return refs.map(ref => accessibleRefs.has(ref));
+    } catch (error) {
+      // A broken/expired observer token cannot demonstrate access; treat as "no access" rather than
+      // failing the whole open. The observer will be re-checked on their next open.
+      if (error instanceof SupabaseApiError && error.isAuthError) return refs.map(() => false);
+      throw error;
+    }
+  }
+
+  async hasOrgAccess(slug: string): Promise<boolean> {
+    try {
+      const orgs = await this.#api().listOrganizations();
+      return orgs.some(org => org.slug === slug);
+    } catch (error) {
+      if (error instanceof SupabaseApiError && error.isAuthError) return false;
+      throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +807,11 @@ class SupabaseSessionContext {
   #cache: SupabaseCache;
   #pending: PendingActionStore;
   #noteExpired: () => Promise<void>;
+  // Set only for organization bindings (data-set tracking). Given the project ref a project-scoped
+  // observation is about to reveal, records it as an observed data set and returns the observer ids
+  // that must not see it (those lacking access). Undefined for project bindings (single-unit ACL),
+  // where there is nothing to exclude. See SupabaseGatekeeperImpl.#prepareProjectObservation.
+  #projectObservationHook?: (ref: string) => Promise<ProjectObservationCheck>;
 
   constructor(
     api: SupabaseApi,
@@ -738,12 +819,31 @@ class SupabaseSessionContext {
     cache: SupabaseCache,
     pending: PendingActionStore,
     noteExpired: () => Promise<void>,
+    projectObservationHook?: (ref: string) => Promise<ProjectObservationCheck>,
   ) {
     this.#api = api;
     this.approvalQueue = approvalQueue;
     this.#cache = cache;
     this.#pending = pending;
     this.#noteExpired = noteExpired;
+    this.#projectObservationHook = projectObservationHook;
+  }
+
+  // Authorize an observation that reveals data belonging to a specific project. For organization
+  // bindings this also tracks the project as an observed data set and excludes any observers who
+  // lack access to it; for project bindings it is a plain authorizeObservation. Use this (rather
+  // than approvalQueue.authorizeObservation directly) for every read that exposes project data.
+  async authorizeProjectObservation(
+    ref: string,
+    description: { title: string; description: string },
+  ): Promise<void> {
+    const check = this.#projectObservationHook
+      ? await this.#projectObservationHook(ref)
+      : {pendingProjects: [], commit() {}};
+    await this.approvalQueue.authorizeObservation({
+      ...description, excludeObservers: check.excludeObservers,
+    });
+    check.commit();
   }
 
   async run<T>(fn: (api: SupabaseApi) => Promise<T>): Promise<T> {
@@ -841,13 +941,66 @@ export class SupabaseGatekeeperImpl extends DurableObject<Env, SupabaseGatekeepe
   }
 
   #makeContext(approvalQueue: RpcStub<ApprovalQueue>): SupabaseSessionContext {
+    // Organization bindings track which projects' data has actually been observed and exclude
+    // observers who lack access to them; project bindings are a single ACL unit with nothing to
+    // exclude, so they get no hook.
+    const projectObservationHook = this.ctx.props.resourceKind === "organization"
+      ? (ref: string) => this.#prepareProjectObservation(ref)
+      : undefined;
     return new SupabaseSessionContext(
       this.#makeApi(),
       approvalQueue.dup(),
       new SupabaseCache(this.ctx.storage.kv),
       new PendingActionStore(this.ctx.storage.kv),
       async () => { await this.#userAccount().noteCredentialsExpired(); },
+      projectObservationHook,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Observer tracking (see addObserver/removeObserver).
+
+  #observerKey(id: string): string { return `observer:${id}`; }
+  #observedProjectKey(ref: string): string { return `observedProject:${ref}`; }
+
+  #isProjectObserved(ref: string): boolean {
+    const state = this.ctx.storage.kv.get<ObservedProjectState>(this.#observedProjectKey(ref));
+    return state === true || state === "observed";
+  }
+
+  #listTrackedProjects(): string[] {
+    const prefix = "observedProject:";
+    return [...this.ctx.storage.kv.list<ObservedProjectState>({ prefix })]
+      .map(([key]) => key.slice(prefix.length));
+  }
+
+  *#listObservers(): IterableIterator<[string, Fetcher<SupabaseVerifierApi>]> {
+    const prefix = "observer:";
+    for (const [key, verifier] of this.ctx.storage.kv.list<Fetcher<SupabaseVerifierApi>>({ prefix })) {
+      yield [key.slice(prefix.length), verifier];
+    }
+  }
+
+  // Organization bindings only. Marks the project pending and returns current observers who cannot
+  // access it. Authorization promotes it; failed attempts remain pending and are rechecked.
+  async #prepareProjectObservation(ref: string): Promise<ProjectObservationCheck> {
+    if (this.#isProjectObserved(ref)) return {pendingProjects: [], commit() {}};
+    const key = this.#observedProjectKey(ref);
+    if (this.ctx.storage.kv.get<ObservedProjectState>(key) === undefined) {
+      this.ctx.storage.kv.put(key, "pending");
+    }
+    const observers = [...this.#listObservers()];
+    const access = await Promise.all(
+      observers.map(([, verifier]) => verifier.hasProjectAccess([ref])),
+    );
+    const excluded = observers
+      .filter((_, index) => !access[index][0])
+      .map(([id]) => id);
+    return {
+      excludeObservers: excluded.length > 0 ? excluded : undefined,
+      pendingProjects: [ref],
+      commit: () => this.ctx.storage.kv.put(key, "observed"),
+    };
   }
 
   // Caches infrequent metadata reads (used by describe()) in the same DO-backed cache the session
@@ -953,6 +1106,65 @@ export class SupabaseGatekeeperImpl extends DurableObject<Env, SupabaseGatekeepe
           "statement (e.g. a corresponding `DELETE`, `UPDATE`, or `DROP`).",
     };
   }
+
+  // Observer tracking. Strategy depends on the binding's granularity:
+  //
+  // - Project binding — "ACL check (single unit)". Arbitrary read-only SQL can read anything in the
+  //   project's database, so the project is the atomic unit. We just confirm the observer can access
+  //   the project (their own `/v1/projects` lists it). Nothing read later could be outside that unit,
+  //   so no observers are tracked and removeObserver is a no-op.
+  //
+  // - Organization binding — "data-set tracking (by project)". Org members may have access to
+  //   different projects, so we track which projects' data the Gadget has actually observed and
+  //   verify each observer against them. addObserver requires org membership (so org-level metadata
+  //   like the project list is fine to show) plus access to every already-observed project; later,
+  //   the first observation of a *new* project excludes any observer lacking it (see
+  //   #prepareProjectObservation). Verified observers are remembered (their verifier stored) so that
+  //   forward-exclusion check can run.
+  //
+  // The overseer re-runs addObserver on every open, catching loss of access promptly.
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<SupabaseVerifierApi>;
+
+    if (this.ctx.props.resourceKind === "project") {
+      const ref = this.#requireRef();
+      const [hasAccess] = await verifier.hasProjectAccess([ref]);
+      if (!hasAccess) {
+        throw new Error(
+          `This collaborator does not have access to the Supabase project ${ref}, so they cannot ` +
+          `be allowed to observe data the Gadget read from it.`);
+      }
+      return;
+    }
+
+    const slug = this.#requireSlug();
+    if (!(await verifier.hasOrgAccess(slug))) {
+      throw new Error(
+        `This collaborator is not a member of the Supabase organization ${slug}, so they cannot ` +
+        `be allowed to observe it.`);
+    }
+    const checked = new Set<string>();
+    while (true) {
+      const refs = this.#listTrackedProjects().filter(ref => !checked.has(ref));
+      if (refs.length === 0) {
+        this.ctx.storage.kv.put(this.#observerKey(id), verifier);
+        return;
+      }
+      const projectAccess = await verifier.hasProjectAccess(refs);
+      for (const [index, ref] of refs.entries()) {
+        if (!projectAccess[index]) {
+          throw new Error(
+            `This collaborator does not have access to the Supabase project ${ref}, whose data the ` +
+            `Gadget has read, so they cannot be allowed to observe it.`);
+        }
+        checked.add(ref);
+      }
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(this.#observerKey(id));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1230,7 @@ class SupabaseOrganizationImpl extends RpcTarget implements SupabaseOrganization
   async getProject(ref: string): Promise<SupabaseProject> {
     // Authorize first: this performs an external read and would otherwise be an unlogged
     // existence/membership oracle for arbitrary project refs.
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(ref, {
       title: "Open Supabase project",
       description: `Look up Supabase project \`${ref}\` within organization \`${this.#slug}\`.`,
     });
@@ -1046,7 +1258,7 @@ class SupabaseProjectImpl extends RpcTarget implements SupabaseProject {
   async getInfo(): Promise<SupabaseProjectInfo> {
     const info = await fetchProjectInfo(this.#ctx, this.#ref);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "Read Supabase project",
       description: `Read metadata for the Supabase project \`${this.#ref}\`.`,
     });
@@ -1064,7 +1276,7 @@ class SupabaseProjectImpl extends RpcTarget implements SupabaseProject {
     const health = await this.#ctx.run(api => api.getServicesHealth(this.#ref, HEALTH_SERVICES));
     const result = health.map(item => ({ service: item.name, status: item.status, error: item.error }));
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "Check Supabase project health",
       description: `Check the health of services for the Supabase project \`${this.#ref}\`.`,
     });
@@ -1085,7 +1297,7 @@ class SupabaseProjectImpl extends RpcTarget implements SupabaseProject {
       }));
     });
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "List Supabase edge functions",
       description: `List the ${functions.length} edge function(s) deployed to project \`${this.#ref}\`.`,
     });
@@ -1099,7 +1311,7 @@ class SupabaseProjectImpl extends RpcTarget implements SupabaseProject {
       api => api.getFunctionBody(this.#ref, slug),
     );
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "Read Supabase edge function source",
       description: `Read the deployed source of edge function \`${slug}\` in project \`${this.#ref}\`.`,
     });
@@ -1118,7 +1330,7 @@ class SupabaseProjectImpl extends RpcTarget implements SupabaseProject {
       }));
     });
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "List Supabase storage buckets",
       description: `List the ${buckets.length} storage bucket(s) in project \`${this.#ref}\`.`,
     });
@@ -1143,7 +1355,7 @@ class SupabaseDatabaseImpl extends RpcTarget implements SupabaseDatabase {
     // result size is bounded inside runReadOnlyQuery (it throws before returning an oversized body).
     const rows = await this.#ctx.run(api => api.runReadOnlyQuery(this.#ref, sql, params));
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "Run read-only SQL on Supabase",
       description:
           `Run a read-only query against Supabase project \`${this.#ref}\`.\n\n` +
@@ -1170,7 +1382,7 @@ class SupabaseDatabaseImpl extends RpcTarget implements SupabaseDatabase {
       api => listSchemas(api, this.#ref),
     );
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "List Supabase schemas",
       description: `List the ${schemas.length} schema(s) in the database of project \`${this.#ref}\`.`,
     });
@@ -1188,7 +1400,7 @@ class SupabaseDatabaseImpl extends RpcTarget implements SupabaseDatabase {
       api => listTables(api, this.#ref, { schema, includeViews }),
     );
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "List Supabase tables",
       description:
           `List the ${tables.length} table(s)/view(s) in schema \`${schema}\` of project \`${this.#ref}\`.`,
@@ -1203,7 +1415,7 @@ class SupabaseDatabaseImpl extends RpcTarget implements SupabaseDatabase {
       api => describeTable(api, this.#ref, schema, name),
     );
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeProjectObservation(this.#ref, {
       title: "Describe Supabase table",
       description: `Read the structure of table \`${schema}.${name}\` in project \`${this.#ref}\`.`,
     });

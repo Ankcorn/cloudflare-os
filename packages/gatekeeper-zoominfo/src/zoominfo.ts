@@ -1,5 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   ApprovalQueue,
   type AccountDescription,
@@ -7,6 +7,7 @@ import {
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
@@ -578,7 +579,18 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // ZoomInfo uses the private-only observer strategy. The verifier is never consulted, but the
+  // overseer mints one on every collaborator open, so getVerifier must still return a valid stub.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    return this.ctx.exports.ZoomInfoVerifier({});
+  }
 }
+
+// A trivial verifier with no methods, since ZoomInfoGatekeeperImpl refuses all non-owner observers.
+@validateRpc()
+export class ZoomInfoVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
 
 // ---------------------------------------------------------------------------
 // Resource configurator — whole-account has no inputs; just reports the canonical URL.
@@ -671,6 +683,18 @@ export class ZoomInfoGatekeeperImpl extends DurableObject<Env, ZoomInfoGatekeepe
           "retrieved data has been discarded from this Gadget.",
     };
   }
+
+  // Observer tracking — strategy A (private-only). This whole-account binding exposes licensed,
+  // entitlement-dependent data and account-specific intelligence, and ZoomInfo provides no ACL
+  // oracle that can prove another account could read every historical result.
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    throw new Error(
+      "ZoomInfo data cannot be shared with other users: this Gadget's ZoomInfo account may only " +
+      "be observed by its owner.",
+    );
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 // ---------------------------------------------------------------------------

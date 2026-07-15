@@ -2,8 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import {
-  // SECURITY: sharing disabled — revert to re-enable.
-  // ShareNetwork,
+  ShareNetwork,
   Pencil,
   Check,
   X,
@@ -22,7 +21,11 @@ import {
   AiChatAuthorInfo,
   ConsoleLogSubscriber,
   ConsoleLogEvent,
+  ObserverConfigCallback,
+  ObserverBindingNeed,
+  ObserverAccountChoice,
 } from '@gadgets/workshop-shared/api'
+import ObserverConfigModal from './ObserverConfigModal'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
@@ -155,6 +158,23 @@ export default function GadgetEditor() {
   const [isInitialLoad, setIsInitialLoad] = useState(true)
   const [connectionLost, setConnectionLost] = useState(false)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
+
+  // ── observer account configuration ───────────────────────────────────────────
+  // When a non-owner opens a shared gadget that reads data through gatekeeper bindings they
+  // haven't yet configured, the overseer calls back to ask them to choose connected accounts.
+  // We surface that as a modal; resolving it lets open() proceed, rejecting it denies the open.
+  const [observerConfig, setObserverConfig] = useState<{
+    needs: ObserverBindingNeed[]
+    resolve: (choices: ObserverAccountChoice[]) => void
+    reject: (err: unknown) => void
+  } | null>(null)
+  // Holds the in-flight configure() rejection so the load effect's cleanup can abort a pending
+  // prompt (e.g. if the user navigates away while the modal is open).
+  const pendingObserverRejectRef = useRef<((err: unknown) => void) | null>(null)
+
+  // Sentinel message used when the user dismisses the observer-config modal, so the load catch can
+  // distinguish a deliberate cancel from a genuine access denial.
+  const OBSERVER_CANCELLED = 'OBSERVER_CONFIG_CANCELLED'
 
   // ── role gating ────────────────────────────────────────────────────────────────
   // "use"-role collaborators receive a restricted overseer that only permits rendering and
@@ -548,6 +568,7 @@ export default function GadgetEditor() {
   useEffect(() => {
     let overseerStub: RpcStub<Overseer> | null = null
     let metaSub: RpcStub<{}> | null = null
+    let configureObservers: RpcStub<ObserverConfigCallback> | null = null
     let cancelled = false
 
     const load = async () => {
@@ -559,7 +580,33 @@ export default function GadgetEditor() {
         const shareKey = hash.startsWith('#share=') ? hash.slice('#share='.length) : undefined
         if (shareKey) navigate({ to: '/gadget/$id', params: { id: id! }, search: {}, replace: true })
 
-        overseerStub = authenticatedApi.openGadget(id, shareKey)
+        // Invoked by the overseer only if we're a non-owner who must choose connected accounts for
+        // one or more gatekeeper bindings before observing the gadget (see ObserverConfigModal).
+        // In the common case it is never called and open() pipelines as before.
+        const configureObserversTarget = new (class extends RpcTarget implements ObserverConfigCallback {
+          configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]> {
+            if (cancelled) return Promise.reject(new Error('Cancelled'))
+            return new Promise<ObserverAccountChoice[]>((resolve, reject) => {
+              pendingObserverRejectRef.current = reject
+              setObserverConfig({
+                needs,
+                resolve: choices => {
+                  pendingObserverRejectRef.current = null
+                  setObserverConfig(null)
+                  resolve(choices)
+                },
+                reject: err => {
+                  pendingObserverRejectRef.current = null
+                  setObserverConfig(null)
+                  reject(err)
+                },
+              })
+            })
+          }
+        })()
+        configureObservers = new RpcStub(configureObserversTarget)
+
+        overseerStub = authenticatedApi.openGadget(id, shareKey, configureObservers)
         setOverseer({ stub: overseerStub })
 
         metaSub = await overseerStub.subscribeToMetadata((meta: GadgetMetadata) => {
@@ -575,19 +622,29 @@ export default function GadgetEditor() {
       } catch (err: any) {
         if (cancelled) return
         console.error('Failed to load gadget:', err)
-        if (err?.message?.includes('Invalid or expired share key')) {
+
+        // TODO: The string-matching here is awful and we need to replace it with something more
+        //   structured!
+        const msg: string = err?.message ?? ''
+        if (msg.includes('Invalid or expired share key')) {
           toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
         }
-        // SECURITY: sharing disabled — revert to re-enable.
-        // "Not Found" means the gadget doesn't exist or we're not the owner (deliberately
-        // indistinguishable; with sharing disabled, any non-owner hits this). Redirect home
-        // instead of showing the error page.
-        if (err?.message?.includes('Not Found')) { navigate({ to: '/' }); return }
+        // The user dismissed the observer-config modal — they chose not to connect the accounts
+        // this gadget requires. Show a clear, non-alarming explanation rather than a load failure.
+        if (msg.includes(OBSERVER_CANCELLED)) {
+          setError('To open this Gadget, you must choose connected accounts for the services it uses.')
+        }
+        // Observer-verification denials carry a specific reason from the overseer; surface it
+        // verbatim so the user understands why access was refused.
+        else if (msg.includes('permitted to observe') || msg.includes('no longer connected') ||
+                 msg.includes('connect an account for every service')) {
+          setError(msg)
+        }
         // "Not Found" is terminal — the gadget doesn't exist or we're no longer authorized
         // (deliberately indistinguishable). Show the generic error page rather than looping on
         // the reconnecting banner, even mid-session (e.g. after a removed collaborator's session
         // is force-restarted by the backend and they reconnect).
-        if (isInitialLoad || err?.message?.includes('Not Found')) setError('Failed to load gadget')
+        else if (isInitialLoad || msg.includes('Not Found')) setError('Failed to load gadget')
         else if (!connectionLost) setConnectionLost(true)
       }
     }
@@ -595,8 +652,15 @@ export default function GadgetEditor() {
     load()
     return () => {
       cancelled = true
+      // Abort any prompt still awaiting the user, so the server-side open() unwinds cleanly.
+      if (pendingObserverRejectRef.current) {
+        pendingObserverRejectRef.current(new Error('Cancelled'))
+        pendingObserverRejectRef.current = null
+      }
+      setObserverConfig(null)
       metaSub?.[Symbol.dispose]()
       overseerStub?.[Symbol.dispose]()
+      configureObservers?.[Symbol.dispose]()
     }
   }, [id, authenticatedApi])
 
@@ -686,6 +750,14 @@ export default function GadgetEditor() {
           <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
           <p className="text-sm text-kumo-subtle">Loading gadget…</p>
         </div>
+        {observerConfig && (
+          <ObserverConfigModal
+            needs={observerConfig.needs}
+            authenticatedApi={authenticatedApi}
+            onConfirm={observerConfig.resolve}
+            onCancel={() => observerConfig.reject(new Error(OBSERVER_CANCELLED))}
+          />
+        )}
       </div>
     )
   }
@@ -811,7 +883,6 @@ export default function GadgetEditor() {
             </span>
           </WorkshopIconButton>
 
-          {/* SECURITY: sharing disabled — revert to re-enable.
           <WorkshopIconButton
             onClick={() => setShareModalOpen(true)}
             title="Share gadget"
@@ -819,7 +890,6 @@ export default function GadgetEditor() {
           >
             <ShareNetwork size={15} />
           </WorkshopIconButton>
-          */}
 
           <WorkshopIconButton
             onClick={() => setBlueprintModalOpen(true)}

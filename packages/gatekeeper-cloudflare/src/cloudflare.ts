@@ -1,7 +1,7 @@
 import { WorkerEntrypoint, DurableObject } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
-  GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, VendorDescription,
+  GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, GatekeeperUserVerifier, VendorDescription,
   GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
   SupportedResource, ResourceConfiguratorFrame,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -380,4 +380,18 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#account().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // Mint a verifier representing this account. The Cloudflare gatekeeper currently exposes no
+  // resource bindings (getGatekeeperClassFor always throws), so it is never an in-scope binding and
+  // this verifier is never consulted by the observer flow — but getVerifier is part of the
+  // GatekeeperUser contract, so it must exist. Returns a trivial verifier with no identity.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    return this.ctx.exports.CloudflareVerifier({});
+  }
 }
+
+// A trivial verifier with no methods. The Cloudflare gatekeeper provides no resources, so no
+// observer verification is ever performed against it. See GatekeeperUserImpl.getVerifier.
+@validateRpc()
+export class CloudflareVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
