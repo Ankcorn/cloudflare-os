@@ -14,14 +14,16 @@
 //     writes immediately. List simulation has documented limitations (see types.d.ts).
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   type AccountDescription,
   type ApprovalQueue,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type ObservationDescription,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -111,6 +113,7 @@ type StoredNonce = {
 };
 
 type StoredAccountInfo = {
+  workspaceId?: string;
   workspaceName?: string;
   workspaceIcon?: string;
   ownerId?: string;
@@ -401,6 +404,7 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<string>("accessToken", grant.accessToken);
     if (grant.refreshToken) this.ctx.storage.kv.put<string>("refreshToken", grant.refreshToken);
     this.ctx.storage.kv.put<StoredAccountInfo>("accountInfo", {
+      workspaceId: grant.workspaceId,
       workspaceName: grant.workspaceName,
       workspaceIcon: grant.workspaceIcon,
       ownerId: grant.owner?.id,
@@ -553,6 +557,119 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // Mint a verifier representing this account, used by the Notion gatekeepers' addObserver to confirm
+  // a prospective observer may read a bound page/database (and, for workspace bindings, the workspace
+  // and each accessed item). The verifier carries this user's own account id, so the access checks
+  // run against the observer's *own* Notion token.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    const props: NotionVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.NotionVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Verifier
+//
+// Notion uses the "ACL check (single unit)" strategy for page/database (item) bindings and "data-set
+// tracking (by page/database)" for workspace bindings (see the gatekeepers' observer methods). Both
+// reduce to per-observer access questions answered against the observer's *own* token:
+//   - hasWorkspaceAccess(workspaceId): the observer's connection belongs to the same Notion
+//     workspace. Gates workspace-level reads (the workspace name and member directory) that any
+//     workspace member may see.
+//   - hasItemAccess(itemId): the observer's connection can retrieve the page/database. Notion returns
+//     404 (object_not_found) / 403 (restricted_resource) for items a connection cannot see, so a
+//     successful retrieve means the observer has at least read access. Note this checks the
+//     observer's *connection* grant (the pages they shared with their Gadgets connection), which is
+//     the only per-observer oracle available and is conservative (it never grants more than the
+//     observer's connection can actually reach).
+// The overseer only ever hands this verifier back to a Notion gatekeeper, which may therefore trust
+// the boolean results.
+
+type NotionVerifierProps = {
+  userObjectId: string;
+};
+
+// The non-standard methods the Notion gatekeepers call on their own verifier (see addObserver). Not
+// part of the generic GatekeeperUserVerifier contract.
+export interface NotionVerifierApi extends GatekeeperUserVerifier {
+  hasWorkspaceAccess(workspaceId: string): Promise<boolean>;
+  hasItemAccess(itemId: string): Promise<boolean>;
+}
+
+@validateRpc()
+export class NotionVerifier extends WorkerEntrypoint<Env, NotionVerifierProps>
+    implements NotionVerifierApi {
+  #account() {
+    return this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+  }
+
+  #api(): NotionApi {
+    const account = () => this.#account();
+    return new NotionApi(
+      async () => await account().getAccessToken(),
+      async () => await account().refreshCredentials(),
+    );
+  }
+
+  async hasWorkspaceAccess(workspaceId: string): Promise<boolean> {
+    const info = await this.#account().getAccountInfo();
+    // Fail closed if either side's workspace id is unknown (e.g. an account connected before workspace
+    // ids were persisted): the observer must reconnect before they can be admitted.
+    return !!info.workspaceId && info.workspaceId === workspaceId;
+  }
+
+  async hasItemAccess(itemId: string): Promise<boolean> {
+    try {
+      await this.#api().detectKind(itemId);
+      return true;
+    } catch (error) {
+      if (error instanceof NotionApiError &&
+          (error.status === 404 || error.status === 403 || error.status === 400 ||
+           error.isAuthError || error.code === "restricted_resource")) {
+        return false;
+      }
+      throw error;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Observation authorization with observer tracking.
+
+// Computes the observer ids that must be excluded from an observation revealing the given item(s),
+// or undefined if none. Item bindings pass no hook (single ACL unit, nothing to exclude); the
+// workspace gatekeeper passes one that records the items as observed data sets and excludes observers
+// lacking access to a newly-seen one. The hook is queue-independent, so the same reference is shared
+// by every (sub-)session of a binding.
+type ItemObservationCheck = {
+  excludeObservers?: string[];
+  pendingItems: string[];
+  commit(): void;
+};
+type ObserveHook = (itemIds: string[]) => Promise<ItemObservationCheck>;
+type ObservedItemState = true | "pending" | "observed";
+
+// Authorize an observation that reveals data belonging to specific item(s). For workspace bindings
+// this also tracks those items as observed data sets and excludes observers lacking access to a
+// newly-seen one; for item bindings it is a plain authorizeObservation. `itemIds` may be empty for
+// workspace-level reads (workspace name, member directory) any member may see, and for "open"
+// observations that reveal no item data yet (the real data reads are tracked by the returned
+// sub-session). Provisional (not-yet-created) ids should be filtered out by the caller, since they
+// are not real Notion items the observer could be checked against.
+async function authorizeItemObservation(
+  queue: RpcStub<ApprovalQueue>,
+  observe: ObserveHook | undefined,
+  itemIds: string[],
+  description: ObservationDescription,
+): Promise<void> {
+  const check = observe && itemIds.length > 0
+    ? await observe(itemIds)
+    : {pendingItems: [], commit() {}};
+  await queue.authorizeObservation({ ...description, excludeObservers: check.excludeObservers });
+  check.commit();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -632,6 +749,22 @@ export class NotionItemGatekeeperImpl extends DurableObject<Env, NotionItemGatek
     return new NotionPageSessionImpl(store, approvalQueue.dup(), this.ctx.props.itemId);
   }
 
+  // Observer tracking — "ACL check (single unit)". The binding is one page or database, so we just
+  // confirm the observer can retrieve it with their own token (hasItemAccess). A page's subtree and a
+  // database's rows inherit its access, so the bound item is the atomic unit: nothing read later could
+  // be outside it, so no observers are tracked and removeObserver is a no-op. The overseer re-runs
+  // addObserver on every open, catching loss of access promptly.
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<NotionVerifierApi>;
+    if (!(await verifier.hasItemAccess(this.ctx.props.itemId))) {
+      throw new Error(
+        "This collaborator does not have access to the bound Notion page/database, so they cannot " +
+        "be allowed to observe data the Gadget read from it.");
+    }
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
+
   async applyAction(action: number): Promise<void> {
     await applyStoredAction(this.#store(), action);
   }
@@ -695,7 +828,103 @@ export class NotionWorkspaceGatekeeperImpl
     const authorizedBy: NotionUser | null = info.ownerId
       ? { id: info.ownerId, name: info.ownerName, avatarUrl: info.ownerAvatar, type: "person" }
       : null;
-    return new NotionWorkspaceSessionImpl(this.#store(), approvalQueue.dup(), authorizedBy);
+    return new NotionWorkspaceSessionImpl(
+      this.#store(), approvalQueue.dup(), authorizedBy,
+      itemIds => this.#prepareItemObservation(itemIds));
+  }
+
+  // -------------------------------------------------------------------------
+  // Observer tracking — "data-set tracking (by page/database)". Workspace members may have shared
+  // different pages/databases with their connections, so we track which items' data the Gadget has
+  // actually observed and verify each observer against them. addObserver requires the observer to be
+  // in the same Notion workspace (so workspace-level metadata and the member directory are fine to
+  // show) plus access to every already-observed item; later, the first observation of a *new* item
+  // excludes any observer lacking it (see #prepareItemObservation). Verified observers are remembered
+  // (their verifier stored) so that forward-exclusion re-check can run. The overseer re-runs
+  // addObserver on every open, catching loss of access promptly.
+
+  #observerKey(id: string): string { return `observer:${id}`; }
+  #observedItemKey(itemId: string): string { return `observedItem:${normalizeId(itemId)}`; }
+
+  #isItemObserved(itemId: string): boolean {
+    const state = this.ctx.storage.kv.get<ObservedItemState>(this.#observedItemKey(itemId));
+    return state === true || state === "observed";
+  }
+
+  #listTrackedItems(): string[] {
+    const prefix = "observedItem:";
+    return [...this.ctx.storage.kv.list<ObservedItemState>({ prefix })]
+      .map(([key]) => key.slice(prefix.length));
+  }
+
+  *#listObservers(): IterableIterator<[string, Fetcher<NotionVerifierApi>]> {
+    const prefix = "observer:";
+    for (const [key, verifier] of this.ctx.storage.kv.list<Fetcher<NotionVerifierApi>>({ prefix })) {
+      yield [key.slice(prefix.length), verifier];
+    }
+  }
+
+  // Marks unknown items pending and returns current observers who cannot access any pending item in
+  // this attempt. Authorization promotes them; failed attempts remain pending and are rechecked.
+  async #prepareItemObservation(itemIds: string[]): Promise<ItemObservationCheck> {
+    const pendingItems = [...new Set(itemIds)].filter(id => !this.#isItemObserved(id));
+    if (pendingItems.length === 0) return {pendingItems, commit() {}};
+    for (const itemId of pendingItems) {
+      const key = this.#observedItemKey(itemId);
+      if (this.ctx.storage.kv.get<ObservedItemState>(key) === undefined) {
+        this.ctx.storage.kv.put(key, "pending");
+      }
+    }
+    const observerAccess = await Promise.all([...this.#listObservers()].map(async ([id, verifier]) => {
+      const access = await Promise.all(pendingItems.map(itemId => verifier.hasItemAccess(itemId)));
+      return [id, access.every(hasAccess => hasAccess)] as const;
+    }));
+    const excluded = observerAccess.filter(([, hasAccess]) => !hasAccess).map(([id]) => id);
+    return {
+      excludeObservers: excluded.length > 0 ? excluded : undefined,
+      pendingItems,
+      commit: () => {
+        for (const itemId of pendingItems) {
+          this.ctx.storage.kv.put(this.#observedItemKey(itemId), "observed");
+        }
+      },
+    };
+  }
+
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<NotionVerifierApi>;
+    const workspaceId = (await this.ctx.exports.UserAccount
+        .get(this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId))
+        .getAccountInfo()).workspaceId;
+    if (!workspaceId) {
+      throw new Error(
+        "This Notion connection predates workspace-id tracking; please disconnect and reconnect " +
+        "the owning Notion account before sharing this Gadget.");
+    }
+    if (!(await verifier.hasWorkspaceAccess(workspaceId))) {
+      throw new Error(
+        "This collaborator is not a member of this Notion workspace, so they cannot be allowed to " +
+        "observe it.");
+    }
+    const checked = new Set<string>();
+    while (true) {
+      const itemIds = this.#listTrackedItems().filter(itemId => !checked.has(itemId));
+      if (itemIds.length === 0) {
+        this.ctx.storage.kv.put(this.#observerKey(id), verifier);
+        return;
+      }
+      const itemAccess = await Promise.all(itemIds.map(itemId => verifier.hasItemAccess(itemId)));
+      if (itemAccess.some(hasAccess => !hasAccess)) {
+        throw new Error(
+          "This collaborator does not have access to a Notion page/database whose data the Gadget " +
+          "has read, so they cannot be allowed to observe it.");
+      }
+      for (const itemId of itemIds) checked.add(itemId);
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(this.#observerKey(id));
   }
 
   async applyAction(action: number): Promise<void> {
@@ -782,12 +1011,18 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
   #store: NotionStore;
   #approvalQueue: RpcStub<ApprovalQueue>;
   #pageId: string;
+  // Undefined for page bindings (single ACL unit); set for workspace bindings to track this page as
+  // an observed data set and exclude observers who lack access to it. Shared by all sub-sessions.
+  #observe?: ObserveHook;
 
-  constructor(store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, pageId: string) {
+  constructor(
+    store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, pageId: string, observe?: ObserveHook,
+  ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#pageId = pageId;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() {
@@ -802,6 +1037,12 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
   // A short identifier for this page, for approval/audit descriptions (resolved real ID if known).
   #ref(): string {
     return this.#store.resolveId(this.#pageId);
+  }
+
+  // The observed data set(s) for a read of this page: the resolved page id, or empty for a still
+  // provisional (not-yet-created) page whose data is the gadget's own staged content, not a real item.
+  #itemIds(): string[] {
+    return this.#isProvisional() ? [] : [this.#store.resolveId(this.#pageId)];
   }
 
   async #baseMetadata(): Promise<NotionPageMetadata | null> {
@@ -834,7 +1075,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
     const meta = simulatePageMetadata(await this.#baseMetadata(), this.#pageId, records);
     meta.createdBy = await this.#resolveUser(meta.createdBy);
     meta.lastEditedBy = await this.#resolveUser(meta.lastEditedBy);
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, this.#itemIds(),
       observation("Read Notion page", `Read metadata for Notion page “${meta.title || "Untitled"}”.`));
     return meta;
   }
@@ -851,7 +1092,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
     const props = simulatePageProperties(await this.#baseProperties(), records, seed);
     const titleVal = Object.values(props).find(v => v.type === "title");
     const label = titleVal?.type === "title" && titleVal.text ? `“${titleVal.text}”` : this.#ref();
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, this.#itemIds(),
       observation("Read Notion page properties", `Read the property values of Notion page ${label}.`));
     return props;
   }
@@ -859,7 +1100,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
   async getContent(): Promise<string> {
     const base = this.#isProvisional() ? null : await this.#store.getPageContent(this.#pageId);
     const content = simulatePageContent(base, this.#store.pendingForPage(this.#pageId));
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, this.#itemIds(),
       observation("Read Notion page content", `Read the body content of Notion page ${this.#ref()}.`));
     return content;
   }
@@ -868,6 +1109,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
     const pageSize = clampPageSize(options?.pageSize) ?? 100;
     const store = this.#store;
     const approvalQueue = this.#approvalQueue;
+    const observe = this.#observe;
     const pageId = this.#pageId;
     const provisional = this.#isProvisional();
     // Walk the block tree so sub-pages nested inside layout containers (columns, toggles, etc.) are
@@ -883,7 +1125,13 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
           collectChildPages(tree, collected);
         }
         all = overlayChildPages(collected, pageId, store, true);
-        await approvalQueue.authorizeObservation(
+        // The listing reveals each (real) child item's existence/title, so attribute it to the parent
+        // page plus the child pages/databases themselves.
+        const itemIds = provisional ? [] : [
+          store.resolveId(pageId),
+          ...all.filter(c => !NotionStore.isProvisional(c.id)).map(c => c.id),
+        ];
+        await authorizeItemObservation(approvalQueue, observe, itemIds,
           observation("List Notion child pages", `List the sub-pages of Notion page ${store.resolveId(pageId)}.`));
       }
       const slice = all.slice(offset, offset + pageSize);
@@ -964,7 +1212,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
       icon: options.icon,
     };
     await this.#stage(action);
-    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId);
+    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId, this.#observe);
   }
 
   async archive(): Promise<void> {
@@ -979,8 +1227,10 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
     const pageSize = clampPageSize(options?.pageSize);
     const store = this.#store;
     const approvalQueue = this.#approvalQueue;
+    const observe = this.#observe;
     const pageId = this.#pageId;
     const provisional = this.#isProvisional();
+    const itemIds = provisional ? [] : [store.resolveId(pageId)];
     return new PagedCursor<NotionComment>(async (cursor, firstPage) => {
       let items: NotionComment[] = [];
       let nextCursor: string | undefined;
@@ -1003,7 +1253,7 @@ class NotionPageSessionImpl extends RpcTarget implements NotionPageSession {
       }
       // Pending comments are only surfaced on the first batch to avoid duplication.
       if (firstPage) items = simulateComments(items, store.pendingForPage(pageId));
-      await approvalQueue.authorizeObservation(
+      await authorizeItemObservation(approvalQueue, observe, itemIds,
         observation("Read Notion page comments", `Read the comment thread on Notion page ${store.resolveId(pageId)}.`));
       return { items, nextCursor };
     });
@@ -1019,12 +1269,18 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
   #store: NotionStore;
   #approvalQueue: RpcStub<ApprovalQueue>;
   #databaseId: string;
+  // Undefined for database bindings (single ACL unit); set for workspace bindings to track this
+  // database as an observed data set. Shared by sub-sessions (rows opened via getPage/createPage).
+  #observe?: ObserveHook;
 
-  constructor(store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, databaseId: string) {
+  constructor(
+    store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, databaseId: string, observe?: ObserveHook,
+  ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#databaseId = databaseId;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() {
@@ -1044,14 +1300,14 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
     const description = (db.description ?? []).map(r => r.plain_text ?? r.text?.content ?? "").join("");
     if (description) metadata.description = description;
     if (summary.icon) metadata.icon = summary.icon;
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [this.#databaseId],
       observation("Read Notion database", `Read metadata for Notion database “${metadata.title}”.`));
     return metadata;
   }
 
   async getSchema(): Promise<NotionDatabaseSchema> {
     const schema = await this.#store.getDatabaseSchema(this.#databaseId);
-    await this.#approvalQueue.authorizeObservation(
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [this.#databaseId],
       observation("Read Notion database schema", "Read the property schema of a Notion database."));
     return schema;
   }
@@ -1060,6 +1316,7 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
     const pageSize = clampPageSize(options?.pageSize);
     const store = this.#store;
     const approvalQueue = this.#approvalQueue;
+    const observe = this.#observe;
     const databaseId = this.#databaseId;
     // Resolve the schema so filters use each property's real type (not a guess from the condition),
     // and resolve the database's primary data source — rows are queried on the data source, which
@@ -1078,7 +1335,9 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
         page_size: pageSize,
       });
       const rows = overlayDatabaseRows(result.results.map(pageToSummary), databaseId, store, firstPage, seed);
-      await approvalQueue.authorizeObservation(
+      // A query reveals row data, which is gated by access to the database (rows inherit it), so the
+      // database is the data set.
+      await authorizeItemObservation(approvalQueue, observe, [databaseId],
         observation("Query Notion database", `Query rows from Notion database ${store.resolveId(databaseId)}.`));
       return { items: rows, nextCursor: result.has_more ? result.next_cursor ?? undefined : undefined };
     });
@@ -1086,8 +1345,9 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
 
   async getPage(idOrUrl: string): Promise<NotionPageSession> {
     // Authorize before touching Notion so this can't be used as an existence oracle for pages
-    // outside this database's grant.
-    await this.#approvalQueue.authorizeObservation(
+    // outside this database's grant. This "open" reveals no row data itself (that is read through the
+    // returned session, which tracks the row), so it carries no item attribution.
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [],
       observation("Open Notion database row", "Open a page (row) in a Notion database."));
 
     // A provisional handle (row created earlier in this session, not yet approved): rehydrate it if
@@ -1098,7 +1358,7 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
           normalizeId(action.parent.databaseId) !== normalizeId(this.#databaseId)) {
         throw new NotionApiError(404, "No such page (row) in this database.");
       }
-      return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), idOrUrl);
+      return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), idOrUrl, this.#observe);
     }
 
     const id = parseNotionId(idOrUrl);
@@ -1115,7 +1375,7 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
         normalizeId(parent.database_id) !== normalizeId(this.#databaseId)) {
       throw new NotionApiError(404, "No such page (row) in this database.");
     }
-    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), id);
+    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), id, this.#observe);
   }
 
   async createPage(options: NotionCreateDatabasePageOptions): Promise<NotionPageSession> {
@@ -1136,7 +1396,7 @@ class NotionDatabaseSessionImpl extends RpcTarget implements NotionDatabaseSessi
       titlePropertyName: titlePropertyNameOf(schema),
     };
     await stageAction(this.#store, this.#approvalQueue, action);
-    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId);
+    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId, this.#observe);
   }
 }
 
@@ -1153,12 +1413,17 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
   #store: NotionStore;
   #approvalQueue: RpcStub<ApprovalQueue>;
   #authorizedBy: NotionUser | null;
+  #observe: ObserveHook;
 
-  constructor(store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, authorizedBy: NotionUser | null) {
+  constructor(
+    store: NotionStore, approvalQueue: RpcStub<ApprovalQueue>, authorizedBy: NotionUser | null,
+    observe: ObserveHook,
+  ) {
     super();
     this.#store = store;
     this.#approvalQueue = approvalQueue;
     this.#authorizedBy = authorizedBy;
+    this.#observe = observe;
   }
 
   [Symbol.dispose]() {
@@ -1169,7 +1434,9 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
     const bot = await this.#store.api.getBotUser();
     const metadata: NotionWorkspaceMetadata = { authorizedBy: this.#authorizedBy };
     if (bot.workspaceName) metadata.name = bot.workspaceName;
-    await this.#approvalQueue.authorizeObservation(
+    // The workspace's name is visible to any workspace member, so no item attribution is needed (the
+    // baseline workspace-membership check in addObserver covers it).
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [],
       observation("Read Notion workspace info", "Read the connected Notion workspace's name."));
     return metadata;
   }
@@ -1178,6 +1445,7 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
     const pageSize = clampPageSize(options?.pageSize);
     const store = this.#store;
     const approvalQueue = this.#approvalQueue;
+    const observe = this.#observe;
     const sort = options?.sort
       ? {
           direction: (options.sort === "lastEditedAscending" ? "ascending" : "descending") as
@@ -1198,29 +1466,37 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
       });
       const items = overlaySearch(
         result.results.map(itemResponseToSummary), store, firstPage, options?.filter);
-      await approvalQueue.authorizeObservation(
+      // Search reveals each matching item's existence/title, so attribute to every (real) result item
+      // and exclude observers who lack access to any of them.
+      const itemIds = result.results
+        .map(r => r.id)
+        .filter(id => !NotionStore.isProvisional(id));
+      await authorizeItemObservation(approvalQueue, observe, itemIds,
         observation("Search Notion", `Search Notion for “${options?.query ?? ""}”.`));
       return { items, nextCursor: result.has_more ? result.next_cursor ?? undefined : undefined };
     });
   }
 
   async getPage(idOrUrl: string): Promise<NotionPageSession> {
-    await this.#approvalQueue.authorizeObservation(
+    // This "open" reveals no page data itself (that is read through the returned session, which
+    // tracks the page), so it carries no item attribution.
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [],
       observation("Open Notion page", "Open a Notion page by ID or URL."));
     // Accept a provisional handle for a page created earlier in this session.
     if (NotionStore.isProvisional(idOrUrl)) {
       if (!this.#store.knowsProvisional(idOrUrl)) {
         throw new NotionApiError(404, "No such page.");
       }
-      return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), idOrUrl);
+      return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), idOrUrl, this.#observe);
     }
     const id = parseNotionId(idOrUrl);
     await this.#store.getPageResponse(id);
-    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), id);
+    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), id, this.#observe);
   }
 
   async getDatabase(idOrUrl: string): Promise<NotionDatabaseSession> {
-    await this.#approvalQueue.authorizeObservation(
+    // As with getPage, opening reveals no database data itself; the returned session tracks it.
+    await authorizeItemObservation(this.#approvalQueue, this.#observe, [],
       observation("Open Notion database", "Open a Notion database by ID or URL."));
     // Databases are never provisional (this gatekeeper doesn't create databases).
     if (NotionStore.isProvisional(idOrUrl)) {
@@ -1228,7 +1504,7 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
     }
     const id = parseNotionId(idOrUrl);
     await this.#store.getDatabaseResponse(id);
-    return new NotionDatabaseSessionImpl(this.#store, this.#approvalQueue.dup(), id);
+    return new NotionDatabaseSessionImpl(this.#store, this.#approvalQueue.dup(), id, this.#observe);
   }
 
   async createPage(options: NotionCreatePageOptions): Promise<NotionPageSession> {
@@ -1243,16 +1519,19 @@ class NotionWorkspaceSessionImpl extends RpcTarget implements NotionWorkspaceSes
       icon: options.icon,
     };
     await stageAction(this.#store, this.#approvalQueue, action);
-    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId);
+    return new NotionPageSessionImpl(this.#store, this.#approvalQueue.dup(), provisionalId, this.#observe);
   }
 
   async listUsers(options?: NotionPageOptions): Promise<Cursor<NotionUser>> {
     const pageSize = clampPageSize(options?.pageSize);
     const store = this.#store;
     const approvalQueue = this.#approvalQueue;
+    const observe = this.#observe;
     return new PagedCursor<NotionUser>(async cursor => {
       const result = await store.api.listUsers(cursor, pageSize);
-      await approvalQueue.authorizeObservation(
+      // The member directory is visible to any workspace member, so no item attribution (the baseline
+      // workspace-membership check in addObserver covers it).
+      await authorizeItemObservation(approvalQueue, observe, [],
         observation("List Notion users", "List the members of the Notion workspace."));
       return {
         items: result.results.map(userResponseToUser),

@@ -128,6 +128,39 @@ export type GatekeeperVendorFilter = {
   resourceUrl?: string,
 };
 
+// Describes one gatekeeper binding for which the opening user must choose a connected account
+// before they can observe the gadget. Passed to ObserverConfigCallback.configure().
+export type ObserverBindingNeed = {
+  // The overseer-assigned gatekeeper id (GatekeeperRecord.id). Echoed back in ObserverAccountChoice.
+  gatekeeperId: number;
+  // The vendor the user must have a connected account for (e.g. "google"). The frontend filters
+  // the user's connected accounts by this to find candidates.
+  vendorId: string;
+  // Human-readable resource title, for display in the configuration modal.
+  resourceTitle: string;
+  // Canonical resource URL, if known, for display.
+  resourceUrl?: string;
+};
+
+// The opening user's chosen account for a single gatekeeper binding. Returned from
+// ObserverConfigCallback.configure().
+export type ObserverAccountChoice = {
+  // Matches the ObserverBindingNeed.gatekeeperId being satisfied.
+  gatekeeperId: number;
+  // An account in the opening user's own User DO (a ConnectedAccountRecord id).
+  accountId: number;
+};
+
+// Provided by the client when opening a gadget. Invoked by the overseer ONLY if the opening user
+// must choose connected accounts for one or more gatekeeper bindings before they can observe the
+// gadget. In the common case (owner, or an already-configured observer) this is never called and
+// open() resolves without an extra round trip. The overseer does not resolve open() until this
+// returns. If the user cannot or will not provide the needed accounts, the callback should reject,
+// and the overseer denies the open.
+export interface ObserverConfigCallback extends RpcTarget {
+  configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
+}
+
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Get profile info for the user who is logged in.
@@ -212,7 +245,13 @@ export interface AuthenticatedApi extends RpcTarget {
   // can be pipelined on the returned Overseer.
   //
   // To allow for pipelining, this throws an exception if the gadget doesn't exist.
-  openGadget(id: string, shareKey?: string): Promise<RpcStub<Overseer>>;
+  //
+  // `configureObservers` is invoked only when the opening user is a non-owner who must choose
+  // connected accounts for one or more gatekeeper bindings before they can observe the gadget (see
+  // ObserverConfigCallback). It is never called for the owner or an already-configured observer,
+  // so the common-case open is still a single pipelined round trip.
+  openGadget(id: string, shareKey?: string,
+             configureObservers?: RpcStub<ObserverConfigCallback>): Promise<RpcStub<Overseer>>;
 
   // Create a new gadget. It will start out titled "Untitled Gadget".
   //

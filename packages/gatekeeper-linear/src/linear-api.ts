@@ -215,6 +215,10 @@ export type RawProject = {
   startDate?: string | null;
   targetDate?: string | null;
   lead?: RawUser | null;
+  // Only populated by the workspace-wide listProjects() query (via PROJECT_LIST_FIELDS), so the
+  // workspace-binding observer tracking can attribute each project to the team(s) that gate access
+  // to it. Omitted everywhere a project is embedded (e.g. on an issue), where it is not needed.
+  teams?: RawConnection<{ id: string }> | null;
 };
 
 export type RawCycle = {
@@ -265,6 +269,13 @@ const TEAM_FIELDS = `id key name description private`;
 const STATE_FIELDS = `id name type color position`;
 const LABEL_FIELDS = `id name color`;
 const PROJECT_FIELDS = `id name url state progress startDate targetDate lead { ${USER_FIELDS} }`;
+// Used only by the workspace-wide listProjects() query: also pulls the teams that gate access to
+// each project, so the workspace-binding observer tracking knows which teams a project listing
+// reveals. (Team-scoped project listings already know their team, so they use PROJECT_FIELDS.)
+const PROJECT_LIST_FIELDS = `${PROJECT_FIELDS} teams(first: 50) {
+  nodes { id }
+  pageInfo { hasNextPage endCursor }
+}`;
 const CYCLE_FIELDS = `id number name startsAt endsAt`;
 
 const ISSUE_SUMMARY_FIELDS = `
@@ -471,12 +482,39 @@ export class LinearApi {
     const data = await this.graphql<{ projects: RawConnection<RawProject> }>(
       `query($first: Int!, $after: String, $includeArchived: Boolean) {
         projects(first: $first, after: $after, includeArchived: $includeArchived) {
-          nodes { ${PROJECT_FIELDS} } pageInfo { hasNextPage endCursor }
+          nodes { ${PROJECT_LIST_FIELDS} } pageInfo { hasNextPage endCursor }
         }
       }`,
       { first: options.first, after: options.after, includeArchived: options.includeArchived ?? false },
     );
+    await Promise.all(data.projects.nodes.map(async project => {
+      const teams = project.teams;
+      if (!teams) return;
+
+      while (teams.pageInfo.hasNextPage) {
+        const after = teams.pageInfo.endCursor;
+        if (!after) throw new LinearApiError(500, "Linear returned an invalid project teams cursor.");
+        const page = await this.#listProjectTeams(project.id, after);
+        teams.nodes.push(...page.nodes);
+        teams.pageInfo = page.pageInfo;
+      }
+    }));
     return data.projects;
+  }
+
+  async #listProjectTeams(projectId: string, after: string): Promise<RawConnection<{ id: string }>> {
+    const data = await this.graphql<{ project: { teams: RawConnection<{ id: string }> } }>(
+      `query($id: String!, $after: String!) {
+        project(id: $id) {
+          teams(first: 50, after: $after) {
+            nodes { id }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }`,
+      { id: projectId, after },
+    );
+    return data.project.teams;
   }
 
   async listCycles(teamId: string, options: { first: number; after?: string }): Promise<RawConnection<RawCycle>> {

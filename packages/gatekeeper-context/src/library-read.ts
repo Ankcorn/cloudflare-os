@@ -1,10 +1,10 @@
-// Agent read path over enabled collections. Every returned result is authorized as an observation;
-// private collection content sets prohibitAllSharing.
+// Agent read path over enabled collections. Every returned result is authorized as an observation
+// and attributed to the collections whose metadata or content it reveals.
 
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
+import type { ApprovalQueue, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
   ContextCollectionVisibility, isTextContentType,
@@ -16,10 +16,16 @@ import { domainName } from "./domain.js";
 // Fanout cap for whole-library search/list.
 const MAX_COLLECTION_FANOUT = 8;
 
+type ObserveCollections = (collectionIds: string[]) => Promise<{
+  excludeObservers?: string[];
+  pendingCollections: string[];
+  commit(): void;
+}>;
+
 @validateRpc()
 export class LibraryReadSession extends RpcTarget {
-  // Per-session enabled set with visibility. Visibility comes from the source (owned = private,
-  // public set = public), so prohibitAllSharing needs no per-collection metadata lookup.
+  // Per-session enabled set. Visibility is retained by the source API, though observer enforcement
+  // uses collection-level access checks rather than the old sticky sharing prohibition.
   #enabledPromise?: Promise<Map<string, ContextCollectionVisibility>>;
 
   constructor(
@@ -28,6 +34,7 @@ export class LibraryReadSession extends RpcTarget {
     private domain: string,
     private accountId: string,
     private approvalQueue: NativeRpcStub<ApprovalQueue>,
+    private observeCollections: ObserveCollections,
   ) {
     super();
   }
@@ -50,10 +57,15 @@ export class LibraryReadSession extends RpcTarget {
     return (this.#enabledPromise ??= this.#userLib().getEnabledCollections(this.domain));
   }
 
-  // Unknown ids are conservative-private.
-  async #anyPrivate(collectionIds: string[]): Promise<boolean> {
-    let enabled = await this.#enabled();
-    return collectionIds.some(id => (enabled.get(id) ?? "private") === "private");
+  async #authorize(
+      collectionIds: string[], description: ObservationDescription): Promise<void> {
+    let check = collectionIds.length > 0
+      ? await this.observeCollections(collectionIds)
+      : { pendingCollections: [], commit() {} };
+    await this.approvalQueue.authorizeObservation({
+      ...description, excludeObservers: check.excludeObservers,
+    });
+    check.commit();
   }
 
   async search(query: string, opts?: {
@@ -96,14 +108,12 @@ export class LibraryReadSession extends RpcTarget {
     // Nothing matched → nothing was observed, so don't record an observation (mirrors read()).
     if (results.length === 0) return results;
     let collectionIds = [...new Set(results.map(r => r.collectionId).filter((id): id is string => !!id))];
-    let prohibit = await this.#anyPrivate(collectionIds);
     // Authorize after fetching, before returning data.
-    await this.approvalQueue.authorizeObservation({
+    await this.#authorize(collectionIds, {
       title: `Context search: ${query}`,
       description:
         `Searched the Context Library for \`${query}\`. Returned ${results.length} result(s)` +
         (collectionIds.length ? ` across ${collectionIds.length} collection(s).` : "."),
-      prohibitAllSharing: prohibit,
     });
     return results;
   }
@@ -115,16 +125,20 @@ export class LibraryReadSession extends RpcTarget {
     let listing = await this.#fetchListing(opts);
     // Nothing listed → nothing was observed, so don't record an observation (mirrors read()).
     if (listing.entries.length === 0) return listing;
-    // A collection listing reveals document names/descriptions; top-level collection names don't.
-    let prohibit = opts?.collectionId ? await this.#anyPrivate([opts.collectionId]) : false;
-    await this.approvalQueue.authorizeObservation({
+    // Both collection contents and top-level collection titles/descriptions reveal collection data.
+    let collectionIds = opts?.collectionId
+      ? [opts.collectionId]
+      : listing.entries
+          .filter((entry): entry is Extract<ContextListingEntry, { type: "collection" }> =>
+            entry.type === "collection")
+          .map(entry => entry.id);
+    await this.#authorize(collectionIds, {
       title: opts?.collectionId
         ? `Context listing: ${opts.collectionId}${opts.path ? "/" + opts.path : ""}`
         : "Context listing: collections",
       description: opts?.collectionId
         ? `Listed contents of Context Library collection \`${opts.collectionId}\`.`
         : "Listed the user's Context Library collections.",
-      prohibitAllSharing: prohibit,
     });
     return listing;
   }
@@ -142,11 +156,9 @@ export class LibraryReadSession extends RpcTarget {
     // No document found (missing or inaccessible) → nothing was observed, so don't record one.
     if (!doc) return null;
 
-    let prohibit = await this.#anyPrivate([collectionId]);
-    await this.approvalQueue.authorizeObservation({
+    await this.#authorize([collectionId], {
       title: `Context read: ${doc.name}`,
       description: `Read Context Library document \`${docId}\`.`,
-      prohibitAllSharing: prohibit,
     });
 
     let content = isTextContentType(doc.contentType)

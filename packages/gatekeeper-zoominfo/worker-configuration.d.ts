@@ -5,7 +5,7 @@ interface __BaseEnv_Env {
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
-		mainModule: typeof import("./.wrangler/validate/src/zoominfo");
+		mainModule: typeof import("./src/zoominfo");
 		durableNamespaces: "UserAccount" | "ZoomInfoGatekeeperImpl";
 	}
 	interface Env extends __BaseEnv_Env {}

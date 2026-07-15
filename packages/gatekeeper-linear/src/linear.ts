@@ -1,7 +1,8 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   GatekeeperUser,
+  GatekeeperUserVerifier,
   GatekeeperVendor as GatekeeperVendorIface,
   Gatekeeper,
   ResourceDescription,
@@ -776,6 +777,106 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#account().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // Mint a verifier representing this account, used by LinearGatekeeperImpl.addObserver to confirm a
+  // prospective observer may read a bound team/issue (and, for workspace bindings, the workspace and
+  // each accessed team). The verifier carries this user's own account id, so the access checks run
+  // against the observer's *own* Linear token.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    const props: LinearVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.LinearVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier
+//
+// Linear uses the "ACL check (single unit)" strategy for team and issue bindings, and "data-set
+// tracking (by team)" for workspace bindings (see LinearGatekeeperImpl observer methods). All three
+// reduce to per-observer access questions answered against the observer's *own* token:
+//   - hasWorkspaceAccess(urlKey): the observer belongs to the workspace (their viewer's organization
+//     urlKey matches). Gates workspace-level metadata/member-directory reads, which any member sees.
+//   - hasTeamAccess(urlKey, teamKeyOrId): the observer is in the workspace AND can see the team.
+//     Linear's `teams` query only returns teams visible to the token's user, so a private team the
+//     observer isn't a member of resolves to null — honoring team privacy. Public teams resolve for
+//     any member. Team UUIDs are global, so this also rejects a same-key team in another workspace.
+//   - hasIssueAccess(urlKey, issueRef): the observer is in the workspace AND can see the issue
+//     (issues inherit their team's ACL, so getIssue returns null when the team is hidden).
+// The overseer only ever hands this verifier back to a Linear gatekeeper, which may therefore trust
+// the boolean results.
+
+type LinearVerifierProps = {
+  userObjectId: string;
+};
+
+// The non-standard methods the Linear gatekeeper calls on its own verifier (see addObserver). Not
+// part of the generic GatekeeperUserVerifier contract.
+export interface LinearVerifierApi extends GatekeeperUserVerifier {
+  hasWorkspaceAccess(workspaceUrlKey: string): Promise<boolean>;
+  hasTeamAccess(workspaceUrlKey: string, teamKeyOrId: string): Promise<boolean>;
+  hasIssueAccess(workspaceUrlKey: string, issueRef: string): Promise<boolean>;
+}
+
+type TeamObservationCheck = {
+  excludeObservers?: string[];
+  pendingTeams: string[];
+  commit(): void;
+};
+
+type ObservedTeamState = true | "pending" | "observed";
+
+@validateRpc()
+export class LinearVerifier extends WorkerEntrypoint<Env, LinearVerifierProps>
+    implements LinearVerifierApi {
+  #orgUrlKey?: Promise<string | null>;
+
+  #api(): LinearApi {
+    const account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return new LinearApi(() => account.getAccessToken());
+  }
+
+  // Memoized within this instance: the urlKey of the workspace the observer's token belongs to, or
+  // null if the token is broken/expired (a token that can't demonstrate access is treated as "no
+  // access" rather than failing the whole open; the observer is re-checked on their next open).
+  #workspaceUrlKey(): Promise<string | null> {
+    if (!this.#orgUrlKey) {
+      this.#orgUrlKey = (async () => {
+        try {
+          return (await this.#api().getOrganization()).urlKey;
+        } catch (error) {
+          if (error instanceof LinearApiError && error.isAuthError) return null;
+          throw error;
+        }
+      })();
+    }
+    return this.#orgUrlKey;
+  }
+
+  async hasWorkspaceAccess(workspaceUrlKey: string): Promise<boolean> {
+    return (await this.#workspaceUrlKey()) === workspaceUrlKey;
+  }
+
+  async hasTeamAccess(workspaceUrlKey: string, teamKeyOrId: string): Promise<boolean> {
+    if (!(await this.hasWorkspaceAccess(workspaceUrlKey))) return false;
+    try {
+      return (await this.#api().findTeam(teamKeyOrId)) !== null;
+    } catch (error) {
+      if (error instanceof LinearApiError && error.isAuthError) return false;
+      throw error;
+    }
+  }
+
+  async hasIssueAccess(workspaceUrlKey: string, issueRef: string): Promise<boolean> {
+    if (!(await this.hasWorkspaceAccess(workspaceUrlKey))) return false;
+    try {
+      return (await this.#api().getIssue(issueRef)) !== null;
+    } catch (error) {
+      if (error instanceof LinearApiError && error.isAuthError) return false;
+      throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +972,81 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
   // The workspace url key (first path segment of linear.app URLs), used to build canonical URLs.
   workspaceKey(): string {
     return this.ctx.props.workspaceUrlKey;
+  }
+
+  // -------------------------------------------------------------------------
+  // Observer tracking (see addObserver/removeObserver). Only workspace bindings track state; team
+  // and issue bindings are single ACL units verified up front, with nothing to log or exclude.
+
+  #observerKey(id: string): string { return `observer:${id}`; }
+  #observedTeamKey(teamId: string): string { return `observedTeam:${teamId}`; }
+
+  #isTeamObserved(teamId: string): boolean {
+    const state = this.ctx.storage.kv.get<ObservedTeamState>(this.#observedTeamKey(teamId));
+    return state === true || state === "observed";
+  }
+
+  #listTrackedTeams(): string[] {
+    const prefix = "observedTeam:";
+    return [...this.ctx.storage.kv.list<ObservedTeamState>({ prefix })]
+      .map(([key]) => key.slice(prefix.length));
+  }
+
+  *#listObservers(): IterableIterator<[string, Fetcher<LinearVerifierApi>]> {
+    const prefix = "observer:";
+    for (const [key, verifier] of this.ctx.storage.kv.list<Fetcher<LinearVerifierApi>>({ prefix })) {
+      yield [key.slice(prefix.length), verifier];
+    }
+  }
+
+  // Workspace bindings only. Marks unknown teams pending and returns current observers who cannot
+  // access any pending team in this attempt. Authorization promotes them; failed attempts remain
+  // pending and are rechecked on retry.
+  async #prepareTeamObservation(teamIds: string[]): Promise<TeamObservationCheck> {
+    const pendingTeams = [...new Set(teamIds)].filter(id => !this.#isTeamObserved(id));
+    if (pendingTeams.length === 0) return {pendingTeams, commit() {}};
+    for (const teamId of pendingTeams) {
+      const key = this.#observedTeamKey(teamId);
+      if (this.ctx.storage.kv.get<ObservedTeamState>(key) === undefined) {
+        this.ctx.storage.kv.put(key, "pending");
+      }
+    }
+    const observerAccess = await Promise.all([...this.#listObservers()].map(async ([id, verifier]) => {
+      const access = await Promise.all(pendingTeams.map(
+        teamId => verifier.hasTeamAccess(this.ctx.props.workspaceUrlKey, teamId),
+      ));
+      return [id, access.every(hasAccess => hasAccess)] as const;
+    }));
+    const excluded = observerAccess.filter(([, hasAccess]) => !hasAccess).map(([id]) => id);
+    return {
+      excludeObservers: excluded.length > 0 ? excluded : undefined,
+      pendingTeams,
+      commit: () => {
+        for (const teamId of pendingTeams) {
+          this.ctx.storage.kv.put(this.#observedTeamKey(teamId), "observed");
+        }
+      },
+    };
+  }
+
+  // Authorize an observation that reveals data belonging to specific team(s). For workspace bindings
+  // this also tracks those teams as observed data sets and excludes any observers lacking access to a
+  // newly-seen one; for team/issue bindings it is a plain authorizeObservation (the bound resource is
+  // a single ACL unit verified up front). Every team-scoped read should go through this rather than
+  // calling approvalQueue.authorizeObservation directly. `teamIds` may be empty for workspace-level
+  // reads (org metadata, member directory) that any workspace member may see.
+  async authorizeTeamObservation(
+    queue: RpcStub<ApprovalQueue>,
+    teamIds: string[],
+    description: ObservationDescription,
+  ): Promise<void> {
+    const check = this.ctx.props.resourceKind === "workspace" && teamIds.length > 0
+      ? await this.#prepareTeamObservation(teamIds)
+      : {pendingTeams: [], commit() {}};
+    await queue.authorizeObservation({
+      ...description, excludeObservers: check.excludeObservers,
+    });
+    check.commit();
   }
 
   // Resolve an issue reference (real identifier/UUID, or provisional id) to the id usable against
@@ -1250,6 +1426,73 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
     }
   }
 
+  // Observer tracking. Strategy depends on the binding's granularity:
+  //
+  // - Team / Issue binding — "ACL check (single unit)". The binding is one team (or one issue, which
+  //   inherits its team's ACL), so we just confirm the observer can see it (hasTeamAccess /
+  //   hasIssueAccess, against their own token, honoring team privacy). Nothing read later could be
+  //   outside that unit, so no observers are tracked and removeObserver is a no-op.
+  //
+  // - Workspace binding — "data-set tracking (by team)". Workspace members may belong to different
+  //   teams, so we track which teams' data the Gadget has actually observed and verify each observer
+  //   against them. addObserver requires workspace membership (so workspace-level metadata and the
+  //   member directory are fine to show) plus access to every already-observed team; later, the first
+  //   observation of a *new* team excludes any observer lacking it (see #prepareTeamObservation). Verified
+  //   observers are remembered (their verifier stored) so that forward-exclusion check can run.
+  //
+  // The overseer re-runs addObserver on every open, catching loss of access promptly.
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const verifier = user as unknown as Fetcher<LinearVerifierApi>;
+    const ws = this.ctx.props.workspaceUrlKey;
+
+    if (this.ctx.props.resourceKind === "team") {
+      const teamKeyOrId = this.ctx.props.teamKeyOrId!;
+      if (!(await verifier.hasTeamAccess(ws, teamKeyOrId))) {
+        throw new Error(
+          `This collaborator does not have access to the Linear team \`${teamKeyOrId}\`, so they ` +
+          `cannot be allowed to observe data the Gadget read from it.`);
+      }
+      return;
+    }
+
+    if (this.ctx.props.resourceKind === "issue") {
+      const issueRef = this.ctx.props.issueRef!;
+      if (!(await verifier.hasIssueAccess(ws, issueRef))) {
+        throw new Error(
+          `This collaborator does not have access to the Linear issue \`${issueRef}\`, so they ` +
+          `cannot be allowed to observe data the Gadget read from it.`);
+      }
+      return;
+    }
+
+    // Workspace binding.
+    if (!(await verifier.hasWorkspaceAccess(ws))) {
+      throw new Error(
+        `This collaborator is not a member of the Linear workspace \`${ws}\`, so they cannot be ` +
+        `allowed to observe it.`);
+    }
+    const checked = new Set<string>();
+    while (true) {
+      const teamIds = this.#listTrackedTeams().filter(teamId => !checked.has(teamId));
+      if (teamIds.length === 0) {
+        this.ctx.storage.kv.put(this.#observerKey(id), verifier);
+        return;
+      }
+      const teamAccess = await Promise.all(
+        teamIds.map(teamId => verifier.hasTeamAccess(ws, teamId)));
+      if (teamAccess.some(hasAccess => !hasAccess)) {
+        throw new Error(
+          `This collaborator does not have access to a Linear team whose data the Gadget has read, ` +
+          `so they cannot be allowed to observe it.`);
+      }
+      for (const teamId of teamIds) checked.add(teamId);
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(this.#observerKey(id));
+  }
+
   async applyAction(actionId: number): Promise<void> {
     const action = this.ctx.storage.kv.get<StoredAction>(`action:${actionId}`);
     if (!action) throw new Error(`Unknown action: ${actionId}`);
@@ -1424,24 +1667,32 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
 // Cursor: lazily pages through a Linear connection, authorizing each page.
 
 class StreamingCursor<TRaw, TOut> extends RpcTarget implements Cursor<TOut> {
+  #gk: LinearGatekeeperImpl;
   #fetchPage: (after: string | undefined) => Promise<RawConnection<TRaw>>;
   #normalize: (raw: TRaw) => TOut;
   #queue: RpcStub<ApprovalQueue>;
   #describe: (items: TOut[]) => ObservationDescription;
+  // The team(s) whose data a given raw page reveals, for workspace-binding observer tracking (see
+  // LinearGatekeeperImpl.authorizeTeamObservation). Empty for workspace-level pages any member sees.
+  #teamIdsOf: (rawItems: TRaw[]) => string[];
   #after: string | undefined = undefined;
   #done = false;
 
   constructor(
+    gk: LinearGatekeeperImpl,
     queue: RpcStub<ApprovalQueue>,
     fetchPage: (after: string | undefined) => Promise<RawConnection<TRaw>>,
     normalize: (raw: TRaw) => TOut,
     describe: (items: TOut[]) => ObservationDescription,
+    teamIdsOf: (rawItems: TRaw[]) => string[],
   ) {
     super();
+    this.#gk = gk;
     this.#queue = queue;
     this.#fetchPage = fetchPage;
     this.#normalize = normalize;
     this.#describe = describe;
+    this.#teamIdsOf = teamIdsOf;
   }
 
   async next(): Promise<TOut[] | null> {
@@ -1449,7 +1700,7 @@ class StreamingCursor<TRaw, TOut> extends RpcTarget implements Cursor<TOut> {
     const conn = await this.#fetchPage(this.#after);
     const items = conn.nodes.map(this.#normalize);
     // Authorize before advancing pagination state, so a denied page can be retried.
-    await this.#queue.authorizeObservation(this.#describe(items));
+    await this.#gk.authorizeTeamObservation(this.#queue, this.#teamIdsOf(conn.nodes), this.#describe(items));
     this.#after = conn.pageInfo.endCursor ?? undefined;
     if (!conn.pageInfo.hasNextPage) this.#done = true;
     return items;
@@ -1482,7 +1733,8 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
 
   async getMetadata(): Promise<LinearWorkspaceMetadata> {
     const org = await this.#gk.orgRaw();
-    await this.#queue.authorizeObservation({
+    // Workspace-level metadata is visible to any workspace member, so no team attribution is needed.
+    await this.#gk.authorizeTeamObservation(this.#queue, [], {
       title: "Read workspace info",
       description: `Read metadata for the Linear workspace **${org.name}**.`,
     });
@@ -1492,10 +1744,14 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
   async listTeams(options?: LinearPageOptions): Promise<Cursor<LinearTeamSummary>> {
     const first = clampPageSize(options?.resultsPerPage);
     return new StreamingCursor<RawTeam, LinearTeamSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.teamsPage(after, first, options?.includeArchived ?? false),
       raw => normTeamSummary(raw, this.#wsKey),
       items => ({ title: "List teams", description: `Listed ${items.length} team(s) in the workspace.` }),
+      // Each listed team is itself a data set whose existence/metadata (incl. private teams) the
+      // observer must be allowed to see.
+      teams => teams.map(t => t.id),
     );
   }
 
@@ -1506,10 +1762,14 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
   async listProjects(options?: LinearPageOptions): Promise<Cursor<LinearProjectSummary>> {
     const first = clampPageSize(options?.resultsPerPage);
     return new StreamingCursor<RawProject, LinearProjectSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.projectsPage(null, after, first, options?.includeArchived ?? false),
       normProjectSummary,
       items => ({ title: "List projects", description: `Listed ${items.length} project(s) in the workspace.` }),
+      // A project's access is gated by the team(s) it belongs to (populated by the workspace-wide
+      // query via PROJECT_LIST_FIELDS), so attribute the listing to all of them.
+      projects => projects.flatMap(p => (p.teams?.nodes ?? []).map(t => t.id)),
     );
   }
 
@@ -1517,10 +1777,12 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
     const first = clampPageSize(filter?.resultsPerPage);
     const args = issueArgs(filter);
     return new StreamingCursor<RawIssue, LinearIssueSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.issuesPage(args, after, first),
       raw => normIssueSummary(raw, this.#wsKey),
       items => ({ title: "List issues", description: `Listed ${items.length} issue(s) across the workspace.` }),
+      issues => issues.map(i => i.team.id),
     );
   }
 
@@ -1528,10 +1790,12 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
     const first = clampPageSize(query.resultsPerPage);
     const args = issueArgs(query);
     return new StreamingCursor<RawIssue, LinearIssueSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.searchPage(query.text, args, after, first),
       raw => normIssueSummary(raw, this.#wsKey),
       items => ({ title: "Search issues", description: `Searched workspace issues for "${query.text}" (${items.length} result(s)).` }),
+      issues => issues.map(i => i.team.id),
     );
   }
 
@@ -1545,7 +1809,8 @@ class LinearWorkspaceSessionImpl extends RpcTarget implements LinearWorkspace {
 
   async findMembers(query?: string): Promise<LinearUser[]> {
     const users = await this.#gk.findMembersRaw(query);
-    await this.#queue.authorizeObservation({
+    // The workspace member directory is visible to any workspace member, so no team attribution.
+    await this.#gk.authorizeTeamObservation(this.#queue, [], {
       title: "Find members",
       description: `Looked up ${users.length} workspace member(s)${query ? ` matching "${query}"` : ""}.`,
     });
@@ -1588,7 +1853,7 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
 
   async getMetadata(): Promise<LinearTeamMetadata> {
     const team = await this.#team();
-    await this.#queue.authorizeObservation({
+    await this.#gk.authorizeTeamObservation(this.#queue, [team.id], {
       title: "Read team info",
       description: `Read metadata for team **${team.key} · ${team.name}**.`,
     });
@@ -1600,10 +1865,12 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
     const first = clampPageSize(filter?.resultsPerPage);
     const args = { ...issueArgs(filter), teamId: team.id };
     return new StreamingCursor<RawIssue, LinearIssueSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.issuesPage(args, after, first),
       raw => normIssueSummary(raw, this.#wsKey),
       items => ({ title: "List team issues", description: `Listed ${items.length} issue(s) in team ${team.key}.` }),
+      () => [team.id],
     );
   }
 
@@ -1612,10 +1879,12 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
     const first = clampPageSize(query.resultsPerPage);
     const args = { ...issueArgs(query), teamId: team.id };
     return new StreamingCursor<RawIssue, LinearIssueSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.searchPage(query.text, args, after, first),
       raw => normIssueSummary(raw, this.#wsKey),
       items => ({ title: "Search team issues", description: `Searched team ${team.key} for "${query.text}" (${items.length} result(s)).` }),
+      () => [team.id],
     );
   }
 
@@ -1632,7 +1901,7 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
   async listWorkflowStates(): Promise<LinearWorkflowState[]> {
     const team = await this.#team();
     const states = await this.#gk.workflowStatesRaw(team.id);
-    await this.#queue.authorizeObservation({
+    await this.#gk.authorizeTeamObservation(this.#queue, [team.id], {
       title: "List workflow states",
       description: `Listed ${states.length} workflow state(s) for team ${team.key}.`,
     });
@@ -1642,7 +1911,7 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
   async listLabels(): Promise<LinearLabel[]> {
     const team = await this.#team();
     const labels = await this.#gk.labelsForDisplay(team.id);
-    await this.#queue.authorizeObservation({
+    await this.#gk.authorizeTeamObservation(this.#queue, [team.id], {
       title: "List labels",
       description: `Listed ${labels.length} label(s) for team ${team.key}.`,
     });
@@ -1676,10 +1945,13 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
     const team = await this.#team();
     const first = clampPageSize(options?.resultsPerPage);
     return new StreamingCursor<RawProject, LinearProjectSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.projectsPage(team.id, after, first, options?.includeArchived ?? false),
       normProjectSummary,
       items => ({ title: "List team projects", description: `Listed ${items.length} project(s) for team ${team.key}.` }),
+      // Team-scoped listing: the projects are reached through this team, so attribute to it.
+      () => [team.id],
     );
   }
 
@@ -1687,17 +1959,19 @@ class LinearTeamSessionImpl extends RpcTarget implements LinearTeam {
     const team = await this.#team();
     const first = clampPageSize(options?.resultsPerPage);
     return new StreamingCursor<RawCycle, LinearCycleSummary>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.cyclesPage(team.id, after, first),
       normCycle,
       items => ({ title: "List cycles", description: `Listed ${items.length} cycle(s) for team ${team.key}.` }),
+      () => [team.id],
     );
   }
 
   async listMembers(): Promise<LinearUser[]> {
     const team = await this.#team();
     const members = await this.#gk.teamMembersRaw(team.id);
-    await this.#queue.authorizeObservation({
+    await this.#gk.authorizeTeamObservation(this.#queue, [team.id], {
       title: "List team members",
       description: `Listed ${members.length} member(s) of team ${team.key}.`,
     });
@@ -1742,7 +2016,7 @@ class LinearIssueImpl extends RpcTarget implements LinearIssue {
 
   async getDetails(): Promise<LinearIssueDetails> {
     const issue = await this.#requireIssue();
-    await this.#queue.authorizeObservation({
+    await this.#gk.authorizeTeamObservation(this.#queue, [issue.team.id], {
       title: `Read issue ${issue.identifier}`,
       description: `Read details of issue **${issue.identifier} ${issue.title}**.`,
     });
@@ -1926,15 +2200,18 @@ class LinearIssueImpl extends RpcTarget implements LinearIssue {
   }
 
   async readComments(options?: LinearPageOptions): Promise<Cursor<LinearComment>> {
-    // Enforce team scope (if any) before exposing the comment thread.
-    if (this.#teamScope) await this.#requireIssue();
+    // Resolve the issue (also enforcing team scope, if any) so the comment thread can be attributed
+    // to the issue's team for observer tracking.
+    const teamId = (await this.#requireIssue()).team.id;
     const ref = this.#ref;
     const first = clampPageSize(options?.resultsPerPage);
     return new StreamingCursor<RawComment, LinearComment>(
+      this.#gk,
       this.#queue.dup(),
       after => this.#gk.commentsPage(ref, after, first),
       normComment,
       items => ({ title: `Read comments on ${ref}`, description: `Read ${items.length} comment(s) on issue ${ref}.` }),
+      () => [teamId],
     );
   }
 

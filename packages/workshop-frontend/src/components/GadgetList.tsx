@@ -1,6 +1,5 @@
 import { Link } from '@tanstack/react-router'
-// SECURITY: sharing disabled — ShareNetwork removed from import; revert to re-enable.
-import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, Trash, Info, PushPin, Pencil, ArrowRight } from '@phosphor-icons/react'
+import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil, ArrowRight } from '@phosphor-icons/react'
 import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -38,8 +37,7 @@ function formatCost(cost: number): string {
 function AppRow({
   gadget,
   onDelete,
-  // SECURITY: sharing disabled — onShare unused while hidden; revert to re-enable.
-  // onShare,
+  onShare,
   onInfo,
   onTogglePin,
   onRename,
@@ -148,12 +146,10 @@ function AppRow({
             <Info size={13} className="mr-2" />
             Information
           </DropdownMenu.Item>
-          {/* SECURITY: sharing disabled — revert to re-enable.
           <DropdownMenu.Item onClick={() => onShare(gadget)} className={MENU_ITEM}>
             <ShareNetwork size={13} className="mr-2" />
             Share
           </DropdownMenu.Item>
-          */}
           <DropdownMenu.Separator />
           <DropdownMenu.Item
             variant="danger"

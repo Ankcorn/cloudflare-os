@@ -13,7 +13,7 @@ A Gatekeeper is a Cloudflare Worker that mediates all access between a Gadget an
 
 Read `packages/workshop-shared/src/gatekeeper.ts` for the canonical interfaces and detailed JSDoc.
 
-## Six responsibilities
+## Seven responsibilities
 
 1. **Auth management** — Manage authorization to the external service via OAuth (or similar), on behalf of the human end user. This means managing "connected accounts" — token storage, refresh, and revocation in a `UserAccount` Durable Object.
 
@@ -27,9 +27,11 @@ Read `packages/workshop-shared/src/gatekeeper.ts` for the canonical interfaces a
 
 6. **Simulation** — Actions submitted but not yet applied should be simulated as if they already occurred, to the maximum extent reasonable. If the caller reads back data, it should observe the data as if pending actions had been applied, even though they haven't yet. This allows the agent to continue working without waiting for each approval, and allows the end user to batch-approve a lot of work at once. Simulation may leverage caching (updating the cache on submit, clearing or repopulating it on reject), or it may work by storing pending actions separately and adjusting read results at query time — the latter is arguably cleaner but trickier to implement correctly. See Phase 2 for implementation guidance.
 
+7. **Observer verification** — When a Gadget is shared, collaborators may "observe" data the Gadget previously read through the gatekeeper. The gatekeeper must ensure each collaborator could access that data themselves, via `getVerifier()` / `addObserver()` / `removeObserver()`. The interface methods are mandatory — a gatekeeper won't type-check without them — so include at least minimal versions in Phase 1; but *choosing and implementing the right strategy* is a Phase 2 security concern, like logging/approvals. See [Observer verification](#observer-verification).
+
 ## Phase 1: Core implementation
 
-In the first phase, focus only on responsibilities 1 - 3, though keeping in mind that 4 - 6 will need to be implemented later.
+In the first phase, focus only on responsibilities 1 - 3, though keeping in mind that 4 - 7 will need to be implemented later. Note the observer methods of responsibility 7 (`getVerifier`/`addObserver`/`removeObserver`) are required for the code to type-check, so the skeleton includes minimal versions; you flesh out the actual strategy in Phase 2.
 
 ### Step 1: Understand the external service
 
@@ -139,9 +141,9 @@ When something already knows the exact resource — most importantly an AI agent
 
 The operator may prefer to implement phase 2 later, perhaps in a new context. Stop here and ask the operator whether to proceed.
 
-## Phase 2: Logging, approvals, caching, and simulation
+## Phase 2: Logging, approvals, caching, simulation, and observers
 
-In this phase, we focus on responsibilities 4-6. These are typically added as a second pass, after the core gatekeeper works. They may be implemented in a separate session.
+In this phase, we focus on responsibilities 4-7. These are typically added as a second pass, after the core gatekeeper works. They may be implemented in a separate session.
 
 ### Logging and approvals
 
@@ -183,6 +185,108 @@ Keep in mind that the agent calling the API (or the agent writing a gadget to ca
 
 For concrete examples, see the Google gatekeeper's Google Docs simulation/cache handling and BigQuery dry-run scope enforcement.
 
+### Observer verification
+
+This is responsibility 7. When a Gadget is shared, each non-owner collaborator becomes an **observer** of every gatekeeper bound to the Gadget, and may see data the Gadget previously read. The gatekeeper's job is to refuse — or forward-restrict — observers who couldn't access that data themselves.
+
+Three methods implement this (full JSDoc in `gatekeeper.ts`):
+
+- `GatekeeperUser.getVerifier()` — mints a `GatekeeperUserVerifier` (a persistent service stub) representing *this* user's account. The overseer mints one per open and **only ever passes it back to a gatekeeper of the same vendor**, so the gatekeeper may trust whatever it learns from it.
+- `Gatekeeper.addObserver(id, verifier)` — must **throw** if the user represented by `verifier` is not allowed to observe everything read through this gatekeeper so far. The overseer calls it on **every open by every authorized observer** (re-verification, so revoked access is caught at the next open); cache as needed if the check is expensive. `id` is an opaque, stable per-(user,gadget) string.
+- `Gatekeeper.removeObserver(id)` — idempotent; drop a tracked observer.
+
+#### The verifier "non-standard method" pattern
+
+`GatekeeperUserVerifier` has no methods of its own — it's an opaque token. To actually answer "can this observer access X?", define a vendor-specific interface that **extends `GatekeeperUserVerifier`** with your own methods, implement it on a `WorkerEntrypoint` that queries the service using the **observer's own token**, and cast the `Fetcher` back to that interface inside `addObserver`. The overseer's same-vendor guarantee is what makes the cast safe.
+
+```typescript
+// In types/impl: a verifier interface with non-standard methods.
+export interface MyVerifierApi extends GatekeeperUserVerifier {
+  hasResourceAccess(resourceId: string): Promise<boolean>;
+}
+
+type MyVerifierProps = { userObjectId: string };
+
+export class MyVerifier extends WorkerEntrypoint<Env, MyVerifierProps>
+    implements MyVerifierApi {
+  async hasResourceAccess(resourceId: string): Promise<boolean> {
+    // Query the service with the OBSERVER's own token (this.ctx.props.userObjectId).
+    try {
+      await myApiForObserver(this.ctx).getResource(resourceId);
+      return true;
+    } catch (error) {
+      // Distinguish "no access" from "transient failure":
+      //   - auth/permission/not-found (401/403/404) → false (they can't see it)
+      //   - anything else → rethrow, so the open fails loudly rather than silently denying
+      if (isNoAccessStatus(statusOf(error))) return false;
+      throw error;
+    }
+  }
+}
+
+// In GatekeeperUser:
+async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+  return this.ctx.exports.MyVerifier({ props: { userObjectId: this.ctx.props.userObjectId } });
+}
+```
+
+`MyVerifier` is a `WorkerEntrypoint`, so it needs **no migration entry**, but (like all entrypoints) it must be `export`ed from the worker's main module so `ctx.exports.MyVerifier(...)` resolves.
+
+#### Choosing a strategy (per resource type / binding)
+
+Strategy is chosen **per `Gatekeeper` DO class / binding**, not per package — one package may use several (e.g. Google: Gmail=A, Doc=B, BigQuery=C).
+
+- **A — Private-only.** `addObserver()` always throws; `removeObserver()` is a no-op. `getVerifier()` must still exist (the overseer mints it) but is never consulted. Use when the resource is too sensitive to share and there is no per-observer access oracle (e.g. a personal Gmail mailbox).
+- **B — ACL check (single unit).** The binding is one atomic resource; sub-resources inherit its ACL. `addObserver()` calls a verifier method to confirm the observer can access it and throws otherwise; `removeObserver()` is a no-op; nothing is tracked and no `excludeObservers` is ever needed. Use for repo / document / page / team / single-project bindings.
+- **C — Data-set tracking.** The binding spans sub-resources with **distinct ACLs**, and there is a **per-observer access oracle** for each. The DO logs the data sets actually observed and the current observers; `addObserver()` verifies the observer against **every** logged set (plus a coarse membership baseline) and **stores their verifier**; each later observation that first touches a **new** set re-checks all stored observers and sets `excludeObservers` for any who fail. Use for workspace / organization / dataset-spanning bindings.
+- **D — Low-stakes.** `addObserver()` / `removeObserver()` are no-ops; `getVerifier()` returns a trivial verifier (no non-standard methods). Use when any collaborator may observe (personal, low-stakes services).
+
+The **B-vs-C decision** (the "broad binding" lens): use C only when **both** (1) the binding spans sub-resources with distinct ACLs *and* (2) there's a per-observer oracle to check each against. If one ACL covers everything → B. If there's no oracle → A or D.
+
+#### Implementing strategy C
+
+Route **every data-revealing observation** through a helper that takes the set id(s) the observation reveals, instead of calling `authorizeObservation()` directly:
+
+```typescript
+// On the Gatekeeper DO. `setIds` are the data sets this observation reveals.
+async authorizeSetObservation(
+    queue: RpcStub<ApprovalQueue>, setIds: string[], description: ObservationDescription) {
+  const check = setIds.length > 0
+      ? await this.#prepareSetObservation(setIds)
+      : { pendingSets: [], excludeObservers: undefined };
+  await queue.authorizeObservation({ ...description, excludeObservers: check.excludeObservers });
+  for (const setId of check.pendingSets) this.#markSetObserved(setId);
+}
+
+async #prepareSetObservation(setIds: string[]) {
+  const pendingSets = [...new Set(setIds)].filter(id => !this.#isSetObserved(id));
+  if (pendingSets.length === 0) return { pendingSets, excludeObservers: undefined };
+  // This synchronous state change is visible to addObserver() before verifier RPCs can interleave.
+  for (const setId of pendingSets) this.#markSetPendingIfUnknown(setId);
+  const excluded = new Set<string>();
+  for (const [id, verifier] of this.#listObservers()) {
+    for (const setId of pendingSets) {
+      if (!(await verifier.hasSetAccess(setId))) { excluded.add(id); break; }
+    }
+  }
+  return {
+    pendingSets,
+    excludeObservers: excluded.size > 0 ? [...excluded] : undefined,
+  };
+}
+```
+
+Key points for C:
+
+- **Use two durable states: pending and observed.** Mark unknown sets pending before the first await, recheck pending sets on every retry, and promote them only after `authorizeObservation()` succeeds. A failed authorization leaves them pending. `addObserver()` must check both states and loop until no unchecked sets remain before synchronously storing the verifier; this also closes admission races in either request ordering.
+- **The session impls must route through this helper**, not `approvalQueue.authorizeObservation()`. If sessions hold the raw queue (not the DO), thread a small prepare hook/callback into each session and any sub-sessions it spawns, and expose a completion step that promotes its pending sets after authorization. For a single broad binding the hook is active; for the narrow (B) sibling binding it is absent (passthrough). See Linear/Notion for the shared-session-impl case and Supabase for the context-object case.
+- **One observation may reveal several sets** (e.g. a workspace-wide list whose rows belong to different sub-resources). Pass all of them; union the exclusions over the newly-seen ones. Reads that reveal *no* set (workspace name, member directory, a bare "open") pass an empty list and rely on the membership baseline.
+- **`addObserver` baseline:** verify the coarse membership (e.g. same org/workspace) that gates the set-independent reads, then verify each already-observed set, then store the verifier. Fail closed if a needed identity is unknown (e.g. an account connected before you began persisting the workspace id → force a reconnect).
+
+#### `excludeObservers` semantics (why conservative is safe)
+
+When `authorizeObservation()` is given `excludeObservers`, the overseer **blocks the observation** if any named observer is still authorized, and only lets it proceed (tearing down the observer) if they've already lost access. So erring toward listing an observer is never a leak — at worst it blocks an observation that could in principle have been allowed. The leak-relevant gate is always the live sharing graph, so stale observer state self-heals on the next open.
+
 ## Hooks (push notifications)
 
 Some services can push events to the Gadget (inbound email, webhooks, chat messages, etc.). A gatekeeper exposes this as a **hook**: the Gadget registers a callback, and the gatekeeper later invokes it when an event arrives. Hooks are persistent — they survive across sessions and server restarts — and are subject to the same observation/action approval model as everything else.
@@ -220,9 +324,13 @@ When defining a session interface with hooks, it's important to include comments
 - All DO classes must appear in `wrangler.jsonc` under `migrations[].new_sqlite_classes`.
 - Set a self-destruct alarm in `UserAccount.setCallback()` in case the OAuth flow is never completed.
 - `authorizeObservation()` may be called *after* fetching data (so the description can include details about what was fetched) but must be awaited *before* returning anything to the caller.
+- `getVerifier()` / `addObserver()` / `removeObserver()` are **mandatory** — the gatekeeper won't type-check without them. Even a read-only or push-only gatekeeper needs them (sharing is independent of whether the gatekeeper has actions). Pick a strategy per [Observers](#observer-verification): a low-stakes one can be A or D; otherwise B/C.
 
 ## Reference implementations
 
-- `packages/gatekeeper-google/` — OAuth, multiple resource types (Gmail, Google Docs, BigQuery), actions, caching/simulation examples, multiple Session types.
-- `packages/gatekeeper-email/` — Hook-based push notifications, no actions, email address claiming.
-- `packages/workshop-shared/src/gatekeeper.ts` — Canonical interfaces with detailed JSDoc.
+- `packages/gatekeeper-google/` — OAuth, multiple resource types (Gmail, Google Docs, BigQuery), actions, caching/simulation examples, multiple Session types. **Observers:** all three strategies in one package — Gmail=A (always throw), Doc=B (single-unit ACL via `GoogleVerifier.hasDocAccess`), BigQuery=C (dataset tracking via `hasDatasetAccess`).
+- `packages/gatekeeper-email/` — Hook-based push notifications, no actions, email address claiming. **Observers:** strategy D (low-stakes no-ops + trivial verifier).
+- `packages/gatekeeper-github/` — **Observers:** clean strategy B example — `GitHubVerifier.hasRepoAccess` plus a one-method `addObserver`.
+- `packages/gatekeeper-supabase/` — **Observers:** strategy C with a per-session context object (`authorizeProjectObservation`) — good when sessions already hold a shared context.
+- `packages/gatekeeper-linear/` & `packages/gatekeeper-notion/` — **Observers:** strategy C where the page/team session impls are shared between the narrow (B) and broad (C) bindings, threading an `observe` hook through sub-sessions; both also handle one observation revealing multiple sets.
+- `packages/workshop-shared/src/gatekeeper.ts` — Canonical interfaces with detailed JSDoc (`getVerifier`, `addObserver`, `removeObserver`, `GatekeeperUserVerifier`, `ObservationDescription.excludeObservers`).

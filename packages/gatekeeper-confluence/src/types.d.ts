@@ -53,7 +53,7 @@ export interface ConfluenceSite {
    */
   search(options?: SearchOptions): Promise<Cursor<ContentSummary>>;
 
-  /** Returns the profile of the user who authorized this connection. */
+  /** Returns the non-email profile fields of the user who authorized this connection. */
   getCurrentUser(): Promise<ConfluenceUser>;
 }
 

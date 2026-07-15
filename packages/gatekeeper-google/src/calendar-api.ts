@@ -283,7 +283,9 @@ export class GoogleCalendarApi {
     let calendars = body.calendars ?? {};
     return opts.people.map(email => {
       let entry = calendars[email];
-      let error = entry?.errors?.map(error => error.reason ?? error.domain ?? "unknown").join(", ");
+      let error = entry
+          ? entry.errors?.map(item => item.reason ?? item.domain ?? "unknown").join(", ")
+          : "notFound";
       return {
         email,
         busy: (entry?.busy ?? []).map(block => ({
@@ -293,6 +295,21 @@ export class GoogleCalendarApi {
         ...(error ? { error } : {}),
       };
     });
+  }
+
+  async hasFreeBusyAccess(calendarId: string): Promise<boolean> {
+    let timeMin = new Date();
+    let [availability] = await this.freeBusy({
+      people: [calendarId],
+      timeMin,
+      timeMax: new Date(timeMin.valueOf() + 60_000),
+    });
+    if (!availability || availability.error === "notFound") return false;
+    if (availability.error) {
+      throw new Error(
+        `Google Calendar free/busy access check failed for ${calendarId}: ${availability.error}`);
+    }
+    return true;
   }
 
   async createEvent(

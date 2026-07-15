@@ -8,6 +8,7 @@ import {
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
   type GatekeeperUser,
+  type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
@@ -724,7 +725,25 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().prepareReconnect(initiationNonce);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
+
+  // Mint a verifier representing this account. Spotify uses the "low-stakes" observer strategy (see
+  // SpotifyGatekeeperImpl.addObserver): a personal Spotify account is not the kind of restricted
+  // corporate data the information-flow model is designed to protect, so any collaborator may
+  // observe. The verifier therefore carries no identity and is never consulted — but the overseer
+  // mints one on every open, so it must exist and not throw.
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    return this.ctx.exports.SpotifyVerifier({});
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Verifier
+//
+// A trivial verifier with no methods, since Spotify's observer strategy is "low-stakes" (no
+// information-flow tracking). See SpotifyGatekeeperImpl.addObserver.
+@validateRpc()
+export class SpotifyVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
 
 // ---------------------------------------------------------------------------
 // Action model, caching, and simulation (gatekeeper responsibilities 4-6).
@@ -1015,6 +1034,14 @@ export class SpotifyGatekeeperImpl extends DurableObject<Env, SpotifyGatekeeperI
     }
     return new SpotifyAccountSessionImpl(this, queue);
   }
+
+  // Observer tracking: Spotify uses the "low-stakes" strategy. A personal Spotify account (profile,
+  // library, playlists, playback) is not the kind of restricted, access-controlled corporate data
+  // the information-flow model exists to protect — if you share a Gadget that can read your
+  // playlists, that is your call. So any collaborator may observe: addObserver/removeObserver are
+  // no-ops and we never set excludeObservers on observations.
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
+  async removeObserver(_id: string): Promise<void> {}
 
   // -------------------------------------------------------------------------
   // Action storage & lookup

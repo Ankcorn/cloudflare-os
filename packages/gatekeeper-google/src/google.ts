@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind } from '@gadgets/workshop-shared/gatekeeper';
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
+import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
   GmailSession, GmailThread, GmailMessage,
@@ -674,6 +674,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       if (!calendarId) {
         throw new Error("Invalid Google Calendar URL: no calendar ID found");
       }
+      if (calendarId === "primary") {
+        throw new Error(
+          "Google Calendar bindings must use a stable calendar ID, not the account-relative " +
+          "\"primary\" alias.");
+      }
       // Default to the least-privilege scope unless the URL explicitly opts into all calendars.
       let availabilityMode: CalendarAvailabilityMode =
           parsed.searchParams.get("availability") === "allVisible" ? "allVisible" : "thisCalendar";
@@ -824,6 +829,120 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     let initiationNonce = generateNonce();
     await obj.prepareReconnect(initiationNonce, requestedScopes);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
+  }
+
+  // Mint a verifier representing this account, used by the Google gatekeepers' addObserver to confirm
+  // a prospective observer may read a bound resource. The verifier carries this user's own account
+  // id, so the access checks run against the observer's *own* Google token. (The Gmail gatekeeper
+  // uses strategy A — it never consults the verifier — but getVerifier must still exist because the
+  // overseer mints one on every open.)
+  @skipRpcValidation()
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    let props: GoogleVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.GoogleVerifier({ props });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier
+//
+// Google spans several strategies (see each gatekeeper's observer methods):
+//   - Gmail Mailbox — strategy A (private-only): addObserver always throws, so the verifier is never
+//     consulted (but must exist).
+//   - Google Doc — strategy B (ACL check, single unit): hasDocAccess answers whether the observer's
+//     own token can open the bound document (Docs API returns 401/403/404 otherwise).
+//   - Google Calendar — strategies B/C: hasCalendarWriterAccess covers the bound calendar, while
+//     hasCalendarFreeBusyAccess covers foreign calendars read by an all-visible availability query.
+//   - BigQuery — strategy C (data-set tracking by dataset): hasDatasetAccess answers whether the
+//     observer's own token has IAM access to a dataset (BigQuery returns 401/403/404 otherwise).
+// The overseer only ever hands this verifier back to a Google gatekeeper, which may therefore trust
+// the boolean results.
+
+type GoogleVerifierProps = {
+  userObjectId: string;
+};
+
+// Extract the HTTP status from the ad-hoc Error messages thrown by the Google API helpers
+// (which embed it as `: <status> ` or `[http=<status>]`). Returns undefined if not found.
+function httpStatusFromError(error: unknown): number | undefined {
+  if (!(error instanceof Error)) return undefined;
+  let m = error.message.match(/\[http=(\d{3})\]/) ?? error.message.match(/:\s(\d{3})(?:\s|$)/);
+  return m ? Number(m[1]) : undefined;
+}
+
+// True if an error means "the observer's token cannot access this resource" (as opposed to a
+// transient failure, which is rethrown so the open fails loudly rather than silently denying).
+function isNoAccessStatus(status: number | undefined): boolean {
+  return status === 401 || status === 403 || status === 404;
+}
+
+// The non-standard methods the Google gatekeepers call on their own verifier (see addObserver). Not
+// part of the generic GatekeeperUserVerifier contract.
+export interface GoogleVerifierApi extends GatekeeperUserVerifier {
+  hasDocAccess(documentId: string): Promise<boolean>;
+  hasCalendarWriterAccess(calendarId: string): Promise<boolean>;
+  hasCalendarFreeBusyAccess(calendarId: string): Promise<boolean>;
+  hasDatasetAccess(projectId: string, datasetId: string): Promise<boolean>;
+}
+
+type ObserverCheck<T> = {
+  excludeObservers?: string[];
+  pendingSets: T[];
+  commit(): void;
+};
+
+type ObservedSetState = true | "pending" | "observed";
+
+@validateRpc()
+export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
+    implements GoogleVerifierApi {
+  async #getToken(): Promise<string> {
+    let account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return (await account.getAccessToken()).token;
+  }
+
+  async hasDocAccess(documentId: string): Promise<boolean> {
+    let api = new GoogleDocsApi(() => this.#getToken());
+    try {
+      await api.getDocument(documentId);
+      return true;
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
+  }
+
+  async hasCalendarWriterAccess(calendarId: string): Promise<boolean> {
+    let api = new GoogleCalendarApi(() => this.#getToken());
+    try {
+      let calendar = await api.getCalendar(calendarId);
+      return calendar.accessRole === "writer" || calendar.accessRole === "owner";
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
+  }
+
+  async hasCalendarFreeBusyAccess(calendarId: string): Promise<boolean> {
+    let api = new GoogleCalendarApi(() => this.#getToken());
+    try {
+      return await api.hasFreeBusyAccess(calendarId);
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
+  }
+
+  async hasDatasetAccess(projectId: string, datasetId: string): Promise<boolean> {
+    let api = new BigQueryApi(() => this.#getToken());
+    try {
+      await api.getDataset(projectId, datasetId);
+      return true;
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
   }
 }
 
@@ -1614,6 +1733,20 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
+
+  // Observer tracking — strategy A (private-only). Full access to a mailbox/label/search is too
+  // personal to extend to any non-owner observer (a Gmail mailbox has no per-recipient ACL we could
+  // verify an observer against — the mailing-list decomposition discussed in the plan is explicitly
+  // out of scope). So no non-owner observer may ever observe Gmail data: addObserver always throws.
+  // (This is enforced here in addition to any prohibitAllSharing usage, so the lockdown holds even
+  // when sharing is otherwise permitted.) removeObserver is a no-op since none is ever recorded.
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    throw new Error(
+      "Gmail data cannot be shared with other users: this Gadget reads a personal Gmail mailbox, " +
+      "which may only be observed by its owner.");
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 // =======================================================================================
@@ -1957,6 +2090,22 @@ export class GoogleDocGatekeeperImpl
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
     throw new Error("revert is not implemented");
   }
+
+  // Observer tracking — strategy B (ACL check, single unit). The binding is one document, so we just
+  // confirm the observer can open it with their own token (hasDocAccess, via the Drive/Docs ACL).
+  // The document is the atomic unit (everything read through this binding is that one doc), so no
+  // observers are tracked and removeObserver is a no-op. The overseer re-runs addObserver on every
+  // open, catching loss of access promptly.
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let verifier = user as unknown as Fetcher<GoogleVerifierApi>;
+    if (!(await verifier.hasDocAccess(this.ctx.props.documentId))) {
+      throw new Error(
+        "This collaborator does not have access to the bound Google Doc, so they cannot be allowed " +
+        "to observe data the Gadget read from it.");
+    }
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
 }
 
 @validateRpc()
@@ -2370,6 +2519,7 @@ export class GoogleCalendarGatekeeperImpl
       this.ctx.props.availabilityMode,
       approvalQueue.dup(),
       pendingActions,
+      calendarIds => this.#prepareAvailabilityCalendarObservation(calendarIds),
     );
   }
 
@@ -2453,6 +2603,102 @@ export class GoogleCalendarGatekeeperImpl
   async setHook(_hook: Fetcher | null): Promise<void> {
     // No hooks for Google Calendar.
   }
+
+  // Observer tracking combines strategy B for the selected calendar with strategy C for the
+  // optional all-visible availability scope. Full event reads can include private event details,
+  // which Google hides from readers, so observers must currently be writers or owners.
+  // TODO: Let the binding owner choose whether private events are included. A public-only mode
+  // could admit readers instead of requiring writer access from every collaborator.
+
+  #observerKey(id: string): string { return `observer:${id}`; }
+  #availabilityCalendarKey(calendarId: string): string {
+    return `observedAvailabilityCalendar:${encodeURIComponent(calendarId)}`;
+  }
+
+  #isAvailabilityCalendarObserved(calendarId: string): boolean {
+    let state = this.ctx.storage.kv.get<ObservedSetState>(this.#availabilityCalendarKey(calendarId));
+    return state === true || state === "observed";
+  }
+
+  #listTrackedAvailabilityCalendars(): string[] {
+    let prefix = "observedAvailabilityCalendar:";
+    return [...this.ctx.storage.kv.list<ObservedSetState>({prefix})]
+        .map(([key]) => decodeURIComponent(key.slice(prefix.length)));
+  }
+
+  *#listObservers(): IterableIterator<[string, Fetcher<GoogleVerifierApi>]> {
+    let prefix = "observer:";
+    for (let [key, verifier] of this.ctx.storage.kv.list<Fetcher<GoogleVerifierApi>>({prefix})) {
+      yield [key.slice(prefix.length), verifier];
+    }
+  }
+
+  async #prepareAvailabilityCalendarObservation(
+    calendarIds: string[],
+  ): Promise<ObserverCheck<string>> {
+    let pendingCalendarIds = [...new Set(calendarIds)]
+        .filter(calendarId => !this.#isAvailabilityCalendarObserved(calendarId));
+    if (pendingCalendarIds.length === 0) return {pendingSets: pendingCalendarIds, commit() {}};
+
+    for (let calendarId of pendingCalendarIds) {
+      let key = this.#availabilityCalendarKey(calendarId);
+      if (this.ctx.storage.kv.get<ObservedSetState>(key) === undefined) {
+        this.ctx.storage.kv.put(key, "pending");
+      }
+    }
+
+    let observerAccess = await Promise.all([...this.#listObservers()].map(async ([id, verifier]) => {
+      let access = await Promise.all(pendingCalendarIds.map(
+        calendarId => verifier.hasCalendarFreeBusyAccess(calendarId),
+      ));
+      return [id, access.every(hasAccess => hasAccess)] as const;
+    }));
+    let excluded = observerAccess.filter(([, hasAccess]) => !hasAccess).map(([id]) => id);
+
+    return {
+      excludeObservers: excluded.length > 0 ? excluded : undefined,
+      pendingSets: pendingCalendarIds,
+      commit: () => {
+        for (let calendarId of pendingCalendarIds) {
+          this.ctx.storage.kv.put(this.#availabilityCalendarKey(calendarId), "observed");
+        }
+      },
+    };
+  }
+
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let verifier = user as unknown as Fetcher<GoogleVerifierApi>;
+    if (!(await verifier.hasCalendarWriterAccess(this.ctx.props.calendarId))) {
+      throw new Error(
+        "This collaborator does not have writer access to the bound Google Calendar, so they " +
+        "cannot be allowed to observe its event details.");
+    }
+    let checked = new Set<string>();
+    while (true) {
+      let calendarIds = this.#listTrackedAvailabilityCalendars()
+          .filter(calendarId => !checked.has(calendarId));
+      if (calendarIds.length === 0) {
+        if (this.ctx.props.availabilityMode === "allVisible") {
+          this.ctx.storage.kv.put(this.#observerKey(id), verifier);
+        }
+        return;
+      }
+      let availabilityAccess = await Promise.all(
+        calendarIds.map(calendarId => verifier.hasCalendarFreeBusyAccess(calendarId)));
+      for (let [index, calendarId] of calendarIds.entries()) {
+        if (!availabilityAccess[index]) {
+          throw new Error(
+            `This collaborator cannot see free/busy availability for ${calendarId}, whose ` +
+            "availability the Gadget has read, so they cannot be allowed to observe it.");
+        }
+      }
+      for (let calendarId of calendarIds) checked.add(calendarId);
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(this.#observerKey(id));
+  }
 }
 
 class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSession {
@@ -2461,6 +2707,7 @@ class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSessi
   #availabilityMode: CalendarAvailabilityMode;
   #approvalQueue: RpcStub<ApprovalQueue>;
   #pendingActions: PendingActionStore<GoogleCalendarAction>;
+  #observeAvailabilityCalendars: (calendarIds: string[]) => Promise<ObserverCheck<string>>;
 
   constructor(
     api: GoogleCalendarApi,
@@ -2468,6 +2715,7 @@ class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSessi
     availabilityMode: CalendarAvailabilityMode,
     approvalQueue: RpcStub<ApprovalQueue>,
     pendingActions: PendingActionStore<GoogleCalendarAction>,
+    observeAvailabilityCalendars: (calendarIds: string[]) => Promise<ObserverCheck<string>>,
   ) {
     super();
     this.#api = api;
@@ -2475,6 +2723,7 @@ class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSessi
     this.#availabilityMode = availabilityMode;
     this.#approvalQueue = approvalQueue;
     this.#pendingActions = pendingActions;
+    this.#observeAvailabilityCalendars = observeAvailabilityCalendars;
   }
 
   async getCapabilities(): Promise<GoogleCalendarCapabilities> {
@@ -2516,6 +2765,11 @@ class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSessi
     let people = [...new Set(opts.people.map(person => person.trim()).filter(Boolean))];
     if (people.length === 0) throw new Error("At least one person or calendar is required.");
     if (people.length > 50) throw new Error("At most 50 people/calendars can be checked at once.");
+    if (people.includes("primary")) {
+      throw new Error(
+        "Availability checks must use a stable calendar ID or email address, not the " +
+        "account-relative \"primary\" alias.");
+    }
 
     let foreign = people.filter(id => id !== this.#calendarId);
     if (foreign.length > 0 && this.#availabilityMode === "thisCalendar") {
@@ -2524,16 +2778,25 @@ class GoogleCalendarSessionImpl extends RpcTarget implements GoogleCalendarSessi
           "\"All calendars visible to me\" to check other calendars' availability.");
     }
 
+    let availability = await this.#api.freeBusy({...opts, people});
+    let successfulForeign = availability
+        .filter(result => foreign.includes(result.email) && !result.error)
+        .map(result => result.email);
+    let check = successfulForeign.length > 0
+        ? await this.#observeAvailabilityCalendars(successfulForeign)
+        : {pendingSets: [], commit() {}};
+
     await this.#approvalQueue.authorizeObservation({
       title: "Check Google Calendar availability",
       description:
           `Check free/busy availability for ${summarizePeople(people)} from ` +
           `${opts.timeMin.toISOString()} to ${opts.timeMax.toISOString()}. ` +
           "Only busy time blocks are returned; event details are not read.",
-      ...(foreign.length > 0 ? {prohibitAllSharing: true} : {}),
+      excludeObservers: check.excludeObservers,
     });
+    check.commit();
 
-    return await this.#api.freeBusy({...opts, people});
+    return availability;
   }
 
   async createEvent(
@@ -2680,6 +2943,7 @@ export class BigQueryGatekeeperImpl
       this.ctx.props.scopedProjectId,
       this.ctx.props.scopedDatasetId,
       this.ctx.props.scopedTableId,
+      datasets => this.#prepareDatasetObservation(datasets),
     );
   }
 
@@ -2688,6 +2952,110 @@ export class BigQueryGatekeeperImpl
   async rejectAction(_action: number): Promise<void> {}
   revertAction(_action: number): Promise<void> {
     throw new Error("BigQuery gatekeeper has no writable actions to revert");
+  }
+
+  // -------------------------------------------------------------------------
+  // Observer tracking — strategy C (data-set tracking by dataset). Even a project- or table-scoped
+  // binding is tracked at dataset granularity: users may have IAM access to different datasets, so we
+  // record which datasets' data the Gadget has actually observed and verify each observer against
+  // them. addObserver requires access to every already-observed dataset; later, the first observation
+  // of a *new* dataset excludes any observer lacking it (see #prepareDatasetObservation). Verified
+  // observers are remembered (their verifier stored) so that forward-exclusion re-check can run. The
+  // overseer re-runs addObserver on every open, catching loss of access promptly.
+
+  #observerKey(id: string): string { return `observer:${id}`; }
+  // A dataset is identified by project + dataset id; "/" cannot appear in either, so it is an
+  // unambiguous separator.
+  #datasetKey(projectId: string, datasetId: string): string {
+    return `observedDataset:${projectId}/${datasetId}`;
+  }
+
+  #isDatasetObserved(projectId: string, datasetId: string): boolean {
+    let state = this.ctx.storage.kv.get<ObservedSetState>(this.#datasetKey(projectId, datasetId));
+    return state === true || state === "observed";
+  }
+
+  #listTrackedDatasets(): { projectId: string; datasetId: string }[] {
+    let prefix = "observedDataset:";
+    return [...this.ctx.storage.kv.list<ObservedSetState>({ prefix })].map(([key]) => {
+      let rest = key.slice(prefix.length);
+      let slash = rest.indexOf("/");
+      return { projectId: rest.slice(0, slash), datasetId: rest.slice(slash + 1) };
+    });
+  }
+
+  *#listObservers(): IterableIterator<[string, Fetcher<GoogleVerifierApi>]> {
+    let prefix = "observer:";
+    for (let [key, verifier] of this.ctx.storage.kv.list<Fetcher<GoogleVerifierApi>>({ prefix })) {
+      yield [key.slice(prefix.length), verifier];
+    }
+  }
+
+  // Marks unknown datasets pending and returns current observers who cannot access any pending
+  // dataset in this attempt. Authorization promotes them; failed attempts remain pending and are
+  // rechecked on retry.
+  async #prepareDatasetObservation(
+    datasets: { projectId: string; datasetId: string }[],
+  ): Promise<ObserverCheck<{ projectId: string; datasetId: string }>> {
+    let seen = new Set<string>();
+    let pendingDatasets = datasets.filter(d => {
+      let key = `${d.projectId}/${d.datasetId}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return !this.#isDatasetObserved(d.projectId, d.datasetId);
+    });
+    if (pendingDatasets.length === 0) return {pendingSets: pendingDatasets, commit() {}};
+    for (let d of pendingDatasets) {
+      let key = this.#datasetKey(d.projectId, d.datasetId);
+      if (this.ctx.storage.kv.get<ObservedSetState>(key) === undefined) {
+        this.ctx.storage.kv.put(key, "pending");
+      }
+    }
+    let observerAccess = await Promise.all([...this.#listObservers()].map(async ([id, verifier]) => {
+      let access = await Promise.all(pendingDatasets.map(
+        d => verifier.hasDatasetAccess(d.projectId, d.datasetId),
+      ));
+      return [id, access.every(hasAccess => hasAccess)] as const;
+    }));
+    let excluded = observerAccess.filter(([, hasAccess]) => !hasAccess).map(([id]) => id);
+    return {
+      excludeObservers: excluded.length > 0 ? excluded : undefined,
+      pendingSets: pendingDatasets,
+      commit: () => {
+        for (let d of pendingDatasets) {
+          this.ctx.storage.kv.put(this.#datasetKey(d.projectId, d.datasetId), "observed");
+        }
+      },
+    };
+  }
+
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let verifier = user as unknown as Fetcher<GoogleVerifierApi>;
+    let checked = new Set<string>();
+    while (true) {
+      let datasets = this.#listTrackedDatasets()
+          .filter(d => !checked.has(`${d.projectId}/${d.datasetId}`));
+      if (datasets.length === 0) {
+        this.ctx.storage.kv.put(this.#observerKey(id), verifier);
+        return;
+      }
+      let access = await Promise.all(datasets.map(
+        d => verifier.hasDatasetAccess(d.projectId, d.datasetId),
+      ));
+      for (let [index, d] of datasets.entries()) {
+        if (!access[index]) {
+          throw new Error(
+            `This collaborator does not have access to the BigQuery dataset ` +
+            `\`${d.projectId}.${d.datasetId}\`, whose data the Gadget has read, so they cannot be ` +
+            `allowed to observe it.`);
+        }
+        checked.add(`${d.projectId}/${d.datasetId}`);
+      }
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    this.ctx.storage.kv.delete(this.#observerKey(id));
   }
 }
 
@@ -2698,13 +3066,19 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
   #scopedProjectId?: string;
   #scopedDatasetId?: string;
   #scopedTableId?: string;
+  // Records the datasets an observation reveals and returns observers to exclude (see
+  // BigQueryGatekeeperImpl.#prepareDatasetObservation).
+  #observe: (datasets: { projectId: string; datasetId: string }[]) =>
+    Promise<ObserverCheck<{ projectId: string; datasetId: string }>>;
 
   constructor(
     api: BigQueryApi,
     approvalQueue: RpcStub<ApprovalQueue>,
-    scopedProjectId?: string,
-    scopedDatasetId?: string,
-    scopedTableId?: string,
+    scopedProjectId: string | undefined,
+    scopedDatasetId: string | undefined,
+    scopedTableId: string | undefined,
+    observe: (datasets: { projectId: string; datasetId: string }[]) =>
+      Promise<ObserverCheck<{ projectId: string; datasetId: string }>>,
   ) {
     super();
     this.#api = api;
@@ -2712,6 +3086,32 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     this.#scopedProjectId = scopedProjectId;
     this.#scopedDatasetId = scopedDatasetId;
     this.#scopedTableId = scopedTableId;
+    this.#observe = observe;
+  }
+
+  // Authorize an observation that reveals data belonging to specific dataset(s), tracking them and
+  // excluding observers who lack access to a newly-seen one. Use for every read that exposes dataset
+  // data; pass an empty `datasets` for reads that reveal none (e.g. echoing the scoped project id).
+  async #authorizeDatasets(
+    datasets: { projectId: string; datasetId: string }[],
+    description: ObservationDescription,
+  ): Promise<void> {
+    let check = datasets.length > 0 ? await this.#observe(datasets) : {pendingSets: [], commit() {}};
+    await this.#approvalQueue.authorizeObservation({
+      ...description, excludeObservers: check.excludeObservers,
+    });
+    check.commit();
+  }
+
+  // The unique datasets referenced by a dry-run's `referencedTables` (format "project.dataset.table",
+  // matching #checkScopedTables's parsing).
+  static #datasetsFromReferencedTables(referenced: string[]): { projectId: string; datasetId: string }[] {
+    let out: { projectId: string; datasetId: string }[] = [];
+    for (let ref of referenced) {
+      let parts = ref.split(".");
+      if (parts.length === 3) out.push({ projectId: parts[0], datasetId: parts[1] });
+    }
+    return out;
   }
 
   // --- helpers -----------------------------------------------------------
@@ -2838,7 +3238,8 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     }
 
     let preview = sql.replace(/\s+/g, " ").trim().slice(0, 200);
-    await this.#approvalQueue.authorizeObservation({
+    await this.#authorizeDatasets(
+      BigQuerySessionImpl.#datasetsFromReferencedTables(estimate.referencedTables), {
       title: `BigQuery query: ${preview}`,
       description:
         `SQL preview: \`${preview}\`${sql.length > preview.length ? "..." : ""}\n` +
@@ -2873,7 +3274,8 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     this.#checkScopedTables(estimate.referencedTables);
 
     let preview = sql.replace(/\s+/g, " ").trim().slice(0, 100);
-    await this.#approvalQueue.authorizeObservation({
+    await this.#authorizeDatasets(
+      BigQuerySessionImpl.#datasetsFromReferencedTables(estimate.referencedTables), {
       title: `BigQuery dry run: ${preview}`,
       description:
         `Estimated bytes processed: ${estimate.bytesProcessed.toLocaleString()}\n` +
@@ -2886,7 +3288,8 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
 
   async getProject(): Promise<BigQueryProject> {
     let result: BigQueryProject = { projectId: this.#scopedProjectId! };
-    await this.#approvalQueue.authorizeObservation({
+    // Echoes the project id the Gadget was bound to — reveals no dataset data, so no attribution.
+    await this.#authorizeDatasets([], {
       title: "Get BigQuery project",
       description: `Returned the scoped project: \`${this.#scopedProjectId}\`.`,
       prohibitAllSharing: true,
@@ -2907,7 +3310,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
 
     if (this.#scopedDatasetId) {
       let dataset = await this.#api.getDataset(p, this.#scopedDatasetId);
-      await this.#approvalQueue.authorizeObservation({
+      await this.#authorizeDatasets([{ projectId: p, datasetId: this.#scopedDatasetId }], {
         title: `List datasets in ${p}`,
         description: `Returned scoped dataset \`${p}.${this.#scopedDatasetId}\` (1 dataset).`,
         prohibitAllSharing: true,
@@ -2916,7 +3319,8 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     }
 
     let result = await this.#api.listDatasets(p);
-    await this.#approvalQueue.authorizeObservation({
+    // Listing reveals each dataset's existence/name, so attribute to all of them.
+    await this.#authorizeDatasets(result.map(ds => ({ projectId: p, datasetId: ds.datasetId })), {
       title: `List datasets in ${p}`,
       description: `Listed ${result.length} dataset(s) in \`${p}\`.`,
       prohibitAllSharing: true,
@@ -2942,7 +3346,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
 
     if (this.#scopedTableId) {
       let { table } = await this.#api.getTable(p, d, this.#scopedTableId);
-      await this.#approvalQueue.authorizeObservation({
+      await this.#authorizeDatasets([{ projectId: p, datasetId: d }], {
         title: `List tables in ${p}.${d}`,
         description: `Returned scoped table \`${p}.${d}.${this.#scopedTableId}\` (1 table).`,
         prohibitAllSharing: true,
@@ -2951,7 +3355,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     }
 
     let result = await this.#api.listTables(p, d);
-    await this.#approvalQueue.authorizeObservation({
+    await this.#authorizeDatasets([{ projectId: p, datasetId: d }], {
       title: `List tables in ${p}.${d}`,
       description: `Listed ${result.length} table(s) in \`${p}.${d}\`.`,
       prohibitAllSharing: true,
@@ -2987,7 +3391,7 @@ class BigQuerySessionImpl extends RpcTarget implements BigQuerySession {
     if (!t) throw new Error("describeTable requires a tableId when the session is unscoped.");
 
     let result = await this.#api.getTable(p, d, t);
-    await this.#approvalQueue.authorizeObservation({
+    await this.#authorizeDatasets([{ projectId: p, datasetId: d }], {
       title: `Describe ${p}.${d}.${t}`,
       description:
         `Described table \`${p}.${d}.${t}\` (${result.schema.length} columns).`,
