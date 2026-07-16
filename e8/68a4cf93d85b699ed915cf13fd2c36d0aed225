@@ -9,6 +9,8 @@ packages/workshop-backend/src/overseer.ts
   s_f74e55bad93be8::t_9fd665b9e92700 4,30-32,424-428,437,522-527,1600-1617,1657,2642-2643,2686,3114-3140,3144,3183,3267-3270,4022,4033-4035,5335,5337,5339-5340,5349,5357,5360,5387,5422,5425,5446
   s_f74e55bad93be8::t_c5af4ca7feba8c 5343-5344
   s_f74e55bad93be8::t_cc75443ae714e5 3
+  s_f74e55bad93be8::t_607211a5397acf 5424
+  s_f74e55bad93be8::t_ce3d049f18064d 5331-5334,5341-5342,5359
 packages/workshop-shared/src/api.ts
   s_f74e55bad93be8::t_1d8258ed0b3ad9 1096,1101,1103,1111,1113-1114
   s_f74e55bad93be8::t_8a984fe55b906f 1650-1652
@@ -92,6 +94,8 @@ packages/gatekeeper-context/src/library-gatekeeper.ts
   s_f74e55bad93be8::t_0ec2514b6d6ce9 45
   s_f74e55bad93be8::t_9fd665b9e92700 5,8,18,22,24-26,42-44,46,48-49,51,53-56,59-62,66-70,231-251,259,267-272,284-290,293-294,296-301,304-306,309-311,313-314,322-324,325,327,329-330,333
   s_f74e55bad93be8::t_cdc1cb8b516eba 16
+  s_f74e55bad93be8::t_55deabe3c2f7a9 23
+  s_f74e55bad93be8::t_8972cc6ee89093 50,52,63-65,292,307-308,312,326,328,334
 packages/workshop-backend/__tests__/agent-skills.test.ts
   s_f74e55bad93be8::t_c3689fb1c1e47a 6,8,13-16,50,67-80
   s_2fe24136c207c6::t_e274a1ff981131 184
@@ -105,14 +109,17 @@ packages/gatekeeper-context/package.json
 packages/gatekeeper-context/src/agent-skill.ts
   s_f74e55bad93be8::t_9fd665b9e92700 1-6,8-40,42-47,50-51,52-136
   s_f74e55bad93be8::t_b500e9988f4afb 7
+  s_f74e55bad93be8::t_227a10bfba9dc1 41,48-49
 packages/gatekeeper-context/src/library-read.ts
   s_f74e55bad93be8::t_cdc1cb8b516eba 8,68
   s_f74e55bad93be8::t_9fd665b9e92700 7,9,11,20,39,45,47,149-152,155-158,160-170,173-174,180-194,198-203
   s_f74e55bad93be8::t_b500e9988f4afb 12
+  s_f74e55bad93be8::t_aea25fb479d26b 175-179
 packages/workshop-backend/src/agent.ts
   s_f74e55bad93be8::t_9fd665b9e92700 1,11-16,31,95-98,827-832,901-902,965-968,1080,1326,1719,1726-1743,1745-1746,1748,1826-1834,1855-1865,1867-1871,1873,1875-1877
 packages/gatekeeper-context/__tests__/agent-skill.test.ts
   s_f74e55bad93be8::t_9fd665b9e92700 1-3,5-161,162-167,173-200,202-211
+  s_f74e55bad93be8::t_7455a5716f822d 4,168-172,201
 ---
 {
   "schema_version": "authorship/3.0.0",
