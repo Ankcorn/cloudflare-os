@@ -5,13 +5,17 @@ import { DurableObject } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
   ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
-  ContextDocument, ContextDocumentSummary, ContextGitTokenCreateResult, ContextGitTokenList,
+  ContextDocument, ContextDocumentSummary,
+  ContextGitTokenCreateResult, ContextGitTokenList,
   DEFAULT_DOCUMENT_CONTENT_TYPE, DEFAULT_GIT_BRANCH, MAX_DOCUMENT_BODY_BYTES,
   contentTypeFromPath, isTextContentType,
 } from "./context-types.js";
 import { metadataToSummary } from "./collection-kv.js";
 import { domainName } from "./domain.js";
 import { readArtifactRepoDocuments } from "./artifact-sync.js";
+import {
+  isSkillManifestPath, parseSkillManifest, type SkillIndexEntry,
+} from "./agent-skill.js";
 
 const MAX_DOCUMENT_PATH_LENGTH = 1024;
 // Git tokens created through the web UI are valid for one year,
@@ -21,6 +25,9 @@ const GIT_TOKEN_TTL_SECONDS = 31_536_000;
 const GIT_REFRESH_MIN_INTERVAL_MS = 60_000;
 // Allow simple branch names made of alphanumerics, '/', '.', '_', and '-', but not leading/trailing '/'.
 const GIT_BRANCH_RE = /^(?!\/)(?!.*\/$)[A-Za-z0-9/._-]{1,255}$/;
+// Older collections build this path list on first use. Increase the version when parsing rules
+// change.
+const SKILL_INDEX_VERSION = 1;
 
 // Validate a document path before using it as a storage key.
 function validateDocumentPath(path: string): void {
@@ -77,6 +84,8 @@ function makeContextCollectionStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
       documents: collection<ContextRecord>()({ primaryKey: "path" }),
+      // Data needed to list skills without loading document bodies.
+      skillIndex: collection<SkillIndexEntry>()({ primaryKey: "path" }),
     },
     singletons: {
       // Sharing domain for cross-DO references.
@@ -93,6 +102,7 @@ function makeContextCollectionStorage(storage: DurableObjectStorage) {
         documentCount: 0,
         content: { source: "web" },
       },
+      skillIndexVersion: 0,
     },
   });
 }
@@ -161,6 +171,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       };
     }
     this.storage.metadata.put(metadata);
+    // A new collection starts with an up-to-date empty path list.
+    this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
     return metadata;
   }
 
@@ -169,6 +181,82 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     // Old storage records won't have `content` set, so we need to default these values in
     // at the API layer.
     return { ...meta, content: meta.content ?? { source: "web" } };
+  }
+
+  #parseAgentSkill(record: ContextRecord) {
+    if (!isSkillManifestPath(record.path) ||
+        !isTextContentType(record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE)) {
+      return undefined;
+    }
+    try {
+      return parseSkillManifest(record.path, record.body);
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Update the skill entry after saving a document.
+  #updateSkillIndex(record: ContextRecord): void {
+    let manifest = this.#parseAgentSkill(record);
+    if (manifest) {
+      this.storage.skillIndex.put({
+        path: record.path,
+        skillName: manifest.name,
+        description: manifest.description,
+      });
+    } else {
+      this.storage.skillIndex.delete(record.path);
+    }
+  }
+
+  // Save a document and update its skill entry together.
+  #putDocument(record: ContextRecord): void {
+    this.storage.documents.put(record);
+    this.#updateSkillIndex(record);
+  }
+
+  // Delete a document and its skill entry together.
+  #deleteDocument(path: string): void {
+    this.storage.documents.delete(path);
+    this.storage.skillIndex.delete(path);
+  }
+
+  #clearSkillIndex(): void {
+    // Read the entries before deleting from the same storage collection.
+    for (let entry of Array.from(this.storage.skillIndex.list())) {
+      this.storage.skillIndex.delete(entry.path);
+    }
+  }
+
+  // Build the index for collections created before it existed.
+  #ensureSkillIndex(): void {
+    if (this.storage.skillIndexVersion.get() === SKILL_INDEX_VERSION) return;
+
+    let entries: SkillIndexEntry[] = [];
+    for (let record of this.storage.documents.list()) {
+      let manifest = this.#parseAgentSkill(record);
+      if (manifest) {
+        entries.push({
+          path: record.path,
+          skillName: manifest.name,
+          description: manifest.description,
+        });
+      }
+    }
+
+    this.storage.transaction(() => {
+      this.#clearSkillIndex();
+      for (let entry of entries) {
+        this.storage.skillIndex.put(entry);
+      }
+      this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
+    });
+  }
+
+  listAgentSkills(): SkillIndexEntry[] {
+    if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
+    this.#ensureSkillIndex();
+    return [...this.storage.skillIndex.list()];
   }
 
   async updateMetadata(options: {
@@ -212,15 +300,16 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async listContextDocuments(prefix?: string): Promise<ContextDocumentSummary[]> {
     // Trigger git mirror revalidation in the background on reads.
     if (this.#isGitBased()) this.#startBackgroundArtifactRefresh();
-
     let options = prefix ? { prefix } : undefined;
     let result: ContextDocumentSummary[] = [];
     for (let record of this.storage.documents.list(options)) {
+      let manifest = this.#parseAgentSkill(record);
       result.push({
         path: record.path,
         name: record.name,
-        description: record.description,
+        description: manifest?.description ?? record.description,
         contentType: record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE,
+        ...(manifest ? {skillName: manifest.name} : {}),
         lastUpdated: record.lastUpdated,
       });
     }
@@ -234,12 +323,15 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
     let record = this.storage.documents.get(path);
     if (!record) return null;
+    let contentType = record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE;
+    let manifest = this.#parseAgentSkill(record);
     return {
       path: record.path,
       name: record.name,
-      description: record.description,
-      contentType: record.contentType ?? DEFAULT_DOCUMENT_CONTENT_TYPE,
+      description: manifest?.description ?? record.description,
+      contentType,
       body: record.body,
+      ...(manifest ? {skillName: manifest.name} : {}),
       lastUpdated: record.lastUpdated,
     };
   }
@@ -256,17 +348,20 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     }
 
     let contentType = doc.contentType || contentTypeFromPath(path);
-    let isNew = !this.storage.documents.get(path);
-
-    // The display name is always the file name (derived from the path) — a single source of truth.
-    this.storage.documents.put({
+    let record: ContextRecord = {
       path, name: baseName(path), description: doc.description, contentType, body: doc.body, lastUpdated: new Date(),
-    });
+    };
 
-    let meta = this.getMetadata();
-    if (isNew) meta.documentCount++;
-    meta.lastUpdated = new Date();
-    this.storage.metadata.put(meta);
+    this.storage.transaction(() => {
+      let isNew = !this.storage.documents.get(path);
+      // Use the file name from the path as the display name.
+      this.#putDocument(record);
+
+      let meta = this.getMetadata();
+      if (isNew) meta.documentCount++;
+      meta.lastUpdated = record.lastUpdated;
+      this.storage.metadata.put(meta);
+    });
     await this.#propagate();
   }
 
@@ -277,12 +372,14 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     let existing = this.storage.documents.get(path);
     if (!existing) throw new Error(`Document not found: ${path}`);
 
-    this.storage.documents.delete(path);
+    this.storage.transaction(() => {
+      this.#deleteDocument(path);
 
-    let meta = this.getMetadata();
-    meta.documentCount = Math.max(0, meta.documentCount - 1);
-    meta.lastUpdated = new Date();
-    this.storage.metadata.put(meta);
+      let meta = this.getMetadata();
+      meta.documentCount = Math.max(0, meta.documentCount - 1);
+      meta.lastUpdated = new Date();
+      this.storage.metadata.put(meta);
+    });
     await this.#propagate();
   }
 
@@ -318,20 +415,29 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       }
     }
 
-    for (let m of moves) this.storage.documents.delete(m.record.path);
-    for (let m of moves) {
-      // Name follows the new path. Reclassify content type only when the extension changes.
-      let contentType = extOf(m.record.path) !== extOf(m.newPath)
-        ? contentTypeFromPath(m.newPath)
-        : m.record.contentType;
-      this.storage.documents.put({
-        ...m.record, path: m.newPath, name: baseName(m.newPath), contentType, lastUpdated: new Date(),
-      });
-    }
+    this.storage.transaction(() => {
+      for (let m of moves) {
+        this.#deleteDocument(m.record.path);
+      }
+      for (let m of moves) {
+        // Update the file name and content type for the new path.
+        let contentType = extOf(m.record.path) !== extOf(m.newPath)
+          ? contentTypeFromPath(m.newPath)
+          : m.record.contentType;
+        let record: ContextRecord = {
+          ...m.record,
+          path: m.newPath,
+          name: baseName(m.newPath),
+          contentType,
+          lastUpdated: new Date(),
+        };
+        this.#putDocument(record);
+      }
 
-    let meta = this.getMetadata();
-    meta.lastUpdated = new Date();
-    this.storage.metadata.put(meta);
+      let meta = this.getMetadata();
+      meta.lastUpdated = new Date();
+      this.storage.metadata.put(meta);
+    });
     await this.#propagate();
   }
 
@@ -411,8 +517,9 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       for (let record of this.storage.documents.list()) {
         this.storage.documents.delete(record.path);
       }
+      this.#clearSkillIndex();
       for (let doc of documents) {
-        this.storage.documents.put(doc);
+        this.#putDocument(doc);
       }
 
       let meta = this.getMetadata();
@@ -422,6 +529,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       meta.content.commit = commit;
       meta.content.lastRefreshedAt = new Date();
       this.storage.metadata.put(meta);
+      this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
     });
   }
 
@@ -430,6 +538,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       for (let record of this.storage.documents.list()) {
         this.storage.documents.delete(record.path);
       }
+      this.#clearSkillIndex();
 
       let meta = this.getMetadata();
       meta.documentCount = 0;
@@ -438,6 +547,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       meta.content.commit = commit;
       meta.content.lastRefreshedAt = new Date();
       this.storage.metadata.put(meta);
+      this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
     });
   }
 
