@@ -11,7 +11,7 @@ import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentHooks, AiChatAgentContext, AlwaysAvailableCapsule, CapsuleEntry, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
 import { readAdminConfig } from "./admin-config";
 import { WebFetchEnv } from "./web-fetch";
-import { UserDurableObject, UserAiModelRecord } from "./user";
+import { UserDurableObject, UserAiModelRecord, type UserChatContext } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
@@ -2000,6 +2000,131 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
+  getChatMetaOrThrow(chatId: number): AiChatMetadata {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    return meta;
+  }
+
+  assertChatNotActive(chatId: number): AiChatMetadata {
+    let meta = this.getChatMetaOrThrow(chatId);
+    if (meta.activeAgent) {
+      throw new Error("Agent is running, wait for it to finish.");
+    }
+    return meta;
+  }
+
+  newChat(
+    clientUser: DurableObjectStub<UserDurableObject>,
+    userMeta: UserChatContext,
+    initialMessage: string,
+    capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
+  ): number {
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    if (!initialMessage.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
+      throw new Error("Cannot send an empty chat message.");
+    }
+
+    let chatId!: number;
+    let timestamp = this.getChatTimestamp();
+    this.ctx.storage.transactionSync(() => {
+      chatId = this.nextChatId();
+      let meta: AiChatMetadata = {
+        id: chatId,
+        title: "New Chat",   // filled in later by AI
+        started: timestamp,
+        lastActive: timestamp,
+      };
+      if (userMeta.aiModel) {
+        meta.activeAgent = userMeta.aiModel.profile;
+      }
+      this.storage.chatMeta.put(meta);
+
+      this.commitChatAttachments(chatId, canonicalAttachments);
+      this.storage.chats.put({
+        chatId,
+        sequence: this.nextChatSequence(chatId),  // always 0 but need to initialize
+        timestamp,
+        author: userMeta.profile,
+
+        type: "message",
+        message: initialMessage,
+        capsules,
+        attachments: canonicalAttachments,
+      });
+    });
+
+    if (userMeta.aiModel) {
+      // Fire off the agent (asynchronously).
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
+    }
+
+    // Also fire off a second LLM call to generate a title based on the first message.
+    if (userMeta.quickModel) {
+      let titleMessage = initialMessage.trim() || `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
+      this.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
+    }
+
+    this.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "chat_started",
+    });
+
+    return chatId;
+  }
+
+  sendChatMessage(
+    clientUser: DurableObjectStub<UserDurableObject>,
+    userMeta: UserChatContext,
+    chatId: number,
+    message: string,
+    capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
+  ): void {
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    if (!message.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
+      throw new Error("Cannot send an empty chat message.");
+    }
+
+    let meta = this.assertChatNotActive(chatId);
+    let result = this.materializeChatDraft(chatId, meta);
+    if (result) meta = result.meta;
+    meta.lastActive = this.getChatTimestamp();
+    if (userMeta.aiModel) {
+      meta.activeAgent = userMeta.aiModel.profile;
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.storage.chatMeta.put(meta);
+      this.commitChatAttachments(chatId, canonicalAttachments);
+      this.storage.chats.put({
+        chatId,
+        sequence: this.nextChatSequence(chatId),
+        timestamp: meta.lastActive,
+        author: userMeta.profile,
+
+        type: "message",
+        message,
+        capsules,
+        attachments: canonicalAttachments,
+      });
+    });
+
+    if (userMeta.aiModel) {
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
+    }
+    this.recordGadgetAnalytics({
+      event_name: "gadget_interaction",
+      user_id: clientUser.id.toString(),
+      chat_id: chatId,
+      interaction_type: "chat_message_sent",
+    });
+  }
+
   cancelAgent(chatId: number) {
     let ctx = this.#liveChats.get(chatId);
     if (ctx) {
@@ -3600,6 +3725,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     await this.impl.waitForAllAgentsToComplete();
   }
 
+  #initializeEmptyCodeSnapshot(): void {
+    let ydoc = new Y.Doc();
+    ydoc.getMap<Y.Text>();
+
+    this.impl.storage.code.put({
+      version: 1,
+      timestamp: new Date(),
+      update: Y.encodeStateAsUpdateV2(ydoc),
+    });
+
+    this.impl.storage.codeVersion.put(1);
+  }
+
   // `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
   // by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
   async open(userId: string, profileId: string,
@@ -3631,16 +3769,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
         this.impl.storage.ownerId.put(userId);
 
-        let ydoc = new Y.Doc();
-        ydoc.getMap<Y.Text>();
-
-        this.impl.storage.code.put({
-          version: 1,
-          timestamp: new Date(),
-          update: Y.encodeStateAsUpdateV2(ydoc)
-        });
-
-        this.impl.storage.codeVersion.put(1);
+        this.#initializeEmptyCodeSnapshot();
       });
     }
 
@@ -4205,22 +4334,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return profilePromise;
   }
 
-  #getChatMetaOrThrow(chatId: number): AiChatMetadata {
-    let meta = this.impl.storage.chatMeta.get(chatId);
-    if (!meta) {
-      throw new Error("No such chatId: " + chatId);
-    }
-    return meta;
-  }
-
-  #assertChatNotActive(chatId: number): AiChatMetadata {
-    let meta = this.#getChatMetaOrThrow(chatId);
-    if (meta.activeAgent) {
-      throw new Error("Agent is running, wait for it to finish.");
-    }
-    return meta;
-  }
-
   async getMetadata(): Promise<GadgetMetadata> {
     let result: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
@@ -4387,7 +4500,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let author = await this.#getClientProfile();
-    let meta = this.#getChatMetaOrThrow(chatId);
+    let meta = this.impl.getChatMetaOrThrow(chatId);
 
     // Decide if we want to materialize existing drafts due to changing users. If two users are
     // typing at the same time we just attribute the edits to both of them, but if the previous
@@ -4426,7 +4539,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
     // TODO: Bundle the UI? For now we just return client.js.
     if (chatId !== undefined) {
-      let meta = this.#getChatMetaOrThrow(chatId);
+      let meta = this.impl.getChatMetaOrThrow(chatId);
       if (!meta.activeAgent) {
         this.impl.materializeChatDraft(chatId, meta);
       }
@@ -5180,104 +5293,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
-    let canonicalAttachments = this.impl.canonicalizeChatAttachmentRefs(attachments);
-    if (!initialMessage.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
-      throw new Error("Cannot send an empty chat message.");
-    }
-
-    let chatId!: number;
-    let timestamp = this.impl.getChatTimestamp();
-    this.impl.ctx.storage.transactionSync(() => {
-      chatId = this.impl.nextChatId();
-      let meta: AiChatMetadata = {
-        id: chatId,
-        title: "New Chat",   // filled in later by AI
-        started: timestamp,
-        lastActive: timestamp,
-      };
-      if (userMeta.aiModel) {
-        meta.activeAgent = userMeta.aiModel.profile;
-      }
-      this.impl.storage.chatMeta.put(meta);
-
-      this.impl.commitChatAttachments(chatId, canonicalAttachments);
-      this.impl.storage.chats.put({
-        chatId,
-        sequence: this.impl.nextChatSequence(chatId),  // always 0 but need to initialize
-        timestamp,
-        author: userMeta.profile,
-
-        type: "message",
-        message: initialMessage,
-        capsules,
-        attachments: canonicalAttachments,
-      });
-    });
-
-    if (userMeta.aiModel) {
-      // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                           this.clientUser.id.toString());
-    }
-
-    // Also fire off a second LLM call to generate a title based on the first message.
-    if (userMeta.quickModel) {
-      let titleMessage = initialMessage.trim() || `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
-      this.impl.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
-    }
-
-    this.impl.recordGadgetAnalytics({
-      event_name: "gadget_interaction",
-      user_id: this.clientUser.id.toString(),
-      chat_id: chatId,
-      interaction_type: "chat_started",
-    });
-
-    return chatId;
+    return this.impl.newChat(this.clientUser, userMeta, initialMessage, capsules, attachments);
   }
 
   async sendChatMessage(
       chatId: number, message: string, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
-    let canonicalAttachments = this.impl.canonicalizeChatAttachmentRefs(attachments);
-    if (!message.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
-      throw new Error("Cannot send an empty chat message.");
-    }
-
-    let meta = this.#assertChatNotActive(chatId);
-    let result = this.impl.materializeChatDraft(chatId, meta);
-    if (result) meta = result.meta;
-    meta.lastActive = this.impl.getChatTimestamp();
-    if (userMeta.aiModel) {
-      meta.activeAgent = userMeta.aiModel.profile;
-    }
-    this.impl.ctx.storage.transactionSync(() => {
-      this.impl.storage.chatMeta.put(meta);
-      this.impl.commitChatAttachments(chatId, canonicalAttachments);
-      this.impl.storage.chats.put({
-        chatId,
-        sequence: this.impl.nextChatSequence(chatId),
-        timestamp: meta.lastActive,
-        author: userMeta.profile,
-
-        type: "message",
-        message,
-        capsules,
-        attachments: canonicalAttachments,
-      });
-    });
-
-    if (userMeta.aiModel) {
-      this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                           this.clientUser.id.toString());
-    }
-    this.impl.recordGadgetAnalytics({
-      event_name: "gadget_interaction",
-      user_id: this.clientUser.id.toString(),
-      chat_id: chatId,
-      interaction_type: "chat_message_sent",
-    });
+    this.impl.sendChatMessage(this.clientUser, userMeta, chatId, message, capsules, attachments);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -5294,7 +5317,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
                      options?: { includeDraft?: boolean }): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(null);
 
-    let meta = this.#assertChatNotActive(chatId);
+    let meta = this.impl.assertChatNotActive(chatId);
     if (options?.includeDraft) {
       let result = this.impl.materializeChatDraft(chatId, meta);
       if (result) {
@@ -5360,7 +5383,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async revertChanges(chatId: number, revertFrom: number): Promise<void> {
     let author = await this.#getClientProfile();
 
-    let meta = this.#assertChatNotActive(chatId);
+    let meta = this.impl.assertChatNotActive(chatId);
 
     let unmerged: number[] = [];
     for (let msg of this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})) {
@@ -5444,7 +5467,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async retryAgent(chatId: number, modelId: string): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(modelId);
 
-    let meta = this.#assertChatNotActive(chatId);
+    let meta = this.impl.assertChatNotActive(chatId);
     if (!userMeta.aiModel) {
       throw new Error("No AI model available.");
     }
@@ -5461,12 +5484,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async finalizeChatDraft(chatId: number): Promise<void> {
-    let meta = this.#assertChatNotActive(chatId);
+    let meta = this.impl.assertChatNotActive(chatId);
     this.impl.materializeChatDraft(chatId, meta);
   }
 
   async discardChatDraftChanges(chatId: number): Promise<void> {
-    let meta = this.#assertChatNotActive(chatId);
+    let meta = this.impl.assertChatNotActive(chatId);
     let updates = this.impl.listChatDraftUpdates(chatId);
     if (updates.length === 0) {
       return;

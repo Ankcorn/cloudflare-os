@@ -60,7 +60,7 @@ export type UserAiModelRecord = {
   config: AiModelConfig;
 }
 
-type UserChatContext = {
+export type UserChatContext = {
   profile: AiChatAuthorInfo;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
