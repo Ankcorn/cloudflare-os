@@ -64,10 +64,13 @@ import {
   CapsuleSpecifier,
   AiChatStreamEvent,
   AiToolCall,
+  SlashCommandChoice,
+  SlashCommandRequest,
   ChatAttachmentHandle,
   ChatAttachmentRef,
 } from "@gadgets/workshop-shared/api";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { parseSlashCommandInput } from "./components/chat/slash-command-input";
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
@@ -84,6 +87,7 @@ import { useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useAuthenticatedApi } from "./AuthContext";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
+import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
 import { copyToClipboard } from "./clipboard";
 
@@ -1432,7 +1436,7 @@ export const ChatInput = ({
   // to support lazy provisional-gadget creation on the Home page.
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
   onSend: (
-    message: string,
+    message: string | SlashCommandRequest,
     modelId: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
@@ -1477,6 +1481,8 @@ export const ChatInput = ({
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [isAttachmentDragActive, setIsAttachmentDragActive] = useState(false);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<SlashCommandChoice | null>(null);
+  const sendInFlightRef = useRef(false);
   const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
   pendingAttachmentsRef.current = pendingAttachments;
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -1498,6 +1504,7 @@ export const ChatInput = ({
 
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const promptCardRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -1510,6 +1517,7 @@ export const ChatInput = ({
   useEffect(() => {
     if (seedNonce === undefined) return;
     const text = seedText ?? "";
+    setSelectedSlashCommand(null);
     setInputValue(text);
     requestAnimationFrame(() => {
       const ta = composerTextareaRef.current;
@@ -1721,8 +1729,24 @@ export const ChatInput = ({
     void addFiles(event.dataTransfer.files);
   };
 
+  const applySlashCommandSelection = useCallback((choice: SlashCommandChoice, tailStart: number) => {
+    setSelectedSlashCommand(choice);
+    setInputValue(inputValue.slice(tailStart));
+    setCapsules(previous => previous.flatMap(capsule =>
+      capsule.start >= tailStart ? [{...capsule, start: capsule.start - tailStart}] : []));
+  }, [inputValue]);
+
+  const slashCommandPicker = useSlashCommandPicker({
+    inputValue,
+    selectedCommand: selectedSlashCommand,
+    disabled: isBlocked,
+    anchorRef: promptCardRef,
+    getOverseer,
+    onSelect: applySlashCommandSelection,
+  });
+
   const handleSend = async () => {
-    if (isSending || isBlocked) return;
+    if (sendInFlightRef.current || isSending || isBlocked) return;
     const attachmentsSnapshot = pendingAttachments;
     const readyAttachments = attachmentsSnapshot
       .filter((attachment) => attachment.uploadState === "ready" && attachment.ref)
@@ -1730,7 +1754,7 @@ export const ChatInput = ({
     const hasUploadingAttachment = attachmentsSnapshot.some((attachment) => attachment.uploadState === "uploading");
     const hasFailedAttachment = attachmentsSnapshot.some((attachment) => attachment.uploadState === "error");
 
-    if (!inputValue.trim() && readyAttachments.length === 0) return;
+    if (!inputValue.trim() && !selectedSlashCommand && readyAttachments.length === 0) return;
     if (hasUploadingAttachment) {
       toasts.add({ title: "Please wait for attachment uploads to finish", variant: "error" });
       return;
@@ -1740,45 +1764,107 @@ export const ChatInput = ({
       return;
     }
 
-    let message = inputValue.trim();
-    let specifiers: CapsuleSpecifier[] | undefined;
-    if (capsules.length > 0) {
-      // Build processed message: replace each capsule title with [i] placeholder.
-      const sortedCapsules = [...capsules].toSorted((a, b) => a.start - b.start);
-      let processedMsg = inputValue;
-      let cumulativeShift = 0;
-      specifiers = [];
-
-      for (let i = 0; i < sortedCapsules.length; i++) {
-        const c = sortedCapsules[i];
-        const placeholder = `[${i}]`;
-        const adjustedStart = c.start + cumulativeShift;
-        processedMsg =
-          processedMsg.slice(0, adjustedStart) +
-          placeholder +
-          processedMsg.slice(adjustedStart + c.length);
-        specifiers.push({
-          position: adjustedStart,
-          length: placeholder.length,
-          gatekeeperId: c.gatekeeperId,
-          description: c.description,
-        });
-        cumulativeShift += placeholder.length - c.length;
-      }
-      message = processedMsg.trim();
-    }
-
+    sendInFlightRef.current = true;
     setIsSending(true);
     try {
-      await onSend(message, selectedModel, specifiers, readyAttachments.length ? readyAttachments : undefined);
+      let messageInput = inputValue;
+      let inputCapsules = capsules;
+      let slashCommand = selectedSlashCommand;
+      if (!slashCommand && inputValue.startsWith("/") && !inputValue.startsWith("//")) {
+        let parsed = parseSlashCommandInput(inputValue);
+        if (!parsed) {
+          toasts.add({ title: "Slash command is invalid", variant: "error" });
+          return;
+        }
+        let match: SlashCommandChoice | null;
+        try {
+          match = await slashCommandPicker.resolveExact(parsed);
+        } catch (error) {
+          console.error("Failed to resolve slash command:", error);
+          toasts.add({ title: "Couldn't load slash commands", variant: "error" });
+          return;
+        }
+        if (!match) {
+          toasts.add({ title: "Choose a slash command", variant: "error" });
+          return;
+        }
+        slashCommand = match;
+        messageInput = parsed.tail;
+        inputCapsules = capsules.flatMap(capsule =>
+          capsule.start >= parsed.tailStart
+            ? [{...capsule, start: capsule.start - parsed.tailStart}]
+            : []);
+      } else if (!slashCommand && inputValue.startsWith("//")) {
+        messageInput = inputValue.slice(1);
+        inputCapsules = capsules.map(capsule => ({
+          ...capsule,
+          start: Math.max(0, capsule.start - 1),
+        }));
+      }
+
+      if (slashCommand && (inputCapsules.length > 0 || readyAttachments.length > 0)) {
+        toasts.add({ title: "Slash commands cannot include resources or attachments", variant: "error" });
+        return;
+      }
+
+      let message: string | SlashCommandRequest = messageInput;
+      if (slashCommand) {
+        message = {
+          id: slashCommand.selection,
+          args: messageInput.trim(),
+        };
+      }
+      let capsuleSpecifiers: CapsuleSpecifier[] | undefined;
+      if (typeof message === "string" && inputCapsules.length > 0) {
+        // Build processed message: replace each capsule title with [i] placeholder.
+        const sortedCapsules = [...inputCapsules].toSorted((a, b) => a.start - b.start);
+        let processedMsg = messageInput;
+        let cumulativeShift = 0;
+        capsuleSpecifiers = [];
+
+        for (let i = 0; i < sortedCapsules.length; i++) {
+          const c = sortedCapsules[i];
+          const placeholder = `[${i}]`;
+          const adjustedStart = c.start + cumulativeShift;
+          processedMsg =
+            processedMsg.slice(0, adjustedStart) +
+            placeholder +
+            processedMsg.slice(adjustedStart + c.length);
+          capsuleSpecifiers.push({
+            position: adjustedStart,
+            length: placeholder.length,
+            gatekeeperId: c.gatekeeperId,
+            description: c.description,
+          });
+          cumulativeShift += placeholder.length - c.length;
+        }
+        message = processedMsg;
+      }
+
+      if (typeof message === "string") {
+        let leadingWhitespace = message.length - message.trimStart().length;
+        if (leadingWhitespace > 0) {
+          capsuleSpecifiers = capsuleSpecifiers?.map(specifier => ({
+            ...specifier,
+            position: Math.max(0, specifier.position - leadingWhitespace),
+          }));
+        }
+        message = message.trim();
+      }
+
+      await onSend(message, selectedModel,
+          capsuleSpecifiers?.length ? capsuleSpecifiers : undefined,
+          readyAttachments.length ? readyAttachments : undefined);
       for (const attachment of attachmentsSnapshot) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
       }
       setInputValue("");
       setCapsules([]);
+      setSelectedSlashCommand(null);
       pendingAttachmentsRef.current = [];
       setPendingAttachments([]);
     } finally {
+      sendInFlightRef.current = false;
       if (mountedRef.current) setIsSending(false);
     }
   };
@@ -2259,7 +2345,7 @@ export const ChatInput = ({
     (attachment) => attachment.uploadState !== "ready",
   );
   const canSend = !isSending && !isAgentActive && !isBlocked &&
-    (inputValue.trim().length > 0 || hasReadyAttachment) &&
+    (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
     !hasUnreadyAttachment;
   const canAttachMore = pendingAttachments.length < MAX_PENDING_ATTACHMENTS;
 
@@ -2324,6 +2410,7 @@ export const ChatInput = ({
           with a soft neutral shadow so the composer reads as a distinct surface instead of blending
           into the canvas; the lift intensifies a touch on focus. */}
       <div
+        ref={promptCardRef}
         className="themed-prompt-card-shadow relative overflow-visible rounded-2xl border border-kumo-line bg-kumo-control transition-shadow duration-150 ease-out"
         onDragEnter={handleAttachmentDragEnter}
         onDragOver={handleAttachmentDragOver}
@@ -2343,6 +2430,46 @@ export const ChatInput = ({
         {draftUpdateBanner}
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
+          {selectedSlashCommand && (
+            <div className="mb-2 flex items-center gap-2">
+              <Tooltip
+                content={
+                  <span className="block max-w-sm space-y-1">
+                    <span className="block font-mono">/{selectedSlashCommand.name}</span>
+                    <span className="block">{selectedSlashCommand.description}</span>
+                    <span className="block text-kumo-subtle">
+                      {selectedSlashCommand.providerLabel}
+                      {selectedSlashCommand.resourceLabel
+                        ? ` · ${selectedSlashCommand.resourceLabel}`
+                        : ""}
+                    </span>
+                  </span>
+                }
+                asChild
+              >
+                <span
+                  tabIndex={0}
+                  className="cursor-pointer rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand transition-colors hover:bg-kumo-brand/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-brand/40"
+                >
+                  Skill: {selectedSlashCommand.name}
+                </span>
+              </Tooltip>
+              <button
+                type="button"
+                className="cursor-pointer text-xs text-kumo-subtle hover:text-kumo-default"
+                onClick={() => {
+                  setSelectedSlashCommand(null);
+                }}
+                aria-label={`Remove selected command /${selectedSlashCommand.name}`}
+              >
+                Remove
+              </button>
+            </div>
+          )}
+          {slashCommandPicker.popup}
+          <div className="sr-only" aria-live="polite">
+            {slashCommandPicker.status}
+          </div>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
             {activeUrl && (
               <CapsuleOverlay
@@ -2369,6 +2496,11 @@ export const ChatInput = ({
             </div>
             <textarea
               value={inputValue}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={slashCommandPicker.open}
+              aria-controls={slashCommandPicker.open ? slashCommandPicker.listboxId : undefined}
+              aria-activedescendant={slashCommandPicker.activeDescendant}
               onChange={(e) => {
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
                 requestAnimationFrame(handleCursorChange);
@@ -2405,6 +2537,32 @@ export const ChatInput = ({
                 }
               }}
               onKeyDown={(e) => {
+                if (slashCommandPicker.open && e.key === "Escape") {
+                  e.preventDefault();
+                  slashCommandPicker.dismiss();
+                  return;
+                }
+                if (slashCommandPicker.open && e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (slashCommandPicker.selectable && slashCommandPicker.activeChoice) {
+                    slashCommandPicker.select(slashCommandPicker.activeChoice);
+                  }
+                  return;
+                }
+                if (slashCommandPicker.open && e.key === "Tab" &&
+                    slashCommandPicker.selectable && slashCommandPicker.activeChoice) {
+                  e.preventDefault();
+                  slashCommandPicker.select(slashCommandPicker.activeChoice);
+                  return;
+                }
+                if (slashCommandPicker.open && slashCommandPicker.selectable && slashCommandPicker.choices.length > 0 &&
+                    (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                  e.preventDefault();
+                  const direction = e.key === "ArrowDown" ? 1 : -1;
+                  slashCommandPicker.setIndex((current) =>
+                    (current + direction + slashCommandPicker.choices.length) % slashCommandPicker.choices.length);
+                  return;
+                }
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -2648,6 +2806,7 @@ type ChatDisplayEntry =
       type: "message";
       key: string;
       message: AiChatMessage;
+      slashCommand?: Extract<AiChatMessage, {type: "slashCommand"}>;
       toolCalls?: AiToolCall[];
       toolCallGroups?: ToolCallGroup[];
       lastMessageSequence?: number;
@@ -2779,6 +2938,28 @@ function buildChatDisplayEntries(
     const msg = messages[i];
     maybePushModelChange(msg);
 
+    if (msg.type === "slashCommand") {
+      let next = messages[i + 1];
+      if (next?.type === "message" && next.generatedBySlashCommandSequence === msg.sequence) {
+        result.push({
+          type: "message",
+          key: `slash-${msg.chatId}-${msg.sequence}`,
+          message: next,
+          slashCommand: msg,
+        });
+        i += 2;
+      } else {
+        result.push({
+          type: "message",
+          key: `slash-${msg.chatId}-${msg.sequence}`,
+          message: msg,
+          slashCommand: msg,
+        });
+        i++;
+      }
+      continue;
+    }
+
     if (msg.type === "changes") {
       if (isVisibleSavedChangesMessage(msg)) {
         result.push({
@@ -2885,8 +3066,8 @@ function buildChatDisplayEntries(
 function isUserMessageEntry(entry: ChatDisplayEntry): boolean {
   return (
     entry.type === "message" &&
-    entry.message.type === "message" &&
-    entry.message.author.type === "user"
+    (entry.message.type === "slashCommand" ||
+      (entry.message.type === "message" && entry.message.author.type === "user"))
   );
 }
 
@@ -3219,6 +3400,7 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
+  const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -4182,12 +4364,12 @@ function ChatInterface({
 
   // Handle sending a message (always called from ChatInput with explicit messageText)
   const handleSend = async (
-    messageText?: string,
+    messageText?: string | SlashCommandRequest,
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
   ) => {
-    const message = messageText?.trim() ?? "";
+    const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
 
     // Use provided modelId or fall back to selectedModel
@@ -4196,7 +4378,8 @@ function ChatInterface({
     try {
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
-        const newChatId = await overseer.newChat(message, model, capsules, attachments);
+        const newChatId = await overseer.newChat(
+            message, model, capsules, attachments);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -4217,16 +4400,17 @@ function ChatInterface({
 
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)
   const handleNewChatSend = async (
-    messageText?: string,
+    messageText?: string | SlashCommandRequest,
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
   ) => {
-    const message = messageText?.trim() ?? "";
+    const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
-      const newChatId = await overseer.newChat(message, model, capsules, attachments);
+      const newChatId = await overseer.newChat(
+          message, model, capsules, attachments);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       console.error("Failed to create new chat:", err);
@@ -5397,7 +5581,7 @@ function ChatInterface({
             createCapsuleGatekeeper={(accountId, url) =>
               overseer.newGatekeeper(accountId, url)
             }
-            getOverseer={() => overseer}
+            getOverseer={getOverseer}
             onSend={handleNewChatSend}
             isAgentActive={false}
             models={availableModels}
@@ -5671,17 +5855,68 @@ function ChatInterface({
                       return (
                         <div key={entry.key} className={entryTopClass}>
                         {/* ── user / AI text message ── */}
+                        {msg.type === "slashCommand" && (
+                          <div className="group/message relative flex flex-col items-end">
+                            <div className="themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default">
+                              {msg.skillName && (
+                                <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+                                  <span className="rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand">
+                                    Skill: {msg.skillName}
+                                  </span>
+                                </div>
+                              )}
+                              {msg.request.args}
+                            </div>
+                            <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
+                              {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
+                                <span className="font-medium">{msg.author.name}</span>
+                              )}
+                              <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                                <span className="font-mono">
+                                  {msg.timestamp.toLocaleTimeString([], {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })}
+                                </span>
+                              </Tooltip>
+                            </div>
+                          </div>
+                        )}
                         {msg.type === "message" && (
                           msg.author.type === "user" ? (
                             <div className="group/message relative flex flex-col items-end">
                               <div className={`themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
+                                {entry.slashCommand?.skillName && (
+                                  <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+                                    <span className="rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand">
+                                      Skill: {entry.slashCommand.skillName}
+                                    </span>
+                                  </div>
+                                )}
                                 {msg.attachments && msg.attachments.length > 0 && (
                                   <ChatAttachmentGrid
                                     attachments={msg.attachments}
                                     onDownload={(attachment) => { void downloadChatAttachment(msg.chatId, attachment); }}
                                   />
                                 )}
-                                {msg.message.trim() && (
+                                {entry.slashCommand ? (
+                                  <>
+                                    {entry.slashCommand.request.args && (
+                                      <div>{entry.slashCommand.request.args}</div>
+                                    )}
+                                    {msg.message && (
+                                      <details className="mt-2 text-left text-xs text-kumo-subtle">
+                                        <summary className="cursor-pointer select-none">Generated by slash command</summary>
+                                        <div className={`mt-2 text-[14px] leading-[22px] text-kumo-default ${styles.markdownContent}`}>
+                                          <MarkdownMessage
+                                            message={msg.message}
+                                            capsules={msg.capsules}
+                                          />
+                                        </div>
+                                      </details>
+                                    )}
+                                  </>
+                                ) : msg.message.trim() && (
                                   <MarkdownMessage
                                     message={msg.message}
                                     capsules={msg.capsules}
@@ -6159,7 +6394,7 @@ function ChatInterface({
                     createCapsuleGatekeeper={(accountId, url) =>
                       overseer.newGatekeeper(accountId, url)
                     }
-                    getOverseer={() => overseer}
+                    getOverseer={getOverseer}
                     onSend={handleSend}
                     isAgentActive={isAgentActive}
                     models={availableModels}
@@ -6277,7 +6512,7 @@ function ChatInterface({
       <GatekeeperModal
         open={connectionAccept !== null}
         onClose={() => setConnectionAccept(null)}
-        getOverseer={() => overseer}
+        getOverseer={getOverseer}
         onCreated={handleConnectionCreated}
         initialVendorId={connectionAccept?.vendorId}
         initialResourceUrl={connectionAccept?.resourceUrl}

@@ -1091,19 +1091,30 @@ export interface Overseer extends RpcTarget {
   // other read calls.)
   subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
 
-  // Starts a new chat with the given initial message.
+  // Lists slash commands available from Gatekeepers currently attached to this Gadget, including
+  // ambient ones.
+  listSlashCommands(): Promise<SlashCommandChoice[]>;
+
+  // Starts a new chat with the given initial message or slash-command request. A slash command
+  // always creates a visible chat event, even when it does not produce a message for the agent.
+  // Slash-command requests cannot include capsules or attachments.
   //
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
-  newChat(initialMessage: string, modelId: string | null,
+  //
+  newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number>;
 
   // Send a message to the chat from this client. Sending a message causes the LLM to start
   // running if it isn't already.
+  // If a slash command produces no message, only its visible invocation event is committed and the
+  // agent does not run.
+  // Slash-command requests cannot include capsules or attachments.
   //
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
-  sendChatMessage(chatId: number, message: string, modelId: string | null,
+  //
+  sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void>;
 
   // Upload an attachment for use in a future chat message. This way by the time the user wants to
@@ -1340,6 +1351,18 @@ export type AiChatMessageBody = {
 
   // Attachments that were sent with this message. Actual bytes stored separately.
   attachments?: ChatAttachmentRef[];
+
+  // Sequence of the visible slash-command event that generated this agent-visible message.
+  // Clients use this to group the two records for display.
+  generatedBySlashCommandSequence?: number;
+} | {
+  // A slash command exactly as requested by the client. This record is retained for display but is
+  // not included in model context and does not itself trigger an agent turn.
+  type: "slashCommand";
+  request: SlashCommandRequest;
+
+  // Provider-supplied skill name for the display badge. Commands without one show no badge.
+  skillName?: string;
 } | {
   // Represents changes made to the code by an agent tool call or by a collaborating user as part
   // of a chat. These changes are provisional until they are accepted.
@@ -1610,6 +1633,41 @@ export type CapsuleSpecifier = {
   // insertion. We store this in the chat message to avoid the need to start up the gatekeeper
   // to ask for it again every time the message is displayed.
   description: ResourceDescription;
+};
+
+// Identifies a specific slash command: the attached Gatekeeper plus that provider's opaque
+// command ID.
+export type SlashCommandId = {
+  gatekeeperId: number;
+  commandId: string;
+};
+
+// A slash command invocation parsed by the client.
+export type SlashCommandRequest = {
+  id: SlashCommandId;
+
+  // Unparsed natural-language arguments following the command. The provider may consume or
+  // transform these into an agent-visible message.
+  args: string;
+};
+
+// One slash command as shown in the Workshop picker.
+export type SlashCommandChoice = {
+  // Selection to pass back when invoking this command.
+  selection: SlashCommandId;
+
+  // Name shown after `/`.
+  name: string;
+
+  // Short description shown in the picker.
+  description: string;
+
+  // Title of the Gatekeeper that offered this command.
+  providerLabel: string;
+
+  // Optional resource label used when multiple commands share a name.
+  resourceLabel?: string;
+
 };
 
 // One provisional streaming event emitted while an agent step is still in progress.

@@ -938,6 +938,7 @@ export default function GadgetEditor() {
             <div className="flex-1 min-h-0 relative">
               <div className={layoutModeReady ? 'h-full' : 'h-full invisible'}>
                 <ChatInterface
+                  key={id}
                   overseer={overseer.stub}
                   selectedChatId={effectiveSelectedChatId}
                   onNavigateToChat={navigateToChat}
