@@ -1,8 +1,11 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, GatekeeperMetadata, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
-import { DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub, restore } from "cloudflare:workers";
+import {
+  DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
+  RpcTarget as NativeRpcTarget, restore,
+} from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
@@ -20,6 +23,7 @@ import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-cat
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
+import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
@@ -106,6 +110,12 @@ type LiveChatContext = {
   }>;
 };
 
+type PreparedChatMessage = {
+  slashCommand?: SlashCommandRequest;
+  message?: string;
+  skillName?: string;
+};
+
 // A agent callback that arrived while the agent was running, queued for delivery once the
 // agent finishes.
 type QueuedAgentCallback = {
@@ -139,6 +149,7 @@ type GatekeeperRecord = {
   bindingName?: string,
   resourceTitle?: string,   // denormalized to avoid gatekeeper query
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
+  hasSlashCommands?: true;  // denormalized from ResourceDescription
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
 
@@ -638,6 +649,8 @@ class OverseerImpl implements AgentHooks {
 
   #autoApprovalDrainer: AutoApprovalDrainer;
 
+  #preparingChatMessages = new Map<number, Promise<void>>();
+
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
   #runningAgents = new Set<number>();
@@ -867,7 +880,6 @@ class OverseerImpl implements AgentHooks {
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
-
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
         (record, resolvedBy, autoApproved) =>
@@ -1438,6 +1450,38 @@ class OverseerImpl implements AgentHooks {
     return this.#autoApprovalDrainer.drain(gatekeeperId);
   }
 
+  // Blocks other messages and agent turns for this chat until the returned object is disposed.
+  reserveChatMessagePreparation(chatId: number): Disposable {
+    if (this.#preparingChatMessages.has(chatId)) {
+      throw new Error("A chat message is already being prepared for this chat.");
+    }
+    let resolve!: () => void;
+    let done = new Promise<void>(resolver => {
+      resolve = resolver;
+    });
+    this.#preparingChatMessages.set(chatId, done);
+    return {
+      [Symbol.dispose]: () => {
+        if (this.#preparingChatMessages.get(chatId) !== done) return;
+        this.#preparingChatMessages.delete(chatId);
+        resolve();
+        let meta = this.storage.chatMeta.get(chatId);
+        let liveChat = this.#liveChats.get(chatId);
+        if (liveChat?.pendingAgentCallbacks.length && !meta?.activeAgent) {
+          this.#startAgentForCallbacks(meta, liveChat);
+        }
+      },
+    };
+  }
+
+  isPreparingChatMessage(chatId: number): boolean {
+    return this.#preparingChatMessages.has(chatId);
+  }
+
+  waitForChatMessagePreparation(chatId: number): Promise<void> | undefined {
+    return this.#preparingChatMessages.get(chatId);
+  }
+
   async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec)
       : Promise<GatekeeperClient<any>> {
     let id = this.storage.nextGatekeeperId.get();
@@ -1449,15 +1493,19 @@ class OverseerImpl implements AgentHooks {
     };
     this.storage.gatekeepers.put(gatekeeperRecord);
 
-    let facet = this.getGatekeeperFacet(id!);
-    let description = await facet.describe();
+    let facet = this.getGatekeeperFacet(id);
+    try {
+      let description = await facet.describe();
+      gatekeeperRecord.resourceTitle = description.title;
+      gatekeeperRecord.resourceUrl = description.url;
+      gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
+      this.storage.gatekeepers.put(gatekeeperRecord);
+    } catch (error) {
+      this.removeGatekeeper(id);
+      throw error;
+    }
 
-    gatekeeperRecord.resourceTitle = description.title;
-    gatekeeperRecord.resourceUrl = description.url;
-
-    this.storage.gatekeepers.put(gatekeeperRecord);
-
-    return new GatekeeperClientImpl<any>(this, id!, facet);
+    return new GatekeeperClientImpl<any>(this, id, facet);
   }
 
   removeGatekeeper(id: number) {
@@ -2008,25 +2056,99 @@ class OverseerImpl implements AgentHooks {
     return meta;
   }
 
-  assertChatNotActive(chatId: number): AiChatMetadata {
+  assertChatNotActive(chatId: number, allowMessagePreparation = false): AiChatMetadata {
     let meta = this.getChatMetaOrThrow(chatId);
-    if (meta.activeAgent) {
+    if (meta.activeAgent || !allowMessagePreparation && this.isPreparingChatMessage(chatId)) {
       throw new Error("Agent is running, wait for it to finish.");
     }
     return meta;
   }
 
-  newChat(
-    clientUser: DurableObjectStub<UserDurableObject>,
-    userMeta: UserChatContext,
-    initialMessage: string,
-    capsules?: CapsuleSpecifier[],
-    attachments?: ChatAttachmentHandle[],
-  ): number {
-    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
-    if (!initialMessage.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
+  // Invoke slash-command requests before committing their visible event and optional generated
+  // message. A result without a message suppresses only the generated message, not the invocation.
+  async #prepareChatMessage(
+      message: string | SlashCommandRequest,
+      hasAttachments: boolean): Promise<PreparedChatMessage> {
+    if (typeof message !== "string") {
+      let record = this.storage.gatekeepers.get(message.id.gatekeeperId);
+      if (!record?.hasSlashCommands) throw new Error("Slash command provider is not available.");
+      using authorizer = new NativeRpcStub<ObservationAuthorizer>(
+          new SlashCommandAuthorizerImpl(this, message.id.gatekeeperId, {from: "user"}));
+      let result = await invokeSlashCommand(
+          this.getGatekeeperFacet(message.id.gatekeeperId), message, authorizer);
+      if (result.message === undefined) {
+        return {slashCommand: message, skillName: result.skillName};
+      }
+      if (!result.message.trim() && !hasAttachments) {
+        throw new Error("Slash command returned an empty message.");
+      }
+      return {slashCommand: message, message: result.message, skillName: result.skillName};
+    }
+    if (!message.trim() && !hasAttachments) {
       throw new Error("Cannot send an empty chat message.");
     }
+    return {message};
+  }
+
+  #commitPreparedChatMessage(
+      chatId: number, timestamp: Date, author: AiChatAuthorInfo,
+      prepared: PreparedChatMessage, capsules: CapsuleSpecifier[] | undefined,
+      attachments: ChatAttachmentRef[] | undefined) {
+    if (prepared.slashCommand) {
+      let slashCommandSequence = this.nextChatSequence(chatId);
+      this.storage.chats.put({
+        chatId,
+        sequence: slashCommandSequence,
+        timestamp,
+        author,
+        type: "slashCommand",
+        request: prepared.slashCommand,
+        ...(prepared.skillName ? {skillName: prepared.skillName} : {}),
+      });
+      if (prepared.message === undefined) return;
+      this.commitChatAttachments(chatId, attachments);
+      this.storage.chats.put({
+        chatId,
+        sequence: this.nextChatSequence(chatId),
+        timestamp,
+        author,
+        type: "message",
+        message: prepared.message,
+        generatedBySlashCommandSequence: slashCommandSequence,
+        capsules,
+        attachments,
+      });
+      return;
+    }
+
+    if (prepared.message === undefined) return;
+
+    this.commitChatAttachments(chatId, attachments);
+    this.storage.chats.put({
+      chatId,
+      sequence: this.nextChatSequence(chatId),
+      timestamp,
+      author,
+      type: "message",
+      message: prepared.message,
+      capsules,
+      attachments,
+    });
+  }
+
+  async newChat(
+    clientUser: DurableObjectStub<UserDurableObject>,
+    userMeta: UserChatContext,
+    initialMessage: string | SlashCommandRequest,
+    capsules?: CapsuleSpecifier[],
+    attachments?: ChatAttachmentHandle[],
+  ): Promise<number> {
+    if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
+      throw new Error("Slash commands cannot include resources or attachments.");
+    }
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    let prepared = await this.#prepareChatMessage(
+        initialMessage, (canonicalAttachments?.length ?? 0) > 0);
 
     let chatId!: number;
     let timestamp = this.getChatTimestamp();
@@ -2038,33 +2160,25 @@ class OverseerImpl implements AgentHooks {
         started: timestamp,
         lastActive: timestamp,
       };
-      if (userMeta.aiModel) {
+      if (prepared.message !== undefined && userMeta.aiModel) {
         meta.activeAgent = userMeta.aiModel.profile;
       }
       this.storage.chatMeta.put(meta);
 
-      this.commitChatAttachments(chatId, canonicalAttachments);
-      this.storage.chats.put({
-        chatId,
-        sequence: this.nextChatSequence(chatId),  // always 0 but need to initialize
-        timestamp,
-        author: userMeta.profile,
-
-        type: "message",
-        message: initialMessage,
-        capsules,
-        attachments: canonicalAttachments,
-      });
+      this.#commitPreparedChatMessage(
+          chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments);
     });
 
-    if (userMeta.aiModel) {
+    if (prepared.message !== undefined && userMeta.aiModel) {
       // Fire off the agent (asynchronously).
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
     }
 
     // Also fire off a second LLM call to generate a title based on the first message.
     if (userMeta.quickModel) {
-      let titleMessage = initialMessage.trim() || `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
+      let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
+        prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
+        `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
       this.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
     }
 
@@ -2078,43 +2192,37 @@ class OverseerImpl implements AgentHooks {
     return chatId;
   }
 
-  sendChatMessage(
+  async sendChatMessage(
     clientUser: DurableObjectStub<UserDurableObject>,
     userMeta: UserChatContext,
     chatId: number,
-    message: string,
+    message: string | SlashCommandRequest,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
-  ): void {
-    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
-    if (!message.trim() && (!canonicalAttachments || canonicalAttachments.length === 0)) {
-      throw new Error("Cannot send an empty chat message.");
+  ): Promise<void> {
+    if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
+      throw new Error("Slash commands cannot include resources or attachments.");
     }
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    this.assertChatNotActive(chatId);
+    using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
+    let prepared = await this.#prepareChatMessage(
+        message, (canonicalAttachments?.length ?? 0) > 0);
 
-    let meta = this.assertChatNotActive(chatId);
+    let meta = this.assertChatNotActive(chatId, true);
     let result = this.materializeChatDraft(chatId, meta);
     if (result) meta = result.meta;
     meta.lastActive = this.getChatTimestamp();
-    if (userMeta.aiModel) {
+    if (prepared.message !== undefined && userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
     this.ctx.storage.transactionSync(() => {
       this.storage.chatMeta.put(meta);
-      this.commitChatAttachments(chatId, canonicalAttachments);
-      this.storage.chats.put({
-        chatId,
-        sequence: this.nextChatSequence(chatId),
-        timestamp: meta.lastActive,
-        author: userMeta.profile,
-
-        type: "message",
-        message,
-        capsules,
-        attachments: canonicalAttachments,
-      });
+      this.#commitPreparedChatMessage(
+          chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments);
     });
 
-    if (userMeta.aiModel) {
+    if (prepared.message !== undefined && userMeta.aiModel) {
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
     }
     this.recordGadgetAnalytics({
@@ -2461,7 +2569,7 @@ class OverseerImpl implements AgentHooks {
     //
     // If the agent is running, we can't just add messages now since it'll confuse the agent, but
     // once the agent finishes it will see the pending callbacks and start another turn.
-    if (!meta.activeAgent) {
+    if (!meta.activeAgent && !this.isPreparingChatMessage(chatId)) {
       this.#startAgentForCallbacks(meta, liveChat);
     }
 
@@ -2489,13 +2597,22 @@ class OverseerImpl implements AgentHooks {
       // Oh well.
       let user = this.users.get(this.users.idFromString(callbacks[0].initiatorUserId));
 
-      // TODO: Race condition: A new chat message could arrive during this await, starting an agent
-      //   and confusing things.
       let userMeta = await user.getChatContext(callbacks[0].initiatorModelId);
 
       if (!userMeta.aiModel) {
         throw new Error("No AI model configured for agent callback processing.");
       }
+
+      // getChatContext() waits on the user's Durable Object. A user message may start an agent while
+      // that call is pending, so wait for message preparation to finish and then re-read chat state.
+      let preparation = this.waitForChatMessagePreparation(chatId);
+      while (preparation) {
+        await preparation;
+        preparation = this.waitForChatMessagePreparation(chatId);
+      }
+      meta = this.storage.chatMeta.get(chatId);
+      if (!meta) throw new Error("Chat thread was deleted before callback was handled.");
+      if (meta.activeAgent) return;
 
       let author: AiChatAuthorInfo = {
         type: "gadget",
@@ -2725,6 +2842,17 @@ class OverseerImpl implements AgentHooks {
       title: liveById.get(gatekeeperId)?.resourceTitle ?? "(unavailable)",
       catalog: catalogs.get(gatekeeperId) ?? null,
     }));
+  }
+
+  async listSlashCommands(): Promise<SlashCommandChoice[]> {
+    let sources = [...this.storage.gatekeepers.list()]
+      .filter(record => record.hasSlashCommands)
+      .map(record => ({
+        gatekeeperId: record.id,
+        providerLabel: record.resourceTitle || record.bindingName || `Gatekeeper ${record.id}`,
+        gatekeeper: this.getGatekeeperFacet(record.id),
+      }));
+    return collectSlashCommands(sources);
   }
 
   // =======================================================================================
@@ -3859,7 +3987,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     return new OverseerClientInterface(
-        this.impl, owner, clientUser, profileId, isOwner, notifyClosed.dup());
+        this.impl, owner, clientUser, profileId, isOwner, notifyClosed.dup(), ensureCapsules);
   }
 
   // Initialize this gadget from a blueprint's code snapshot. Called by
@@ -4303,7 +4431,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               private clientUser: DurableObjectStub<UserDurableObject>,
               private clientProfileId: string,
               private isOwner: boolean,
-              private notifyClosed: NativeRpcStub<() => void>) {
+              private notifyClosed: NativeRpcStub<() => void>,
+              // Ambient capsule reconciliation started during open(); listSlashCommands() waits for
+              // this so ambient providers are attached when possible.
+               private slashCommandsReady: Promise<void>) {
     super();
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
@@ -4963,6 +5094,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
   // connection, or all awaited actions approved). Denials intentionally don't call this.
   async #resumeSuspendedAgent(chatId: number): Promise<void> {
+    await this.impl.waitForChatMessagePreparation(chatId);
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) return;  // Chat deleted.
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
@@ -4979,6 +5111,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let userMeta = await this.clientUser.getChatContext(modelId);
     if (!userMeta.aiModel) return;  // No model resolved; nothing to resume.
+
+    let preparation = this.impl.waitForChatMessagePreparation(chatId);
+    if (preparation) {
+      await preparation;
+      return this.#resumeSuspendedAgent(chatId);
+    }
 
     // Re-read after the await: another concurrent accept may have started the agent in the
     // meantime. Avoid starting a second agent loop for the same chat.
@@ -5089,6 +5227,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
     return this.clientUser.listModels();
+  }
+
+  async listSlashCommands(): Promise<SlashCommandChoice[]> {
+    await this.slashCommandsReady;
+    return this.impl.listSlashCommands();
   }
 
   async uploadChatAttachment(attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> {
@@ -5290,17 +5433,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
   }
 
-  async newChat(initialMessage: string, chosenModelId: string | null,
+  async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
     return this.impl.newChat(this.clientUser, userMeta, initialMessage, capsules, attachments);
   }
 
   async sendChatMessage(
-      chatId: number, message: string, chosenModelId: string | null,
+      chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
-    this.impl.sendChatMessage(this.clientUser, userMeta, chatId, message, capsules, attachments);
+    return this.impl.sendChatMessage(
+        this.clientUser, userMeta, chatId, message, capsules, attachments);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -5953,14 +6097,20 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
   async getChatHistory(_chatId: number): Promise<AiChatMessage[]> { this.#deny(); }
   async getChatMessage(_chatId: number, _sequence: number): Promise<AiChatMessage | undefined> { this.#deny(); }
+  async listSlashCommands(): Promise<SlashCommandChoice[]> { this.#deny(); }
   async subscribeToChat(
       _subscriber: RpcStub<AiChatSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     this.#deny();
   }
-  async newChat(_initialMessage: string, _modelId: string | null,
-                _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> { this.#deny(); }
-  async sendChatMessage(_chatId: number, _message: string, _modelId: string | null,
-                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> { this.#deny(); }
+  async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
+                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
+    this.#deny();
+  }
+  async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
+                        _modelId: string | null,
+                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> {
+    this.#deny();
+  }
   async uploadChatAttachment(_attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> { this.#deny(); }
   async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
   async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
@@ -6112,6 +6262,20 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
       suggestValue: annotation.suggestValue,
     };
     this.impl.storage.gatekeepers.put(record);
+  }
+}
+
+// ObservationAuthorizer handed to a slash-command provider. Scoped to one Gatekeeper; observations
+// only (no actions or hooks).
+@validateRpc()
+class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationAuthorizer {
+  constructor(private impl: OverseerImpl, private gatekeeperId: number,
+              private caller: GatekeeperCaller) {
+    super();
+  }
+
+  authorizeObservation(description: ObservationDescription): Promise<void> {
+    return this.impl.authorizeObservation(this.gatekeeperId, description, this.caller);
   }
 }
 

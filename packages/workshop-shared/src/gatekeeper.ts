@@ -190,6 +190,9 @@ export type ResourceDescription = {
   // `getTypeScriptTypes()` method.
   tsType: string;
 
+  // Indicates that getSlashCommandProvider() is available.
+  hasSlashCommands?: true;
+
   // Some resources implement the ability for the client to subscribe to events. The application
   // implements a "hook", which is a WorkerEntrypoint that implements the TypeScript interface
   // named by `hookTsType` (which must be one of the exports from `getTypescriptTypes()`).
@@ -670,6 +673,9 @@ export interface Gatekeeper<Session> extends DurableObject {
   // should just ignore the call rather than throw.
   removeObserver(id: string): Promise<void>;
 
+  // Returns the provider for describe().hasSlashCommands, if supported.
+  getSlashCommandProvider?(): Promise<SlashCommandProvider>;
+
   // ---------------------------------------------------------------------------
   // Callbacks invoked by the overseer to apply (or reject) actions that were previously queued
   // for approval via the ApprovalQueue.
@@ -731,6 +737,53 @@ export interface ObservationAuthorizer extends RpcTarget {
   // as the operation is strictly read-only, and the call is made before actually returning any
   // data to the gadget, this is OK.
   authorizeObservation(description: ObservationDescription): Promise<void>;
+}
+
+// Macro expansion produced by a slash command. An absent message suppresses the generated
+// agent-visible message and agent turn; the visible command event remains in chat history.
+export type SlashCommandResult = {
+  // Optional skill name for the display badge. Commands that do not represent skills omit it.
+  skillName?: string;
+
+  // Final text to insert into chat as if the user had sent it. The provider owns all formatting and
+  // argument handling; Workshop stores this as an ordinary generated user message.
+  message?: string;
+};
+
+// One slash command offered by a Gatekeeper. This is picker metadata only.
+export type SlashCommandDescriptor = {
+  // Opaque ID local to this provider. Passed back to invoke().
+  id: string;
+
+  // Name shown after `/` in the picker.
+  name: string;
+
+  // Short description shown in the picker.
+  description: string;
+
+  // Optional label for the underlying resource (e.g. a collection path), used when names collide.
+  resourceLabel?: string;
+};
+
+// Optional API for a Gatekeeper that offers slash commands.
+//
+// list() returns non-sensitive picker metadata. Before invoke() returns expansion text derived from
+// protected data, it must use `authorizer` to authorize and audit the read. The provider cannot
+// submit actions or bind hooks.
+export interface SlashCommandProvider extends RpcTarget {
+  // Complete catalog of commands offered by this provider. Providers should keep this reasonably
+  // small.
+  list(): Promise<SlashCommandDescriptor[]>;
+
+  // Runs the command identified by `id`, which must be an ID previously returned by list().
+  // `args` is the unparsed natural-language text following the command. The provider owns all
+  // expansion semantics and may return final text to insert as an ordinary user message.
+  // `authorizer` remains authorization and audit only. The provider must reject unknown IDs.
+  invoke(
+    id: string,
+    args: string,
+    authorizer: RpcStub<ObservationAuthorizer>,
+  ): Promise<SlashCommandResult>;
 }
 
 // Used by a gatekeeper to request an action that has side effects (is not read-only). Any such

@@ -1,0 +1,172 @@
+// @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
+
+import { act, useRef } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import type { RpcStub } from "capnweb";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  Overseer, SlashCommandChoice,
+} from "@gadgets/workshop-shared/api";
+import { useSlashCommandPicker } from "./SlashCommandPicker";
+
+(globalThis as {IS_REACT_ACT_ENVIRONMENT?: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+
+const choices: SlashCommandChoice[] = [{
+  selection: {gatekeeperId: 1, commandId: "deploy"},
+  name: "deploy",
+  description: "Deploy the current project.",
+  providerLabel: "Context",
+}, {
+  selection: {gatekeeperId: 1, commandId: "debug"},
+  name: "debug",
+  description: "Debug an issue.",
+  providerLabel: "Context",
+}];
+
+function pickerOverseer(result: SlashCommandChoice[]) {
+  return {
+    listSlashCommands: vi.fn<() => Promise<SlashCommandChoice[]>>(async () => result),
+  } as unknown as RpcStub<Overseer>;
+}
+
+function Harness({
+  inputValue,
+  getOverseer,
+  onSelect,
+}: {
+  inputValue: string;
+  getOverseer: () => RpcStub<Overseer>;
+  onSelect: (choice: SlashCommandChoice, tailStart: number) => void;
+}) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const picker = useSlashCommandPicker({
+    inputValue,
+    selectedCommand: null,
+    disabled: false,
+    anchorRef,
+    getOverseer,
+    onSelect,
+  });
+  return <>
+    <div ref={(element) => {
+      anchorRef.current = element;
+      if (element) {
+        element.getBoundingClientRect = () => ({
+          top: 500,
+          bottom: 540,
+          left: 100,
+          right: 500,
+          width: 400,
+          height: 40,
+          x: 100,
+          y: 500,
+          toJSON: () => ({}),
+        });
+      }
+    }} />
+    <div data-testid="active-command">{picker.activeChoice?.selection.commandId}</div>
+    <button
+      type="button"
+      data-testid="choose-second"
+      aria-label="Choose second command"
+      onClick={() => picker.setIndex(1)}
+    />
+    {picker.popup}
+  </>;
+}
+
+async function waitFor(check: () => boolean) {
+  for (let i = 0; i < 20; i++) {
+    if (check()) return;
+    await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+  }
+  expect(check()).toBe(true);
+}
+
+describe("SlashCommandPicker", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(async () => {
+    if (root) await act(async () => root.unmount());
+    container?.remove();
+  });
+
+  it("loads once, filters locally, positions above, and dismisses outside", async () => {
+    Object.defineProperty(window, "innerHeight", {value: 600, configurable: true});
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let overseer = pickerOverseer(choices);
+    let getOverseer = () => overseer;
+
+    await act(async () => root.render(
+      <Harness inputValue="/" getOverseer={getOverseer} onSelect={() => {}} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
+    expect(overseer.listSlashCommands).toHaveBeenCalledTimes(1);
+
+    let listbox = document.querySelector('[role="listbox"]')!;
+    let popup = listbox.closest("div.fixed") as HTMLElement;
+    expect(popup.style.bottom).not.toBe("");
+    expect(popup.style.top).toBe("");
+
+    await act(async () => root.render(
+      <Harness inputValue="/dep" getOverseer={getOverseer} onSelect={() => {}} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 1);
+    expect(overseer.listSlashCommands).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain("/deploy");
+
+    await act(async () => {
+      document.body.dispatchEvent(new Event("pointerdown", {bubbles: true}));
+    });
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    await act(async () => root.render(
+      <Harness inputValue="hello" getOverseer={getOverseer} onSelect={() => {}} />,
+    ));
+    await act(async () => root.render(
+      <Harness inputValue="/" getOverseer={getOverseer} onSelect={() => {}} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
+    expect(overseer.listSlashCommands).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects a unique exact command when trailing message text starts", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let onSelect = vi.fn<(choice: SlashCommandChoice, tailStart: number) => void>();
+    let getOverseer = () => pickerOverseer(choices);
+
+    await act(async () => root.render(
+      <Harness inputValue="/deploy production" getOverseer={getOverseer} onSelect={onSelect} />,
+    ));
+    await waitFor(() => onSelect.mock.calls.length === 1);
+    expect(onSelect).toHaveBeenCalledWith(choices[0], 8);
+  });
+
+  it("does not default an ambiguous exact command", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let duplicates = [{...choices[0]}, {...choices[1], name: "deploy"}];
+    let getOverseer = () => pickerOverseer(duplicates);
+
+    await act(async () => root.render(
+      <Harness inputValue="/deploy" getOverseer={getOverseer} onSelect={() => {}} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
+    expect(document.querySelector('[data-testid="active-command"]')?.textContent).toBe("");
+    expect(document.querySelectorAll('[role="option"][aria-selected="true"]')).toHaveLength(0);
+
+    let chooseSecond = document.querySelector<HTMLButtonElement>('[data-testid="choose-second"]');
+    if (!chooseSecond) throw new Error("Missing test selection control");
+    await act(async () => chooseSecond.click());
+    expect(document.querySelector('[data-testid="active-command"]')?.textContent).toBe("debug");
+    expect(document.querySelectorAll('[role="option"][aria-selected="true"]')).toHaveLength(1);
+  });
+
+});

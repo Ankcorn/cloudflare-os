@@ -11,6 +11,7 @@ import {
   AiChatAuthorInfo,
   CapsuleSpecifier,
   ChatAttachmentHandle,
+  SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
 import {
   getStoredSelectedModel,
@@ -78,7 +79,7 @@ function HomePage() {
 
   const handleSend = useCallback(
     async (
-      message: string,
+      message: string | SlashCommandRequest,
       modelId: string | null,
       capsules?: CapsuleSpecifier[],
       attachments?: ChatAttachmentHandle[],
@@ -86,22 +87,21 @@ function HomePage() {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
-        // Pipeline both calls in one batch (newChat doesn't depend on the metadata result), then
-        // await before navigating with the resolved id.
-        const metadataPromise = overseer.getMetadata();
-        await overseer.newChat(message, modelId, capsules, attachments);
-        const { id } = await metadataPromise;
+        // Pipeline both independent calls in one batch, but settle both before releasing the stub.
+        const [, {id}] = await Promise.all([
+          overseer.newChat(message, modelId, capsules, attachments),
+          overseer.getMetadata(),
+        ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
         navigate({ to: "/gadget/$id", params: { id } });
       } catch (err) {
         console.error("Failed to create gadget:", err);
-        if (!attachments?.length) {
+        // A retry reuses the provisional gadget while the draft contains gadget-scoped references.
+        if (!attachments?.length && !capsules?.length) {
           provisionalOverseerRef.current?.stub[Symbol.dispose]();
           provisionalOverseerRef.current = null;
         }
-        // Staged attachment handles are scoped to this provisional gadget. Keep it alive so retrying
-        // doesn't require re-uploading the files.
         toasts.add({ title: "Failed to create gadget", variant: "error" });
         throw err;
       }

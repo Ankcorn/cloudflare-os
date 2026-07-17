@@ -1182,6 +1182,10 @@ export async function runAgent(
         // No need to tell the agent about this.
         break;
 
+      case "slashCommand":
+        // This records what the user invoked for display; only a generated message is model input.
+        break;
+
       case "revert": {
         // Synthetic message.
         let toolCallId = `synthetic_${msg.sequence}`;
