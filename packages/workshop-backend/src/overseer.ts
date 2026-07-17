@@ -150,6 +150,14 @@ type GatekeeperRecord = {
   blueprintAnnotation?: BlueprintBindingAnnotation;
 };
 
+function observerVendorId(record: GatekeeperRecord): string | null {
+  if (!record.creationSpec) {
+    throw new Error(
+        "This Gadget has a legacy connection that must be reconnected by its owner before it can be shared.");
+  }
+  return "vendorId" in record.creationSpec ? record.creationSpec.vendorId : null;
+}
+
 // Storage record describing a non-owner collaborator who has configured their gatekeeper accounts
 // and passed all `addObserver` checks -- i.e. is actually set up to observe data the Gadget has
 // read. This is distinct from the sharing table (which records the owner's *intent* that a user
@@ -3335,6 +3343,7 @@ class OverseerImpl implements AgentHooks {
   #inScopeGatekeepers(role: CollaboratorRole): GatekeeperRecord[] {
     let result: GatekeeperRecord[] = [];
     for (let gk of this.storage.gatekeepers.list()) {
+      if (!observerVendorId(gk)) continue;
       if (role === "use" && !gk.bindingName) continue;
       result.push(gk);
     }
@@ -3429,8 +3438,7 @@ class OverseerImpl implements AgentHooks {
 
           let needs: ObserverBindingNeed[] = uncovered.map(gk => ({
             gatekeeperId: gk.id,
-            // creationSpec.type === "gatekeeper" is guaranteed by #inScopeGatekeepers.
-            vendorId: gk.creationSpec?.type === "gatekeeper" ? gk.creationSpec.vendorId : "",
+            vendorId: observerVendorId(gk)!,
             resourceTitle: gk.resourceTitle || gk.bindingName || "Connection",
             resourceUrl: gk.resourceUrl,
           }));

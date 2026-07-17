@@ -245,10 +245,8 @@ Logic:
 1. **Select in-scope gatekeepers** from `this.storage.gatekeepers.list()`:
    - `build`: all gatekeepers.
    - `use`: only those with a `bindingName`.
-   - Only `creationSpec.type === "gatekeeper"` bindings require an account; built-in bindings
-     (`aiModel`, `agentSpawner`, web-fetch) need no verifier and no account choice. (Their
-     gatekeepers' `addObserver` will be trivial/no-op once implemented; we may simply skip them
-     here.)
+   - A `creationSpec` with a `vendorId` requires an account; other specs need no verifier or account
+     choice.
 
 2. **Load the observer record** for `profileId` (may be absent).
 
@@ -299,8 +297,9 @@ Implement the `ObserverConfigCallback` on the client. When the overseer calls `c
    `subscribeConnectedAccounts()` results (`user.ts:890`) by `need.vendorId`.
 2. If one or more accounts match, pre-select one arbitrarily as the default; let the user change
    it via a dropdown. (Most users have one account per vendor and will just click "OK".)
-3. If **no** account matches a needed vendor, prompt the user to connect one, reusing the existing
-   connect-account flow (`connectAccount`, `user.ts:869`), then include the new account as the
+3. Include forced auto-provisioned accounts in the subscription. If **no** account matches, use
+   `listAddableGatekeepers()` to identify optional auto-provisioning vendors and provision those
+   directly; otherwise use the existing `connectAccount` flow. Then include the new account as the
    choice.
 4. Resolve `configure()` with one `ObserverAccountChoice` per binding. If the user cancels / can't
    provide an account, reject (the overseer denies the open and the UI shows an access-denied

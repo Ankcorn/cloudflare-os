@@ -128,6 +128,12 @@ export type GatekeeperVendorFilter = {
   resourceUrl?: string,
 };
 
+/** Options for subscribing to connected accounts. */
+export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
+  /** Ensure and include auto-provisioned accounts forced by deployment policy. */
+  includeForcedAutoProvisionedAccounts?: boolean;
+};
+
 // Describes one gatekeeper binding for which the opening user must choose a connected account
 // before they can observe the gadget. Passed to ObserverConfigCallback.configure().
 export type ObserverBindingNeed = {
@@ -309,7 +315,7 @@ export interface AuthenticatedApi extends RpcTarget {
   // window. When it completes, we want the list of accounts in the Workshop UI to update
   // immediately, to give the user feedback that the account is now connected.
   subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: GatekeeperVendorFilter)
+      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
       : Promise<RpcStub<{}>>;
 
   // Remove a connected account, revoking the token.
