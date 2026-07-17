@@ -9,6 +9,7 @@ packages/workshop-frontend/src/GadgetCodeInterface.tsx
 packages/workshop-backend/src/overseer.ts
   s_c85b5e8e7db407::t_f97bf5d4bddc9a 5140,5203,5260-5262
   s_c85b5e8e7db407::t_fbad0e96b6cc38 5163,5166-5167,5179,5185,5259,5263
+  s_c85b5e8e7db407::t_5462b1877772b2 5164-5165
 ---
 {
   "schema_version": "authorship/3.0.0",
