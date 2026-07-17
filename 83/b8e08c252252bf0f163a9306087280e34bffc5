@@ -65,6 +65,11 @@ packages/workshop-backend/src/overseer.ts
   s_3ffe2342bfe098::t_d939283ecc7d07 4458
   s_3ffe2342bfe098::t_1b4ebbbf383308 6241
   s_3ffe2342bfe098::t_b8bce080c2422d 6243
+  s_3ffe2342bfe098::t_71a16b6fcf1749 2280
+  s_3ffe2342bfe098::t_bb07f9d1161cfd 745-748,754-757,763-768,775-778,782-787,798,800,803,819-822,825-826,829,834-835,838,844,846,860-867
+  s_3ffe2342bfe098::t_fd221a7869eced 5-11,824,868-869,2296-2301,2574-2578,2585-2591,2593,2601,4409-4410,4629-4647,4650-4651,4653,4656,4659
+  s_3ffe2342bfe098::t_fd5133a438e9d3 2599
+  s_3ffe2342bfe098::t_97c6aed5b29f9f 4658
 packages/workshop-shared/src/external-message-gateway.ts
   s_3ffe2342bfe098::t_ff49ada3ea190f 5-6
   s_3ffe2342bfe098::t_99bb3b120f9a89 46
@@ -103,6 +108,7 @@ packages/workshop-shared/src/external-message-gateway.ts
   s_3ffe2342bfe098::t_ce8f32fa9180eb 119
   s_3ffe2342bfe098::t_20e11f291e938a 122
   s_3ffe2342bfe098::t_a6dddf98dbde6d 127
+  s_3ffe2342bfe098::t_fd221a7869eced 2,4,7-9,40
 ---
 {
   "schema_version": "authorship/3.0.0",
