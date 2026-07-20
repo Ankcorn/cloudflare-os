@@ -13,6 +13,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   SupabaseApi,
   SupabaseApiError,
@@ -47,6 +48,13 @@ import TYPES_CODE from "./types.txt";
 import SUPABASE_LOGO_SVG from "./supabase-logo.svg";
 import SUPABASE_PROJECT_CONFIGURATOR_HTML from "./generated/supabase-project-configurator-ui.txt";
 import SUPABASE_ORGANIZATION_CONFIGURATOR_HTML from "./generated/supabase-organization-configurator-ui.txt";
+
+export const VENDOR_ID = "supabase";
+type SupabaseLogFields = { vendorId: string };
+
+const logger = createLogger<SupabaseLogFields>({
+  component: "gatekeeper.supabase", vendorId: VENDOR_ID,
+});
 
 type Env = Cloudflare.Env & {
   BASE_URL?: string;
@@ -525,7 +533,9 @@ export class UserAccount extends DurableObject<Env> {
       try {
         await revokeRefreshToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
       } catch (error) {
-        console.error("Failed to revoke Supabase OAuth grant:", error instanceof Error ? error.message : error);
+        logger.error("failed to revoke Supabase OAuth grant", {
+          event: "oauth.grant.revoke.failed", error,
+        });
       }
     }
     await this.ctx.storage.deleteAlarm();

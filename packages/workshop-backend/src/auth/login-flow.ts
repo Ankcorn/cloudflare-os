@@ -21,8 +21,11 @@
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
+import { createWorkshopLogger } from "../logging";
 import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
+
+const logger = createWorkshopLogger("workshop.auth");
 
 type PendingResult = { token: string } | { error: string };
 
@@ -83,6 +86,10 @@ export class LoginConnectCallbackImpl
   }
 
   async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
+    const loginLogger = logger.with({
+      operation: "gatekeeper.login",
+      vendorId: this.ctx.props.vendorId,
+    });
     const pending = this.#pending();
     // `account` is a call parameter, so Cap'n Web disposes it automatically when this method
     // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
@@ -90,6 +97,9 @@ export class LoginConnectCallbackImpl
     try {
       const email = await account.getAuthenticatedEmail();
       if (!email) {
+        loginLogger.info("gatekeeper login finished", {
+          event: "gatekeeper.login.finished", outcome: "no_email",
+        });
         await pending.fail("This account has no verified email, so it can't be used to sign in.");
         return;
       }
@@ -100,6 +110,9 @@ export class LoginConnectCallbackImpl
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
       const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
       if (secret === null) {
+        loginLogger.info("gatekeeper login finished", {
+          event: "gatekeeper.login.finished", outcome: "signups_disabled",
+        });
         await pending.fail("New sign-ups are currently disabled on this deployment.");
         return;
       }
@@ -112,8 +125,16 @@ export class LoginConnectCallbackImpl
       // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
       // the first part. The user DO is keyed by email, so the prefix must be the email.
       await pending.deliver(`${email}:${secret}`);
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "ok",
+      });
     } catch (err) {
-      console.error("Gatekeeper login failed:", err);
+      loginLogger.error("gatekeeper login failed", {
+        event: "gatekeeper.login.failed", error: err,
+      });
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "error",
+      });
       await pending.fail("Sign-in failed. Please try again.");
     }
   }

@@ -4,11 +4,14 @@ import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
+import { createWorkshopLogger } from "./logging";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from './admin-config.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
+
+const logger = createWorkshopLogger("workshop.admin.settings");
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -262,7 +265,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             })),
           };
         } catch (err) {
-          console.error(`Failed to read resource config for gatekeeper "${id}":`, err);
+          logger.warn("failed to read resource config for gatekeeper", {
+            event: "gatekeeper.resource.config.read.failed", gatekeeperId: id, error: err,
+          });
           return null;
         }
       })());

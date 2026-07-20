@@ -1,5 +1,6 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, isTextLikeAttachmentMimeType } from '@gadgets/workshop-shared/api';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
+import { createWorkshopLogger } from "./logging";
 import * as Y from "yjs";
 import { streamText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";
@@ -8,6 +9,8 @@ import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
+
+const logger = createWorkshopLogger("workshop.agent");
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -504,7 +507,9 @@ class CodePreviewManager {
       }
     } catch (err) {
       this.#broken = true;
-      console.error("failed to parse provisional tool input:", err);
+      logger.warn("failed to parse provisional tool input", {
+        event: "agent.provisional.tool.input.parse.failed", toolCallId, error: err,
+      });
       this.emit({type: "codeReset"});
     }
   }
@@ -666,7 +671,10 @@ class ExecuteCodeStreamManager {
       stream.parser.append(delta);
       if (stream.parser.hasError) {
         this.#streams.delete(toolCallId);
-        console.error("failed to parse provisional executeCode input");
+        logger.warn("failed to parse provisional executeCode input", {
+          event: "agent.provisional.execute.code.input.parse.failed",
+          toolCallId,
+        });
         return;
       }
 
@@ -684,7 +692,10 @@ class ExecuteCodeStreamManager {
       }
     } catch (err) {
       this.#streams.delete(toolCallId);
-      console.error("failed to parse provisional executeCode input:", err);
+      logger.warn("failed to parse provisional executeCode input", {
+        event: "agent.provisional.execute.code.input.parse.failed",
+        toolCallId, error: err,
+      });
     }
   }
 
@@ -1113,7 +1124,10 @@ export async function runAgent(
               toolOutput = {type: "error-text", value: `${err}`};
 
               // This indicates a bug in the replay logic, so report it to logs.
-              console.error("Error in tool call replay:", err);
+              logger.error("error in tool call replay", {
+                event: "agent.tool.call.replay.failed",
+                toolName: toolCall.toolName, toolCallId: toolCall.toolCallId, error: err,
+              });
             }
 
             modelMessages.push({

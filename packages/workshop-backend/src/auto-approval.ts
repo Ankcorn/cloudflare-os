@@ -5,7 +5,10 @@
 
 import type { Collection } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import { createWorkshopLogger } from "./logging";
 import type { ActionRecord, AutoApproveTagRecord } from "./overseer.js";
+
+const logger = createWorkshopLogger("workshop.auto.approval");
 
 export interface AutoApprovalStorage {
   actions: Collection<ActionRecord, number>;
@@ -82,7 +85,9 @@ export class AutoApprovalDrainer {
         await this.applyPendingAction(fresh, rule.enabledBy, true);
       } catch (err) {
         // Leave the action pending for manual handling and stop the drain (never skip ahead).
-        console.error(`Auto-approval failed for action ${fresh.id}:`, err);
+        logger.error("auto-approval failed", {
+          event: "auto.approval.failed", actionId: fresh.id, error: err,
+        });
         break;
       }
     }

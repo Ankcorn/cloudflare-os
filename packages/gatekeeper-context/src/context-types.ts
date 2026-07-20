@@ -3,6 +3,9 @@
 
 import type { RpcTarget } from "capnweb";
 
+// Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
+export const VENDOR_ID = "context";
+
 // ---------------------------------------------------------------------------
 // Read-session value types
 //

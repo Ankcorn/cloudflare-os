@@ -40,5 +40,11 @@
       "namespace": "gatekeeper-context-collections",
       "remote": true
     }
-  ]
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  }
+
 }

@@ -1,0 +1,28 @@
+{
+  "name": "@gadgets/backend-utils",
+  "version": "1.0.0",
+  "description": "Shared Worker-side libraries; not a standalone deployable Worker.",
+  "type": "module",
+  "exports": {
+    "./logger": {
+      "types": "./src/logger.ts",
+      "import": "./src/logger.ts"
+    },
+    "./context-logger": {
+      "types": "./src/context-logger.ts",
+      "import": "./src/context-logger.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "types:check": "tsc --noEmit && tsc -p tsconfig.type-tests.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260619.1",
+    "@cloudflare/vitest-pool-workers": "^0.16.18",
+    "vitest": "^4.1.9"
+  }
+}
