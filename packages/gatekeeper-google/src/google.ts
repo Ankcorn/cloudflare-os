@@ -1,5 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
@@ -38,6 +39,18 @@ import CALENDAR_CONFIGURATOR_HTML from "./generated/calendar-configurator-ui.txt
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
+
+// Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
+export const VENDOR_ID = "google";
+type GoogleLogFields = {
+  actionId: number | string;
+  messageId: string;
+  vendorId: string;
+};
+
+const logger = createLogger<GoogleLogFields>({
+  component: "gatekeeper.google", vendorId: VENDOR_ID,
+});
 
 // A nonce stored in UserAccount KV to protect the OAuth flow. Only one nonce is active at a time;
 // the `stage` field tracks where we are in the flow.
@@ -584,7 +597,9 @@ export class UserAccount extends DurableObject<Env> {
       if (callback) {
         // Fire and forget — don't let notification failure block the error propagation.
         callback.credentialsExpired().catch(notifyErr => {
-          console.error("Failed to notify credential expiry:", notifyErr);
+          logger.warn("failed to notify credential expiry", {
+            event: "credentials.expiry.notify.failed", error: notifyErr,
+          });
         });
       }
       throw new Error("Google credentials have expired or been revoked. Please re-authenticate.");
@@ -1355,7 +1370,10 @@ class GmailThreadStub extends RpcTarget implements GmailThread {
       const batch = thread.messages.slice(i, i + 5);
       const participantSets = await Promise.all(batch.map(message =>
         this.#ctx.gmailApi.getMessageParticipants(message.id).catch(err => {
-          console.warn(`getMessageParticipants failed for ${message.id}:`, err);
+          logger.warn("getMessageParticipants failed", {
+            event: "gmail.message.participants.get.failed",
+            messageId: message.id, error: err,
+          });
           return null;
         })));
       for (let j = 0; j < batch.length; j++) {
@@ -2033,7 +2051,10 @@ export class GoogleDocGatekeeperImpl
     try {
       requests = materializeGoogleDocAction(snapshot, action);
     } catch (error) {
-      console.error("Dropping stale Google Doc action during apply", error);
+      logger.error("dropping stale Google Doc action during apply", {
+        event: "google.doc.action.apply.stale.dropped",
+        actionId, error,
+      });
       pendingActions.remove(actionId);
       this.#simulationCache.current = undefined;
       await this.ctx.storage.put("docSnapshot", snapshot);
@@ -2062,7 +2083,9 @@ export class GoogleDocGatekeeperImpl
           pending.slice(pendingIndex + 1),
           `Pending Google Doc edits could not be replayed after edit ${actionId} was applied`);
     } catch (error) {
-      console.error("Failed to refresh Google Doc simulation after applying action", error);
+      logger.warn("failed to refresh Google Doc simulation after applying action", {
+        event: "google.doc.simulation.refresh.failed", error,
+      });
       await this.ctx.storage.delete("docSnapshot");
     }
   }

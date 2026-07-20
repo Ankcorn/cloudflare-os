@@ -5,12 +5,15 @@ import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisionin
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
+import { createWorkshopLogger } from "./logging";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+
+const logger = createWorkshopLogger("workshop.user");
 
 type ConnectedAccountRecord = {
   id: number;
@@ -193,6 +196,7 @@ function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
 
 async function checkGatekeeperVendorFilter(
     vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
+    vendorId: string,
     filter: GatekeeperVendorFilter): Promise<boolean> {
   try {
     if (filter.resourceUrl) {
@@ -220,7 +224,9 @@ async function checkGatekeeperVendorFilter(
     // This function is called when iterating over several gatekeepers to filter them. If one of
     // them throws we don't want to block the whole list, so instead log the error and assume this
     // gatekeeper should be filtered.
-    console.error(err);
+    logger.warn("gatekeeper filter check failed", {
+      event: "gatekeeper.filter.check.failed", vendorId, error: err,
+    });
     return false;
   }
 }
@@ -889,7 +895,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         continue;  // Whole gatekeeper disabled by admin.
       }
       promises.push((async () => {
-        if (filter && !(await checkGatekeeperVendorFilter(vendor, filter))) {
+        if (filter && !(await checkGatekeeperVendorFilter(vendor, id, filter))) {
           return null;
         }
 
@@ -907,7 +913,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
           return {id, description, supportedResources: enabledResources};
         } catch (err) {
-          console.error(`Failed to load gatekeeper vendor ${id}:`, err);
+          logger.warn("failed to load gatekeeper vendor", {
+            event: "gatekeeper.vendor.load.failed", vendorId: id, error: err,
+          });
           return unavailableGatekeeperVendorInfo(id);
         }
       })());
@@ -937,6 +945,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
 
     let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
+    logger.info("account connect started", {
+      event: "account.connect.started", vendorId, accountId,
+    });
     return {url};
   }
 
@@ -952,9 +963,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         rec = this.storage.connectedAccounts.get(id);
       } catch (err) {
-        console.error(
-            `Skipping connected account #${id}: failed to load. The gatekeeper Worker binding it ` +
-            `was connected to may no longer exist in this deployment.`, err);
+        logger.warn("skipping connected account: failed to load", {
+          event: "connected.account.load.skipped", accountId: id, error: err,
+        });
         continue;
       }
       if (rec) yield rec;
@@ -979,7 +990,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         let description = await vendor.describe();
         return description.autoProvisionsAccount ? {vendorId, vendor, description} : null;
       } catch (err) {
-        console.error(`Failed to describe vendor "${vendorId}":`, err);
+        logger.warn("failed to describe vendor", {
+          event: "vendor.describe.failed", vendorId, error: err,
+        });
         return null;
       }
     }));
@@ -1083,7 +1096,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         await this.#createAutoProvisionedAccount(vendorId, vendor);
       } catch (err) {
-        console.error(`Failed to auto-provision account for vendor "${vendorId}":`, err);
+        logger.error("failed to auto-provision account", {
+          event: "account.auto.provision.failed", vendorId, error: err,
+        });
       }
     }
   }
@@ -1167,13 +1182,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (disabledGatekeeperSet.has(record.vendorId)) {
         return;  // Whole gatekeeper disabled by admin.
       }
-      if (filter && !(await checkGatekeeperVendorFilter(record.account, filter))) {
+      if (filter && !(await checkGatekeeperVendorFilter(
+          record.account, record.vendorId, filter))) {
         return;
       }
 
       let vendor = vendors.get(record.vendorId);
       if (!vendor) {
-        console.error("No such service for connected account", record.id, record.vendorId);
+        logger.error("no such service for connected account", {
+          event: "connected.account.service.missing",
+          accountId: record.id, vendorId: record.vendorId,
+        });
         return;
       }
 
@@ -1189,7 +1208,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         }
         vendorDescription = await vendorDescriptionPromise;
       } catch (err) {
-        console.error("Failed to describe connected account", record.id, err);
+        logger.warn("failed to describe connected account", {
+          event: "connected.account.describe.failed",
+          accountId: record.id, vendorId: record.vendorId, error: err,
+        });
         return;
       }
 
@@ -1199,7 +1221,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         supportedResources =
             filterEnabledResources(config, record.vendorId, supportedResources);
       } catch (err) {
-        console.error("Failed to get supported resources for connected account", record.id, err);
+        logger.warn("failed to get supported resources for connected account", {
+          event: "connected.account.supported.resources.failed",
+          accountId: record.id, vendorId: record.vendorId, error: err,
+        });
       }
 
       let credentialsValid = areCredentialsValid(record);
@@ -1262,9 +1287,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         try {
           await account.account.revoke();
         } catch (err) {
-          console.error(`revoke() failed disconnecting "${account.vendorId}" account ${accountId}:`, err);
+          logger.error("revoke() failed during disconnect", {
+            event: "account.revoke.failed",
+            vendorId: account.vendorId, accountId, error: err,
+          });
         }
         this.storage.connectedAccounts.delete(accountId);
+        logger.info("account disconnected", {
+          event: "account.disconnected",
+          vendorId: account.vendorId, accountId, autoProvisioned: true,
+        });
         return;
       }
       await account.account.revoke();
@@ -1274,6 +1306,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (account.vendorId === CLOUDFLARE_VENDOR_ID) {
         this.storage.cloudflareBilling.put(null);
       }
+      logger.info("account disconnected", {
+        event: "account.disconnected",
+        vendorId: account.vendorId, accountId, autoProvisioned: false,
+      });
     }
   }
 
@@ -1313,8 +1349,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         try {
           await existing.account.revoke();
         } catch (err) {
-          console.error(
-              `Failed to revoke stale grant for account #${existing.id}; replacing anyway.`, err);
+          logger.error("failed to revoke stale grant; replacing anyway", {
+            event: "account.stale.grant.revoke.failed",
+            accountId: existing.id, vendorId, error: err,
+          });
         }
         existing.account = account;
         existing.description = description;
@@ -1349,10 +1387,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         existing = this.storage.connectedAccounts.get(id);
       } catch (err) {
-        console.error(
-            `Skipping connected account #${id} during identity lookup: failed to load. The ` +
-            `gatekeeper Worker binding it was connected to may no longer exist in this ` +
-            `deployment.`, err);
+        logger.warn("skipping connected account during identity lookup: failed to load", {
+          event: "connected.account.identity.lookup.skipped", accountId: id, error: err,
+        });
         continue;
       }
       if (!existing) continue;

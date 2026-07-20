@@ -1,3 +1,7 @@
+import { createWorkshopLogger } from "./logging";
+
+const logger = createWorkshopLogger("workshop.analytics");
+
 export type ProductAnalyticsConnectionType = "gatekeeper" | "ai_model" | "agent_spawner";
 
 // The record written to Pipelines stream.
@@ -123,11 +127,15 @@ export function recordAnalytics(
     };
 
     let send = env.PRODUCT_ANALYTICS.send([record]).catch(err => {
-      console.error("analytics send failed", err);
+      logger.warn("analytics send failed", {
+        event: "analytics.send.failed", eventName: event_name, error: err,
+      });
     });
 
     ctx.waitUntil(send);
   } catch (err) {
-    console.error("analytics record failed", err);
+    logger.warn("analytics record failed", {
+      event: "analytics.record.failed", eventName: event.event_name, error: err,
+    });
   }
 }

@@ -15,6 +15,7 @@ import {
   SupportedResource,
   ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
+import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   EmailSession,
   EmailHook,
@@ -28,6 +29,13 @@ import TYPES_CODE from "./types.txt";
 import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
 import type { EmailMailboxConfiguratorRpc } from "./configurator/email-configurator-types";
 import EMAIL_LOGO_SVG from "./email-logo.svg";
+
+export const VENDOR_ID = "email";
+type EmailLogFields = { vendorId: string };
+
+const logger = createLogger<EmailLogFields>({
+  component: "gatekeeper.email", vendorId: VENDOR_ID,
+});
 
 const NONCE_BYTES = 32;
 const NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
@@ -231,7 +239,9 @@ export default {
     try {
       await stub.receiveEmail(incomingEmail);
     } catch (err) {
-      console.error(err);
+      logger.error("email delivery failed", {
+        event: "email.delivery.failed", error: err,
+      });
       // If no hook is configured or delivery fails, reject the email.
       message.setReject("Delivery failed: " + err);
     }

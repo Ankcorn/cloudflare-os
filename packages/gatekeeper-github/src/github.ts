@@ -16,6 +16,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   GitHubApi,
   GitHubApiError,
@@ -72,6 +73,13 @@ import {
 import GITHUB_ISSUE_CONFIGURATOR_HTML from "./generated/github-issue-configurator-ui.txt";
 import GITHUB_PULL_REQUEST_CONFIGURATOR_HTML from "./generated/github-pull-request-configurator-ui.txt";
 import GITHUB_REPO_CONFIGURATOR_HTML from "./generated/github-repo-configurator-ui.txt";
+
+export const VENDOR_ID = "github";
+type GitHubLogFields = { vendorId: string };
+
+const logger = createLogger<GitHubLogFields>({
+  component: "gatekeeper.github", vendorId: VENDOR_ID,
+});
 
 type Env = Cloudflare.Env & {
   BASE_URL?: string;
@@ -1173,7 +1181,9 @@ export class UserAccount extends DurableObject<Env> {
       try {
         await revokeOAuthGrant(accessToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
       } catch (error) {
-        console.error("Failed to revoke GitHub OAuth grant:", error);
+        logger.error("failed to revoke GitHub OAuth grant", {
+          event: "oauth.grant.revoke.failed", error,
+        });
       }
     }
 
@@ -2360,7 +2370,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       deletions = (comparison.files ?? []).reduce((sum, file) => sum + file.deletions, 0);
       changedFiles = comparison.files?.length ?? 0;
     } catch (error) {
-      console.error("Failed to compute provisional pull request comparison:", error);
+      logger.warn("failed to compute provisional pull request comparison", {
+        event: "pull.request.provisional.comparison.compute.failed", error,
+      });
     }
 
     return {

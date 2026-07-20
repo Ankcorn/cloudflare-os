@@ -1,5 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   GatekeeperUser,
   GatekeeperUserVerifier,
@@ -72,6 +73,13 @@ import {
 import LINEAR_WORKSPACE_CONFIGURATOR_HTML from "./generated/linear-workspace-configurator-ui.txt";
 import LINEAR_TEAM_CONFIGURATOR_HTML from "./generated/linear-team-configurator-ui.txt";
 import LINEAR_ISSUE_CONFIGURATOR_HTML from "./generated/linear-issue-configurator-ui.txt";
+
+export const VENDOR_ID = "linear";
+type LinearLogFields = { vendorId: string };
+
+const logger = createLogger<LinearLogFields>({
+  component: "gatekeeper.linear", vendorId: VENDOR_ID,
+});
 
 const NONCE_BYTES = 32;
 const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;
@@ -631,7 +639,9 @@ export class UserAccount extends DurableObject<Env> {
     try {
       await callback.credentialsExpired();
     } catch (err) {
-      console.error("Failed to notify credential expiry:", err);
+      logger.warn("failed to notify credential expiry", {
+        event: "credentials.expiry.notify.failed", error: err,
+      });
     }
   }
 
@@ -648,7 +658,9 @@ export class UserAccount extends DurableObject<Env> {
         await revokeToken(grant.accessToken);
         if (grant.refreshToken) await revokeToken(grant.refreshToken);
       } catch (err) {
-        console.error("Failed to revoke Linear token:", err);
+        logger.error("failed to revoke Linear token", {
+          event: "oauth.token.revoke.failed", error: err,
+        });
       }
     }
     await this.ctx.storage.deleteAlarm();
@@ -678,7 +690,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return await fn(api);
     } catch (error) {
       if (error instanceof LinearApiError && error.isAuthError) {
-        try { await account.noteCredentialsExpired(); } catch (notifyErr) { console.error("Failed to note credential expiry:", notifyErr); }
+        try { await account.noteCredentialsExpired(); } catch (notifyErr) {
+          logger.warn("failed to note credential expiry", {
+            event: "credentials.expiry.note.failed", error: notifyErr,
+          });
+        }
         throw new Error("Linear credentials have expired or been revoked. Please reconnect the account.", { cause: error });
       }
       throw error;
@@ -945,7 +961,11 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
       return await fn(api);
     } catch (error) {
       if (error instanceof LinearApiError && error.isAuthError) {
-        try { await account.noteCredentialsExpired(); } catch (notifyErr) { console.error("Failed to note credential expiry:", notifyErr); }
+        try { await account.noteCredentialsExpired(); } catch (notifyErr) {
+          logger.warn("failed to note credential expiry", {
+            event: "credentials.expiry.note.failed", error: notifyErr,
+          });
+        }
         throw new Error("Linear credentials have expired or been revoked. Please reconnect the account.", { cause: error });
       }
       throw error;

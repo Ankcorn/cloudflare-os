@@ -56,3 +56,23 @@ IMPORTANT: Remember when using RPC to use promise pipelining whenever possible. 
 IMPORTANT: When using React's useState(), the state value cannot be an RPC stub. At runtime, all stubs appear to be callable (because the system doesn't actually know if the stub points to a function on the server side or not). But the setter returned by useState() has different behavior if passed a function (including any callable object): it calls the function in order to get the state. In order to avoid this problem, whenever a useState() state will contain an RpcStub, it's important to wrap the stub in an object, and set the state to that object instead.
 
 IMPORTANT: RPC stubs must be disposed to prevent resource leaks on the server side. Call `stub[Symbol.dispose]()` when the stub is no longer needed (or use a `using` declaration where possible). In particular, when a React component obtains a stub in a useEffect, the cleanup function should dispose the stub.
+
+IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend browser `console.*` is out of scope):
+- Define a package-owned field type and module-scoped logger with a stable dot-separated `component`
+  and, for gatekeepers, `vendorId`:
+  `const logger = createLogger<GitHubLogFields>({ component: "gatekeeper.github", vendorId: VENDOR_ID });`.
+- Emit concrete event names and relevant typed fields, for example:
+  `logger.warn("failed to notify credential expiry", { event: "credentials.expiry.notify.failed", error: err });`.
+  Each call emits one indexed object; module/child fields such as `vendorId` are inherited.
+- Use immutable `logger.with(fields)` for object-owned or nearby context. Prefer module/object loggers
+  over logger parameters, and do not replace a shallow child logger with ambient context just to
+  remove a local variable.
+- For bounded operation context needed by deep helpers or independent loggers, use `createLogger`
+  and `withLogContext` from `@gadgets/backend-utils/context-logger`. Re-establish it per operation;
+  it does not cross RPC, hibernation, or restart, and requires `nodejs_als` or `nodejs_compat`.
+- Pass caught values as `error`. The helper stringifies `Error` instances and primitives, uses an
+  own string `message` for plain objects, omits `undefined`, and adds stacks to all `Error` logs.
+  Keep this normalization deliberately small; do not traverse causes or copy arbitrary properties.
+- Extend field vocabularies locally. Levels: `error` needs attention, `warn` continues best-effort,
+  `info` is notable lifecycle, and `debug` is noisy breadcrumbs. Never log secrets, prompts, headers,
+  tokens, or request/response bodies.

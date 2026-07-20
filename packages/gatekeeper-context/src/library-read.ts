@@ -7,13 +7,20 @@ import { validateRpc } from "capnweb-validate";
 import type {
   ObservationAuthorizer, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { createLogger } from "@gadgets/backend-utils/context-logger";
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
-  ContextCollectionVisibility, decodeDocId, encodeDocId, isTextContentType,
+  ContextCollectionVisibility, decodeDocId, encodeDocId, isTextContentType, VENDOR_ID,
 } from "./context-types.js";
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
 import { domainName } from "./domain.js";
+
+type ContextLibraryLogFields = { collectionId: string; vendorId: string };
+
+const logger = createLogger<ContextLibraryLogFields>({
+  component: "gatekeeper.context", vendorId: VENDOR_ID,
+});
 
 // Fanout cap for whole-library search/list.
 const MAX_COLLECTION_FANOUT = 8;
@@ -98,7 +105,9 @@ export class LibraryReadSession extends RpcTarget {
           score: r.score,
         }));
       } catch (err) {
-        console.error(`Failed to search collection ${collectionId}:`, err);
+        logger.warn("failed to search collection", {
+          event: "collection.search.failed", collectionId, error: err,
+        });
         return [];
       }
     });
@@ -192,7 +201,9 @@ export class LibraryReadSession extends RpcTarget {
               documentCount: meta.documentCount,
             };
           } catch (err) {
-            console.error(`Failed to list collection ${collectionId}:`, err);
+            logger.warn("failed to list collection", {
+              event: "collection.list.failed", collectionId, error: err,
+            });
             return null;
           }
         });

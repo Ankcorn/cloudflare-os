@@ -1,7 +1,21 @@
 // Thin client over the Cloudflare REST API used by the gatekeeper: resolve the account's identity
 // (email) and enumerate accounts. All calls use the user's OAuth access token.
 
+import { createLogger } from "@gadgets/backend-utils/logger";
+import { VENDOR_ID } from "./vendor.js";
+
 const API_BASE = "https://api.cloudflare.com/client/v4";
+
+type CloudflareApiLogFields = {
+  path: string;
+  status: number;
+  statusText: string;
+  vendorId: string;
+};
+
+const logger = createLogger<CloudflareApiLogFields>({
+  component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
+});
 
 interface CfEnvelope<T> {
   success: boolean;
@@ -13,9 +27,10 @@ async function cfGet<T>(token: string, path: string): Promise<T | null> {
     headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
   });
   if (!resp.ok) {
-    let body = "";
-    try { body = await resp.text(); } catch { /* ignore */ }
-    console.error(`[cf-gatekeeper] GET ${path} -> ${resp.status} ${resp.statusText}`, body.slice(0, 500));
+    logger.error("cf-gatekeeper GET failed", {
+      event: "cloudflare.api.get.failed",
+      path, status: resp.status, statusText: resp.statusText,
+    });
     return null;
   }
   const data = await resp.json() as CfEnvelope<T>;

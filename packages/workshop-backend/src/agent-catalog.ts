@@ -3,6 +3,9 @@ import {
   AGENT_CATALOG_MAX_ID_LENGTH, AGENT_CATALOG_MAX_TITLE_LENGTH,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { AgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
+import { createWorkshopLogger } from "./logging";
+
+const logger = createWorkshopLogger("workshop.agent.catalog");
 
 export type AgentCatalogSnapshot = {
   gatekeeperId: number;
@@ -53,7 +56,9 @@ export async function completeAgentCatalogSnapshot(
     try {
       catalogs.set(gatekeeperId, await loadCatalog(gatekeeperId));
     } catch (error) {
-      console.error(`Failed to load agent catalog for gatekeeper ${gatekeeperId}:`, error);
+      logger.warn("failed to load agent catalog", {
+        event: "agent.catalog.load.failed", gatekeeperId, error,
+      });
       catalogs.set(gatekeeperId, null);
     }
   }));

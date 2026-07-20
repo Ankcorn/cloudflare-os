@@ -7,7 +7,10 @@
 // (see ai-models.ts), billed via Unified Billing. We only ever need the account id here — no gateway
 // is listed or chosen.
 
+import { createWorkshopLogger } from "../../logging";
+
 const API_BASE = "https://api.cloudflare.com/client/v4";
+const logger = createWorkshopLogger("workshop.ai.gateway.billing");
 
 interface CfEnvelope<T> {
   success: boolean;
@@ -24,9 +27,10 @@ async function cfGet<T>(token: string, path: string): Promise<T | null> {
     headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
   });
   if (!resp.ok) {
-    let body = "";
-    try { body = await resp.text(); } catch { /* ignore */ }
-    console.error(`[cf-account] GET ${path} -> ${resp.status} ${resp.statusText}`, body.slice(0, 500));
+    logger.error("cf-account GET failed", {
+      event: "cloudflare.account.get.failed",
+      path, status: resp.status, statusText: resp.statusText,
+    });
     return null;
   }
   const data = await resp.json() as CfEnvelope<T>;

@@ -3,10 +3,13 @@
 // Contains no secrets.
 
 import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
+import { createWorkshopLogger } from "./logging";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
+
+const logger = createWorkshopLogger("workshop.deployment.config");
 
 // Resolve the auth-capable, allowlisted gatekeeper vendors offered as sign-in methods, querying
 // each gatekeeper's describe() for display info. Skips vendors with no binding, that don't advertise
@@ -24,7 +27,9 @@ export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInf
       if (!desc.providesAuth) return null;
       return { vendorId, displayName: desc.displayName, logo: desc.logo, color: desc.color };
     } catch (err) {
-      console.error(`[auth] failed to describe gatekeeper "${vendorId}":`, err);
+      logger.error("failed to describe auth gatekeeper", {
+        event: "auth.gatekeeper.describe.failed", vendorId, error: err,
+      });
       return null;
     }
   }));

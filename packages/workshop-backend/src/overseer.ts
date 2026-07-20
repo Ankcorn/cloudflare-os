@@ -7,6 +7,7 @@ import {
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
+import { withLogContext } from "@gadgets/backend-utils/context-logger";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
@@ -24,6 +25,9 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
+import { createWorkshopLogger, type WorkshopLogFields } from "./logging";
+
+const logger = createWorkshopLogger("workshop.overseer");
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
@@ -632,6 +636,7 @@ const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 // declare private methods because some of the methods are needed by multiple classes.
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
+  readonly logger: ReturnType<typeof createWorkshopLogger>;
 
   // Identifies this DO instance. Sent to chat subscribers so they can detect a full server
   // restart (see AiChatSubscriber.streamGeneration). A timestamp suffices since a DO won't
@@ -860,7 +865,10 @@ class OverseerImpl implements AgentHooks {
       let userMeta = await user.getChatContext(record.modelId);
       aiModel = userMeta.aiModel;
     } catch (err) {
-      console.error("error resolving model while resuming agent:", err);
+      this.logger.error("error resolving model while resuming agent", {
+        event: "agent.resume.model.resolve.failed",
+        chatId: record.chatId, modelId: record.modelId, error: err,
+      });
     }
 
     if (!aiModel) {
@@ -885,6 +893,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
+    this.logger = logger.with({ gadgetId: ctx.id.toString() });
     this.storage = makeOverseerStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
@@ -1571,7 +1580,9 @@ class OverseerImpl implements AgentHooks {
         this.addChatMessages(caller.chatId, author, [{type: "action", actionId}]);
       }
     } catch (err) {
-      console.error(err);
+      this.logger.warn("failed to post action chat message", {
+        event: "action.chat.message.post.failed", actionId, error: err,
+      });
     }
   }
 
@@ -1938,7 +1949,10 @@ class OverseerImpl implements AgentHooks {
       await owner.setGadgetLastActive(this.ctx.id.toString(), this.#lastActiveTimeKnownToUs!,
                                       this.storage.totalCost.get());
     } catch (err) {
-      console.error(err);
+      this.logger.warn("failed to bump gadget last-active on user DO", {
+        event: "gadget.last.active.bump.failed",
+        gadgetId: this.ctx.id.toString(), error: err,
+      });
 
       // Force retry on next bump.
       this.#lastActiveTimeKnownToUserDo = undefined;
@@ -2333,14 +2347,36 @@ class OverseerImpl implements AgentHooks {
     this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
   }
 
-  async #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
-                      initiator: AiChatAuthorInfo,
-                      callbackInitiated: boolean,
-                      liveChat: LiveChatContext): Promise<void> {
+  #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
+                initiator: AiChatAuthorInfo,
+                callbackInitiated: boolean,
+                liveChat: LiveChatContext): Promise<void> {
+    return withLogContext({
+      operation: "agent.run",
+      gadgetId: this.ctx.id.toString(),
+      chatId,
+      modelId: aiModel.profile.id,
+    } satisfies Partial<WorkshopLogFields>, () => this.#runAgentTurnWithContext(
+        chatId, aiModel, initiator, callbackInitiated, liveChat));
+  }
+
+  async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
+                                 initiator: AiChatAuthorInfo,
+                                 callbackInitiated: boolean,
+                                 liveChat: LiveChatContext): Promise<void> {
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
     let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
+    let startedAt = Date.now();
+    const turnLogger = this.logger.with({
+      operation: "agent.run",
+      chatId,
+      modelId: aiModel.profile.id,
+    });
+    turnLogger.debug("agent run started", {
+      event: "agent.run.started", callbackInitiated,
+    });
 
     try {
       // Enforce the optional free-tier usage limit before starting a user-initiated turn. Callback-
@@ -2355,6 +2391,10 @@ class OverseerImpl implements AgentHooks {
         if (!usage.allowed) {
           this.postAgentErrorMessage(chatId, aiModel.profile,
               usage.reason ?? "Usage limit reached.", "usage_limit");
+          turnLogger.debug("agent run finished", {
+            event: "agent.run.finished", outcome: "usage_limit",
+            durationMs: Date.now() - startedAt,
+          });
           return;
         }
         // Free tier exhausted but the user can continue via their own Cloudflare gateway: route
@@ -2373,6 +2413,7 @@ class OverseerImpl implements AgentHooks {
       controller.signal.throwIfAborted();
 
       let hasBeenNudged = false;
+      let outcome: "ok" | "callbacks_stalled" = "ok";
       while (true) {
         let chatMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
         let callbackCountBefore = liveChat.activeAgentCallbacks.size;
@@ -2395,6 +2436,7 @@ class OverseerImpl implements AgentHooks {
               "Agent failed to resolve callbacks after multiple attempts.");
           this.postAgentErrorMessage(chatId, aiModel.profile,
               `Failed to resolve ${count} outstanding callback(s).`);
+          outcome = "callbacks_stalled";
           break;
         }
 
@@ -2430,6 +2472,10 @@ class OverseerImpl implements AgentHooks {
         }]);
         hasBeenNudged = true;
       }
+      turnLogger.debug("agent run finished", {
+        event: "agent.run.finished", outcome,
+        durationMs: Date.now() - startedAt,
+      });
     } catch (err: unknown) {
       // Extract the APICallError if present — either thrown directly
       // (non-retryable) or wrapped in RetryError (retryable, exhausted).
@@ -2442,14 +2488,22 @@ class OverseerImpl implements AgentHooks {
 
       let errorMessage: string;
       if (apiError) {
-        let { statusCode, url, responseBody } = apiError;
+        let { statusCode, responseBody } = apiError;
         let summary = stringifyError(err);
-        console.error("error in runAgent():", summary, `| ${statusCode} ${url} | body: ${responseBody}`);
+        turnLogger.error("runAgent failed", {
+          event: "agent.run.failed", statusCode, error: err,
+        });
         errorMessage = `${summary} — ${responseBody ?? statusCode}`;
       } else {
         errorMessage = stringifyError(err);
-        console.error("error in runAgent():", errorMessage);
+        turnLogger.error("runAgent failed", {
+          event: "agent.run.failed", error: err,
+        });
       }
+      turnLogger.debug("agent run finished", {
+        event: "agent.run.finished", outcome: "error",
+        durationMs: Date.now() - startedAt,
+      });
 
       this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
 
@@ -2777,7 +2831,10 @@ class OverseerImpl implements AgentHooks {
             cls,
             {type: "ambient", vendorId: account.vendorId, accountId: account.accountId});
       } catch (err) {
-        console.error(`Failed to provision ambient capsule for vendor "${account.vendorId}":`, err);
+        this.logger.error("failed to provision ambient capsule", {
+          event: "ambient.capsule.provision.failed",
+          vendorId: account.vendorId, accountId: account.accountId, error: err,
+        });
       }
     }));
   }
@@ -2826,7 +2883,10 @@ class OverseerImpl implements AgentHooks {
                 authorizer as unknown as ObservationAuthorizer);
             return catalog ? normalizeAgentCatalog(catalog) : null;
           } catch (error) {
-            console.error(`Failed to load agent catalog for ${record.resourceTitle}:`, error);
+            this.logger.warn("failed to load agent catalog", {
+              event: "agent.catalog.load.failed",
+              gatekeeperId, resourceTitle: record.resourceTitle, error,
+            });
             return null;
           }
         });
@@ -3128,7 +3188,9 @@ class OverseerImpl implements AgentHooks {
       // TODO: Should we track costs for title generation? It's pretty negligible.
     } catch (err) {
       // Oh well, just leave the title as "New Chat".
-      console.error("Error generating chat title:", err);
+      this.logger.warn("error generating chat title", {
+        event: "chat.title.generate.failed", chatId, error: err,
+      });
     }
   }
 
@@ -3165,7 +3227,9 @@ class OverseerImpl implements AgentHooks {
       }
     } catch (err) {
       // Oh well, just leave the title as-is.
-      console.error("Error generating gadget title:", err);
+      this.logger.warn("error generating gadget title", {
+        event: "gadget.title.generate.failed", chatId, error: err,
+      });
     }
   }
 
@@ -3255,7 +3319,9 @@ class OverseerImpl implements AgentHooks {
       // this error.
       // TODO: If we ever use this for billing we'll want to make it more reliable, perhaps by
       //   storing unfetched log IDs in storage and retrying fetches.
-      console.error(err);
+      this.logger.warn("failed to fetch AI Gateway cost log", {
+        event: "ai.gateway.cost.log.fetch.failed", error: err,
+      });
     }
   }
 
@@ -3440,7 +3506,9 @@ class OverseerImpl implements AgentHooks {
       // Cheap single KV get from the mirror AdminSettings maintains; avoids the singleton DO.
       return (await readAdminConfig(this.env)).instanceInstructions;
     } catch (err) {
-      console.error("Failed to read instance instructions:", err);
+      this.logger.warn("failed to read instance instructions", {
+        event: "instance.instructions.read.failed", error: err,
+      });
       return "";
     }
   }
@@ -3450,7 +3518,9 @@ class OverseerImpl implements AgentHooks {
       let vendors = await this.#listGatekeeperVendorsCached();
       return vendors.map(v => ({id: v.id, displayName: v.description.displayName}));
     } catch (err) {
-      console.error("Failed to list connectable vendors:", err);
+      this.logger.warn("failed to list connectable vendors", {
+        event: "connectable.vendors.list.failed", error: err,
+      });
       return [];
     }
   }
@@ -3572,7 +3642,9 @@ class OverseerImpl implements AgentHooks {
       resolver(trace);
       this.#codeModeResolvers.delete(executionId);
     } else {
-      console.error(`Received unexpected code mode trace: ${executionId}`);
+      this.logger.error("received unexpected code mode trace", {
+        event: "code.mode.trace.unexpected", executionId,
+      });
     }
   }
 
@@ -3612,7 +3684,9 @@ class OverseerImpl implements AgentHooks {
       try {
         await this.getGatekeeperFacet(id).removeObserver(observerId);
       } catch (err) {
-        console.error("Failed to remove observer from gatekeeper", id, err);
+        this.logger.warn("failed to remove observer from gatekeeper", {
+          event: "gatekeeper.observer.remove.failed", gatekeeperId: id, observerId, error: err,
+        });
       }
     }));
   }
@@ -3921,7 +3995,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // On the very first open we block so the agent's first turn sees the capsules; later opens let the
     // reconcile run in the background to keep cross-DO latency off the hot path.
     let ensureCapsules = this.impl.ensureAmbientCapsules().catch((err) => {
-      console.error("Failed to ensure singleton gatekeeper capsules:", err);
+      this.impl.logger.error("failed to ensure singleton gatekeeper capsules", {
+        event: "singleton.capsules.ensure.failed", error: err,
+      });
     });
     if (firstOpen) {
       await ensureCapsules;
@@ -3983,7 +4059,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           const ownerProfile = await owner.whoami();
           clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile);
         } catch (err) {
-          console.error(err);
+          this.impl.logger.warn("failed to record shared gadget open", {
+            event: "shared.gadget.open.record.failed", gadgetId, error: err,
+          });
         }
       })();
     }
@@ -4319,13 +4397,12 @@ export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetT
     await stub.deliverGadgetLogs(this.ctx.props.chatId ?? null, logs);
   }
 
-  // New-style streaming tail worker. This produces console logs in real time (rather than waiting
-  // for the end of the event), but currently produces log spam on the `wrangler dev` console.
+  // New-style streaming tail worker. Delivers gadget console logs to the product UI in real time.
+  // Do not console.log the tail events here — they spam wrangler dev and are not ops logs.
   tailStream(event: TailStream.TailEvent<TailStream.Onset>)
       : TailStream.TailEventHandlerType | Promise<TailStream.TailEventHandlerType> {
     return {
       log: (event: TailStream.TailEvent<TailStream.Log>) => {
-        console.log("log", event);
         let log: ConsoleLogEvent = {
           timestamp: new Date(event.timestamp),
           level: event.event.level,
@@ -4335,7 +4412,6 @@ export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetT
       },
 
       exception: (event: TailStream.TailEvent<TailStream.Exception>) => {
-        console.log("exception", event);
         let log: ConsoleLogEvent = {
           timestamp: new Date(event.timestamp),
           level: "error",
@@ -4350,7 +4426,12 @@ export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetT
   // for calls that do things like register subscriptions.
   async tail(events: TraceItem[]) {
     if (events.length != 1) {
-      console.error("Unexpected gadget trace size: ${events.length}");
+      logger.error("unexpected gadget trace size", {
+        event: "gadget.trace.size.unexpected",
+        gadgetId: this.ctx.props.overseerId,
+        chatId: this.ctx.props.chatId,
+        size: events.length,
+      });
       return;
     }
 
@@ -4393,7 +4474,12 @@ export class CodeModeTailLoopback extends WorkerEntrypoint<Cloudflare.Env, CodeM
 
   async tail(events: TraceItem[]) {
     if (events.length != 1) {
-      console.error(`Unexpected code mode trace size: ${events.length}`);
+      logger.error("unexpected code mode trace size", {
+        event: "code.mode.trace.size.unexpected",
+        gadgetId: this.ctx.props.overseerId,
+        executionId: this.ctx.props.executionId,
+        size: events.length,
+      });
       return;
     }
 

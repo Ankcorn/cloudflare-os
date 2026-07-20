@@ -3,12 +3,13 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
+import { createLogger } from "@gadgets/backend-utils/context-logger";
 import {
   ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
   ContextDocument, ContextDocumentSummary,
   ContextGitTokenCreateResult, ContextGitTokenList,
   DEFAULT_DOCUMENT_CONTENT_TYPE, DEFAULT_GIT_BRANCH, MAX_DOCUMENT_BODY_BYTES,
-  contentTypeFromPath, isTextContentType,
+  contentTypeFromPath, isTextContentType, VENDOR_ID,
 } from "./context-types.js";
 import { metadataToSummary } from "./collection-kv.js";
 import { domainName } from "./domain.js";
@@ -16,6 +17,12 @@ import { readArtifactRepoDocuments } from "./artifact-sync.js";
 import {
   isSkillManifestPath, parseSkillManifest, type SkillIndexEntry,
 } from "./agent-skill.js";
+
+type ContextCollectionLogFields = { collectionId: string; vendorId: string };
+
+const logger = createLogger<ContextCollectionLogFields>({
+  component: "gatekeeper.context", vendorId: VENDOR_ID,
+});
 
 const MAX_DOCUMENT_PATH_LENGTH = 1024;
 // Git tokens created through the web UI are valid for one year,
@@ -146,7 +153,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     // Artifacts auto-creates an initial write token when the repo is first
     // created. We don't want or need this token, so we immediately revoke it.
     await repo.revokeToken(created.token).catch((err) => {
-      console.warn("Failed to revoke initial Artifacts token for context collection.", {
+      logger.warn("failed to revoke initial Artifacts token for context collection", {
+        event: "artifacts.initial.token.revoke.failed",
         collectionId: metadata.id,
         error: err,
       });
@@ -495,7 +503,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     if (Date.now() - content.lastRefreshedAt.getTime() < GIT_REFRESH_MIN_INTERVAL_MS) return;
 
     void this.#refreshArtifactSource().catch((err) => {
-      console.warn("Failed to refresh git-based context collection in the background.", {
+      logger.warn("failed to refresh git-based context collection in the background", {
+        event: "context.collection.git.refresh.failed",
         collectionId: this.getMetadata().id,
         error: err,
       });
@@ -633,7 +642,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
     if (meta.content.source === "git") {
       await this.env.ARTIFACTS.delete(id).catch((err) => {
-        console.warn("Failed to delete Artifacts repo for context collection.", {
+        logger.warn("failed to delete Artifacts repo for context collection", {
+          event: "artifacts.repo.delete.failed",
           collectionId: id,
           error: err,
         });
@@ -648,7 +658,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     let meta = this.getMetadata();
     if (meta.content.source === "git" && meta.id) {
       await this.env.ARTIFACTS.delete(meta.id).catch((err) => {
-        console.warn("Failed to delete Artifacts repo while revoking context collection owner.", {
+        logger.warn("failed to delete Artifacts repo while revoking context collection owner", {
+          event: "artifacts.repo.delete.for.revoked.owner.failed",
           collectionId: meta.id,
           error: err,
         });

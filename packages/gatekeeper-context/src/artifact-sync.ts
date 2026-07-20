@@ -5,10 +5,29 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import { posix as posixPath } from "node:path";
+import { createLogger, withLogContext } from "@gadgets/backend-utils/context-logger";
 import {
-  ContextDocument, MAX_DOCUMENT_BODY_BYTES, contentTypeFromPath, isTextContentType,
+  ContextDocument, MAX_DOCUMENT_BODY_BYTES, contentTypeFromPath, isTextContentType, VENDOR_ID,
 } from "./context-types.js";
 import { extractDescription } from "./description-extractors.js";
+
+type ArtifactSyncLogFields = {
+  bodyBytes: number;
+  branch: string;
+  dir: string;
+  filepath: string;
+  maxBodyBytes: number;
+  maxGitDirBytes: number;
+  operation: string;
+  repoName: string;
+  sizeBytes: number;
+  tokenId: number | string;
+  vendorId: string;
+};
+
+const logger = createLogger<ArtifactSyncLogFields>({
+  component: "gatekeeper.context", vendorId: VENDOR_ID,
+});
 
 // Maximum packed git repository size that can be loaded into memory
 // during clone or fetch. This is a soft limit since additional
@@ -80,7 +99,8 @@ async function gitdirStats(dir: string): Promise<{ exists: boolean; sizeBytes: n
 async function deleteCachedRepo(dir: string): Promise<void> {
   await fsp.rm(dir, { recursive: true, force: true }).catch((cleanupErr) => {
     if (isEnoent(cleanupErr)) return;
-    console.warn("Failed to clean up Artifacts git cache.", {
+    logger.warn("failed to clean up Artifacts git cache", {
+      event: "artifacts.git.cache.cleanup.failed",
       dir,
       error: cleanupErr,
     });
@@ -111,7 +131,8 @@ async function cloneRepo(dir: string, url: string, branch: string, onAuth: () =>
       onAuth,
     });
   } catch (err) {
-    console.warn("Artifacts git clone failed; cleaning up partial clone.", {
+    logger.warn("artifacts git clone failed; cleaning up partial clone", {
+      event: "artifacts.git.clone.failed",
       dir,
       error: err,
     });
@@ -145,7 +166,8 @@ async function fetchOrRecloneRepo(dir: string, url: string, branch: string, onAu
   let { sizeBytes } = await gitdirStats(dir);
   let remainingBytes = MAX_GIT_DIR_BYTES - sizeBytes;
   if (remainingBytes <= 0) {
-    console.warn("Artifacts git cache exceeded transfer budget; recloning shallow cache.", {
+    logger.warn("artifacts git cache exceeded transfer budget; recloning shallow cache", {
+      event: "artifacts.git.cache.transfer.budget.exceeded",
       dir,
       sizeBytes,
       maxGitDirBytes: MAX_GIT_DIR_BYTES,
@@ -156,7 +178,8 @@ async function fetchOrRecloneRepo(dir: string, url: string, branch: string, onAu
   try {
     return await fetchRepo(dir, url, branch, onAuth, remainingBytes);
   } catch (err) {
-    console.warn("Artifacts git fetch failed; cleaning up before recloning.", {
+    logger.warn("artifacts git fetch failed; cleaning up before recloning", {
+      event: "artifacts.git.fetch.failed",
       dir,
       error: err,
     });
@@ -170,17 +193,31 @@ function encodedBodyBytes(contentType: string, blob: Uint8Array): number {
     : Math.ceil(blob.byteLength / 3) * 4;
 }
 
-export async function readArtifactRepoDocuments(
+export function readArtifactRepoDocuments(
   artifacts: Artifacts,
   repoName: string,
   url: string,
   branch: string,
   currentCommit?: string,
 ): Promise<ArtifactRepoReadResult> {
+  const dir = `/tmp/artifacts/${repoName}`;
+  return withLogContext({
+    operation: "artifacts.repo.read", repoName, branch, dir,
+  } satisfies Partial<ArtifactSyncLogFields>, () => readArtifactRepoDocumentsWithContext(
+      artifacts, repoName, url, branch, dir, currentCommit));
+}
+
+async function readArtifactRepoDocumentsWithContext(
+  artifacts: Artifacts,
+  repoName: string,
+  url: string,
+  branch: string,
+  dir: string,
+  currentCommit?: string,
+): Promise<ArtifactRepoReadResult> {
   let repo = await artifacts.get(repoName);
   // Create a temporary read token just for this function call.
   let token = await repo.createToken("read", 3600);
-  let dir = `/tmp/artifacts/${repoName}`;
 
   try {
     let onAuth = () => ({ username: "x-access-token", password: token.plaintext });
@@ -216,7 +253,8 @@ export async function readArtifactRepoDocuments(
       let contentType = contentTypeFromPath(filepath);
       let bodyBytes = encodedBodyBytes(contentType, blob);
       if (bodyBytes > MAX_DOCUMENT_BODY_BYTES) {
-        console.warn("Skipping oversized mirrored context file.", {
+        logger.warn("skipping oversized mirrored context file", {
+          event: "context.file.oversized.skipped",
           filepath,
           bodyBytes,
           maxBodyBytes: MAX_DOCUMENT_BODY_BYTES,
@@ -237,7 +275,8 @@ export async function readArtifactRepoDocuments(
     return { commit, changed: true, documents };
   } finally {
     await repo.revokeToken(token.id).catch((err) => {
-      console.warn("Failed to revoke temporary Artifacts read token for context collection sync.", {
+      logger.warn("failed to revoke temporary Artifacts read token for context collection sync", {
+        event: "artifacts.read.token.revoke.failed",
         repoName,
         tokenId: token.id,
         error: err,
