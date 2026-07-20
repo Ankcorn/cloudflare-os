@@ -51,6 +51,7 @@ export default function ObserverConfigModal({
   const [choices, setChoices] = useState<Record<number, number | undefined>>({})
   // Vendor descriptions keyed by vendorId, for display (name + logo) even when no account exists.
   const [vendorsById, setVendorsById] = useState<Map<string, VendorDescription>>(new Map())
+  const [vendorsReady, setVendorsReady] = useState(false)
   const [connecting, setConnecting] = useState<string | null>(null)
   const [reconnecting, setReconnecting] = useState<number | null>(null)
 
@@ -102,7 +103,7 @@ export default function ObserverConfigModal({
     }
 
     authenticatedApi
-      .subscribeConnectedAccounts(new Subscriber())
+      .subscribeConnectedAccounts(new Subscriber(), { includeForcedAutoProvisionedAccounts: true })
       .then(stub => {
         if (cancelled) { stub[Symbol.dispose](); return }
         subStub = stub
@@ -121,15 +122,21 @@ export default function ObserverConfigModal({
   // ── load vendor descriptions for display (names + logos) ──────────────────────
   useEffect(() => {
     let cancelled = false
-    authenticatedApi
-      .listGatekeeperVendors()
-      .then(list => {
+    Promise.all([
+      authenticatedApi.listGatekeeperVendors(),
+      authenticatedApi.listAddableGatekeepers(),
+    ])
+      .then(([vendors, addable]) => {
         if (cancelled) return
         const map = new Map<string, VendorDescription>()
-        for (const v of list) map.set(v.id, v.description)
+        for (const v of [...vendors, ...addable]) map.set(v.id, v.description)
         setVendorsById(map)
+        setVendorsReady(true)
       })
-      .catch(err => console.error('Failed to load vendors:', err))
+      .catch(err => {
+        console.error('Failed to load vendors:', err)
+        if (!cancelled) setVendorsReady(true)
+      })
     return () => { cancelled = true }
   }, [authenticatedApi])
 
@@ -156,14 +163,17 @@ export default function ObserverConfigModal({
   }, [accounts, needs])
 
   // ── connect / reconnect handlers ──────────────────────────────────────────────
-  const handleConnect = async (vendorId: string) => {
+  const handleConnect = async (need: ObserverBindingNeed) => {
+    const { vendorId } = need
     connectingRef.current = vendorId
     setConnecting(vendorId)
     try {
-      const { url } = await authenticatedApi.connectAccount(vendorId)
-      window.open(url, '_blank', 'noopener,noreferrer')
-      // The subscription fires add() with the new account when the flow completes, at which point
-      // we clear `connecting` and auto-select it via the default-choice effect above.
+      if (vendorsById.get(vendorId)?.autoProvisionsAccount) {
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+      } else {
+        const { url } = await authenticatedApi.connectAccount(vendorId)
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -211,16 +221,16 @@ export default function ObserverConfigModal({
           so we can confirm you&apos;re allowed to see the data it uses.
         </Text>
 
-        {!ready ? (
+        {!ready || !vendorsReady ? (
           <div className="text-center py-10">
             <Loader />
           </div>
         ) : (
           <div className="flex flex-col gap-4 mt-5">
             {needs.map(need => {
-              const vendor = vendorsById.get(need.vendorId)
-              const vendorName = vendor?.displayName || need.vendorId || 'service'
               const matching = [...accounts.values()].filter(a => a.vendorId === need.vendorId)
+              const vendor = matching[0]?.vendor ?? vendorsById.get(need.vendorId)
+              const vendorName = vendor?.displayName || need.vendorId || 'service'
               const chosen = accountFor(need.gatekeeperId)
 
               return (
@@ -237,10 +247,10 @@ export default function ObserverConfigModal({
                         </div>
                       )}
                     </div>
-                    {matching.length === 0 && (
+                    {matching.length === 0 && vendor && (
                       <WorkshopButton
                         tone="primary"
-                        onClick={() => handleConnect(need.vendorId)}
+                        onClick={() => handleConnect(need)}
                         disabled={connecting === need.vendorId}
                       >
                         {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect'}
@@ -292,15 +302,17 @@ export default function ObserverConfigModal({
                         </button>
                       )}
 
-                      <button
-                        type="button"
-                        onClick={() => handleConnect(need.vendorId)}
-                        disabled={connecting === need.vendorId}
-                        className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start"
-                      >
-                        <Plus size={11} />
-                        {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect a different account'}
-                      </button>
+                      {!vendor?.autoProvisionsAccount && (
+                        <button
+                          type="button"
+                          onClick={() => handleConnect(need)}
+                          disabled={connecting === need.vendorId}
+                          className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start"
+                        >
+                          <Plus size={11} />
+                          {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect a different account'}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -313,7 +325,11 @@ export default function ObserverConfigModal({
           <WorkshopButton tone="secondary" onClick={onCancel}>
             Cancel
           </WorkshopButton>
-          <WorkshopButton tone="primary" onClick={handleConfirm} disabled={!ready || !allSatisfied}>
+          <WorkshopButton
+            tone="primary"
+            onClick={handleConfirm}
+            disabled={!ready || !vendorsReady || !allSatisfied}
+          >
             Open Gadget
           </WorkshopButton>
         </div>
