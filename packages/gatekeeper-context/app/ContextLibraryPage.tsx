@@ -1720,9 +1720,9 @@ type TreeFolder = {
   files: ContextDocumentSummary[];
 };
 
-// A folder is an agent skill if it directly contains a SKILL.md (the agent skill standard).
+// A folder is a skill when one of its files has a parsed skill name.
 function isSkillFolder(folder: TreeFolder): boolean {
-  return folder.files.some((f) => baseName(f.path) === "SKILL.md");
+  return folder.files.some((file) => file.skillName !== undefined);
 }
 
 function buildTree(
@@ -1947,7 +1947,7 @@ function FolderView({
                 </span>
                 {isSkill && (
                   <span
-                    title="Contains a SKILL.md — an agent skill"
+                    title="Contains a valid Agent Skill"
                     className="shrink-0 text-[10px] font-medium uppercase leading-none tracking-[0.4px] text-kumo-inactive"
                   >
                     skill
@@ -2943,6 +2943,7 @@ function DocumentEditor({
   const [renaming, setRenaming] = useState(false);
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
+  const [skillName, setSkillName] = useState<string | null>(null);
   // Content type is path-derived, so renames update rendering immediately.
   const contentType = contentTypeFromPath(path);
   const [loading, setLoading] = useState(true);
@@ -2982,6 +2983,7 @@ function DocumentEditor({
         savedDocumentRef.current = { description: d.description, body: d.body };
         setDescription(d.description);
         setBody(d.body);
+        setSkillName(d.skillName ?? null);
         setDirty(false);
         setMode(readOnly || initialMode !== "edit" ? "read" : "edit");
       }
@@ -3020,7 +3022,12 @@ function DocumentEditor({
         body: savedBody,
         contentType: overrides?.contentType ?? contentType,
       });
-      savedDocumentRef.current = { description: savedDescription, body: savedBody };
+      let saved = await context.getContextDocument(collectionId, path);
+      savedDocumentRef.current = {
+        description: saved?.description ?? savedDescription,
+        body: saved?.body ?? savedBody,
+      };
+      setSkillName(saved?.skillName ?? null);
       setDirty(false);
       toasts.add({ title: "Saved", variant: "success" });
       onChanged();
@@ -3168,6 +3175,9 @@ function DocumentEditor({
       <div className="border-b border-kumo-line px-6 py-3.5 sm:px-10">
         <label className="mb-1.5 block text-[12px] font-medium tracking-[-0.15px] text-kumo-subtle">
           When to use this
+          {skillName && (
+            <span className="ml-1 font-mono text-kumo-brand">· /{skillName}</span>
+          )}
           {extractedDescription !== null && (
             <span
               className="ml-1 text-kumo-inactive"

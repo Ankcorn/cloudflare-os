@@ -4,10 +4,12 @@
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { ApprovalQueue, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ObservationAuthorizer, ObservationDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
-  ContextCollectionVisibility, isTextContentType,
+  ContextCollectionVisibility, decodeDocId, encodeDocId, isTextContentType,
 } from "./context-types.js";
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
@@ -33,15 +35,15 @@ export class LibraryReadSession extends RpcTarget {
     private userLibraries: DurableObjectNamespace<UserLibraryDurableObject>,
     private domain: string,
     private accountId: string,
-    private approvalQueue: NativeRpcStub<ApprovalQueue>,
+    private authorizer: NativeRpcStub<ObservationAuthorizer>,
     private observeCollections: ObserveCollections,
   ) {
     super();
   }
 
-  // Release the dup'd approval queue when the read session is disposed.
+  // Release the authorizer owned by this read session.
   [Symbol.dispose](): void {
-    this.approvalQueue[Symbol.dispose]?.();
+    this.authorizer[Symbol.dispose]?.();
   }
 
   #collection(id: string): DurableObjectStub<ContextCollectionDurableObject> {
@@ -62,7 +64,7 @@ export class LibraryReadSession extends RpcTarget {
     let check = collectionIds.length > 0
       ? await this.observeCollections(collectionIds)
       : { pendingCollections: [], commit() {} };
-    await this.approvalQueue.authorizeObservation({
+    await this.authorizer.authorizeObservation({
       ...description, excludeObservers: check.excludeObservers,
     });
     check.commit();
@@ -245,18 +247,4 @@ async function mapWithConcurrency<T, R>(
   let workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
   await Promise.all(workers);
   return results;
-}
-
-function encodeDocId(collectionId: string, path: string): string {
-  return `${collectionId}/${path}`;
-}
-
-// Split opaque "collectionId/path" ids; malformed means not found.
-function decodeDocId(docId: string): { collectionId: string; path: string } | null {
-  let slashIdx = docId.indexOf("/");
-  if (slashIdx < 0) return null;
-  let collectionId = docId.slice(0, slashIdx);
-  let path = docId.slice(slashIdx + 1);
-  if (!collectionId || !path) return null;
-  return { collectionId, path };
 }

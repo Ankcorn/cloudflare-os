@@ -2,7 +2,7 @@
 // unnamed agent capsule (ContextGatekeeper) and a management UI (ContextApi). Data is sharing-domain
 // scoped by binding props.
 
-import { WorkerEntrypoint, DurableObject, RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { WorkerEntrypoint, DurableObject, RpcStub as NativeRpcStub, RpcTarget as NativeRpcTarget } from "cloudflare:workers";
 import { RpcStub } from "capnweb";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { boundAgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
@@ -11,11 +11,18 @@ import type {
   AppUiContext, GatekeeperUser, GatekeeperUiFrame, ApprovalQueue, ObservationAuthorizer,
   GatekeeperConnectCallback, GatekeeperConnectOptions, SupportedResource,
   Gatekeeper, GatekeeperUserVerifier, ResourceDescription, ActionKind,
+  SlashCommandDescriptor, SlashCommandProvider, SlashCommandResult,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { LibraryReadSession } from "./library-read.js";
 import { ContextApiImpl, loadEnabledContextCollections } from "./context-api.js";
 import { ContextObserverTracker } from "./context-observers.js";
 import type { ContextVerifierApi } from "./context-observers.js";
+import {
+  buildAgentSkillCatalogEntries, buildAgentSkillCommands, buildAgentSkillMessage,
+  parseSkillManifest,
+  type CollectionSkills,
+} from "./agent-skill.js";
+import type { EnabledCollectionInfo } from "./context-types.js";
 import { domainName, DEFAULT_SHARING_DOMAIN } from "./domain.js";
 import APP_HTML from "./generated/app.txt";
 
@@ -31,11 +38,40 @@ const LIBRARY_ICON = {
     "</svg>"),
 };
 
+const COLLECTION_SKILL_FANOUT = 8;
+
+class ContextSlashCommandProvider extends NativeRpcTarget
+    implements SlashCommandProvider {
+  constructor(
+    private listCommands: () => Promise<SlashCommandDescriptor[]>,
+    private invokeCommand: (
+      id: string,
+      args: string,
+      authorizer: NativeRpcStub<ObservationAuthorizer>,
+    ) => Promise<SlashCommandResult>,
+  ) {
+    super();
+  }
+
+  list(): Promise<SlashCommandDescriptor[]> {
+    return this.listCommands();
+  }
+
+  invoke(
+      id: string,
+      args: string,
+      authorizer: NativeRpcStub<ObservationAuthorizer>): Promise<SlashCommandResult> {
+    return this.invokeCommand(id, args, authorizer);
+  }
+
+  [Symbol.dispose]() {}
+}
+
 // Agent-facing API returned by describeBinding(). Keep these shapes in sync with context-types.ts.
 const CONTEXT_LIBRARY_TYPES = `
 /**
- * Shared context documents (runbooks, schemas, conventions, how-tos). Search/read when you need
- * project or team knowledge you don't already have. Every call is an observation.
+ * Shared context documents and skills. Catalog entries provide document IDs accepted by read().
+ * Each call records an observation.
  */
 interface ContextLibrary {
   /** Full-text search across the collections available to you. Returns documents (with docIds). */
@@ -43,9 +79,7 @@ interface ContextLibrary {
   /** Browse the tree: no args lists collections (by collectionId); pass a collectionId (and optional
    *  path) to drill in and get the documents (with docIds) inside it. */
   list(opts?: { collectionId?: string; path?: string }): Promise<ContextListing>;
-  /** Read a full document by its opaque docId. A docId comes only from a search() result or a list()
-   *  document entry — it is NOT a collectionId. Returns null if the docId doesn't resolve (so to read
-   *  inside a collection, search() it or list() it first to obtain document docIds). */
+  /** Read a document by an ID from the catalog, search(), or list(). */
   read(docId: string): Promise<ContextDocument | null>;
 }
 
@@ -191,6 +225,33 @@ export class ContextGatekeeper
     return new ContextObserverTracker(this.ctx.storage.kv, this.ctx.props.sharingDomain);
   }
 
+  async #loadSkills(
+      collections: EnabledCollectionInfo[]):
+      Promise<CollectionSkills[]> {
+    let result: CollectionSkills[] = [];
+    for (let offset = 0; offset < collections.length; offset += COLLECTION_SKILL_FANOUT) {
+      let batch = await Promise.all(
+        collections.slice(offset, offset + COLLECTION_SKILL_FANOUT).map(async collection => {
+          try {
+            let id = this.#collections().idFromName(
+                domainName(this.ctx.props.sharingDomain, collection.id));
+            let skills = await this.#collections().get(id).listAgentSkills();
+            return {collection, skills};
+          } catch (error) {
+            console.error("Failed to load skills from Context collection:", {
+              collectionId: collection.id,
+              error,
+            });
+            return null;
+          }
+        }));
+      for (let entry of batch) {
+        if (entry) result.push(entry);
+      }
+    }
+    return result;
+  }
+
   async describe(): Promise<ResourceDescription> {
     return {
       url: "context://library",
@@ -198,6 +259,7 @@ export class ContextGatekeeper
       snippet: "Search and read your team's shared context collections.",
       suggestedBindingName: "CONTEXT",
       tsType: "ContextLibrary",
+      hasSlashCommands: true,
     };
   }
 
@@ -205,18 +267,52 @@ export class ContextGatekeeper
     return CONTEXT_LIBRARY_TYPES;
   }
 
-  async startSession(approvalQueue: NativeRpcStub<ApprovalQueue>): Promise<LibraryReadSession> {
-    // The session uses the queue after startSession() returns, so own a dup and dispose it on failure.
-    let queue = approvalQueue.dup();
+  #newReadSession(authorizer: NativeRpcStub<ObservationAuthorizer>): LibraryReadSession {
+    // The read session uses this authorizer after startSession() returns, so it owns a duplicate.
+    let ownedAuthorizer = authorizer.dup();
     try {
       return new LibraryReadSession(
         this.#collections(), this.#userLibraries(),
-        this.ctx.props.sharingDomain, this.ctx.props.accountId, queue,
+        this.ctx.props.sharingDomain, this.ctx.props.accountId, ownedAuthorizer,
         collectionIds => this.#observers().prepareObservation(collectionIds));
     } catch (err) {
-      queue[Symbol.dispose]?.();
+      ownedAuthorizer[Symbol.dispose]?.();
       throw err;
     }
+  }
+
+  async startSession(approvalQueue: NativeRpcStub<ApprovalQueue>): Promise<LibraryReadSession> {
+    return this.#newReadSession(approvalQueue);
+  }
+
+  async getSlashCommandProvider():
+      Promise<ContextSlashCommandProvider> {
+    return new ContextSlashCommandProvider(
+        () => this.#listSlashCommands(),
+        (id, args, authorizer) => this.#invokeAgentSkillCommand(id, args, authorizer));
+  }
+
+  async #listSlashCommands(): Promise<SlashCommandDescriptor[]> {
+    let domain = this.ctx.props.sharingDomain;
+    let userLibrary = this.#userLibraries().get(
+        this.#userLibraries().idFromName(domainName(domain, this.ctx.props.accountId)));
+    let collections = (await loadEnabledContextCollections(this.env, domain, userLibrary))
+        .toSorted((left, right) =>
+          left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+    return buildAgentSkillCommands(await this.#loadSkills(collections));
+  }
+
+  async #invokeAgentSkillCommand(
+      id: string, args: string, authorizer: NativeRpcStub<ObservationAuthorizer>):
+      Promise<SlashCommandResult> {
+    using session = this.#newReadSession(authorizer);
+    let document = await session.read(id);
+    if (!document?.path) throw new Error("The selected Agent Skill is no longer available.");
+    let manifest = parseSkillManifest(document.path, document.content);
+    return {
+      skillName: manifest.name,
+      message: buildAgentSkillMessage(document.content, args),
+    };
   }
 
   async getAgentCatalog(
@@ -226,23 +322,28 @@ export class ContextGatekeeper
     let userLibrary = this.#userLibraries().get(
       this.#userLibraries().idFromName(domainName(domain, this.ctx.props.accountId)));
     let collections = await loadEnabledContextCollections(this.env, domain, userLibrary);
-    let catalog = boundAgentCatalog(
-      collections
-          .map(collection => ({
-            id: collection.id,
-            title: collection.title,
-            description: collection.description,
-          }))
-          .toSorted((left, right) =>
-            left.title.localeCompare(right.title) || left.id.localeCompare(right.id)),
-      request,
-    );
+    let loaded = await this.#loadSkills(collections);
+    let skillEntries = buildAgentSkillCatalogEntries(loaded);
+    let collectionEntries = collections
+        .map(collection => ({
+          id: collection.id,
+          title: collection.title,
+          description: collection.description,
+        }))
+        .toSorted((left, right) =>
+          left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+    let entries = [...skillEntries, ...collectionEntries].toSorted((left, right) =>
+      left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
+    let catalog = boundAgentCatalog(entries, request);
     if (catalog.entries.length > 0) {
-      let check = await this.#observers().prepareObservation(
-        catalog.entries.map(entry => entry.id));
+      let collectionIds = [...new Set(catalog.entries.map(entry => {
+        let slash = entry.id.indexOf("/");
+        return slash < 0 ? entry.id : entry.id.slice(0, slash);
+      }))];
+      let check = await this.#observers().prepareObservation(collectionIds);
       await authorizer.authorizeObservation({
-        title: "Context collection catalog",
-        description: `Listed ${catalog.entries.length} available Context collection(s).`,
+        title: "Context catalog",
+        description: `Listed ${catalog.entries.length} available Context item(s).`,
         excludeObservers: check.excludeObservers,
       });
       check.commit();

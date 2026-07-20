@@ -64,6 +64,20 @@ export type ContextReadResult = {
   content: string;
 };
 
+// Document IDs join the collection ID and path with a slash.
+export function encodeDocId(collectionId: string, path: string): string {
+  return `${collectionId}/${path}`;
+}
+
+// Invalid IDs resolve to no document.
+export function decodeDocId(docId: string): {collectionId: string; path: string} | null {
+  let slashIndex = docId.indexOf("/");
+  if (slashIndex < 0) return null;
+  let collectionId = docId.slice(0, slashIndex);
+  let path = docId.slice(slashIndex + 1);
+  return collectionId && path ? {collectionId, path} : null;
+}
+
 // ---------------------------------------------------------------------------
 // Stored data model
 // ---------------------------------------------------------------------------
@@ -145,6 +159,9 @@ export type ContextDocument = {
   // Literal text for text content types; base64 for binary ones.
   body: string;
 
+  // Set when this document is a valid skill.
+  skillName?: string;
+
   lastUpdated: Date;
 };
 
@@ -154,6 +171,7 @@ export type ContextDocumentSummary = {
   name: string;
   description: string;
   contentType: string;
+  skillName?: string;
   lastUpdated: Date;
 };
 
@@ -254,6 +272,7 @@ export function contentTypeFromPath(path: string): string {
 
 // Text bodies are literal/searchable; everything else is base64. SVG is treated as an image.
 export function isTextContentType(contentType: string): boolean {
+  contentType = contentType.split(";", 1)[0].trim().toLowerCase();
   if (contentType.startsWith("text/")) return true;
   return (
     contentType === "application/json" ||
