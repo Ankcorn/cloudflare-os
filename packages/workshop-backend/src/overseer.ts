@@ -2110,7 +2110,7 @@ class OverseerImpl implements AgentHooks {
       this.storage.chats.put({
         chatId,
         sequence: this.nextChatSequence(chatId),
-        timestamp,
+        timestamp: this.getChatTimestamp(),
         author,
         type: "message",
         message: prepared.message,
