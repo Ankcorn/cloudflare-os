@@ -835,7 +835,10 @@ function getMarkdownComponents(
 const REMARK_PLUGINS_NO_CAPSULES = [remarkGfm];
 const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
 
-const MarkdownMessage = memo(function MarkdownMessage(
+// Exported for unit testing (see ChatInterface.markdown.test.tsx), which verifies that a
+// single newline in a user message survives to the DOM as a literal "\n" so the
+// `whitespace-pre-wrap` wrapper at the user-message render site renders it as a hard break.
+export const MarkdownMessage = memo(function MarkdownMessage(
   { message, capsules }: { message: string; capsules?: CapsuleSpecifier[] },
 ): ReactNode {
   const tokenizedMessage = useMemo(
@@ -5865,7 +5868,7 @@ function ChatInterface({
                                   </span>
                                 </div>
                               )}
-                              {msg.request.args}
+                              <span className="whitespace-pre-wrap">{msg.request.args}</span>
                             </div>
                             <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
                               {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
@@ -5902,7 +5905,7 @@ function ChatInterface({
                                 {entry.slashCommand ? (
                                   <>
                                     {entry.slashCommand.request.args && (
-                                      <div>{entry.slashCommand.request.args}</div>
+                                      <div className="whitespace-pre-wrap">{entry.slashCommand.request.args}</div>
                                     )}
                                     {msg.message && (
                                       <details className="mt-2 text-left text-xs text-kumo-subtle">
@@ -5917,10 +5920,13 @@ function ChatInterface({
                                     )}
                                   </>
                                 ) : msg.message.trim() && (
-                                  <MarkdownMessage
-                                    message={msg.message}
-                                    capsules={msg.capsules}
-                                  />
+                                  // pre-wrap renders users' single newlines as hard breaks.
+                                  <div className="whitespace-pre-wrap">
+                                    <MarkdownMessage
+                                      message={msg.message}
+                                      capsules={msg.capsules}
+                                    />
+                                  </div>
                                 )}
                               </div>
                               <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
