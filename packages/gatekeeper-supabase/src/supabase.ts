@@ -49,7 +49,7 @@ import SUPABASE_LOGO_SVG from "./supabase-logo.svg";
 import SUPABASE_PROJECT_CONFIGURATOR_HTML from "./generated/supabase-project-configurator-ui.txt";
 import SUPABASE_ORGANIZATION_CONFIGURATOR_HTML from "./generated/supabase-organization-configurator-ui.txt";
 
-export const VENDOR_ID = "supabase";
+const VENDOR_ID = "supabase";
 type SupabaseLogFields = { vendorId: string };
 
 const logger = createLogger<SupabaseLogFields>({

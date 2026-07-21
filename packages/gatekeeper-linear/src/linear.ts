@@ -74,7 +74,7 @@ import LINEAR_WORKSPACE_CONFIGURATOR_HTML from "./generated/linear-workspace-con
 import LINEAR_TEAM_CONFIGURATOR_HTML from "./generated/linear-team-configurator-ui.txt";
 import LINEAR_ISSUE_CONFIGURATOR_HTML from "./generated/linear-issue-configurator-ui.txt";
 
-export const VENDOR_ID = "linear";
+const VENDOR_ID = "linear";
 type LinearLogFields = { vendorId: string };
 
 const logger = createLogger<LinearLogFields>({
