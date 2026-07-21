@@ -41,7 +41,7 @@ import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
 
 // Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
-export const VENDOR_ID = "google";
+const VENDOR_ID = "google";
 type GoogleLogFields = {
   actionId: number | string;
   messageId: string;

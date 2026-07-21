@@ -30,7 +30,7 @@ import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
 import type { EmailMailboxConfiguratorRpc } from "./configurator/email-configurator-types";
 import EMAIL_LOGO_SVG from "./email-logo.svg";
 
-export const VENDOR_ID = "email";
+const VENDOR_ID = "email";
 type EmailLogFields = { vendorId: string };
 
 const logger = createLogger<EmailLogFields>({

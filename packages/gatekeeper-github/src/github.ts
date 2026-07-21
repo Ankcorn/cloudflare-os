@@ -74,7 +74,7 @@ import GITHUB_ISSUE_CONFIGURATOR_HTML from "./generated/github-issue-configurato
 import GITHUB_PULL_REQUEST_CONFIGURATOR_HTML from "./generated/github-pull-request-configurator-ui.txt";
 import GITHUB_REPO_CONFIGURATOR_HTML from "./generated/github-repo-configurator-ui.txt";
 
-export const VENDOR_ID = "github";
+const VENDOR_ID = "github";
 type GitHubLogFields = { vendorId: string };
 
 const logger = createLogger<GitHubLogFields>({
