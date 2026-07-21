@@ -7,6 +7,7 @@ packages/workshop-frontend/src/ChatInterface.tsx
   s_b9d78ba39005bb::t_e24ea6c1f5e573 2065,2514-2516
   s_b9d78ba39005bb::t_5a30febf68cc39 1812,1835,1838-1843,1845-1849
   s_b9d78ba39005bb::t_9aea52b85bbb5b 92,3436-3437,4407-4408,4410-4411,4441-4442,4444-4445
+  s_b9d78ba39005bb::t_b1ab63145578f2 5900,5902-5904,5941-5950
 packages/workshop-frontend/src/newChatRequest.ts
   s_b9d78ba39005bb::t_5f0a56e4ae4a52 1-29
 packages/workshop-frontend/src/newChatRequest.test.ts
