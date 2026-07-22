@@ -49,6 +49,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [autoApproveRules, setAutoApproveRules] =
     useState<Array<{ bindingName: string; actionKind: ActionKind }>>([])
+  const [deleteRuleTarget, setDeleteRuleTarget] = useState<{ bindingName: string; tag: string } | null>(null)
   // Keyed `${bindingName}:${actionKind.tag}` -- the rule has no numeric id.
   const [togglingRules, setTogglingRules] = useState<Set<string>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
@@ -140,6 +141,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       // Reload to restore the accurate (still-enabled) state.
       await loadGatekeepers()
     } finally {
+      setDeleteRuleTarget(null)
       setTogglingRules((prev) => {
         const next = new Set(prev)
         next.delete(key)
@@ -460,7 +462,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                 Auto-approval rules
               </h2>
               <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                Action types approved automatically on a connection, without prompting. Turn one off
+                Action types approved automatically on a connection, without prompting. Delete one
                 to require manual approval again.
               </p>
             </div>
@@ -470,37 +472,66 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                 const key = `${rule.bindingName}:${rule.actionKind.tag}`
                 const gatekeeper = gatekeepers.find((g) => g.bindingName === rule.bindingName)
                 const vendorId = gatekeeper?.vendorId
+                const isDeleting = deleteRuleTarget?.bindingName === rule.bindingName &&
+                  deleteRuleTarget.tag === rule.actionKind.tag
 
                 return (
                   <div
                     key={key}
-                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
                   >
-                    <div className="flex items-center gap-3">
-                      <GatekeeperIcon
-                        vendorId={vendorId}
-                        bindingName={rule.bindingName}
-                        logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                          {rule.actionKind.label}
-                        </p>
-                        <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-                          {gatekeeper?.resourceTitle}
-                          {gatekeeper?.resourceTitle && ' · '}
-                          <span className="font-mono text-kumo-subtle">{rule.bindingName}</span>
-                        </p>
+                    {isDeleting ? (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
+                            Delete {rule.actionKind.label}?
+                          </p>
+                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            This action type will require manual approval again.
+                          </p>
+                        </div>
+                        <WorkshopButton
+                          tone="danger"
+                          className="min-w-[68px]"
+                          onClick={() => handleDisableRule(rule.bindingName, rule.actionKind.tag)}
+                        >
+                          Delete
+                        </WorkshopButton>
+                        <WorkshopButton onClick={() => setDeleteRuleTarget(null)}>
+                          Cancel
+                        </WorkshopButton>
                       </div>
-                      <div className="ml-auto flex shrink-0 items-center gap-2">
-                        <HookToggle
-                          enabled
-                          disabled={togglingRules.has(key)}
-                          onToggle={() => handleDisableRule(rule.bindingName, rule.actionKind.tag)}
-                          label="auto-approval rule"
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <GatekeeperIcon
+                          vendorId={vendorId}
+                          bindingName={rule.bindingName}
+                          logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
                         />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            {rule.actionKind.label}
+                          </p>
+                          <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                            {gatekeeper?.resourceTitle}
+                            {gatekeeper?.resourceTitle && ' · '}
+                            <span className="font-mono text-kumo-subtle">{rule.bindingName}</span>
+                          </p>
+                        </div>
+                        <div className="ml-auto flex shrink-0 items-center gap-2">
+                          <Tooltip content="Delete auto-approval rule" asChild>
+                            <WorkshopIconButton
+                              danger
+                              disabled={togglingRules.has(key)}
+                              onClick={() => setDeleteRuleTarget({ bindingName: rule.bindingName, tag: rule.actionKind.tag })}
+                              aria-label="Delete auto-approval rule"
+                            >
+                              <Trash size={14} />
+                            </WorkshopIconButton>
+                          </Tooltip>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
                 )
               })}

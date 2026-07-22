@@ -5,23 +5,19 @@ interface HookToggleProps {
   disabled?: boolean
   onToggle: (enabled: boolean) => void
   size?: 'sm' | 'base' | 'lg'
-  // Noun for the tooltip/aria copy (e.g. "hook", "auto-approval rule"). Defaults to "hook".
-  label?: string
 }
 
-// Enable/disable toggle. Originally for bound hooks; also reused for other on/off concepts (e.g.
-// auto-approval rules) via `label`. Used in the Connections tab, the Activity log, and inline chat
-// action cards.
-export function HookToggle({ enabled, disabled = false, onToggle, size = 'sm', label = 'hook' }: HookToggleProps) {
+// Enable/disable toggle for bound hooks. Used in the Connections tab, Activity log, and inline chat.
+export function HookToggle({ enabled, disabled = false, onToggle, size = 'sm' }: HookToggleProps) {
   return (
-    <Tooltip content={enabled ? `Disable this ${label}.` : `Enable this ${label}.`} asChild>
+    <Tooltip content={enabled ? 'Disable this hook.' : 'Enable this hook.'} asChild>
       <span className="inline-flex items-center">
         <Switch
           checked={enabled}
           disabled={disabled}
           size={size}
           onCheckedChange={(checked) => onToggle(checked)}
-          aria-label={enabled ? `Disable ${label}` : `Enable ${label}`}
+          aria-label={enabled ? 'Disable hook' : 'Enable hook'}
         />
       </span>
     </Tooltip>
