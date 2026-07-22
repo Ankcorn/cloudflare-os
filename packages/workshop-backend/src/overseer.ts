@@ -4062,6 +4062,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       if (!effectiveRole) throw new Error("Not Found");
       role = effectiveRole;
 
+      // Ambient reconciliation may attach Gatekeepers after open() starts. Finish it before taking
+      // the observer snapshot so every capability exposed to this collaborator has an observer.
+      await ensureCapsules;
+
       // Verify the caller may observe everything this Gadget has read through its in-scope
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
       // role is confirmed, so it never reveals the Gadget's existence to an unauthorized user. The
