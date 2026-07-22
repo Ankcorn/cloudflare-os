@@ -3,7 +3,7 @@
 // Contains no secrets.
 
 import { AuthVendorInfo, ServerConfig } from "@gadgets/workshop-shared/api";
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config.js";
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";

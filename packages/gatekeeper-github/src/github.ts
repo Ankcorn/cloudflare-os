@@ -16,7 +16,6 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   GitHubApi,
   GitHubApiError,
@@ -73,11 +72,11 @@ import {
 import GITHUB_ISSUE_CONFIGURATOR_HTML from "./generated/github-issue-configurator-ui.txt";
 import GITHUB_PULL_REQUEST_CONFIGURATOR_HTML from "./generated/github-pull-request-configurator-ui.txt";
 import GITHUB_REPO_CONFIGURATOR_HTML from "./generated/github-repo-configurator-ui.txt";
+import { obsContext } from "./observability.js";
 
 const VENDOR_ID = "github";
-type GitHubLogFields = { vendorId: string };
 
-const logger = createLogger<GitHubLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.github", vendorId: VENDOR_ID,
 });
 

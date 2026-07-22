@@ -4,7 +4,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from './admin-config.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';

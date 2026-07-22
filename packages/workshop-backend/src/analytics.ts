@@ -1,4 +1,4 @@
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 
 const logger = createWorkshopLogger("workshop.analytics");
 

@@ -3,7 +3,6 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
-import { createLogger } from "@gadgets/backend-utils/context-logger";
 import {
   ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
   ContextDocument, ContextDocumentSummary,
@@ -17,10 +16,9 @@ import { readArtifactRepoDocuments } from "./artifact-sync.js";
 import {
   isSkillManifestPath, parseSkillManifest, type SkillIndexEntry,
 } from "./agent-skill.js";
+import { obsContext } from "./observability.js";
 
-type ContextCollectionLogFields = { collectionId: string; vendorId: string };
-
-const logger = createLogger<ContextCollectionLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.context", vendorId: VENDOR_ID,
 });
 

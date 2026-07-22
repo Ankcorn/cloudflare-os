@@ -21,7 +21,7 @@
 
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
-import { createWorkshopLogger } from "../logging";
+import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID } from "../user.js";
 import { readAdminConfig } from "../admin-config.js";
 

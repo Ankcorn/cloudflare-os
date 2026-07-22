@@ -67,8 +67,9 @@ IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend br
 - Use immutable `logger.with(fields)` for object-owned or nearby context. Prefer module/object loggers
   over logger parameters, and do not replace a shallow child logger with ambient context just to
   remove a local variable.
-- For bounded operation context needed by deep helpers or independent loggers, use `createLogger`
-  and `withLogContext` from `@gadgets/backend-utils/context-logger`. Re-establish it per operation;
+- For bounded operation context needed by deep helpers, independent loggers, or other observability
+  consumers, use `createObservabilityContext` from `@gadgets/backend-utils/observability-context`.
+  Re-establish it per operation;
   it does not cross RPC, hibernation, or restart, and requires `nodejs_als` or `nodejs_compat`.
 - Pass caught values as `error`. The helper stringifies `Error` instances and primitives, uses an
   own string `message` for plain objects, omits `undefined`, and adds stacks to all `Error` logs.
@@ -76,3 +77,11 @@ IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend br
 - Extend field vocabularies locally. Levels: `error` needs attention, `warn` continues best-effort,
   `info` is notable lifecycle, and `debug` is noisy breadcrumbs. Never log secrets, prompts, headers,
   tokens, or request/response bodies.
+- To also dispatch a failure to the optional external issue Reporter (in addition to logging it),
+  call `reportIssue(failureSite, caught, options?)` from
+  `@gadgets/backend-utils/error-reporting`. Attach ambient fields from the package's observability
+  context and augment them with capture-site fields:
+  `reportIssue("overseer.catalog-fallback", err, { handled: true, attributes: { ...obsContext.get(), gatekeeperId } });`.
+  It is a no-op when the `ERROR_REPORTER` binding is absent (local dev / deployments without an issue
+  destination). Only bounded scalars are retained as attributes; reported context obeys the same
+  no-secrets rules as log fields.

@@ -7,7 +7,6 @@ import { validateRpc } from "capnweb-validate";
 import type {
   ObservationAuthorizer, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { createLogger } from "@gadgets/backend-utils/context-logger";
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
   ContextCollectionVisibility, decodeDocId, encodeDocId, isTextContentType, VENDOR_ID,
@@ -15,10 +14,9 @@ import {
 import type { ContextCollectionDurableObject } from "./context-collection.js";
 import type { UserLibraryDurableObject } from "./user-library.js";
 import { domainName } from "./domain.js";
+import { obsContext } from "./observability.js";
 
-type ContextLibraryLogFields = { collectionId: string; vendorId: string };
-
-const logger = createLogger<ContextLibraryLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.context", vendorId: VENDOR_ID,
 });
 

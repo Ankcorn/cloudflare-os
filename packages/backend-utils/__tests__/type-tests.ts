@@ -1,5 +1,13 @@
 import { createLogger } from "../src/logger.js";
-import { withLogContext } from "../src/context-logger.js";
+import { createObservabilityContext } from "../src/observability-context.js";
+
+const obsContext = createObservabilityContext<{
+  chatId: number;
+  operation: string;
+}>();
+const sensitiveObsContext = createObservabilityContext<{ token: string }>();
+// @ts-expect-error context vocabularies contain only structured log values
+createObservabilityContext<{ invalid: Uint8Array }>();
 
 let logger = createLogger<{
   accountId?: number;
@@ -21,19 +29,34 @@ createLogger<{ token?: string }>({ component: "test", token: "private token" });
 logger.info("valid", { event: "valid", accountId: 1, providerRequestId: "request-1" });
 logger.with({ chatId: 1 });
 logger.with({ providerRequestId: "request-2" });
-withLogContext({ operation: "test.operation" }, () => {});
+// @ts-expect-error ambient context is read from its observability context, not from a logger
+logger.getContext();
+obsContext.with({ operation: "test.operation" }, () => {});
+const currentContext: Readonly<Partial<{ chatId: number; operation: string }>> = obsContext.get();
+const currentChatId: number | undefined = currentContext.chatId;
+void currentContext;
+void currentChatId;
+// @ts-expect-error context values retain their declared types
+const invalidChatId: string | undefined = obsContext.get().chatId;
+void invalidChatId;
+// @ts-expect-error context fields must use their declared types
+obsContext.with({ chatId: "one" }, () => {});
+// @ts-expect-error context fields must be declared in the package vocabulary
+obsContext.with({ gadgetId: "gadget-1" }, () => {});
 // @ts-expect-error sensitive fields are not accepted in ambient context
-withLogContext({ token: "private token" }, () => {});
+obsContext.with({ token: "private token" }, () => {});
+// @ts-expect-error sensitive fields remain prohibited when declared in the context vocabulary
+sensitiveObsContext.with({ token: "private token" }, () => {});
 // @ts-expect-error errors belong to individual log entries, not ambient context
-withLogContext({ error: "boom" }, () => {});
+obsContext.with({ error: "boom" }, () => {});
 // @ts-expect-error error stacks are produced by the logger, not ambient context
-withLogContext({ errorStack: "stack" }, () => {});
+obsContext.with({ errorStack: "stack" }, () => {});
 // @ts-expect-error components are fixed when a logger is created
-withLogContext({ component: "other" }, () => {});
+obsContext.with({ component: "other" }, () => {});
 // @ts-expect-error events belong to individual log entries, not ambient context
-withLogContext({ event: "other" }, () => {});
+obsContext.with({ event: "other" }, () => {});
 // @ts-expect-error messages are the first argument to a log method
-withLogContext({ message: "other" }, () => {});
+obsContext.with({ message: "other" }, () => {});
 
 // @ts-expect-error event is required
 logger.info("missing event", { accountId: 1 });

@@ -1,6 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { createLogger } from "@gadgets/backend-utils/logger";
 import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
@@ -39,16 +38,11 @@ import CALENDAR_CONFIGURATOR_HTML from "./generated/calendar-configurator-ui.txt
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
+import { obsContext } from "./observability.js";
 
 // Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
 const VENDOR_ID = "google";
-type GoogleLogFields = {
-  actionId: number | string;
-  messageId: string;
-  vendorId: string;
-};
-
-const logger = createLogger<GoogleLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.google", vendorId: VENDOR_ID,
 });
 

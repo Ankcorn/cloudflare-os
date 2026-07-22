@@ -1,6 +1,5 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   GatekeeperUser,
   GatekeeperUserVerifier,
@@ -73,11 +72,11 @@ import {
 import LINEAR_WORKSPACE_CONFIGURATOR_HTML from "./generated/linear-workspace-configurator-ui.txt";
 import LINEAR_TEAM_CONFIGURATOR_HTML from "./generated/linear-team-configurator-ui.txt";
 import LINEAR_ISSUE_CONFIGURATOR_HTML from "./generated/linear-issue-configurator-ui.txt";
+import { obsContext } from "./observability.js";
 
 const VENDOR_ID = "linear";
-type LinearLogFields = { vendorId: string };
 
-const logger = createLogger<LinearLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.linear", vendorId: VENDOR_ID,
 });
 

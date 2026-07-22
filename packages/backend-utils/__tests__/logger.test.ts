@@ -1,21 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLogger as createBaseLogger } from "../src/logger.js";
-import { createLogger, withLogContext } from "../src/context-logger.js";
+import { createObservabilityContext } from "../src/observability-context.js";
 
-type TestLogFields = {
+type TestObservabilityFields = {
   accountId?: number;
+  chatId?: number;
   collectionId?: string;
+  gadgetId?: string;
   operation?: string;
   outcome?: string;
   vendorId?: string;
+  providerRequestId?: string;
 };
+
+const obsContext = createObservabilityContext<TestObservabilityFields>();
+const createLogger = obsContext.createLogger;
 
 describe("worker logger", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("emits the message and structured context as one indexed object", () => {
     let spy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    let logger = createLogger<TestLogFields>({ component: "workshop.user" });
+    let logger = createLogger({ component: "workshop.user" });
 
     logger.warn("failed to load vendor", {
       event: "gatekeeper.vendor.load.failed",
@@ -32,7 +38,7 @@ describe("worker logger", () => {
 
   it("derives immutable child loggers", () => {
     let spy = vi.spyOn(console, "info").mockImplementation(() => {});
-    let logger = createLogger<TestLogFields>({ component: "workshop.user" });
+    let logger = createLogger({ component: "workshop.user" });
     let accountLogger = logger.with({ accountId: 7 });
 
     accountLogger.info("account disconnected", {
@@ -50,7 +56,7 @@ describe("worker logger", () => {
 
   it("chains child context with nearest values taking precedence", () => {
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
-    const logger = createLogger<TestLogFields>({
+    const logger = createLogger({
       component: "gatekeeper.context", vendorId: "context",
     });
     const collectionLogger = logger.with({
@@ -78,10 +84,10 @@ describe("worker logger", () => {
 
   it("keeps explicit child context ahead of ambient context", () => {
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
-    const logger = createLogger<TestLogFields>({ component: "workshop.overseer" })
+    const logger = createLogger({ component: "workshop.overseer" })
       .with({ operation: "agent.run" });
 
-    withLogContext({ operation: "ambient.operation" }, () => {
+    obsContext.with({ operation: "ambient.operation" }, () => {
       logger.info("child wins", { event: "precedence.child" });
       logger.info("details win", { event: "precedence.details", operation: "log.call" });
     });
@@ -93,7 +99,7 @@ describe("worker logger", () => {
   it("pins component against ambient collisions", () => {
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     const logger = createLogger({ component: "workshop.overseer" });
-    const runWithUnsafeContext = withLogContext as unknown as (
+    const runWithUnsafeContext = obsContext.with as unknown as (
       fields: Record<string, string>, callback: () => void,
     ) => void;
 
@@ -106,7 +112,7 @@ describe("worker logger", () => {
 
   it("adds package-local fields to child loggers", () => {
     const spy = vi.spyOn(console, "debug").mockImplementation(() => {});
-    const logger = createLogger<{ providerRequestId?: string }>({ component: "workshop.agent" });
+    const logger = createLogger({ component: "workshop.agent" });
     const requestLogger = logger.with({ providerRequestId: "request-1" });
 
     requestLogger.debug("provider request started", { event: "provider.request.started" });
@@ -118,8 +124,8 @@ describe("worker logger", () => {
     let spy = vi.spyOn(console, "debug").mockImplementation(() => {});
     let logger = createLogger({ component: "workshop.overseer" });
 
-    await withLogContext({ operation: "agent.run", gadgetId: "gadget-1" }, async () => {
-      await withLogContext({ chatId: 3 }, async () => {
+    await obsContext.with({ operation: "agent.run", gadgetId: "gadget-1" }, async () => {
+      await obsContext.with({ chatId: 3 }, async () => {
         await Promise.resolve();
         logger.debug("nested", { event: "nested" });
       });
@@ -142,12 +148,12 @@ describe("worker logger", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
 
     const runs = Promise.all([
-      withLogContext({ chatId: 1 }, async () => {
+      obsContext.with({ chatId: 1 }, async () => {
         ++ready;
         await gate;
         logger.debug("first", { event: "first" });
       }),
-      withLogContext({ chatId: 2 }, async () => {
+      obsContext.with({ chatId: 2 }, async () => {
         ++ready;
         await gate;
         logger.debug("second", { event: "second" });
@@ -169,7 +175,7 @@ describe("worker logger", () => {
     const overseerLogger = createLogger({ component: "workshop.overseer" });
     const agentLogger = createLogger({ component: "workshop.agent" });
 
-    await withLogContext({ operation: "agent.run", gadgetId: "gadget-1", chatId: 3 }, async () => {
+    await obsContext.with({ operation: "agent.run", gadgetId: "gadget-1", chatId: 3 }, async () => {
       overseerLogger.warn("overseer warning", { event: "overseer.warning" });
       await Promise.resolve();
       agentLogger.warn("agent warning", { event: "agent.warning" });
@@ -193,7 +199,7 @@ describe("worker logger", () => {
     const spy = vi.spyOn(console, "info").mockImplementation(() => {});
     const logger = createBaseLogger<{ operation?: string }>({ component: "gatekeeper.github" });
 
-    withLogContext({ operation: "agent.run" }, () => {
+    obsContext.with({ operation: "agent.run" }, () => {
       logger.info("base logger event", { event: "base.logger.event" });
     });
 
@@ -205,13 +211,12 @@ describe("worker logger", () => {
     const logger = createLogger({ component: "workshop.overseer" });
     const thenable: PromiseLike<void> = {
       // oxlint-disable-next-line unicorn/no-thenable -- Deliberately models an RPC promise.
-      then(resolve) {
-        queueMicrotask(() => resolve());
-        return Promise.resolve();
+      then(onfulfilled, onrejected) {
+        return Promise.resolve().then(onfulfilled, onrejected);
       },
     };
 
-    await withLogContext({ operation: "agent.run" }, async () => {
+    await obsContext.with({ operation: "agent.run" }, async () => {
       await thenable;
       logger.debug("after thenable", { event: "after.thenable" });
     });
@@ -274,5 +279,18 @@ describe("worker logger", () => {
     const serialized = JSON.stringify(spy.mock.calls[0]?.[0]);
     expect(serialized).not.toContain("Error: inner");
     expect(serialized).not.toContain("do not log");
+  });
+});
+
+describe("observability context", () => {
+  it("returns typed nested context and restores its parent", () => {
+    obsContext.with({ operation: "agent.run" }, () => {
+      expect(obsContext.get()).toEqual({ operation: "agent.run" });
+      obsContext.with({ chatId: 3 }, () => {
+        expect(obsContext.get()).toEqual({ operation: "agent.run", chatId: 3 });
+      });
+      expect(obsContext.get()).toEqual({ operation: "agent.run" });
+    });
+    expect(obsContext.get()).toEqual({});
   });
 });

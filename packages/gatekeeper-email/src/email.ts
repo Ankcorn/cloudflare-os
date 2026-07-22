@@ -15,7 +15,6 @@ import {
   SupportedResource,
   ResourceConfiguratorFrame,
 } from '@gadgets/workshop-shared/gatekeeper';
-import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   EmailSession,
   EmailHook,
@@ -29,11 +28,11 @@ import TYPES_CODE from "./types.txt";
 import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
 import type { EmailMailboxConfiguratorRpc } from "./configurator/email-configurator-types";
 import EMAIL_LOGO_SVG from "./email-logo.svg";
+import { obsContext } from "./observability.js";
 
 const VENDOR_ID = "email";
-type EmailLogFields = { vendorId: string };
 
-const logger = createLogger<EmailLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.email", vendorId: VENDOR_ID,
 });
 

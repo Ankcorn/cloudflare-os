@@ -1,6 +1,6 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, isTextLikeAttachmentMimeType } from '@gadgets/workshop-shared/api';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 import * as Y from "yjs";
 import { streamText, LanguageModel, ModelMessage, stepCountIs, tool, ToolCallPart, ToolResultPart, ToolSet } from "ai";
 import z from "zod";

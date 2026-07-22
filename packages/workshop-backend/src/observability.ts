@@ -1,7 +1,7 @@
-import { createLogger } from "@gadgets/backend-utils/context-logger";
+import { createObservabilityContext } from "@gadgets/backend-utils/observability-context";
 
-/** Structured fields emitted by the Workshop backend. */
-export type WorkshopLogFields = {
+/** Observability fields emitted by the Workshop backend. */
+export type WorkshopObservabilityFields = {
   accountId: number;
   actionId: number | string;
   autoProvisioned: boolean;
@@ -27,7 +27,10 @@ export type WorkshopLogFields = {
   vendorId: string;
 };
 
+/** Ambient observability fields for one Workshop operation. */
+export const obsContext = createObservabilityContext<WorkshopObservabilityFields>();
+
 /** Creates a logger restricted to the Workshop backend's field vocabulary. */
 export function createWorkshopLogger(component: string) {
-  return createLogger<WorkshopLogFields>({ component });
+  return obsContext.createLogger({ component });
 }
