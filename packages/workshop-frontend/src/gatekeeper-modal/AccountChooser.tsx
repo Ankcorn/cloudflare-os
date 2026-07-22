@@ -91,7 +91,13 @@ export function AccountChooser({
                 onClick={() => onSelect(account.id)}
                 className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left transition-colors enabled:hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-kumo-tint">
+                <div
+                  className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full"
+                  style={{
+                    backgroundColor:
+                      account.vendorDescription.color ?? 'var(--color-kumo-tint)',
+                  }}
+                >
                   <AccountAvatar avatarUrl={account.description.avatar?.url} logoUrl={account.vendorDescription.logo?.url} />
                 </div>
                 <div className="min-w-0 flex-1">

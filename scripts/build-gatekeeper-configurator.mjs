@@ -556,7 +556,36 @@ window.addEventListener("touchmove", event => {
 <head>
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; script-src data: 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; media-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'; navigate-to 'none';">
   <style>
-    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --color-kumo-base: #fcfcfb;
+      --color-kumo-elevated: #f8f8f7;
+      --color-kumo-tint: #f3f3f1;
+      --color-kumo-line: #1411100f;
+      --color-kumo-ring: #cac8c3;
+      --color-kumo-default: #1c1a18;
+      --color-kumo-subtle: oklch(52% 0.006 60);
+      --color-kumo-inactive: oklch(66% 0.005 60);
+      --color-kumo-danger: oklch(63.7% 0.237 25.331);
+      --color-kumo-danger-tint: #fff1f2;
+      --color-kumo-danger-line: #fecdd3;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-kumo-base: oklch(0.115 0.012 285);
+        --color-kumo-elevated: oklch(0.155 0.011 285);
+        --color-kumo-tint: oklch(0.225 0.025 285);
+        --color-kumo-line: oklch(0.34 0.022 285);
+        --color-kumo-ring: oklch(0.52 0.065 285);
+        --color-kumo-default: oklch(0.92 0.01 285);
+        --color-kumo-subtle: oklch(0.66 0.02 285);
+        --color-kumo-inactive: oklch(0.58 0.025 285);
+        --color-kumo-danger: oklch(70.4% 0.191 22.216);
+        --color-kumo-danger-tint: oklch(0.25 0.065 25.331);
+        --color-kumo-danger-line: oklch(0.4 0.1 25.331);
+      }
+    }
     html, body { margin: 0; overflow: visible; background: transparent; color: var(--color-kumo-default, #2f261f); font-size: 13px; }
     * { box-sizing: border-box; }
     #root { padding: 2px 2px 4px; }
@@ -594,7 +623,7 @@ window.addEventListener("touchmove", event => {
     .radio-card.selected { border-color: var(--color-kumo-ring, #ff6a00); background: var(--color-kumo-tint, #fff3eb); }
     .radio-title { font-weight: 600; }
     .radio-description { color: var(--color-kumo-subtle, #7d746c); font-size: 12px; line-height: 16px; }
-    .error { white-space: pre-wrap; color: #9f1239; border: 1px solid #fecdd3; border-radius: 10px; padding: 10px; background: #fff1f2; }
+    .error { white-space: pre-wrap; color: var(--color-kumo-danger); border: 1px solid var(--color-kumo-danger-line); border-radius: 10px; padding: 10px; background: var(--color-kumo-danger-tint); }
   </style>
 </head>
 <body>
