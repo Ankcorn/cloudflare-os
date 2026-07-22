@@ -1,13 +1,13 @@
 packages/gatekeeper-google/src/google.ts
-  s_6e01b0aff5e870::t_996554d87bb862 1415-1416,1445-1446
+  s_6e01b0aff5e870::t_0c0f099bceb0ca 1415-1416,1445-1446
 packages/workshop-backend/src/overseer.ts
-  s_6e01b0aff5e870::t_483099aac472e5 274-282,412-417,1190-1241,1523-1532,3919,3921-3923,3949-3981,5036-5040
+  s_6e01b0aff5e870::t_9a07e151c73d51 274-282,412-417,1190-1241,1523-1532,3919,3921-3923,3949-3981,5036-5040
 packages/workshop-shared/src/api.ts
-  s_6e01b0aff5e870::t_82cb72e7ede1b6 711-719
+  s_6e01b0aff5e870::t_e34cf8e214c870 711-719
 packages/workshop-shared/src/gatekeeper.ts
-  s_6e01b0aff5e870::t_cc0d4513228530 631-641
+  s_6e01b0aff5e870::t_3fc4eb1c2c64d7 631-641
 packages/workshop-frontend/src/Activity.tsx
-  s_2205b9864417ba::t_1d6bf5f6a7b6cb 71-86,152-157,201,212,263-271
+  s_2205b9864417ba::t_b3842654b28864 71-86,152-157,201,212,263-271
 ---
 {
   "schema_version": "authorship/3.0.0",
