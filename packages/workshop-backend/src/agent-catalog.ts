@@ -3,7 +3,7 @@ import {
   AGENT_CATALOG_MAX_ID_LENGTH, AGENT_CATALOG_MAX_TITLE_LENGTH,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { AgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 
 const logger = createWorkshopLogger("workshop.agent.catalog");
 

@@ -5,7 +5,7 @@
 
 import type { Collection } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import { createWorkshopLogger } from "./logging";
+import { createWorkshopLogger } from "./observability";
 import type { ActionRecord, AutoApproveTagRecord } from "./overseer.js";
 
 const logger = createWorkshopLogger("workshop.auto.approval");

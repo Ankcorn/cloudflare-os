@@ -7,7 +7,7 @@
 // (see ai-models.ts), billed via Unified Billing. We only ever need the account id here — no gateway
 // is listed or chosen.
 
-import { createWorkshopLogger } from "../../logging";
+import { createWorkshopLogger } from "../../observability";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const logger = createWorkshopLogger("workshop.ai.gateway.billing");

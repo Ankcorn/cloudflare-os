@@ -5,27 +5,13 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import { posix as posixPath } from "node:path";
-import { createLogger, withLogContext } from "@gadgets/backend-utils/context-logger";
 import {
   ContextDocument, MAX_DOCUMENT_BODY_BYTES, contentTypeFromPath, isTextContentType, VENDOR_ID,
 } from "./context-types.js";
 import { extractDescription } from "./description-extractors.js";
+import { obsContext } from "./observability.js";
 
-type ArtifactSyncLogFields = {
-  bodyBytes: number;
-  branch: string;
-  dir: string;
-  filepath: string;
-  maxBodyBytes: number;
-  maxGitDirBytes: number;
-  operation: string;
-  repoName: string;
-  sizeBytes: number;
-  tokenId: number | string;
-  vendorId: string;
-};
-
-const logger = createLogger<ArtifactSyncLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.context", vendorId: VENDOR_ID,
 });
 
@@ -201,9 +187,9 @@ export function readArtifactRepoDocuments(
   currentCommit?: string,
 ): Promise<ArtifactRepoReadResult> {
   const dir = `/tmp/artifacts/${repoName}`;
-  return withLogContext({
+  return obsContext.with({
     operation: "artifacts.repo.read", repoName, branch, dir,
-  } satisfies Partial<ArtifactSyncLogFields>, () => readArtifactRepoDocumentsWithContext(
+  }, () => readArtifactRepoDocumentsWithContext(
       artifacts, repoName, url, branch, dir, currentCommit));
 }
 

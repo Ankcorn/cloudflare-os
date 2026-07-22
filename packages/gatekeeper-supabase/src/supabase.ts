@@ -13,7 +13,6 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   SupabaseApi,
   SupabaseApiError,
@@ -48,11 +47,11 @@ import TYPES_CODE from "./types.txt";
 import SUPABASE_LOGO_SVG from "./supabase-logo.svg";
 import SUPABASE_PROJECT_CONFIGURATOR_HTML from "./generated/supabase-project-configurator-ui.txt";
 import SUPABASE_ORGANIZATION_CONFIGURATOR_HTML from "./generated/supabase-organization-configurator-ui.txt";
+import { obsContext } from "./observability.js";
 
 const VENDOR_ID = "supabase";
-type SupabaseLogFields = { vendorId: string };
 
-const logger = createLogger<SupabaseLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.supabase", vendorId: VENDOR_ID,
 });
 

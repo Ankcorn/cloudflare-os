@@ -7,7 +7,6 @@ import {
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
-import { withLogContext } from "@gadgets/backend-utils/context-logger";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
@@ -18,6 +17,7 @@ import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
+import { reportIssue } from "@gadgets/backend-utils/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
@@ -25,7 +25,7 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
-import { createWorkshopLogger, type WorkshopLogFields } from "./logging";
+import { createWorkshopLogger, obsContext } from "./observability";
 
 const logger = createWorkshopLogger("workshop.overseer");
 
@@ -2351,12 +2351,12 @@ class OverseerImpl implements AgentHooks {
                 initiator: AiChatAuthorInfo,
                 callbackInitiated: boolean,
                 liveChat: LiveChatContext): Promise<void> {
-    return withLogContext({
+    return obsContext.with({
       operation: "agent.run",
       gadgetId: this.ctx.id.toString(),
       chatId,
       modelId: aiModel.profile.id,
-    } satisfies Partial<WorkshopLogFields>, () => this.#runAgentTurnWithContext(
+    }, () => this.#runAgentTurnWithContext(
         chatId, aiModel, initiator, callbackInitiated, liveChat));
   }
 
@@ -2485,6 +2485,18 @@ class OverseerImpl implements AgentHooks {
         APICallError.isInstance(err) ? err :
         RetryError.isInstance(err) && APICallError.isInstance(err.lastError) ? err.lastError :
         null;
+
+      // Report unexpected failures for triage. Skip expected provider 4xx (auth,
+      // rate limit, quota/billing), which are ordinary control flow, not incidents.
+      const apiStatus = apiError?.statusCode;
+      if (apiStatus === undefined || apiStatus >= 500) {
+        reportIssue("overseer.run-agent", apiError ?? err, {
+          attributes: obsContext.get(),
+          http: apiStatus === undefined
+            ? undefined
+            : { kind: "client", responseStatusCode: apiStatus },
+        });
+      }
 
       let errorMessage: string;
       if (apiError) {
@@ -2883,6 +2895,12 @@ class OverseerImpl implements AgentHooks {
                 authorizer as unknown as ObservationAuthorizer);
             return catalog ? normalizeAgentCatalog(catalog) : null;
           } catch (error) {
+            reportIssue("overseer.catalog-fallback", error, {
+              handled: true,
+              attributes: {
+                ...obsContext.get(), gadgetId: this.ctx.id.toString(), gatekeeperId,
+              },
+            });
             this.logger.warn("failed to load agent catalog", {
               event: "agent.catalog.load.failed",
               gatekeeperId, resourceTitle: record.resourceTitle, error,

@@ -6,15 +6,13 @@ import {
   SupportedResource, ResourceConfiguratorFrame,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
-import { createLogger } from "@gadgets/backend-utils/logger";
 import { getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens, AUTH_SCOPES, FULL_SCOPES } from "./oauth";
 import { fetchIdentity } from "./cloudflare-api";
 import { VENDOR_ID } from "./vendor.js";
 import TYPES_CODE from "./types.txt";
+import { obsContext } from "./observability.js";
 
-type CloudflareLogFields = { vendorId: string };
-
-const logger = createLogger<CloudflareLogFields>({
+const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
 });
 
