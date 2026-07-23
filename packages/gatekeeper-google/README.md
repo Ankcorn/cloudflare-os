@@ -7,9 +7,9 @@ This package provides Google OAuth integration for Gadgets. It serves two purpos
   `userinfo.email`, `userinfo.profile`) to read the account's **verified email** (`email_verified`),
   which becomes the user's identity.
   The sign-in grant is transient (discarded right after the email is read).
-- **Connections:** when a user connects Google (or signs in and later connects it), the full scopes
-  (Gmail, Docs, Drive metadata, BigQuery — see below) are requested so gadgets can access those
-  APIs on the user's behalf.
+- **Connections:** when a user connects Google (or signs in and later connects it), the scopes for
+  the selected resources (Gmail, Docs, Sheets, Calendar, or BigQuery — see below) are requested so
+  gadgets can access those APIs on the user's behalf.
 
 A single Google OAuth client is used for both. Set it up as follows.
 
@@ -29,7 +29,7 @@ If you're running this project locally and want to use Google API integrations, 
 
 ### Step 2: Enable Required APIs
 
-You'll need to enable the Google APIs that you want to use. Currently supported: Gmail, Google Docs, Google Calendar, and BigQuery.
+You'll need to enable the Google APIs that you want to use. Currently supported: Gmail, Google Docs, Google Sheets, Google Calendar, and BigQuery.
 
 1. In the left sidebar, go to **APIs & Services** > **Library** (or [click here](https://console.cloud.google.com/apis/library))
 2. Search for "Gmail API"
@@ -41,14 +41,17 @@ You'll need to enable the Google APIs that you want to use. Currently supported:
 8. Go back to the Library, search for "Google Drive API"
 9. Click on **Google Drive API** in the results
 10. Click **Enable**
-11. Go back to the Library, search for "Google Calendar API"
-12. Click on **Google Calendar API** in the results
+11. Go back to the Library, search for "Google Sheets API"
+12. Click on **Google Sheets API** in the results
 13. Click **Enable**
-14. Go back to the Library, search for "BigQuery API"
-15. Click on **BigQuery API** in the results
+14. Go back to the Library, search for "Google Calendar API"
+15. Click on **Google Calendar API** in the results
 16. Click **Enable**
+17. Go back to the Library, search for "BigQuery API"
+18. Click on **BigQuery API** in the results
+19. Click **Enable**
 
-The Google Drive API is used only to search and display document metadata in the resource picker. Document reads and edits still go through the Google Docs API.
+The Google Drive API is used only to search and display document and spreadsheet metadata in the resource pickers. Document reads and edits still go through the Google Docs API, and spreadsheet reads go through the Google Sheets API.
 
 ### Step 3: Configure the OAuth Consent Screen
 
@@ -72,7 +75,8 @@ included). Across all resource types, the gatekeeper can request:
 - `openid`, `userinfo.profile`, and `userinfo.email` to identify the connected account.
 - `gmail.modify` for Gmail thread reads, organization, replies, forwards, and sending. This single scope already includes label access and sending.
 - `documents` for Google Docs reads and edits.
-- `drive.metadata.readonly` so the resource picker can search Google Docs by title.
+- `drive.metadata.readonly` so the resource pickers can search Google Docs and Sheets by title.
+- `spreadsheets.readonly` to read metadata and cell values from selected Google spreadsheets.
 - `calendar.calendarlist.readonly` so the resource picker can list calendars.
 - `calendar.events` to manage selected calendar and check calendar availability.
 - `bigquery` for BigQuery dry-runs and queries. This is intentionally broader than `bigquery.readonly` because dry-runs use `jobs.insert`; the gatekeeper enforces read-only SQL and resource scope checks before running queries.
@@ -131,7 +135,7 @@ User — see Step 4.)
 2. Create or open a gadget.
 3. Navigate to the **Connections** tab.
 4. Click **+ New Connection**.
-5. Choose a Google resource type: Gmail, Google Doc, Google Calendar, or BigQuery.
+5. Choose a Google resource type: Gmail, Google Doc, Google Spreadsheet, Google Calendar, or BigQuery.
 6. If prompted, connect a Google account.
 7. You should be redirected to Google's consent screen in a new tab.
 8. The consent screen acts extra-scary since this is an "unverified" test app.

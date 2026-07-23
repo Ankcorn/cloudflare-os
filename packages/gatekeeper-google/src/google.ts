@@ -8,6 +8,10 @@ import {
 } from "./types";
 import { GoogleDocSession, DocMetadata } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
+import { GoogleSheetsApi } from "./sheets-api";
+import type {
+  GoogleSpreadsheetSession, SpreadsheetInfo, SpreadsheetRange, SpreadsheetValueMode,
+} from "./sheets-types";
 import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnapshot } from "./markdown-converter";
 import { BigQueryApi, DEFAULT_MAX_BYTES_BILLED } from "./bigquery-api";
 import {
@@ -27,16 +31,19 @@ import TYPES_CODE from "./types.txt";
 import DOCS_TYPES_CODE from "./docs-types.txt";
 import BIGQUERY_TYPES_CODE from "./bigquery-types.txt";
 import CALENDAR_TYPES_CODE from "./calendar-types.txt";
+import SHEETS_TYPES_CODE from "./sheets-types.txt";
 import {
   BigQueryConfiguratorUI,
   CalendarConfiguratorUI,
   GmailConfiguratorUI,
   GoogleDocConfiguratorUI,
+  GoogleSheetsConfiguratorUI,
 } from "./google-configurators";
 import BIGQUERY_CONFIGURATOR_HTML from "./generated/bigquery-configurator-ui.txt";
 import CALENDAR_CONFIGURATOR_HTML from "./generated/calendar-configurator-ui.txt";
 import GMAIL_CONFIGURATOR_HTML from "./generated/gmail-configurator-ui.txt";
 import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui.txt";
+import GOOGLE_SHEETS_CONFIGURATOR_HTML from "./generated/google-sheets-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
 import { obsContext } from "./observability.js";
 
@@ -216,6 +223,13 @@ const GOOGLE_DOC_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
+const GOOGLE_SHEETS_RESOURCE: SupportedResource = {
+  urlPattern: "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
+  title: "Google Spreadsheet",
+  description: "Read values from a spreadsheet you choose.",
+  grantable: true,
+};
+
 const GOOGLE_CALENDAR_RESOURCE: SupportedResource = {
   urlPattern: "https://calendar.google.com/calendar/:calendarId/*",
   title: "Google Calendar",
@@ -231,6 +245,14 @@ const BIGQUERY_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
+// Accounts connected before per-resource scope tracking received scopes for exactly these
+// resources.
+const LEGACY_GRANTED_RESOURCE_URL_PATTERNS = [
+  GMAIL_RESOURCE.urlPattern,
+  GOOGLE_DOC_RESOURCE.urlPattern,
+  BIGQUERY_RESOURCE.urlPattern,
+];
+
 const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
   {
     resource: GMAIL_RESOURCE,
@@ -244,6 +266,14 @@ const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
     scopes: [
       "https://www.googleapis.com/auth/documents",
       // Read-only Drive file metadata, used to power the doc picker when connecting a Google Doc.
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ],
+  },
+  {
+    resource: GOOGLE_SHEETS_RESOURCE,
+    scopes: [
+      "https://www.googleapis.com/auth/spreadsheets.readonly",
+      // Read-only Drive file metadata, used to power the spreadsheet picker.
       "https://www.googleapis.com/auth/drive.metadata.readonly",
     ],
   },
@@ -393,11 +423,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://google.com",
       logo: { url: GOOGLE_LOGO_URL },
       color: "#e8f0fe",
-      tagline: "Draft replies, edit docs, manage calendars, and analyze data",
+      tagline: "Draft replies, edit docs, read sheets, manage calendars, and analyze data",
       description:
-          "Connect your Google account to give Gadgets access to Gmail, Google Docs, " +
-          "Google Calendar, and BigQuery. Build agents that triage email, draft and edit " +
-          "documents, find focus time, schedule meetings, or run analytics queries on your data.",
+          "Connect your Google account to give Gadgets access to Gmail, Google Docs, Google " +
+          "Sheets, Google Calendar, and BigQuery. Build agents that triage email, draft and edit " +
+          "documents, read spreadsheets, find focus time, schedule meetings, or run analytics " +
+          "queries on your data.",
       providesAuth: true,
     };
   }
@@ -430,7 +461,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getTypeScriptTypes(): Promise<string> {
-    return [TYPES_CODE, DOCS_TYPES_CODE, CALENDAR_TYPES_CODE, BIGQUERY_TYPES_CODE].join("\n");
+    return [
+      TYPES_CODE, DOCS_TYPES_CODE, SHEETS_TYPES_CODE, CALENDAR_TYPES_CODE, BIGQUERY_TYPES_CODE,
+    ].join("\n");
   }
 }
 
@@ -473,12 +506,13 @@ export class UserAccount extends DurableObject<Env> {
   // The grantable resource `urlPattern`s currently granted on this account. Used to decide
   // whether ensureResources() needs to expand.
   //
-  // Legacy accounts connected before granular scope tracking have no recorded granted scopes; we
-  // treat them as having every resource granted so existing connections keep working.
+  // Legacy accounts connected before granular scope tracking have no recorded granted scopes.
+  // Report only the resources included in that historical grant, so newer resources correctly
+  // trigger OAuth scope expansion.
   async getGrantedResourceUrlPatterns(): Promise<string[]> {
     let granted = this.ctx.storage.kv.get<string[]>("grantedScopes");
     if (granted === undefined) {
-      return SUPPORTED_RESOURCES.map(resource => resource.urlPattern);
+      return [...LEGACY_GRANTED_RESOURCE_URL_PATTERNS];
     }
     return grantedResourcesFromScopes(granted);
   }
@@ -678,6 +712,22 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {class: this.ctx.exports.GoogleDocGatekeeperImpl({props}), resource: GOOGLE_DOC_RESOURCE};
     }
 
+    if (parsed.hostname === "docs.google.com" &&
+        parsed.pathname.startsWith("/spreadsheets/d/")) {
+      let spreadsheetId = parsed.pathname.split("/")[3];
+      if (!spreadsheetId) {
+        throw new Error("Invalid Google Sheets URL: no spreadsheet ID found");
+      }
+      let props: GoogleSheetsGatekeeperImplProps = {
+        userObjectId: this.ctx.props.userObjectId,
+        spreadsheetId,
+      };
+      return {
+        class: this.ctx.exports.GoogleSheetsGatekeeperImpl({ props }),
+        resource: GOOGLE_SHEETS_RESOURCE,
+      };
+    }
+
     if (parsed.hostname === "calendar.google.com" && parsed.pathname.startsWith("/calendar/")) {
       let calendarId = decodeURIComponent(parsed.pathname.split("/")[2] ?? "");
       if (!calendarId) {
@@ -804,6 +854,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       };
     }
 
+    if (resourceUrlPattern === GOOGLE_SHEETS_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: GOOGLE_SHEETS_CONFIGURATOR_HTML,
+        ui: new RpcStub(new GoogleSheetsConfiguratorUI(getToken)),
+      };
+    }
+
     throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
   }
 
@@ -860,6 +917,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 //     consulted (but must exist).
 //   - Google Doc — strategy B (ACL check, single unit): hasDocAccess answers whether the observer's
 //     own token can open the bound document (Docs API returns 401/403/404 otherwise).
+//   - Google Sheets — strategy B (ACL check, single unit): hasSpreadsheetAccess answers whether the
+//     observer's own token can open the bound spreadsheet.
 //   - Google Calendar — strategies B/C: hasCalendarWriterAccess covers the bound calendar, while
 //     hasCalendarFreeBusyAccess covers foreign calendars read by an all-visible availability query.
 //   - BigQuery — strategy C (data-set tracking by dataset): hasDatasetAccess answers whether the
@@ -889,6 +948,7 @@ function isNoAccessStatus(status: number | undefined): boolean {
 // part of the generic GatekeeperUserVerifier contract.
 export interface GoogleVerifierApi extends GatekeeperUserVerifier {
   hasDocAccess(documentId: string): Promise<boolean>;
+  hasSpreadsheetAccess(spreadsheetId: string): Promise<boolean>;
   hasCalendarWriterAccess(calendarId: string): Promise<boolean>;
   hasCalendarFreeBusyAccess(calendarId: string): Promise<boolean>;
   hasDatasetAccess(projectId: string, datasetId: string): Promise<boolean>;
@@ -915,6 +975,17 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
     let api = new GoogleDocsApi(() => this.#getToken());
     try {
       await api.getDocument(documentId);
+      return true;
+    } catch (error) {
+      if (isNoAccessStatus(httpStatusFromError(error))) return false;
+      throw error;
+    }
+  }
+
+  async hasSpreadsheetAccess(spreadsheetId: string): Promise<boolean> {
+    let api = new GoogleSheetsApi(() => this.#getToken());
+    try {
+      await api.getSpreadsheet(spreadsheetId);
       return true;
     } catch (error) {
       if (isNoAccessStatus(httpStatusFromError(error))) return false;
@@ -1082,9 +1153,7 @@ class GmailSessionImpl extends RpcTarget implements GmailSession {
     this.#ctx = ctx;
   }
 
-  // TODO: The dup'd approvalQueue RPC stub should be disposed when the session
-  // ends. Symbol.dispose requires esnext lib; revisit when the tsconfig target
-  // is upgraded.
+  // TODO: The dup'd approvalQueue RPC stub should be disposed when the session ends.
 
   async listThreads(): Promise<Cursor<GmailThreadEntry>> {
     const scopeDescription = this.#ctx.searchQuery
@@ -2309,6 +2378,154 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
       this.#simulationCache.current = undefined;
       throw error;
     }
+  }
+}
+
+// =======================================================================================
+// Google Sheets Gatekeeper
+// =======================================================================================
+
+type GoogleSheetsGatekeeperImplProps = {
+  userObjectId: string;
+  spreadsheetId: string;
+};
+
+@validateRpc()
+export class GoogleSheetsGatekeeperImpl
+    extends DurableObject<Env, GoogleSheetsGatekeeperImplProps>
+    implements Gatekeeper<GoogleSpreadsheetSession> {
+  #accessToken: GoogleAccessToken | undefined;
+
+  async #getAccessToken(): Promise<string> {
+    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
+      let account = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
+      );
+      this.#accessToken = await account.getAccessToken();
+    }
+    return this.#accessToken.token;
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    let api = new GoogleSheetsApi(() => this.#getAccessToken());
+    let spreadsheet = await api.getSpreadsheet(this.ctx.props.spreadsheetId);
+    return {
+      url: `https://docs.google.com/spreadsheets/d/${this.ctx.props.spreadsheetId}/edit`,
+      title: spreadsheet.title,
+      snippet: `Google Spreadsheet: ${spreadsheet.title} (read-only)`,
+      suggestedBindingName: "GOOGLE_SHEET",
+      tsType: "GoogleSpreadsheetSession",
+    };
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return SHEETS_TYPES_CODE;
+  }
+
+  async getAutoApprovableActions(): Promise<ActionKind[]> {
+    return [];
+  }
+
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GoogleSpreadsheetSession> {
+    let api = new GoogleSheetsApi(() => this.#getAccessToken());
+    return new GoogleSpreadsheetSessionImpl(
+      api, this.ctx.props.spreadsheetId, approvalQueue.dup(),
+    );
+  }
+
+  // Read-only — no side-effecting actions.
+  async applyAction(_action: number): Promise<void> {
+    throw new Error("Google Sheets is read-only and implements no actions.");
+  }
+  async rejectAction(_action: number): Promise<void> {
+    throw new Error("Google Sheets is read-only and implements no actions.");
+  }
+  revertAction(_action: number): Promise<void> {
+    throw new Error("Google Sheets is read-only and implements no actions.");
+  }
+
+  // Observer tracking — strategy B (ACL check, single unit). Google applies sharing permissions at
+  // spreadsheet granularity, so an observer must be able to open this spreadsheet with their own
+  // account. The overseer re-runs this check on every open, catching revoked access.
+  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let verifier = user as unknown as Fetcher<GoogleVerifierApi>;
+    if (!(await verifier.hasSpreadsheetAccess(this.ctx.props.spreadsheetId))) {
+      throw new Error(
+        "This collaborator does not have access to the bound Google spreadsheet, so they cannot " +
+        "observe data the Gadget read from it.",
+      );
+    }
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
+}
+
+@validateRpc()
+class GoogleSpreadsheetSessionImpl extends RpcTarget implements GoogleSpreadsheetSession {
+  #api: GoogleSheetsApi;
+  #spreadsheetId: string;
+  #approvalQueue: RpcStub<ApprovalQueue>;
+
+  constructor(
+    api: GoogleSheetsApi,
+    spreadsheetId: string,
+    approvalQueue: RpcStub<ApprovalQueue>,
+  ) {
+    super();
+    this.#api = api;
+    this.#spreadsheetId = spreadsheetId;
+    this.#approvalQueue = approvalQueue;
+  }
+
+  [Symbol.dispose](): void {
+    this.#approvalQueue[Symbol.dispose]();
+  }
+
+  async getSpreadsheet(): Promise<SpreadsheetInfo> {
+    let spreadsheet = await this.#api.getSpreadsheet(this.#spreadsheetId);
+    await this.#approvalQueue.authorizeObservation({
+      title: "Read Google spreadsheet metadata",
+      description:
+        `Read metadata for "${spreadsheet.title}", including its ${spreadsheet.sheets.length} ` +
+        "worksheet(s).",
+    });
+    return spreadsheet;
+  }
+
+  async readRange(
+    range: string,
+    options?: { valueMode?: SpreadsheetValueMode },
+  ): Promise<SpreadsheetRange> {
+    return (await this.#readRanges([range], options))[0];
+  }
+
+  async readRanges(
+    ranges: string[],
+    options?: { valueMode?: SpreadsheetValueMode },
+  ): Promise<SpreadsheetRange[]> {
+    return this.#readRanges(ranges, options);
+  }
+
+  async #readRanges(
+    ranges: string[],
+    options?: { valueMode?: SpreadsheetValueMode },
+  ): Promise<SpreadsheetRange[]> {
+    let result = await this.#api.readRanges(
+      this.#spreadsheetId, ranges, options?.valueMode,
+    );
+    let cellCount = result.reduce(
+      (total, range) => total + range.values.reduce((sum, row) => sum + row.length, 0),
+      0,
+    );
+    await this.#approvalQueue.authorizeObservation({
+      title: result.length === 1
+        ? `Read Google Sheets range ${result[0].range}`
+        : `Read ${result.length} Google Sheets ranges`,
+      description:
+        `Read ${cellCount.toLocaleString()} cell(s) from ${result.length} bounded range(s) in ` +
+        "the connected spreadsheet.",
+    });
+    return result;
   }
 }
 

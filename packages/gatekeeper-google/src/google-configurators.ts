@@ -7,6 +7,7 @@ import type { BigQueryConfiguratorRpc } from "./configurator/bigquery-configurat
 import type { CalendarConfiguratorRpc } from "./configurator/calendar-configurator-types";
 import type { GmailConfiguratorRpc } from "./configurator/gmail-configurator-types";
 import type { GoogleDocConfiguratorRpc } from "./configurator/google-doc-configurator-types";
+import type { GoogleSheetsConfiguratorRpc } from "./configurator/google-sheets-configurator-types";
 
 type ConfiguratorOption = { value: string; title: string; subtitle?: string; meta?: string };
 const googleTokenGetters = new WeakMap<object, () => Promise<GoogleAccessToken>>();
@@ -62,6 +63,62 @@ function optionMatches(parts: (string | undefined)[], query: string): boolean {
   if (!lowerQuery) return true;
   let corpus = parts.filter(Boolean).join(" ").toLowerCase();
   return lowerQuery.split(/\s+/).every(term => corpus.includes(term));
+}
+
+async function listDriveFiles(
+  target: object,
+  query: string,
+  mimeType: string,
+  resourceName: string,
+): Promise<ConfiguratorOption[]> {
+  let token = await googleToken(target);
+  let url = new URL("https://www.googleapis.com/drive/v3/files");
+  url.searchParams.set("pageSize", "100");
+  url.searchParams.set("fields", "files(id,name,modifiedTime,owners(displayName,emailAddress))");
+  url.searchParams.set("orderBy", "modifiedTime desc");
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("includeItemsFromAllDrives", "true");
+  let q = `mimeType = '${mimeType}' and trashed = false`;
+  let trimmed = query.trim();
+  if (trimmed) {
+    // Drive query strings use single-quoted literals; Google documents escaping ' as \'.
+    let escaped = trimmed.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    q += ` and name contains '${escaped}'`;
+  }
+  url.searchParams.set("q", q);
+
+  let response = await fetch(url.toString(), {
+    headers: { "Authorization": `Bearer ${token.token}` },
+  });
+  if (!response.ok) {
+    let text = await response.text();
+    if (response.status === 403 && text.includes("Google Drive API has not been used")) {
+      throw new Error(
+        `${resourceName} search requires the Google Drive API to be enabled for this OAuth project.`,
+      );
+    }
+    throw new Error(`Failed to search ${resourceName}: ${response.status} ${text}`);
+  }
+  let body = await response.json<{
+    files?: {
+      id: string,
+      name: string,
+      modifiedTime?: string,
+      owners?: { displayName?: string, emailAddress?: string }[],
+    }[],
+  }>();
+  return (body.files ?? []).map(file => {
+    let owner = file.owners?.[0];
+    let subtitleParts = [
+      owner?.displayName ?? owner?.emailAddress,
+      file.modifiedTime ? `Modified ${new Date(file.modifiedTime).toLocaleDateString()}` : undefined,
+    ].filter(Boolean);
+    return {
+      value: file.id,
+      title: file.name,
+      subtitle: subtitleParts.join(" · "),
+    };
+  });
 }
 
 // RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
@@ -164,50 +221,23 @@ export class GoogleDocConfiguratorUI extends RpcTarget implements GoogleDocConfi
   }
 
   async listDocs(query: string): Promise<ConfiguratorOption[]> {
-    let token = await googleToken(this);
-    let url = new URL("https://www.googleapis.com/drive/v3/files");
-    url.searchParams.set("pageSize", "100");
-    url.searchParams.set("fields", "files(id,name,modifiedTime,owners(displayName,emailAddress))");
-    url.searchParams.set("orderBy", "modifiedTime desc");
-    let q = "mimeType = 'application/vnd.google-apps.document' and trashed = false";
-    let trimmed = query.trim();
-    if (trimmed) {
-      // Drive query strings use single-quoted literals; Google documents escaping ' as \'.
-      let escaped = trimmed.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-      q += ` and name contains '${escaped}'`;
-    }
-    url.searchParams.set("q", q);
+    return listDriveFiles(
+      this, query, "application/vnd.google-apps.document", "Google Docs",
+    );
+  }
+}
 
-    let response = await fetch(url.toString(), {
-      headers: { "Authorization": `Bearer ${token.token}` },
-    });
-    if (!response.ok) {
-      let text = await response.text();
-      if (response.status === 403 && text.includes("Google Drive API has not been used")) {
-        throw new Error("Google Docs search requires the Google Drive API to be enabled for this OAuth project.");
-      }
-      throw new Error(`Failed to search Google Docs: ${response.status} ${text}`);
-    }
-    let body = await response.json<{
-      files?: {
-        id: string,
-        name: string,
-        modifiedTime?: string,
-        owners?: { displayName?: string, emailAddress?: string }[],
-      }[],
-    }>();
-    return (body.files ?? []).map(file => {
-      let owner = file.owners?.[0];
-      let subtitleParts = [
-        owner?.displayName ?? owner?.emailAddress,
-        file.modifiedTime ? `Modified ${new Date(file.modifiedTime).toLocaleDateString()}` : undefined,
-      ].filter(Boolean);
-      return {
-        value: file.id,
-        title: file.name,
-        subtitle: subtitleParts.join(" · "),
-      };
-    });
+// RPC interface exposed by Gatekeeper to the resource selection/configuration iframe.
+@validateRpc()
+export class GoogleSheetsConfiguratorUI extends RpcTarget implements GoogleSheetsConfiguratorRpc {
+  constructor(getToken: () => Promise<GoogleAccessToken>) {
+    super();
+    googleTokenGetters.set(this, getToken);
   }
 
+  async listSpreadsheets(query: string): Promise<ConfiguratorOption[]> {
+    return listDriveFiles(
+      this, query, "application/vnd.google-apps.spreadsheet", "Google Sheets",
+    );
+  }
 }
