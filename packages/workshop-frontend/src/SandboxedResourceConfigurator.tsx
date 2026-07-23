@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { ResourceConfiguratorFrame, ResourceConfiguratorHost, ResourceConfiguratorIframe } from '@gadgets/workshop-shared/gatekeeper'
 import { createRateLimitedCapability } from './rateLimitedCapability'
+import { useTheme } from './ThemeContext'
 
 // Upper bound on iframe height. Sized to leave room for a typical configurator form plus an open
 // autocomplete popup, while staying within a reasonable viewport even on short screens.
@@ -78,6 +79,7 @@ export default function SandboxedResourceConfigurator({
   initialResourceUrl?: string,
   resourceUrlPattern?: string,
 }) {
+  const { resolvedThemeMode } = useTheme()
   const placeholderRef = useRef<HTMLDivElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const rpcSessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
@@ -396,6 +398,7 @@ export default function SandboxedResourceConfigurator({
             : undefined,
           border: 0,
           background: 'transparent',
+          colorScheme: resolvedThemeMode,
           pointerEvents: 'auto',
         }}
       />, document.body)}
