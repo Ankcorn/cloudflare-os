@@ -4493,6 +4493,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       idempotencyKey: input.idempotencyKey,
       chatGatewayRpcTarget: input.chatGatewayRpcTarget,
     };
+    let chatId: number;
     if (externalChat) {
       await this.impl.sendChatMessage(
         caller,
@@ -4503,8 +4504,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         undefined,
         responseTargetRegistration,
       );
+      chatId = externalChat.chatId;
     } else {
-      await this.impl.newChat(
+      chatId = await this.impl.newChat(
         caller,
         userContext,
         input.prompt,
@@ -4515,7 +4517,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       );
     }
 
-    return { accepted: true };
+    return { accepted: true, chatPath: `/gadget/${this.ctx.id.toString()}?chat=${chatId}` };
   }
 
   // Initialize this gadget from a blueprint's code snapshot. Called by

@@ -37,6 +37,7 @@ export type SubmitExternalMessageInput = {
 export type SubmitExternalMessageResult =
   | {
       accepted: true;
+      chatPath: string;
     }
   | {
       accepted: false;
