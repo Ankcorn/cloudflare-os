@@ -636,6 +636,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
+  async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {
+    let models = await this.listModels();
+    // Prefer the existing chat's model, then the user's preferred model, then the first available model.
+    let selectedModel = models.find(model => model.id === existingChatModelId)
+      ?? models.find(model => model.id === this.storage.preferredModel.get())
+      ?? models[0];
+
+    return this.getChatContext(selectedModel?.id ?? null);
+  }
+
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     let result: GadgetMetadataWithTimestamps[] = [];
     for (let gadget of this.storage.gadgets.list()) {
@@ -671,6 +681,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async newGadget(id: string, title: string): Promise<void> {
     let created = new Date();
     this.storage.gadgets.put({id, title, created});
+  }
+
+  async ensureGadgetRegistered(id: string, title: string): Promise<void> {
+    if (this.storage.gadgets.get(id)) return;
+    await this.newGadget(id, title);
   }
 
   async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {

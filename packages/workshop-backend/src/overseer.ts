@@ -26,8 +26,10 @@ import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } fro
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
+import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 
 const logger = createWorkshopLogger("workshop.overseer");
+export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
@@ -388,6 +390,63 @@ export type AutoApproveTagRecord = {
 //
 // Note we deliberately do NOT store the resolved `AiModelConfig` here, because it contains a secret
 // API token. Instead we store enough to re-fetch it from the initiator's user DO on resume.
+
+// External message gateways pass a response target when submitting a prompt. While the agent turn is
+// in progress, `waiting` records persist that target across DO eviction/restart; once response
+// text is known, `ready` records retry delivery until acknowledged; `delivered` records are
+// retained briefly so retries of the same external message remain idempotent.
+type ExternalMessageRecord = {
+  // Namespaced external message key used to dedupe retries of the same submission.
+  idempotencyKey: string;
+  chatId: number;
+  // Chat log sequence number of the external prompt. The target sends the latest agent/error
+  // response after this sequence, stopping before the next user message.
+  promptSequence: number;
+  createdAt: number;
+} & (
+  | {
+      status: "waiting";
+      chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+    }
+  | {
+      status: "ready";
+      chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+      responseText: string;
+    }
+  | {
+      status: "delivered";
+      deliveredAt: number;
+    }
+);
+
+type ExternalMessageResponseTargetRegistration = {
+  idempotencyKey: string;
+  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+};
+
+type ExternalMessageResponseTargetRegistrationDecision =
+  | {
+      reuseExisting: false;
+    }
+  | {
+      reuseExisting: true;
+      record: ExternalMessageRecord;
+    };
+
+type ExternalMessageSubmitInput = {
+  callerEmail: string;
+  externalChatKey: string;
+  idempotencyKey: string;
+  prompt: string;
+  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+  title: string;
+};
+
+type ExternalChatRecord = {
+  externalChatKey: string;
+  chatId: number;
+};
+
 type ActiveAgentRecord = {
   chatId: number;
   // Hex durable object ID of the initiator's user DO, used to re-resolve the model config and for
@@ -403,6 +462,7 @@ type ActiveAgentRecord = {
 
 const CHAT_DRAFT_AUTHOR_SPLIT_MS = 60_000;
 const CHAT_DRAFT_COMPACT_THRESHOLD = 128;
+const AGENT_RESPONSE_DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 // Safely convert an unknown thrown value to a human-readable string.
 // Plain objects (e.g. from AI SDK stream error parts) would otherwise render as "[object Object]".
@@ -485,6 +545,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
       title: "Untitled Gadget",
 
+      // External-message Gadgets claim ownership before registering in the owner's UserDO. If that
+      // registration fails, this keeps the owner-table write retryable.
+      ownerRegistrationPending: false,
+
       codeVersion: 0,
       totalCost: 0,
 
@@ -558,6 +622,29 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // `ActiveAgentRecord`.
       activeAgents: collection<ActiveAgentRecord>()({
         primaryKey: "chatId"
+      }),
+
+      gadgetResponseDeliveries: collection<ExternalMessageRecord>()({
+        primaryKey: "idempotencyKey",
+        uniqueIndexes: {
+          undeliveredByChatId(record: ExternalMessageRecord) {
+            return record.status === "delivered" ? null : record.chatId;
+          },
+        },
+        nonUniqueIndexes: {
+          // Retry delivery by listing only ready records, not the whole idempotency history.
+          readyByIdempotencyKey(record: ExternalMessageRecord) {
+            return record.status === "ready" ? record.idempotencyKey : null;
+          },
+          // Sweep expired delivered records by age without scanning pending/ready records.
+          deliveredByDeliveredAt(record: ExternalMessageRecord) {
+            return record.status === "delivered" ? record.deliveredAt : null;
+          },
+        },
+      }),
+
+      externalChats: collection<ExternalChatRecord>()({
+        primaryKey: "externalChatKey",
       }),
 
       chats: collection<AiChatMessage>()({
@@ -838,13 +925,53 @@ class OverseerImpl implements AgentHooks {
     this.#runningAgents.delete(chatId);
     this.storage.activeAgents.delete(chatId);
     if (this.#runningAgents.size === 0) {
-      // One -> zero running agents: cancel the keep-alive alarm and wake any `alarm()` waiter.
-      this.ctx.storage.deleteAlarm();
+      // One -> zero running agents: replace the keep-alive alarm with any response-target retry/sweep
+      // alarm that is now due, and wake any `alarm()` waiter.
+      this.#updateExternalMessageResponseDeliveryAlarm();
       for (let waiter of this.#allAgentsIdleWaiters) {
         waiter();
       }
       this.#allAgentsIdleWaiters = [];
     }
+  }
+
+  #updateExternalMessageResponseDeliveryAlarm(): void {
+    if (this.#runningAgents.size > 0) return;
+
+    // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
+    // Recompute from storage whenever the alarm may have been overwritten by another concern.
+    this.#sweepDeliveredExternalMessageResponses();
+
+    let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
+      .length > 0;
+    if (hasReadyExternalMessageResponse) {
+      this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
+    let nextDeliveredRecord = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
+    if (nextDeliveredRecord?.status === "delivered") {
+      this.ctx.storage.setAlarm(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
+      return;
+    }
+
+    this.ctx.storage.deleteAlarm();
+  }
+
+  #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
+    this.storage.gadgetResponseDeliveries.delete(record.idempotencyKey);
+    if (record.status !== "delivered") {
+      record.chatGatewayRpcTarget[Symbol.dispose]();
+    }
+  }
+
+  #sweepDeliveredExternalMessageResponses(): void {
+    let cutoff = Date.now() - AGENT_RESPONSE_DELIVERED_RETENTION_MS;
+    this.ctx.storage.transactionSync(() => {
+      for (let record of Array.from(this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ end: cutoff }))) {
+        this.storage.gadgetResponseDeliveries.delete(record.idempotencyKey);
+      }
+    });
   }
 
   // Resolves once no agents are running. Used by `alarm()` to keep the DO alive until all running
@@ -885,6 +1012,7 @@ class OverseerImpl implements AgentHooks {
         this.storage.chatMeta.put(meta);
       }
       this.#unregisterRunningAgent(record.chatId);
+      this.#deliverWaitingExternalMessageResponse(record.chatId);
       return;
     }
 
@@ -930,6 +1058,7 @@ class OverseerImpl implements AgentHooks {
             "Agent interrupted due to server restart.");
         delete thread.activeAgent;
         this.storage.chatMeta.put(thread);
+        this.#deliverWaitingExternalMessageResponse(thread.id);
       }
     }
   }
@@ -1225,7 +1354,7 @@ class OverseerImpl implements AgentHooks {
 
     // Defensive check; nobody should call this when the agent is active.
     if (meta.activeAgent) {
-      throw new Error("Agent is running, wait for it to finish.");
+      throw new Error(AGENT_RUNNING_ERROR_MESSAGE);
     }
 
     let timestamp = this.getChatTimestamp();
@@ -2081,7 +2210,7 @@ class OverseerImpl implements AgentHooks {
   assertChatNotActive(chatId: number, allowMessagePreparation = false): AiChatMetadata {
     let meta = this.getChatMetaOrThrow(chatId);
     if (meta.activeAgent || !allowMessagePreparation && this.isPreparingChatMessage(chatId)) {
-      throw new Error("Agent is running, wait for it to finish.");
+      throw new Error(AGENT_RUNNING_ERROR_MESSAGE);
     }
     return meta;
   }
@@ -2115,7 +2244,7 @@ class OverseerImpl implements AgentHooks {
   #commitPreparedChatMessage(
       chatId: number, timestamp: Date, author: AiChatAuthorInfo,
       prepared: PreparedChatMessage, capsules: CapsuleSpecifier[] | undefined,
-      attachments: ChatAttachmentRef[] | undefined) {
+      attachments: ChatAttachmentRef[] | undefined): number | undefined {
     if (prepared.slashCommand) {
       let slashCommandSequence = this.nextChatSequence(chatId);
       this.storage.chats.put({
@@ -2129,9 +2258,10 @@ class OverseerImpl implements AgentHooks {
       });
       if (prepared.message === undefined) return;
       this.commitChatAttachments(chatId, attachments);
+      let messageSequence = this.nextChatSequence(chatId);
       this.storage.chats.put({
         chatId,
-        sequence: this.nextChatSequence(chatId),
+        sequence: messageSequence,
         timestamp: this.getChatTimestamp(),
         author,
         type: "message",
@@ -2140,15 +2270,16 @@ class OverseerImpl implements AgentHooks {
         capsules,
         attachments,
       });
-      return;
+      return messageSequence;
     }
 
     if (prepared.message === undefined) return;
 
     this.commitChatAttachments(chatId, attachments);
+    let messageSequence = this.nextChatSequence(chatId);
     this.storage.chats.put({
       chatId,
-      sequence: this.nextChatSequence(chatId),
+      sequence: messageSequence,
       timestamp,
       author,
       type: "message",
@@ -2156,6 +2287,7 @@ class OverseerImpl implements AgentHooks {
       capsules,
       attachments,
     });
+    return messageSequence;
   }
 
   async newChat(
@@ -2164,7 +2296,13 @@ class OverseerImpl implements AgentHooks {
     initialMessage: string | SlashCommandRequest,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
+    responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
+    externalChatKey?: string,
   ): Promise<number> {
+    if (responseTargetRegistration) {
+      let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
+      if (decision.reuseExisting) return decision.record.chatId;
+    }
     if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -2187,16 +2325,30 @@ class OverseerImpl implements AgentHooks {
       }
       this.storage.chatMeta.put(meta);
 
-      this.#commitPreparedChatMessage(
+      let promptSequence = this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments);
+      if (responseTargetRegistration) {
+        if (promptSequence === undefined) {
+          throw new Error("External messages require a prompt.");
+        }
+        this.registerExternalMessageResponseTarget(
+          responseTargetRegistration.idempotencyKey,
+          chatId,
+          promptSequence,
+          responseTargetRegistration.chatGatewayRpcTarget,
+        );
+      }
+      if (externalChatKey) {
+        this.storage.externalChats.put({ externalChatKey, chatId });
+      }
     });
 
     if (prepared.message !== undefined && userMeta.aiModel) {
-      // Fire off the agent (asynchronously).
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
+      let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
 
-    // Also fire off a second LLM call to generate a title based on the first message.
     if (userMeta.quickModel) {
       let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
         prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
@@ -2221,7 +2373,12 @@ class OverseerImpl implements AgentHooks {
     message: string | SlashCommandRequest,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
+    responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
   ): Promise<void> {
+    if (responseTargetRegistration) {
+      let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
+      if (decision.reuseExisting) return;
+    }
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -2240,12 +2397,25 @@ class OverseerImpl implements AgentHooks {
     }
     this.ctx.storage.transactionSync(() => {
       this.storage.chatMeta.put(meta);
-      this.#commitPreparedChatMessage(
+      let promptSequence = this.#commitPreparedChatMessage(
           chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments);
+      if (responseTargetRegistration) {
+        if (promptSequence === undefined) {
+          throw new Error("External messages require a prompt.");
+        }
+        this.registerExternalMessageResponseTarget(
+          responseTargetRegistration.idempotencyKey,
+          chatId,
+          promptSequence,
+          responseTargetRegistration.chatGatewayRpcTarget,
+        );
+      }
     });
 
     if (prepared.message !== undefined && userMeta.aiModel) {
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
+      let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
+                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -2253,6 +2423,130 @@ class OverseerImpl implements AgentHooks {
       chat_id: chatId,
       interaction_type: "chat_message_sent",
     });
+  }
+
+  registerExternalMessageResponseTarget(
+    idempotencyKey: string,
+    chatId: number,
+    promptSequence: number,
+    chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>,
+  ): void {
+    if (this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId)) {
+      throw new Error("This chat already has an undelivered Gadget response target.");
+    }
+    chatGatewayRpcTarget = chatGatewayRpcTarget.dup();
+    try {
+      this.storage.gadgetResponseDeliveries.put({
+        idempotencyKey,
+        chatId,
+        promptSequence,
+        chatGatewayRpcTarget,
+        createdAt: Date.now(),
+        status: "waiting",
+      });
+    } catch (err) {
+      chatGatewayRpcTarget[Symbol.dispose]();
+      throw err;
+    }
+  }
+
+  #prepareExternalMessageResponseTargetRegistration(
+    { idempotencyKey }: ExternalMessageResponseTargetRegistration,
+  ): ExternalMessageResponseTargetRegistrationDecision {
+    let existing = this.storage.gadgetResponseDeliveries.get(idempotencyKey);
+
+    // No prior record exists for this external message, so process it as fresh.
+    if (!existing) return { reuseExisting: false };
+
+    // A prior record points at a deleted chat, so discard it and process the retry fresh.
+    if (!this.storage.chatMeta.get(existing.chatId)) {
+      this.#deleteExternalMessageResponseDeliveryRecord(existing);
+      return { reuseExisting: false };
+    }
+
+    if (existing.status === "ready") {
+      this.deliverExternalMessageResponse(existing, existing.responseText);
+    }
+    return { reuseExisting: true, record: existing };
+  }
+
+  #deliverWaitingExternalMessageResponse(chatId: number): void {
+    let response = this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
+    if (response?.status !== "waiting") return;
+
+    // Chat storage is a single ordered table for all threads; each key starts with the chat ID.
+    let messagesAfterPrompt = [...this.storage.chats.list({
+      prefix: `${keyString(chatId)}.`,
+      startAfter: `${keyString(chatId)}.${keyString(response.promptSequence)}`,
+    })];
+    let nextUserMessageIndex = messagesAfterPrompt.findIndex(
+      message => message.type === "message" && message.author.type === "user",
+    );
+    // Stop at the next user message, which starts a later turn in the same chat.
+    let messagesInSameTurn = nextUserMessageIndex === -1
+      ? messagesAfterPrompt
+      : messagesAfterPrompt.slice(0, nextUserMessageIndex);
+    // Prefer the final agent message or terminal agent error in this turn.
+    for (let message of messagesInSameTurn.toReversed()) {
+      if (
+        (message.type === "error" ||
+          (message.type === "message" && message.author.type === "agent")) &&
+        message.message.trim()
+      ) {
+        this.deliverExternalMessageResponse(response, message.message);
+        return;
+      }
+    }
+    this.deliverExternalMessageResponse(response, "Agent turn completed without a response.");
+  }
+
+  deliverExternalMessageResponse(record: ExternalMessageRecord, text: string): void {
+    if (record.status === "delivered") return;
+
+    let readyRecord: ExternalMessageRecord = { ...record, status: "ready", responseText: text };
+    this.storage.gadgetResponseDeliveries.put(readyRecord);
+    this.#updateExternalMessageResponseDeliveryAlarm();
+    this.ctx.waitUntil(this.#deliverExternalMessageResponseToTarget(readyRecord).finally(() => {
+      this.#updateExternalMessageResponseDeliveryAlarm();
+    }));
+  }
+
+  async #deliverExternalMessageResponseToTarget(record: ExternalMessageRecord): Promise<void> {
+    if (record.status !== "ready") return;
+
+    try {
+      await record.chatGatewayRpcTarget.onGadgetResponse({
+        text: record.responseText,
+      });
+    } catch (err) {
+      this.logger.error("failed to deliver external message response", {
+        event: "external.message.response.delivery.failed",
+        chatId: record.chatId,
+        error: err,
+      });
+      throw err;
+    }
+    this.storage.gadgetResponseDeliveries.put({
+      idempotencyKey: record.idempotencyKey,
+      chatId: record.chatId,
+      promptSequence: record.promptSequence,
+      status: "delivered",
+      createdAt: record.createdAt,
+      deliveredAt: Date.now(),
+    });
+    record.chatGatewayRpcTarget[Symbol.dispose]();
+  }
+
+  async deliverReadyExternalMessageResponses(): Promise<void> {
+    let readyRecords = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list()];
+
+    let results = await Promise.allSettled(
+      readyRecords.map(record => this.#deliverExternalMessageResponseToTarget(record)),
+    );
+    for (let result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
+    this.#updateExternalMessageResponseDeliveryAlarm();
   }
 
   cancelAgent(chatId: number) {
@@ -2331,7 +2625,8 @@ class OverseerImpl implements AgentHooks {
   // needed to re-resolve the model config on resume.
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
-             callbackInitiated: boolean = false): void {
+             callbackInitiated: boolean = false,
+             keepAlive: boolean = false): void {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -2344,7 +2639,8 @@ class OverseerImpl implements AgentHooks {
     });
 
     let liveChat = this.#getLiveChat(chatId);
-    this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
+    let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
+    if (keepAlive) this.ctx.waitUntil(turn);
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -2561,6 +2857,8 @@ class OverseerImpl implements AgentHooks {
       if (liveChat.pendingAgentCallbacks.length > 0) {
         this.#startAgentForCallbacks(meta, liveChat);
       } else {
+        this.#deliverWaitingExternalMessageResponse(chatId);
+
         // LiveChatContext is now empty.
         this.#liveChats.delete(chatId);
       }
@@ -3951,6 +4249,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   //   the agents yet again.
   async alarm() {
     await this.impl.waitForAllAgentsToComplete();
+    await this.impl.deliverReadyExternalMessageResponses();
   }
 
   #initializeEmptyCodeSnapshot(): void {
@@ -4096,6 +4395,127 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     return new OverseerClientInterface(
         this.impl, owner, clientUser, profileId, isOwner, notifyClosed.dup(), ensureCapsules);
+  }
+
+  #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
+    let externalChat = this.impl.storage.externalChats.get(externalChatKey);
+    if (externalChat && !this.impl.storage.chatMeta.get(externalChat.chatId)) {
+      this.impl.storage.externalChats.delete(externalChat.externalChatKey);
+      externalChat = undefined;
+    }
+    return externalChat;
+  }
+
+  async receiveExternalMessage(
+    input: ExternalMessageSubmitInput,
+  ): Promise<SubmitExternalMessageResult> {
+    if (!input.prompt.trim()) {
+      return { accepted: false, message: "Please include a prompt." };
+    }
+
+    // Resolve the caller.
+    let caller = this.impl.users.getByName(input.callerEmail);
+    let callerId = caller.id.toString();
+    let callerProfile = await caller.whoamiIfExists();
+    if (!callerProfile) {
+      return {
+        accepted: false,
+        message: "Please create a Gadgets account to continue.",
+      };
+    }
+
+    // Create the Gadget if it doesn't exist yet.
+    let ownerId = this.impl.ownerId;
+    if (!ownerId) {
+      this.impl.ownerId = callerId;
+      this.impl.ownerProfileId = callerProfile.id;
+      this.impl.storage.ownerId.put(callerId);
+      this.impl.storage.title.put(input.title);
+      this.impl.storage.ownerRegistrationPending.put(true);
+      this.#initializeEmptyCodeSnapshot();
+      ownerId = callerId;
+    }
+
+    // Caller must be the owner or a build collaborator.
+    if (ownerId !== callerId) {
+      if (this.impl.storage.prohibitAllSharing.get()) {
+        return {
+          accepted: false,
+          message: "This Gadget has sharing disabled, so only its owner can access it.",
+        };
+      }
+      let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id);
+      if (role !== "build") {
+        return {
+          accepted: false,
+          message: "You do not have access to interact with this Gadget through its agent.",
+        };
+      }
+    }
+
+    // Complete pending registration in the owner's UserDO.
+    if (this.impl.storage.ownerRegistrationPending.get()) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
+      await owner.ensureGadgetRegistered(this.ctx.id.toString(), this.impl.storage.title.get());
+      this.impl.storage.ownerRegistrationPending.put(false);
+    }
+
+    // Find the external conversation's chat if it exists.
+    let externalChat = this.#getExternalChat(input.externalChatKey);
+    let modelId = null;
+    if (externalChat) {
+      // Continue existing chats with the most recent agent model used in that chat.
+      for (let msg of this.impl.storage.chats.list({ prefix: `${keyString(externalChat.chatId)}.`, reverse: true })) {
+        if (msg.author.type === "agent") {
+          modelId = msg.author.id;
+          break;
+        }
+      }
+    }
+
+    // Resolve the caller's profile and model.
+    let userContext = await caller.getExternalMessageChatContext(modelId);
+
+    // The caller must have an available agent model.
+    let aiModel = userContext.aiModel;
+    if (!aiModel) {
+      return {
+        accepted: false,
+        message: "Your Gadgets account needs an AI model configured before it can respond.",
+      };
+    }
+
+    // Re-check because another request may have created the external chat while resolving the model.
+    externalChat = this.#getExternalChat(input.externalChatKey);
+
+    // Submit the prompt to the existing external chat, or start a new external chat.
+    let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
+      idempotencyKey: input.idempotencyKey,
+      chatGatewayRpcTarget: input.chatGatewayRpcTarget,
+    };
+    if (externalChat) {
+      await this.impl.sendChatMessage(
+        caller,
+        userContext,
+        externalChat.chatId,
+        input.prompt,
+        undefined,
+        undefined,
+        responseTargetRegistration,
+      );
+    } else {
+      await this.impl.newChat(
+        caller,
+        userContext,
+        input.prompt,
+        undefined,
+        undefined,
+        responseTargetRegistration,
+        input.externalChatKey,
+      );
+    }
+
+    return { accepted: true };
   }
 
   // Initialize this gadget from a blueprint's code snapshot. Called by
@@ -5684,6 +6104,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async deleteChat(chatId: number): Promise<void> {
+    let response = this.impl.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
+    if (response?.status === "waiting") {
+      this.impl.deliverExternalMessageResponse(response, "The chat was deleted before the Gadget responded.");
+    }
     this.impl.storage.chatMeta.delete(chatId);
     this.impl.storage.chatContext.delete(chatId);
     this.impl.deleteChatDraftUpdates(chatId);
