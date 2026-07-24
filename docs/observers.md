@@ -170,16 +170,22 @@ Add a method to the User DO (`packages/workshop-backend/src/user.ts`), near
 
 ```ts
 // Mint a verifier from one of THIS user's connected accounts, identified by accountId.
-// Throws if the account no longer exists.
-async getVerifier(accountId: number): Promise<Fetcher<GatekeeperUserVerifier>>
+// Returns null if the account is missing. Throws if it belongs to a different vendor.
+async getVerifier(
+  accountId: number,
+  expectedVendorId: string,
+): Promise<Fetcher<GatekeeperUserVerifier> | null>
 ```
 
-Implementation: look up `this.storage.connectedAccounts.get(accountId)`; return
-`account.account.getVerifier()`. (Account *selection* is done by the frontend, not here — see
-Step 3. This method just resolves a chosen account to its verifier.)
+Implementation: look up `this.storage.connectedAccounts.get(accountId)` and compare its stored
+vendor with `expectedVendorId` (exact match) before returning `account.account.getVerifier()`.
+Account selection is done by the frontend, but this server-side check must not trust that filtering
+(see Step 3). A missing account returns null (re-prompt); a vendor mismatch throws (not a
+legitimate UI state).
 
 > Promise pipelining: callers can pass the returned promise straight into `addObserver()` without
-> awaiting it (see the Cap'n Web note in `AGENTS.md`).
+> awaiting it (see the Cap'n Web note in `AGENTS.md`). The observer-open path awaits it because a
+> null result means the account must be re-selected before calling `addObserver()`.
 
 ### Step 2 — Client-server API: a configuration callback on `open` / `openGadget`
 
@@ -263,13 +269,18 @@ Logic:
    `accountChoices`.
 
 5. **Re-verify all in-scope bindings** (covered + newly chosen). For each, resolve the chosen
-   account's verifier via `clientUser.getVerifier(accountId)` and call
+   account's verifier via `clientUser.getVerifier(accountId, bindingVendorId)` and call
    `this.getGatekeeperFacet(gk.id).addObserver(record.observerId, verifier)`. Generate
    `observerId` (random) if the record is new. Run these with `Promise.all` + pipelining where
    possible.
-   - If any `addObserver` **throws**, the user is not (or no longer) allowed: best-effort
-     `removeObserver(record.observerId)` on the gatekeepers added in *this* pass, do **not**
-     persist the working record, and deny the open with a clear message.
+   - The User DO compares `bindingVendorId` with the chosen connected account's stored vendor and
+     **throws** on a mismatch. This server-side check is what guarantees a gatekeeper only receives
+     a verifier minted by its own vendor; filtering account choices in the client is only a
+     user-interface convenience.
+   - If any `addObserver` **throws** (or `getVerifier` throws on vendor mismatch), the user is not
+     (or no longer) allowed: best-effort `removeObserver(record.observerId)` on the gatekeepers
+     added in *this* pass, do **not** persist the working record, and deny the open with a clear
+     message.
 
 6. **Persist the observer record** (with merged `accountChoices` and `observerId`) only after all
    `addObserver` calls succeed. Storing/creating the record is the canonical moment the user
@@ -384,9 +395,10 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
 
 1. **Owner is never an observer** — the owner always has `build` and is excluded from the
    collaborators table; `ensureObserver` runs for non-owners only.
-2. **Collaborator disconnects a chosen account later** — next open, `getVerifier(accountId)`
-   throws / the account is gone; treat the affected binding as uncovered and re-prompt via the
-   modal.
+2. **Collaborator disconnects a chosen account later** — next open,
+   `getVerifier(accountId, bindingVendorId)` returns null; treat the affected binding as uncovered
+   and re-prompt via the modal. A mismatched-vendor account (only reachable by bypassing the UI)
+   throws and denies the open.
 3. **Underlying resource access revoked** — caught at the next open because `addObserver`
    re-runs the live check and throws; the open is denied. Consistent with the lazy-revocation
    model in `sharing.ts`.

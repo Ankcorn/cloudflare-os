@@ -1421,14 +1421,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // Mint a verifier from one of THIS user's connected accounts, identified by accountId. The
   // overseer passes the returned verifier to a gatekeeper's `addObserver()` so the gatekeeper can
   // check whether this user is allowed to observe the data read through it. Returns null if the
-  // account no longer exists (or never existed).
+  // account no longer exists (or never existed). Throws if the account belongs to a different
+  // vendor (not a legitimate UI state — only reachable by bypassing client-side filtering).
   //
   // Account *selection* (which of the user's accounts to use for a given binding) is done by the
-  // frontend; this method just resolves a chosen account to its verifier. Callers can pipeline the
-  // returned promise straight into `addObserver()` without awaiting it.
-  async getVerifier(accountId: number): Promise<Fetcher<GatekeeperUserVerifier> | null> {
+  // frontend; this method validates and resolves a chosen account to its verifier.
+  async getVerifier(accountId: number, expectedVendorId: string)
+      : Promise<Fetcher<GatekeeperUserVerifier> | null> {
     let account = this.storage.connectedAccounts.get(accountId);
-    return account ? (await account.account.getVerifier()) : null;
+    if (!account) return null;
+    if (account.vendorId !== expectedVendorId) {
+      // Details stay server-side: this error reaches the browser via ensureObserver → open.
+      console.error(
+          `getVerifier: account ${accountId} vendor "${account.vendorId}" ` +
+          `!= expected "${expectedVendorId}"`);
+      throw new Error("Invalid account selection for this service.");
+    }
+    return await account.account.getVerifier();
   }
 
 }
