@@ -4114,11 +4114,12 @@ class OverseerImpl implements AgentHooks {
 
         await Promise.all(inScope.map(async gk => {
           let accountId = accountChoices[gk.id];
-          if (gk.creationSpec?.type !== "gatekeeper") {
+          let vendorId = observerVendorId(gk);
+          if (!vendorId) {
             throw new Error("An observer account was requested for a non-gatekeeper binding.");
           }
 
-          let verifier = await clientUser.getVerifier(accountId, gk.creationSpec.vendorId);
+          let verifier = await clientUser.getVerifier(accountId, vendorId);
           if (!verifier) {
             // Account gone -> re-prompt this binding. (Wrong vendor throws above.)
             goneAccounts.push(gk.id);
