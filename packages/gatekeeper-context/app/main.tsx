@@ -10,6 +10,10 @@ import ContextLibraryPage from './ContextLibraryPage'
 import { ContextApiProvider, PresentationProvider, type PresentAck } from './bridge'
 import { applyThemeMode, type ResolvedThemeMode } from './theme'
 import './styles.css'
+import ErrorBoundary from './ErrorBoundary'
+import { installErrorReporting, reportIssue } from './error-reporting'
+
+installErrorReporting()
 
 // The only capability the iframe exposes back to the host: a receiver for theme-mode pushes.
 class AppIframe extends RpcTarget {
@@ -39,8 +43,12 @@ function main() {
   // The initial mode comes back from the call; later changes arrive via iframe.setThemeMode().
   host.subscribeTheme(iframe).then(applyThemeMode).catch(() => {})
 
-  createRoot(root).render(
-    <ContextApiProvider value={host.ui}>
+  createRoot(root, {
+    onUncaughtError: (error) => reportIssue('context.react-root', error, {
+      handled: false, severity: 'fatal', captureMechanism: 'react',
+    }),
+  }).render(
+    <ErrorBoundary><ContextApiProvider value={host.ui}>
       <PresentationProvider setPresenting={(active) => host.setPresenting(active)}>
         <TooltipProvider>
           <Toasty>
@@ -48,7 +56,7 @@ function main() {
           </Toasty>
         </TooltipProvider>
       </PresentationProvider>
-    </ContextApiProvider>,
+    </ContextApiProvider></ErrorBoundary>,
   )
 }
 

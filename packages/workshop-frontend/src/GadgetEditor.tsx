@@ -14,6 +14,7 @@ import {
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import UserMenu from './components/UserMenu'
+import { reportIssue } from './errorReporting'
 
 import {
   Overseer,
@@ -644,7 +645,14 @@ export default function GadgetEditor() {
         // (deliberately indistinguishable). Show the generic error page rather than looping on
         // the reconnecting banner, even mid-session (e.g. after a removed collaborator's session
         // is force-restarted by the backend and they reconnect).
-        else if (isInitialLoad || msg.includes('Not Found')) setError('Failed to load gadget')
+        else if (isInitialLoad || msg.includes('Not Found')) {
+          // Not Found intentionally conflates absence and authorization, so it is expected and
+          // excluded. Other initial-load failures are unexpected and safe to report by opaque id.
+          if (!msg.includes('Not Found')) {
+            reportIssue('gadget.load', err, { gadgetId: id })
+          }
+          setError('Failed to load gadget')
+        }
         else if (!connectionLost) setConnectionLost(true)
       }
     }

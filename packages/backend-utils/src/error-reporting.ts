@@ -1,67 +1,28 @@
 import { env, waitUntil, type WorkerEntrypoint } from "cloudflare:workers";
 import { createLogger } from "./logger.js";
+import {
+  MAX_ATTRIBUTE_KEYS,
+  MAX_STRING_CHARS,
+  serializeException,
+  type ErrorEventV1,
+  type ErrorReporterProps,
+  type ErrorReportOptions,
+} from "@gadgets/error-reporting";
+
+export {
+  MAX_ATTRIBUTE_KEYS,
+  MAX_MESSAGE_CHARS,
+  MAX_STACK_CHARS,
+  MAX_STRING_CHARS,
+  type ErrorEventV1,
+  type ErrorReporterProps,
+  type ErrorReportOptions,
+} from "@gadgets/error-reporting";
 
 /** Log fields owned by this module. */
 type ErrorReportingLogFields = { failureSite?: string };
 
 const logger = createLogger<ErrorReportingLogFields>({ component: "backend-utils.error-reporting" });
-
-/** Max retained length of an exception message. */
-export const MAX_MESSAGE_CHARS = 1024;
-/** Max retained length of an exception stack. */
-export const MAX_STACK_CHARS = 16_384;
-/** Max number of retained scalar attributes. */
-export const MAX_ATTRIBUTE_KEYS = 32;
-/** Max retained length of any other bounded string (site, type, keys, correlation, http). */
-export const MAX_STRING_CHARS = 256;
-
-/** A bounded, vendor-neutral error occurrence sent to the private Reporter. */
-export type ErrorEventV1 = Readonly<{
-  schemaVersion: 1;
-  occurrenceId: string;
-  occurredAt: string;
-  /** Stable literal identifying the capture site. */
-  failureSite: string;
-  severity: "warning" | "error" | "fatal";
-  /** Whether the producer recovered instead of failing the operation. */
-  handled: boolean;
-  exception?: Readonly<{
-    type: string;
-    message?: string;
-    stack?: string;
-    truncated?: true;
-  }>;
-  correlation?: Readonly<{ rayId?: string; requestId?: string }>;
-  http?: Readonly<{
-    kind: "server" | "client";
-    method?: string;
-    routeTemplate?: string;
-    responseStatusCode?: number;
-  }>;
-  /** Bounded scalars only; no raw runtime objects or nested context. */
-  attributes?: Readonly<Record<string, string | number | boolean | null>>;
-  truncated?: true;
-}>;
-
-/** Trusted producer metadata configured on each Reporter service binding. */
-export type ErrorReporterProps = Readonly<{
-  service: string;
-  release?: string;
-  environment?: string;
-}>;
-
-/** Optional details already available at the capture site. */
-export type ErrorReportOptions = Readonly<{
-  handled?: boolean;
-  severity?: ErrorEventV1["severity"];
-  correlation?: ErrorEventV1["correlation"];
-  http?: ErrorEventV1["http"];
-  /**
-   * Arbitrary observability context to record as attributes. Only bounded scalars are retained;
-   * non-scalars are dropped.
-   */
-  attributes?: Readonly<Record<string, unknown>>;
-}>;
 
 /** Native Workers RPC capability implemented by the private Reporter Worker. */
 export interface ErrorReporter extends WorkerEntrypoint<unknown, ErrorReporterProps> {
@@ -77,7 +38,6 @@ declare global {
   }
 }
 
-type Exception = NonNullable<ErrorEventV1["exception"]>;
 type Scalar = string | number | boolean | null;
 
 /** Builds a bounded error event without traversing arbitrary thrown objects. */
@@ -85,7 +45,8 @@ function createErrorEvent(
     failureSite: string, caught: unknown, options?: ErrorReportOptions): ErrorEventV1 {
   let truncated = false;
   const mark = () => { truncated = true; };
-  const exception = normalizeException(caught, mark);
+  const exception = serializeException(caught);
+  if (exception.truncated) mark();
   const correlation = normalizeCorrelation(options?.correlation, mark);
   const http = normalizeHttp(options?.http, mark);
   const attributes = normalizeAttributes(options?.attributes, mark);
@@ -139,58 +100,6 @@ export function reportIssue(
     logger.debug("error report setup failed",
       { event: "error_report.setup.failed", failureSite, error });
   }
-}
-
-function normalizeException(caught: unknown, mark: () => void): Exception {
-  try {
-    if (caught === null) return { type: "NullThrown" };
-    if (typeof caught === "function") return { type: "FunctionThrown" };
-    if (typeof caught !== "object") {
-      return makeException(`${typeof caught}Thrown`, String(caught), undefined, mark);
-    }
-    if (caught instanceof Error) {
-      // Read genuine Errors directly: `Error.stack` is a native accessor, so the
-      // getter-avoiding readString() below cannot see it. Any custom getter that
-      // throws is caught by the outer try/catch and reported as uninspectable.
-      const { name, message, stack } = caught;
-      return makeException(
-        typeof name === "string" ? name : "Error",
-        typeof message === "string" ? message : undefined,
-        typeof stack === "string" ? stack : undefined,
-        mark,
-      );
-    }
-    return makeException(
-      readString(caught, "name") ?? "Object",
-      readString(caught, "message"),
-      readString(caught, "stack"),
-      mark,
-    );
-  } catch {
-    mark();
-    return { type: "UninspectableThrown", truncated: true };
-  }
-}
-
-function makeException(
-    type: string,
-    message: string | undefined,
-    stack: string | undefined,
-    mark: () => void): Exception {
-  const truncated = type.length > MAX_STRING_CHARS
-    || (message?.length ?? 0) > MAX_MESSAGE_CHARS
-    || (stack?.length ?? 0) > MAX_STACK_CHARS;
-  const result = {
-    type: boundString(type, MAX_STRING_CHARS, mark),
-    ...(message !== undefined && { message: boundString(message, MAX_MESSAGE_CHARS, mark) }),
-    ...(stack !== undefined && { stack: boundString(stack, MAX_STACK_CHARS, mark) }),
-  };
-  return truncated ? { ...result, truncated: true } : result;
-}
-
-function readString(object: object, key: string): string | undefined {
-  const value = Object.getOwnPropertyDescriptor(object, key)?.value;
-  return typeof value === "string" ? value : undefined;
 }
 
 function normalizeCorrelation(

@@ -26,11 +26,18 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      vite:
+        specifier: ^7.3.5
+        version: 7.3.5(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(yaml@2.9.0)
       wrangler:
         specifier: ^4.103.0
         version: 4.103.0(@cloudflare/workers-types@4.20260621.1)
 
   packages/backend-utils:
+    dependencies:
+      '@gadgets/error-reporting':
+        specifier: workspace:*
+        version: link:../error-reporting
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.16.18
@@ -47,6 +54,15 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+
+  packages/error-reporting:
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(jsdom@26.1.0)(vite@7.3.5(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(yaml@2.9.0))
 
   packages/gatekeeper-cloudflare:
     dependencies:
@@ -103,6 +119,9 @@ importers:
       '@gadgets/backend-utils':
         specifier: workspace:*
         version: link:../backend-utils
+      '@gadgets/error-reporting':
+        specifier: workspace:*
+        version: link:../error-reporting
       '@gadgets/typed-storage':
         specifier: workspace:*
         version: link:../typed-storage
@@ -489,6 +508,9 @@ importers:
       '@gadgets/backend-utils':
         specifier: workspace:*
         version: link:../backend-utils
+      '@gadgets/error-reporting':
+        specifier: workspace:*
+        version: link:../error-reporting
       '@gadgets/typed-storage':
         specifier: workspace:*
         version: link:../typed-storage
@@ -544,6 +566,9 @@ importers:
       '@cloudflare/kumo':
         specifier: ^2.5.2
         version: 2.5.2(@date-fns/tz@1.4.1)(@phosphor-icons/react@2.1.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(@types/react@19.2.17)(date-fns@4.1.0)(echarts@6.0.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(zod@4.4.3)
+      '@gadgets/error-reporting':
+        specifier: workspace:*
+        version: link:../error-reporting
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared

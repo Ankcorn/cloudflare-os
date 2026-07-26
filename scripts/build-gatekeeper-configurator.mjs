@@ -1,19 +1,39 @@
 import { watch } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import ts from "typescript";
+import { loadEnv } from "vite";
 
 const packageDir = resolve(process.argv[2] ?? ".");
 const watchMode = process.argv.includes("--watch");
 const quietMode = process.argv.includes("--quiet");
+const frontendReportingEnabled =
+  loadEnv(watchMode ? "development" : "production", packageDir).VITE_FRONTEND_ERROR_REPORTING === "true";
 const configuratorDir = join(packageDir, "src", "configurator");
 const generatedDir = join(packageDir, "src", "generated");
+const vendorId = basename(packageDir).replace(/^gatekeeper-/, "");
+const sourceBase = `app:///gatekeeper/${vendorId}/configurator`;
+// Function constructor bodies start on line 3 of their synthetic function source.
+const functionBodyLineOffset = 2;
+const exceptionSerializerPath = resolve(
+  import.meta.dirname, "../packages/error-reporting/src/serialize-exception.ts");
 
 function logInfo(message) {
   if (!quietMode) console.log(message);
 }
 
+async function writeFileIfChanged(path, contents) {
+  try {
+    if (await readFile(path, "utf8") === contents) return false;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await writeFile(path, contents);
+  return true;
+}
+
 let capnwebBundle;
+let exceptionSerializerBundle;
 
 async function getCapnwebBundle() {
   if (capnwebBundle !== undefined) return capnwebBundle;
@@ -21,14 +41,59 @@ async function getCapnwebBundle() {
   return capnwebBundle;
 }
 
-async function createConfiguratorHtml(moduleCode) {
-  const capnwebBase64 = Buffer.from(`//# sourceURL=configurator-jsrpc.js\n${await getCapnwebBundle()}`, "utf8").toString("base64");
-  const configuratorUIModuleCode = moduleCode.replace(
-    /export\s+default\s+/,
-    "globalThis.__configuratorUISpec = ",
-  );
-  const runtime = `//# sourceURL=configurator-runtime.js
+async function getExceptionSerializerBundle() {
+  if (exceptionSerializerBundle !== undefined) return exceptionSerializerBundle;
+  const source = await readFile(exceptionSerializerPath, "utf8");
+  exceptionSerializerBundle = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    fileName: exceptionSerializerPath,
+  }).outputText;
+  return exceptionSerializerBundle;
+}
+
+async function createExceptionSerializerImport() {
+  const source = `//# sourceURL=${sourceBase}/serialize-exception.js\n${await getExceptionSerializerBundle()}`;
+  const base64 = Buffer.from(source, "utf8").toString("base64");
+  return `import { serializeException } from "data:text/javascript;charset=utf-8;base64,${base64}";`;
+}
+
+async function createConfiguratorHtml(configuratorUIModuleSource) {
+  const capnwebBase64 = Buffer.from(`//# sourceURL=${sourceBase}/capnweb.js\n${await getCapnwebBundle()}`, "utf8").toString("base64");
+  const exceptionSerializerImport = frontendReportingEnabled
+    ? await createExceptionSerializerImport()
+    : "";
+  const runtime = `//# sourceURL=${sourceBase}/runtime.js
 import { RpcTarget, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${capnwebBase64}";
+${exceptionSerializerImport}
+
+const frontendReportingEnabled = ${frontendReportingEnabled};
+function reportFrontendIssue(failureSite, caught, options = {}) {
+  if (!frontendReportingEnabled) return;
+  try {
+    window.parent.postMessage({
+      type: "gadgets.frontend-error.v1",
+      report: {
+        failureSite,
+        severity: options.severity ?? "error",
+        handled: options.handled ?? true,
+        captureMechanism: options.captureMechanism || "explicit",
+        exception: serializeException(caught),
+      },
+    }, "*");
+  } catch {}
+}
+
+if (frontendReportingEnabled) {
+  window.addEventListener("error", event => {
+    if (event.error == null) return;
+    reportFrontendIssue("configurator.window-error", event.error,
+      { handled: false, captureMechanism: "window.error" });
+  });
+  window.addEventListener("unhandledrejection", event => reportFrontendIssue(
+    "configurator.unhandled-rejection", event.reason,
+    { handled: false, captureMechanism: "unhandledrejection" },
+  ));
+}
 
 const root = document.getElementById("root");
 let host;
@@ -312,6 +377,7 @@ const components = {
         renderPopup({ options });
       } catch (error) {
         if (currentRequest !== requestId) return;
+        reportFrontendIssue("configurator.autocomplete-load", error);
         renderPopup({ error: error?.message || "Could not load options." });
       }
     }
@@ -475,9 +541,7 @@ async function main() {
   ui = host.gatekeeper;
 
   Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, Autocomplete });
-  new Function(${JSON.stringify(`${configuratorUIModuleCode}\n//# sourceURL=configurator-ui-module.js`)})();
-
-  spec = globalThis.__configuratorUISpec;
+  spec = new Function(${JSON.stringify(configuratorUIModuleSource)})();
   if (!spec) throw new Error("Configurator UI module did not define a configurator UI.");
   values = { ...(spec.initial || {}) };
   await seedInitialValues();
@@ -486,6 +550,9 @@ async function main() {
 }
 
 main().catch(error => {
+  reportFrontendIssue("configurator.startup", error, {
+    handled: false, severity: "fatal",
+  });
   root?.replaceChildren(el("div", { className: "error", text: error?.stack || String(error) }));
   postHeightAfterLayout();
 });
@@ -633,6 +700,19 @@ window.addEventListener("touchmove", event => {
 </html>`.trim();
 }
 
+function blankCode(text) {
+  return text.replace(/[^\r\n]/g, " ");
+}
+
+function prepareConfiguratorModule(outputText) {
+  return outputText
+    .replace(/^import\s+[^;]+from\s+["']@gadgets\/configurator-ui["'];\s*\n?/gm, blankCode)
+    .replace(/^import\s+type\s+[^;]+;\s*\n?/gm, blankCode)
+    .replace(/^export\s+{};\s*\n?/gm, blankCode)
+    .replace(/^\/\/# sourceMappingURL=.*$/gm, blankCode)
+    .replace(/export[\t ]+default[\t ]+/, match => "return".padEnd(match.length));
+}
+
 async function buildConfiguratorUIs() {
   let configuratorUIs;
   try {
@@ -657,6 +737,8 @@ async function buildConfiguratorUIs() {
         jsxFactory: "h",
         jsxFragmentFactory: "Fragment",
         removeComments: false,
+        sourceMap: frontendReportingEnabled,
+        inlineSources: frontendReportingEnabled,
       },
       fileName: configuratorUI,
       reportDiagnostics: true,
@@ -670,34 +752,43 @@ async function buildConfiguratorUIs() {
       throw new Error(formatted);
     }
 
-    const outputName = basename(configuratorUI, ".tsx") + ".txt";
-    const outputText = diagnostics.outputText
-      .replace(/^import\s+[^;]+from\s+["']@gadgets\/configurator-ui["'];\s*\n?/gm, "")
-      .replace(/^import\s+type\s+[^;]+;\s*\n?/gm, "")
-      .replace(/^export\s+{};\s*\n?/gm, "");
-    if (/^\s*import\s/m.test(outputText) || /^\s*export\s+.*\sfrom\s/m.test(outputText)) {
+    const moduleName = basename(configuratorUI, ".tsx");
+    const outputName = moduleName + ".txt";
+    const moduleCode = prepareConfiguratorModule(diagnostics.outputText);
+    if (/^\s*import\s/m.test(moduleCode) || /^\s*export\s+.*\sfrom\s/m.test(moduleCode)) {
       throw new Error(
         `${configuratorUI} generated unsupported import or re-export statements. ` +
         `Configurator UI modules must be self-contained after generation.`);
     }
 
+    const sourceMapReference = frontendReportingEnabled
+      ? `\n//# sourceMappingURL=${sourceBase}/${moduleName}.js.map`
+      : "";
+    const configuratorUIModuleSource =
+      `${moduleCode}\n//# sourceURL=${sourceBase}/${moduleName}.js${sourceMapReference}`;
     const outputPath = join(generatedDir, outputName);
-    const html = await createConfiguratorHtml(outputText);
+    const html = await createConfiguratorHtml(configuratorUIModuleSource);
+    const artifactPath = join(generatedDir, `${moduleName}.js`);
+    const mapPath = join(generatedDir, `${moduleName}.js.map`);
+    if (frontendReportingEnabled && diagnostics.sourceMapText) {
+      const artifactContent =
+        `${"\n".repeat(functionBodyLineOffset)}${configuratorUIModuleSource}\n`;
+      await writeFileIfChanged(artifactPath, artifactContent);
+      const sourceMap = JSON.parse(diagnostics.sourceMapText);
+      sourceMap.file = `${moduleName}.js`;
+      sourceMap.sources = [`${sourceBase}/${configuratorUI}`];
+      sourceMap.mappings = ";".repeat(functionBodyLineOffset) + sourceMap.mappings;
+      const mapContent = JSON.stringify(sourceMap);
+      await writeFileIfChanged(mapPath, mapContent);
+    } else {
+      await Promise.all([rm(artifactPath, { force: true }), rm(mapPath, { force: true })]);
+    }
     const newContent =
       `<!-- Generated by scripts/build-gatekeeper-configurator.mjs from src/configurator/${configuratorUI}. Do not edit. -->\n` +
       html;
 
     // Skip writes when content is unchanged so editors / file watchers don't see spurious changes.
-    let existing;
-    try {
-      existing = await readFile(outputPath, "utf8");
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    if (existing === newContent) continue;
-
-    await writeFile(outputPath, newContent);
-    writtenCount++;
+    if (await writeFileIfChanged(outputPath, newContent)) writtenCount++;
   }
 
   return { ok: true, total: configuratorUIs.length, writtenCount };

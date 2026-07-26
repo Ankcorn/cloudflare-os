@@ -10,6 +10,8 @@ import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
 import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
+import FrontendErrorBoundary from './FrontendErrorBoundary'
+import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -111,6 +113,7 @@ export function markConnectionRestored() {
 }
 
 // Current stub. handleBroken() will replace this on disconnect.
+installWorkshopErrorReporting()
 let currentStub = startConnection();
 currentStub.onRpcBroken(handleBroken);
 
@@ -157,7 +160,11 @@ function AppWithConnection() {
   );
 }
 
-const root = createRoot(document.getElementById('root')!)
+const root = createRoot(document.getElementById('root')!, {
+  onUncaughtError: (error) => reportIssue('workshop.react-root', error, {
+    handled: false, severity: 'fatal', captureMechanism: 'react',
+  }),
+})
 
 // Kick off dev auto-login in the background. If it completes before
 // useAuth checks the token, the user skips the login page. If the backend
@@ -167,6 +174,8 @@ devAutoLogin(currentStub).catch(() => {})
 
 root.render(
   <StrictMode>
-    <AppWithConnection />
+    <FrontendErrorBoundary>
+      <AppWithConnection />
+    </FrontendErrorBoundary>
   </StrictMode>
 )

@@ -4,6 +4,7 @@ import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { ResourceConfiguratorFrame, ResourceConfiguratorHost, ResourceConfiguratorIframe } from '@gadgets/workshop-shared/gatekeeper'
 import { createRateLimitedCapability } from './rateLimitedCapability'
 import { useTheme } from './ThemeContext'
+import { forwardTrustedFrameError } from './errorReporting'
 
 // Upper bound on iframe height. Sized to leave room for a typical configurator form plus an open
 // autocomplete popup, while staying within a reasonable viewport even on short screens.
@@ -357,6 +358,11 @@ export default function SandboxedResourceConfigurator({
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow || event.origin !== 'null') return
       if (iframeInvalidatedRef.current) return
+
+      const frameWindow = iframeRef.current?.contentWindow
+      if (frameWindow && forwardTrustedFrameError(
+        event, frameWindow, { surface: 'configurator' },
+      )) return
 
       if (event.data?.type === 'handshake' && event.ports?.[0]) {
         connectIframe(event.ports[0])

@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { jwtVerify, createRemoteJWKSet, JWTPayload } from "jose";
+import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api';
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -22,6 +22,8 @@ import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentS
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
+import { handleClientErrorRequest } from "./client-errors.js";
+import { verifyCfAccessJwt } from "./access.js";
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
   return {
@@ -698,6 +700,10 @@ export default {
     // browser via the `attempt` stub from PublicApi.startGatekeeperLogin(). So the backend no longer
     // hosts /auth/* callbacks.
 
+    if (url.pathname === "/api/client-errors") {
+      return handleClientErrorRequest(req, env, ctx);
+    }
+
     if (url.pathname === "/api") {
       let accessPayload: JWTPayload | undefined;
 
@@ -706,20 +712,8 @@ export default {
           return new Response("Cross-origin API access not allowed.", { status: 403 });
         }
 
-        const token = req.headers.get("cf-access-jwt-assertion");
-        if (!token) {
-          return new Response("Missing CF access JWT.", { status: 403 });
-        }
-
-        const JWKS = createRemoteJWKSet(
-          new URL(`${env.CF_ACCESS_ISS}/cdn-cgi/access/certs`)
-        );
-
-        // Verify the JWT
-        const { payload } = await jwtVerify(token, JWKS, {
-          issuer: env.CF_ACCESS_ISS,
-          audience: env.CF_ACCESS_AUD,
-        });
+        const payload = await verifyCfAccessJwt(req, env);
+        if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
 
         if (!payload.email) {
           return new Response("Access JWT didn't specify email address.", { status: 403 });
@@ -729,8 +723,8 @@ export default {
       }
 
       return newWorkersRpcResponse(req, new PublicApiImpl(ctx, env, accessPayload));
-    } else {
-      return new Response("Not Found", {status: 404});
     }
+
+    return new Response("Not Found", {status: 404});
   }
 } satisfies ExportedHandler<Env>;
