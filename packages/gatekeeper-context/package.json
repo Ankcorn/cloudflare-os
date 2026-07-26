@@ -16,6 +16,7 @@
   "dependencies": {
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/error-reporting": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.8.0",
     "capnweb-validate": "0.2.1",

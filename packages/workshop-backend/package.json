@@ -18,6 +18,7 @@
     "@ai-sdk/openai": "^3.0.73",
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/error-reporting": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "ai": "^6.0.208",
     "ai-gateway-provider": "^3.1.3",

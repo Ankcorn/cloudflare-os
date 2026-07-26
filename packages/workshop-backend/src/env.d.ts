@@ -33,6 +33,12 @@ declare global {
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
       PRODUCT_ANALYTICS?: import("cloudflare:pipelines").Pipeline<ProductAnalyticsRecord>;
 
+      // Optional browser error pipeline. Both bindings must be present before reports dispatch.
+      FRONTEND_ERROR_REPORTER?: Service<
+        import("@gadgets/backend-utils/error-reporting").ErrorReporter
+      >;
+      FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
+
       // ---------------------------------------------------------------------------------------------
       // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier
       // limits / top-up). All OFF by default; existing password / Cloudflare Access deployments are
@@ -69,5 +75,4 @@ declare global {
     }
   }
 }
-
 

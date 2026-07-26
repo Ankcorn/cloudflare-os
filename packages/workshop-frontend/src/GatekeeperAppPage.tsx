@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import SandboxedGatekeeperApp from './SandboxedGatekeeperApp'
+import { reportIssue } from './errorReporting'
 
 // The frame's `ui` is an RPC stub at runtime; dispose it to release the server-side capability.
 function disposeFrame(frame: GatekeeperUiFrame | null) {
@@ -36,6 +37,9 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
       })
       .catch((err) => {
         console.error('Failed to load gatekeeper app:', err)
+        reportIssue('gatekeeper-app.load', err, {
+          gatekeeperVendorId: appId,
+        })
         if (!cancelled) setError(`${err}`)
       })
     return () => {
@@ -56,7 +60,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
   // Fill the viewport below the header so the embedded app can manage its own internal layout.
   return (
     <div style={{ height: 'calc(100vh - 56px)' }}>
-      <SandboxedGatekeeperApp frame={state.frame} />
+      <SandboxedGatekeeperApp frame={state.frame} gatekeeperVendorId={appId} />
     </div>
   )
 }

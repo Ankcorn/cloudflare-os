@@ -22,6 +22,7 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import PreApprovalDialog from './components/PreApprovalDialog'
+import { reportIssue } from './errorReporting'
 import { usePreApprovalPrompt } from './usePreApprovalPrompt'
 
 interface ConnectionsProps {
@@ -72,6 +73,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
       onHasGatekeepersChange?.(gatekeeperList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
+      reportIssue('connections.load', err)
       toasts.add({ title: 'Failed to load connections', variant: 'error' })
     } finally {
       setLoading(false)
@@ -626,7 +628,10 @@ function BlueprintAnnotationModal({
           }
         }
       } catch (err: any) {
-        if (!cancelled) setLoadError(err?.message || 'Could not load binding.')
+        if (!cancelled) {
+          reportIssue('connections.binding-load', err)
+          setLoadError(err?.message || 'Could not load binding.')
+        }
       }
     })()
     return () => {
@@ -644,6 +649,7 @@ function BlueprintAnnotationModal({
       if (gk) await gk.setBlueprintAnnotation(data.annotation)
       onSaved()
     } catch (err: any) {
+      reportIssue('connections.binding-save', err)
       setSaveError(err?.message || 'Could not save.')
     } finally {
       gk?.[Symbol.dispose]()

@@ -27,6 +27,7 @@ import { AgentSpawnerConfigForm } from './gatekeeper-modal/AgentSpawnerConfigFor
 import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionConfig'
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
 import { matchesResourceUrl } from './resourceMatching'
+import { reportIssue } from './errorReporting'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -364,6 +365,7 @@ export default function GatekeeperModal({
     }).catch(err => {
       if (cancelled) return
       console.error('Failed to load models:', err)
+      reportIssue('gatekeeper.models-load', err)
       toasts.add({ title: "Couldn't load AI models", variant: 'error' })
     })
 
@@ -373,6 +375,7 @@ export default function GatekeeperModal({
     }).catch(err => {
       if (cancelled) return
       console.error('Failed to load connection vendors:', err)
+      reportIssue('gatekeeper.vendors-load', err)
       toasts.add({ title: "Couldn't load connection options", variant: 'error' })
     })
 
@@ -557,7 +560,12 @@ export default function GatekeeperModal({
       })
       .catch(error => {
         console.error('Failed to start resource configurator:', error)
-        if (!cancelled) setConfiguratorError(error?.message || 'Could not start configurator.')
+        if (!cancelled) {
+          reportIssue('gatekeeper.configurator-start', error, {
+            gatekeeperVendorId: selectedConnection?.vendorId,
+          })
+          setConfiguratorError(error?.message || 'Could not start configurator.')
+        }
       })
       .finally(() => {
         if (!cancelled) setConfiguratorLoading(false)
@@ -584,6 +592,7 @@ export default function GatekeeperModal({
       toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
     } catch (error) {
       console.error('Failed to initiate connection:', error)
+      reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
     } finally {
       setConnectingVendor(null)
@@ -608,6 +617,9 @@ export default function GatekeeperModal({
       // the configurator loads automatically.
     } catch (error) {
       console.error('Failed to request additional access:', error)
+      reportIssue('gatekeeper.resource-grant', error, {
+        gatekeeperVendorId: selectedConnection?.vendorId,
+      })
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
     } finally {
       setGrantingAccountId(null)
@@ -622,6 +634,9 @@ export default function GatekeeperModal({
       toasts.add({ title: 'Complete the account reconnect in the new tab.', variant: 'success' })
     } catch (error) {
       console.error('Failed to initiate reconnect:', error)
+      reportIssue('gatekeeper.reconnect-start', error, {
+        gatekeeperVendorId: selectedConnection?.vendorId,
+      })
       toasts.add({ title: 'Failed to start reconnect flow', variant: 'error' })
     } finally {
       setReconnectingAccountId(null)
@@ -1099,4 +1114,3 @@ function ConnectionGroupRow({
     </div>
   )
 }
-

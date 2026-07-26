@@ -10,6 +10,7 @@ import {
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { reportIssue } from './errorReporting'
 import {
   DropdownMenu,
   Tooltip,
@@ -1626,6 +1627,7 @@ export const ChatInput = ({
     } catch (err: any) {
       console.error("Failed to upload chat attachment:", err);
       if (!mountedRef.current) return;
+      reportIssue('chat.attachment-upload', err)
       setPendingAttachments((prev) => prev.map((attachment) => attachment.id === id ? {
         ...attachment,
         uploadState: "error",
@@ -4240,6 +4242,7 @@ function ChatInterface({
         }
       } catch (err) {
         console.error("Failed to subscribe to chats:", err);
+        reportIssue('chat.subscription-load', err)
         toasts.add({ title: "Unable to load conversations", variant: "error" });
       }
     };

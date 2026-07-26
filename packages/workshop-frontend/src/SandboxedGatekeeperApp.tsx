@@ -5,6 +5,7 @@ import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { createRateLimitedCapability } from './rateLimitedCapability'
 import { useTheme } from './ThemeContext'
 import type { ResolvedThemeMode } from './theme'
+import { forwardTrustedFrameError } from './errorReporting'
 
 // A receiver, defined by the sandboxed app, that the host calls to push theme changes into the frame.
 interface ThemeReceiver extends RpcTarget {
@@ -159,8 +160,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
 // Hosts a gatekeeper's full-page management SPA in a sandboxed, network-isolated iframe. The app
 // talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
 // The iframe fills its parent container.
-export default function SandboxedGatekeeperApp({ frame }: {
+export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   frame: GatekeeperUiFrame,
+  gatekeeperVendorId: string,
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const sessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
@@ -238,6 +240,9 @@ export default function SandboxedGatekeeperApp({ frame }: {
       const frameWindow = iframeRef.current?.contentWindow
       if (!frameWindow || event.source !== frameWindow || event.origin !== 'null') return
       if (invalidatedRef.current) return
+      if (forwardTrustedFrameError(
+        event, frameWindow, { surface: 'gatekeeper-app', gatekeeperVendorId },
+      )) return
       if (event.data?.type === 'handshake' && event.ports?.[0]) {
         connect(event.ports[0])
       }
@@ -254,7 +259,7 @@ export default function SandboxedGatekeeperApp({ frame }: {
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, present, setOverlayPhase])
+  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, present, setOverlayPhase])
 
   return (
     <iframe
