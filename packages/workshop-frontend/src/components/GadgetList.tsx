@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, PushPin, Pencil, ArrowRight } from '@phosphor-icons/react'
+import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, Star, Pencil, ArrowRight } from '@phosphor-icons/react'
 import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
@@ -88,7 +88,7 @@ function AppRow({
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          {gadget.pinned && <PushPin size={12} weight="fill" className="text-kumo-brand flex-shrink-0" />}
+          {gadget.pinned && <Star size={12} weight="fill" className="text-kumo-brand flex-shrink-0" />}
           {isRenaming ? (
             <input
               ref={renameInputRef}
@@ -139,8 +139,8 @@ function AppRow({
             Rename
           </DropdownMenu.Item>
           <DropdownMenu.Item onClick={() => onTogglePin(gadget)} className={MENU_ITEM}>
-            <PushPin size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
-            {gadget.pinned ? 'Unpin' : 'Pin to top'}
+            <Star size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
+            {gadget.pinned ? 'Unfavorite' : 'Favorite'}
           </DropdownMenu.Item>
           <DropdownMenu.Item onClick={() => onInfo(gadget)} className={MENU_ITEM}>
             <Info size={13} className="mr-2" />
@@ -297,7 +297,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
           return b.lastActive.getTime() - a.lastActive.getTime()
         })
       })
-      toasts.add({ title: 'Failed to update pin status', variant: 'error' })
+      toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
     } finally {
       (await overseer)[Symbol.dispose]()
     }

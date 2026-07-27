@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { DotsThree, PushPin, ShareNetwork, Trash, Pencil } from '@phosphor-icons/react'
+import { DotsThree, Star, ShareNetwork, Trash, Pencil } from '@phosphor-icons/react'
 import { DropdownMenu } from '@cloudflare/kumo'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from '../menuStyles'
 import { useState, useEffect, useRef } from 'react'
@@ -13,8 +13,8 @@ function initials(title: string | undefined): string {
 }
 
 // One row in the sidebar's Favorites / Recent list. Compact, with a monogram avatar, a truncated
-// title, and an overflow menu (pin, rename, share, delete). Pin/rename/share/delete callbacks are
-// passed in by the parent so this row stays a pure presentational component.
+// title, and an overflow menu (favorite, rename, share, delete). Favorite/rename/share/delete
+// callbacks are passed in by the parent so this row stays a pure presentational component.
 export default function SidebarGadgetRow({
   gadget,
   collapsed = false,
@@ -112,8 +112,8 @@ export default function SidebarGadgetRow({
                   onClick={() => onTogglePin(gadget)}
                   className={MENU_ITEM}
                 >
-                  <PushPin size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
-                  {gadget.pinned ? 'Unpin' : 'Pin to top'}
+                  <Star size={13} className="mr-2" weight={gadget.pinned ? 'fill' : 'regular'} />
+                  {gadget.pinned ? 'Unfavorite' : 'Favorite'}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   onClick={() => onShare(gadget)}

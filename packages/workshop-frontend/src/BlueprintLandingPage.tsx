@@ -4,7 +4,7 @@ import { RpcStub, RpcTarget } from 'capnweb'
 import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
-import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, PushPin, Robot, Star, Trash, X } from '@phosphor-icons/react'
+import { ArrowsOutSimple, ArrowLeft, ArrowSquareOut, DotsThree, DownloadSimple, Lightning, Plus, Robot, Sparkle, Star, Trash, X } from '@phosphor-icons/react'
 
 import { useAuth } from './useAuth'
 import LoginPage from './LoginPage'
@@ -638,10 +638,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         setIsInLibrary(true)
         setIsUploadedBlueprint(false)
       }
-      toasts.add({ title: nextPinned ? 'Blueprint pinned' : 'Blueprint unpinned', variant: 'success' })
+      toasts.add({ title: nextPinned ? 'Blueprint favorited' : 'Blueprint unfavorited', variant: 'success' })
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
-      toasts.add({ title: 'Failed to update pin status', variant: 'error' })
+      toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
     } finally {
       setUpdatingPinned(false)
     }
@@ -869,12 +869,12 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 </DropdownMenu.Item>
 
                 <DropdownMenu.Item
-                  icon={<PushPin size={13} className="mr-2" weight={isPinned ? 'fill' : 'regular'} />}
+                  icon={<Star size={13} className="mr-2" weight={isPinned ? 'fill' : 'regular'} />}
                   onClick={handleTogglePinned}
                   disabled={updatingPinned}
                   className={MENU_ITEM}
                 >
-                  {updatingPinned ? 'Updating...' : (isPinned ? 'Unpin blueprint' : 'Pin blueprint')}
+                  {updatingPinned ? 'Updating...' : (isPinned ? 'Unfavorite' : 'Favorite')}
                 </DropdownMenu.Item>
 
                 {ownBlueprintSummary?.gadgetId && ownBlueprintSummary.gadgetTitle !== 'Deleted Gadget' && (
@@ -931,7 +931,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   <>
                     <DropdownMenu.Separator />
                     <DropdownMenu.Item
-                      icon={<Star size={13} className="mr-2" weight={isFeatured ? 'fill' : 'regular'} />}
+                      icon={<Sparkle size={13} className="mr-2" weight={isFeatured ? 'fill' : 'regular'} />}
                       onClick={handleToggleFeatured}
                       disabled={updatingFeatured}
                       className={MENU_ITEM}

@@ -5,7 +5,7 @@ import {
   Compass,
   DotsThreeVertical,
   MagnifyingGlass,
-  PushPin,
+  Star,
   Trash,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -67,7 +67,7 @@ function BlueprintRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          {item.pinned && <PushPin size={12} weight="fill" className="flex-shrink-0 text-kumo-brand" />}
+          {item.pinned && <Star size={12} weight="fill" className="flex-shrink-0 text-kumo-brand" />}
           <h3 className="truncate text-sm font-medium text-kumo-default">
             {item.title || 'Untitled blueprint'}
           </h3>
@@ -98,8 +98,8 @@ function BlueprintRow({
           />
           <DropdownMenu.Content className={MENU_CONTENT}>
             <DropdownMenu.Item onClick={() => onTogglePin(item)} className={MENU_ITEM}>
-              <PushPin size={13} className="mr-2" weight={item.pinned ? 'fill' : 'regular'} />
-              {item.pinned ? 'Unpin' : 'Pin to top'}
+              <Star size={13} className="mr-2" weight={item.pinned ? 'fill' : 'regular'} />
+              {item.pinned ? 'Unfavorite' : 'Favorite'}
             </DropdownMenu.Item>
             {item.inLibrary && (
               <DropdownMenu.Item variant="danger" onClick={() => onRemoveFromLibrary(item)} className={MENU_ITEM_DANGER}>
@@ -184,7 +184,7 @@ export default function BlueprintList() {
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
       setItems((prev) => sortItems(prev.map((b) => (b.id === item.id ? { ...b, pinned: item.pinned } : b))))
-      toasts.add({ title: 'Failed to update pin', variant: 'error' })
+      toasts.add({ title: 'Failed to update favorite', variant: 'error' })
     }
   }
 
