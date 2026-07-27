@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, Blueprint, DotsThreeVertical, Hexagon, MagnifyingGlass, PushPin, UploadSimple } from '@phosphor-icons/react'
+import { ArrowRight, Blueprint, DotsThreeVertical, Hexagon, MagnifyingGlass, Star, UploadSimple } from '@phosphor-icons/react'
 import { DropdownMenu, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { BlueprintLibrarySummary, BlueprintMetadata, BlueprintUserSummary } from '@gadgets/workshop-shared/api'
@@ -170,7 +170,7 @@ export default function HomeBlueprintList() {
       await authenticatedApi.setBlueprintPinned(blueprint.id, nextPinned)
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
-      toasts.add({ title: 'Failed to update pin status', variant: 'error' })
+      toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
       void loadBlueprints()
     }
   }, [authenticatedApi, loadBlueprints, toasts])
@@ -277,7 +277,7 @@ function BlueprintRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
-          {blueprint.pinned && <PushPin size={12} weight="fill" className="shrink-0 text-kumo-brand" />}
+          {blueprint.pinned && <Star size={12} weight="fill" className="shrink-0 text-kumo-brand" />}
           <h3 className="truncate text-sm font-medium text-kumo-default">
             {blueprint.title || 'Untitled blueprint'}
           </h3>
@@ -298,8 +298,8 @@ function BlueprintRow({
           />
           <DropdownMenu.Content>
             <DropdownMenu.Item onClick={onTogglePin}>
-              <PushPin size={14} className="mr-2" weight={blueprint.pinned ? 'fill' : 'regular'} />
-              {blueprint.pinned ? 'Unpin' : 'Pin to top'}
+              <Star size={14} className="mr-2" weight={blueprint.pinned ? 'fill' : 'regular'} />
+              {blueprint.pinned ? 'Unfavorite' : 'Favorite'}
             </DropdownMenu.Item>
             {onRemoveFromLibrary && (
               <>
@@ -330,7 +330,7 @@ function EmptyBlueprints({ onUpload, uploading }: { onUpload: () => void; upload
         No blueprints yet
       </p>
       <p className="mx-auto mt-1 max-w-[320px] text-[12px] font-normal leading-4 tracking-[-0.2px] text-kumo-subtle">
-        Save blueprints from Explore or create one from a Gadget. Pinned blueprints will stay at the top.
+        Save blueprints from Explore or create one from a Gadget. Favorite blueprints will stay at the top.
       </p>
       <div className="mt-4 flex items-center justify-center gap-2">
         <Link

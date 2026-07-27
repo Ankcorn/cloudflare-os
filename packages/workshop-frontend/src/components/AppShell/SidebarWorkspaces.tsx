@@ -146,7 +146,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     } catch (err) {
       console.error('Failed to toggle pin:', err)
       setGadgets((prev) => prev.map((x) => (x.id === g.id ? { ...x, pinned: g.pinned } : x)))
-      toasts.add({ title: 'Failed to update pin', variant: 'error' })
+      toasts.add({ title: 'Failed to update favorite', variant: 'error' })
     } finally {
       overseer[Symbol.dispose]()
     }
@@ -335,7 +335,7 @@ export function SidebarWorkspacesLists({ collapsed = false }: { collapsed?: bool
       >
         {favorites.length === 0 ? (
           <p className="px-2.5 py-1.5 text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">
-            Pin a workspace to keep it here.
+            Favorite a workspace to keep it here.
           </p>
         ) : (
           <div className="flex flex-col">
