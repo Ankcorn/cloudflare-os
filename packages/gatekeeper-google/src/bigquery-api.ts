@@ -9,6 +9,7 @@ import type {
   BigQueryDataset, BigQueryDryRunResult, BigQueryField, BigQueryParam, BigQueryProject,
   BigQueryQueryOptions, BigQueryQueryResult, BigQueryTable,
 } from "./bigquery-types";
+import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
 
 const API_BASE = "https://bigquery.googleapis.com/bigquery/v2";
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -238,18 +239,18 @@ function buildQueryParameters(params: Record<string, BigQueryParam> | undefined)
 async function callRest<T>(
   url: string,
   init: RequestInit,
-  getAccessToken: () => Promise<string>,
+  getAccessToken: AccessTokenProvider,
 ): Promise<T> {
-  let token = await getAccessToken();
-  let response = await fetch(url, {
+  let headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+
+  // retries: 1 — no transient retry. query() promises a single absolute deadline covering the submit
+  // and every poll, and a retried submit would burn it before the first poll, leaving the caller
+  // with "query took too long" for a query that never ran.
+  let response = await fetchWithAuthRetry(url, {
     ...init,
-    headers: {
-      ...init.headers,
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/json",
-    },
-    signal: AbortSignal.timeout(REQUEST_ABORT_TIMEOUT_MS),
-  });
+    headers,
+  }, getAccessToken, { timeoutMs: REQUEST_ABORT_TIMEOUT_MS, retries: 1 });
 
   let contentType = response.headers.get("Content-Type") ?? "";
   let isJson = contentType.includes("application/json");
@@ -283,7 +284,7 @@ async function callRest<T>(
 // Public API
 
 export class BigQueryApi {
-  constructor(private getAccessToken: () => Promise<string>) {}
+  constructor(private getAccessToken: AccessTokenProvider) {}
 
   async listProjects(options?: ListOptions): Promise<BigQueryProject[]> {
     let projects: BigQueryProject[] = [];

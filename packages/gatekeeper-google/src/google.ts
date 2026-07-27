@@ -46,6 +46,7 @@ import GOOGLE_DOC_CONFIGURATOR_HTML from "./generated/google-doc-configurator-ui
 import GOOGLE_SHEETS_CONFIGURATOR_HTML from "./generated/google-sheets-configurator-ui.txt";
 import GOOGLE_LOGO_SVG from "./google-logo.svg";
 import { obsContext } from "./observability.js";
+import { AccessTokenCache, AccessTokenRequest, ACCESS_TOKEN_EXPIRY_SAFETY_MS } from "./auth-retry";
 
 // Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
 const VENDOR_ID = "google";
@@ -64,7 +65,19 @@ type StoredNonce = {
 const NONCE_BYTES = 32;
 const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;  // 10 minutes
 const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;    // 10 minutes
-const ACCESS_TOKEN_EXPIRY_SAFETY_MS = 60 * 1000;
+
+// Ceilings on the OAuth round trips that run while holding the credential mutex. Each must be
+// bounded: an unbounded hang keeps the mutex, and every caller waiting for a token then queues
+// behind it.
+const TOKEN_MINT_TIMEOUT_MS = 20 * 1000;
+const AUTH_CODE_EXCHANGE_TIMEOUT_MS = 30 * 1000;
+const TOKEN_REVOKE_TIMEOUT_MS = 10 * 1000;
+
+// How long a permanent mint failure suppresses further attempts. Long enough to absorb the burst a
+// revoke produces (every outstanding token 401s at once, so callers arrive within milliseconds),
+// short enough that the account recovers on its own once the cause is fixed — an admin lifting a
+// scope restriction leaves nothing for us to observe, so we have to re-ask Google eventually.
+const MINT_FAILURE_COOLDOWN_MS = 60 * 1000;
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -468,6 +481,31 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
+  // Serialize minting, reconnect, and revoke against each other. Minting is a network round trip, so
+  // without this a single invalidated token has every concurrent caller mint its own — a burst
+  // against Google's token endpoint that may get rate-limited, turning a recoverable 401 into a hard
+  // failure. It also keeps a mint from interleaving with credentials being replaced or wiped.
+  //
+  // A promise chain rather than blockConcurrencyWhile: that would freeze the whole object for the
+  // duration of the fetch, and an exception or a 30s overrun inside it resets the Durable Object.
+  // Same pattern as the Slack and Supabase gatekeepers.
+  #credentialUpdate: Promise<void> = Promise.resolve();
+
+  // The last mint that failed permanently — revoked credentials, or a scope an admin has blocked.
+  #mintFailure: { error: Error; at: number } | undefined;
+
+  async #updateCredentials<T>(operation: () => Promise<T>): Promise<T> {
+    let previous = this.#credentialUpdate;
+    let release!: () => void;
+    this.#credentialUpdate = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   async setCallback(
       callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
       requestedScopes: string[], ephemeral?: boolean) {
@@ -550,33 +588,46 @@ export class UserAccount extends DurableObject<Env> {
     }
     this.ctx.storage.kv.delete("nonce");
 
-    if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
+    let { CLIENT_ID: clientId, CLIENT_SECRET: clientSecret } = this.env;
+    if (!clientId || !clientSecret) {
       throw new Error("The Google Gatekeeper is not configured.");
     }
 
-    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (!callback) {
-      // Must have timed out.
-      throw new Error("Took too long to complete the authorization. Please try again.");
-    }
+    // The credential swap is serialized against minting and revoke, but the callbacks below are
+    // not: they are outbound RPCs that can re-enter this object, and awaiting one while holding the
+    // mutex would deadlock. So the locked section returns what the notifications need and the
+    // notifications happen after it releases.
+    let completion = await this.#updateCredentials(async () => {
+      let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+      if (!callback) {
+        // Must have timed out.
+        throw new Error("Took too long to complete the authorization. Please try again.");
+      }
 
-    let response = await exchangeAuthCode(
-        code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getBaseUrl(this.env) + "/oauth");
+      let response = await exchangeAuthCode(
+          code, clientId, clientSecret, getBaseUrl(this.env) + "/oauth",
+          AbortSignal.timeout(AUTH_CODE_EXCHANGE_TIMEOUT_MS));
 
-    if (!response.refreshToken) {
-      throw new Error("OAuth exchange didn't return refresh token?");
-    }
+      if (!response.refreshToken) {
+        throw new Error("OAuth exchange didn't return refresh token?");
+      }
 
-    this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
-    this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", response.accessToken);
-    // Record what Google actually granted (the user may have declined some requested scopes).
-    this.ctx.storage.kv.put<string[]>("grantedScopes", response.grantedScopes);
-    this.ctx.storage.kv.delete("requestedScopes");
+      this.ctx.storage.kv.put<string>("refreshToken", response.refreshToken);
+      this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", response.accessToken);
+      // These credentials are new, so any recorded permanent failure no longer applies
+      this.#mintFailure = undefined;
+      // Record what Google actually granted (the user may have declined some requested scopes).
+      this.ctx.storage.kv.put<string[]>("grantedScopes", response.grantedScopes);
+      this.ctx.storage.kv.delete("requestedScopes");
 
-    let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
-    if (reconnecting) {
-      // Reconnect flow: replace credentials and notify restoration.
-      this.ctx.storage.kv.delete("reconnecting");
+      let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+      if (reconnecting) this.ctx.storage.kv.delete("reconnecting");
+      return { callback, reconnecting: !!reconnecting };
+    });
+
+    let callback = completion.callback;
+    if (completion.reconnecting) {
+      // Reconnect flow: credentials replaced above, notify restoration.
       await callback.credentialsRestored();
     } else {
       // Initial connect flow: create the user entrypoint and notify completion.
@@ -602,55 +653,138 @@ export class UserAccount extends DurableObject<Env> {
     return this.ctx.storage.kv.get<string>("refreshToken") !== undefined;
   }
 
-  async getAccessToken(): Promise<GoogleAccessToken> {
-    if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
+  /**
+   * Whether the stored token still satisfies this request, i.e. can be served without minting.
+   *
+   * A `staleToken` request comes from a caller that just had a 401. It must not be answered from the
+   * expiry check — the whole point is that Google rejected a token that had not yet expired. It is
+   * satisfied only if the stored token is no longer the one that failed, which means another caller
+   * already replaced it and this caller should take theirs.
+   */
+  #tokenSatisfies(cached: GoogleAccessToken | undefined, opts?: AccessTokenRequest)
+      : cached is GoogleAccessToken {
+    if (!cached) return false;
+    // Expiry gates every path — no request, however it is phrased, is answered with a token that is
+    // already inside the safety window.
+    if (cached.expires.valueOf() <= Date.now() + ACCESS_TOKEN_EXPIRY_SAFETY_MS) return false;
+    if (opts?.staleToken !== undefined) return cached.token !== opts.staleToken;
+    return !opts?.forceRefresh;
+  }
+
+  async getAccessToken(opts?: AccessTokenRequest): Promise<GoogleAccessToken> {
+    let { CLIENT_ID: clientId, CLIENT_SECRET: clientSecret } = this.env;
+    if (!clientId || !clientSecret) {
       throw new Error("The Google Gatekeeper is not configured.");
     }
 
-    let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
-    if (!refreshToken) {
+    if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       throw new Error("no refresh token set");
     }
 
-    // TODO: If new refresh token returned, use it.
+    // Fast path, deliberately outside the lock: the overwhelmingly common case is a valid cached
+    // token, and that must not serialize behind anything.
     let cached = this.ctx.storage.kv.get<GoogleAccessToken>("accessToken");
-    if (cached && cached.expires.valueOf() > Date.now() + ACCESS_TOKEN_EXPIRY_SAFETY_MS) {
+    if (this.#tokenSatisfies(cached, opts)) {
       return cached;
     }
 
-    let result = await getAccessToken(refreshToken, this.env.CLIENT_ID, this.env.CLIENT_SECRET);
-    if (result === null) {
-      // Credentials expired or revoked. Notify the workshop.
-      let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-      if (callback) {
-        // Fire and forget — don't let notification failure block the error propagation.
-        callback.credentialsExpired().catch(notifyErr => {
-          logger.warn("failed to notify credential expiry", {
-            event: "credentials.expiry.notify.failed", error: notifyErr,
-          });
-        });
+    // Serialized so a burst of concurrent 401s collapses into one token exchange. The re-check
+    // inside the lock is what does the collapsing — the lock alone would just queue the mints.
+    return this.#updateCredentials(async () => {
+      let fresh = this.ctx.storage.kv.get<GoogleAccessToken>("accessToken");
+      if (this.#tokenSatisfies(fresh, opts)) {
+        return fresh;
       }
-      throw new Error("Google credentials have expired or been revoked. Please re-authenticate.");
-    }
-    this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", result);
-    return result;
+
+      // A mint already established that these credentials are permanently dead. Fail the same way
+      // without asking Google again — see #mintFailure.
+      if (this.#mintFailure && Date.now() - this.#mintFailure.at < MINT_FAILURE_COOLDOWN_MS) {
+        throw this.#mintFailure.error;
+      }
+
+      // Re-read rather than closing over the outer value: the credentials may have been replaced
+      // while this call waited for the lock.
+      let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
+      if (!refreshToken) {
+        throw new Error("no refresh token set");
+      }
+
+      // Logged before the exchange so a mint that fails or hangs still leaves a trace. The events
+      // are distinct because their rates mean different things: `expiry` should tick about once per
+      // token lifetime, whereas `rejected` means a token was invalidated early and the 401 retry
+      // healed it — and a burst of 401s should still produce exactly one.
+      logger.info("minting Google access token", {
+        event: opts?.staleToken !== undefined
+            ? "google.token.mint.rejected"
+            : "google.token.mint.expiry",
+      });
+
+      // TODO: If new refresh token returned, use it.
+      let result = await getAccessToken(refreshToken, clientId, clientSecret,
+          AbortSignal.timeout(TOKEN_MINT_TIMEOUT_MS));
+      if (!result.ok) {
+        // Both are permanent, so both mark the connection dead. They differ in the remedy:
+        // re-authenticating fixes a revoked grant but cannot grant a scope an admin has blocked.
+        let error = new Error(
+            result.reason === "policyBlocked"
+                ? "A Google Workspace admin has restricted access this connection needs " +
+                  `(${result.detail}). Ask your administrator to allow it — re-authenticating ` +
+                  "will not help."
+                : "Google credentials have expired or been revoked. Please re-authenticate.");
+        // Recorded before notifying so only the first caller of a burst does either.
+        this.#mintFailure = { error, at: Date.now() };
+        this.#notifyCredentialsDead();
+        throw error;
+      }
+
+      // Backstop for the credential mutators: the mutex already keeps them from interleaving with a
+      // mint, so this should be unreachable. It stays because publishing a token minted against a
+      // refresh token that is no longer current would resurrect a revoked account.
+      if (this.ctx.storage.kv.get<string>("refreshToken") !== refreshToken) {
+        logger.warn("discarded a Google access token minted against superseded credentials", {
+          event: "google.token.mint.superseded",
+        });
+        let current = this.ctx.storage.kv.get<GoogleAccessToken>("accessToken");
+        if (current) return current;
+        throw new Error("Google credentials changed while refreshing. Please try again.");
+      }
+
+      this.ctx.storage.kv.put<GoogleAccessToken>("accessToken", result.token);
+      return result.token;
+    });
+  }
+
+  // Tell the workshop the credentials are permanently dead so the UI prompts a reconnect instead of
+  // every call failing opaquely. Fire and forget — a notification failure must not mask the error.
+  #notifyCredentialsDead(): void {
+    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    callback?.credentialsExpired().catch(notifyErr => {
+      logger.warn("failed to notify credential expiry", {
+        event: "credentials.expiry.notify.failed", error: notifyErr,
+      });
+    });
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
     // Drop the account if the flow never completed, or if this was a transient auth-only sign-in
-    // grant (used once to read the email for login).
-    if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("ephemeral")) {
-      this.ctx.storage.deleteAll();
-    }
+    // grant (used once to read the email for login). Serialized so the wipe cannot land in the
+    // middle of a mint, leaving a freshly minted token behind on a deleted account.
+    await this.#updateCredentials(async () => {
+      if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("ephemeral")) {
+        this.ctx.storage.deleteAll();
+      }
+    });
   }
 
   async revoke(): Promise<void> {
-    let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
-    if (refreshToken) {
-      await revokeGoogleToken(refreshToken);
-    }
-    this.ctx.storage.deleteAlarm();
-    this.ctx.storage.deleteAll();
+    await this.#updateCredentials(async () => {
+      let refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
+      if (refreshToken) {
+        await revokeGoogleToken(refreshToken, AbortSignal.timeout(TOKEN_REVOKE_TIMEOUT_MS));
+      }
+      this.ctx.storage.deleteAlarm();
+      this.ctx.storage.deleteAll();
+    });
   }
 }
 
@@ -965,14 +1099,14 @@ type ObservedSetState = true | "pending" | "observed";
 @validateRpc()
 export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
     implements GoogleVerifierApi {
-  async #getToken(): Promise<string> {
+  async #getToken(opts?: AccessTokenRequest): Promise<string> {
     let account = this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-    return (await account.getAccessToken()).token;
+    return (await account.getAccessToken(opts)).token;
   }
 
   async hasDocAccess(documentId: string): Promise<boolean> {
-    let api = new GoogleDocsApi(() => this.#getToken());
+    let api = new GoogleDocsApi(opts => this.#getToken(opts));
     try {
       await api.getDocument(documentId);
       return true;
@@ -983,7 +1117,7 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
   }
 
   async hasSpreadsheetAccess(spreadsheetId: string): Promise<boolean> {
-    let api = new GoogleSheetsApi(() => this.#getToken());
+    let api = new GoogleSheetsApi(opts => this.#getToken(opts));
     try {
       await api.getSpreadsheet(spreadsheetId);
       return true;
@@ -994,7 +1128,7 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
   }
 
   async hasCalendarWriterAccess(calendarId: string): Promise<boolean> {
-    let api = new GoogleCalendarApi(() => this.#getToken());
+    let api = new GoogleCalendarApi(opts => this.#getToken(opts));
     try {
       let calendar = await api.getCalendar(calendarId);
       return calendar.accessRole === "writer" || calendar.accessRole === "owner";
@@ -1005,7 +1139,7 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
   }
 
   async hasCalendarFreeBusyAccess(calendarId: string): Promise<boolean> {
-    let api = new GoogleCalendarApi(() => this.#getToken());
+    let api = new GoogleCalendarApi(opts => this.#getToken(opts));
     try {
       return await api.hasFreeBusyAccess(calendarId);
     } catch (error) {
@@ -1015,7 +1149,7 @@ export class GoogleVerifier extends WorkerEntrypoint<Env, GoogleVerifierProps>
   }
 
   async hasDatasetAccess(projectId: string, datasetId: string): Promise<boolean> {
-    let api = new BigQueryApi(() => this.#getToken());
+    let api = new BigQueryApi(opts => this.#getToken(opts));
     try {
       await api.getDataset(projectId, datasetId);
       return true;
@@ -1652,18 +1786,14 @@ type GmailGatekeeperImplProps = {
 @validateRpc()
 export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplProps>
     implements Gatekeeper<GmailSession> {
-  #accessToken: GoogleAccessToken | undefined;
+  #tokens = new AccessTokenCache(opts => {
+    let stub = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return stub.getAccessToken(opts);
+  });
 
-  async #getAccessToken(): Promise<string> {
-    if (!this.#accessToken) {
-      let stub = this.ctx.exports.UserAccount.get(
-          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-      this.#accessToken = await stub.getAccessToken();
-
-      let ttl = this.#accessToken.expires.valueOf() - Date.now();
-      setTimeout(() => { this.#accessToken = undefined; }, ttl / 2);
-    }
-    return this.#accessToken.token;
+  async #getAccessToken(opts?: AccessTokenRequest): Promise<string> {
+    return this.#tokens.get(opts);
   }
 
   async #getSelfEmail(): Promise<string> {
@@ -1722,7 +1852,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GmailSession> {
     let selfEmail = await this.#getSelfEmail();
-    let gmailApi = new GmailApi(selfEmail, () => this.#getAccessToken());
+    let gmailApi = new GmailApi(selfEmail, opts => this.#getAccessToken(opts));
 
     // In-memory label map cache for the session lifetime. Fetched once on
     // first label resolution, shared across all stubs in this session.
@@ -1761,7 +1891,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
     if (!action) throw new Error(`Unknown pending Gmail action: ${actionId}`);
 
     const selfEmail = await this.#getSelfEmail();
-    const gmailApi = new GmailApi(selfEmail, () => this.#getAccessToken());
+    const gmailApi = new GmailApi(selfEmail, opts => this.#getAccessToken(opts));
 
     switch (action.type) {
       case "archive":
@@ -2036,23 +2166,19 @@ const EDIT_DOCUMENT_ACTION: ActionKind = {
 export class GoogleDocGatekeeperImpl
     extends DurableObject<Env, GoogleDocGatekeeperImplProps>
     implements Gatekeeper<GoogleDocSession> {
-  #accessToken: GoogleAccessToken | undefined;
   #simulationCache: GoogleDocSimulationCacheHolder = {};
+  #tokens = new AccessTokenCache(opts => {
+    let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return stub.getAccessToken(opts);
+  });
 
-  async #getAccessToken(): Promise<string> {
-    if (!this.#accessToken) {
-      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
-          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-      this.#accessToken = await stub.getAccessToken();
-
-      let ttl = this.#accessToken.expires.valueOf() - Date.now();
-      setTimeout(() => { this.#accessToken = undefined; }, ttl / 2);
-    }
-    return this.#accessToken.token;
+  async #getAccessToken(opts?: AccessTokenRequest): Promise<string> {
+    return this.#tokens.get(opts);
   }
 
   async describe(): Promise<ResourceDescription> {
-    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    let api = new GoogleDocsApi(opts => this.#getAccessToken(opts));
     let doc = await api.getDocument(this.ctx.props.documentId);
     return {
       url: `https://docs.google.com/document/d/${this.ctx.props.documentId}/edit`,
@@ -2073,7 +2199,7 @@ export class GoogleDocGatekeeperImpl
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GoogleDocSession> {
-    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    let api = new GoogleDocsApi(opts => this.#getAccessToken(opts));
     let pendingActions = new PendingActionStore<GoogleDocAction>(this.ctx.storage.kv);
     return new GoogleDocSessionImpl(
         api,
@@ -2107,7 +2233,7 @@ export class GoogleDocGatekeeperImpl
         `${firstPending?.id} before edit ${actionId}.`);
     }
 
-    let api = new GoogleDocsApi(() => this.#getAccessToken());
+    let api = new GoogleDocsApi(opts => this.#getAccessToken(opts));
     let doc = await api.getDocument(action.documentId);
     let snapshot = docToMarkdown(doc);
     let requests: any[];
@@ -2394,20 +2520,19 @@ type GoogleSheetsGatekeeperImplProps = {
 export class GoogleSheetsGatekeeperImpl
     extends DurableObject<Env, GoogleSheetsGatekeeperImplProps>
     implements Gatekeeper<GoogleSpreadsheetSession> {
-  #accessToken: GoogleAccessToken | undefined;
+  #tokens = new AccessTokenCache(opts => {
+    let account = this.ctx.exports.UserAccount.get(
+      this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
+    );
+    return account.getAccessToken(opts);
+  });
 
-  async #getAccessToken(): Promise<string> {
-    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
-      let account = this.ctx.exports.UserAccount.get(
-        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId),
-      );
-      this.#accessToken = await account.getAccessToken();
-    }
-    return this.#accessToken.token;
+  async #getAccessToken(opts?: AccessTokenRequest): Promise<string> {
+    return this.#tokens.get(opts);
   }
 
   async describe(): Promise<ResourceDescription> {
-    let api = new GoogleSheetsApi(() => this.#getAccessToken());
+    let api = new GoogleSheetsApi(opts => this.#getAccessToken(opts));
     let spreadsheet = await api.getSpreadsheet(this.ctx.props.spreadsheetId);
     return {
       url: `https://docs.google.com/spreadsheets/d/${this.ctx.props.spreadsheetId}/edit`,
@@ -2427,7 +2552,7 @@ export class GoogleSheetsGatekeeperImpl
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GoogleSpreadsheetSession> {
-    let api = new GoogleSheetsApi(() => this.#getAccessToken());
+    let api = new GoogleSheetsApi(opts => this.#getAccessToken(opts));
     return new GoogleSpreadsheetSessionImpl(
       api, this.ctx.props.spreadsheetId, approvalQueue.dup(),
     );
@@ -2703,7 +2828,11 @@ function summarizePeople(people: string[]): string {
 export class GoogleCalendarGatekeeperImpl
     extends DurableObject<Env, GoogleCalendarGatekeeperImplProps>
     implements Gatekeeper<GoogleCalendarSession> {
-  #accessToken: GoogleAccessToken | undefined;
+  #tokens = new AccessTokenCache(opts => {
+    let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
+        this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
+    return stub.getAccessToken(opts);
+  });
 
   // Revert data for already-applied actions, keyed by action id. The overseer no longer round-trips
   // revert info through applyAction()/revertAction(), so we persist it in our own storage.
@@ -2711,17 +2840,12 @@ export class GoogleCalendarGatekeeperImpl
     return `revert:info:${actionId}`;
   }
 
-  async #getAccessToken(): Promise<string> {
-    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
-      let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
-          this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-      this.#accessToken = await stub.getAccessToken();
-    }
-    return this.#accessToken.token;
+  async #getAccessToken(opts?: AccessTokenRequest): Promise<string> {
+    return this.#tokens.get(opts);
   }
 
   async describe(): Promise<ResourceDescription> {
-    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let api = new GoogleCalendarApi(opts => this.#getAccessToken(opts));
     let calendar = await api.getCalendar(this.ctx.props.calendarId);
     let availability = this.ctx.props.availabilityMode === "allVisible"
         ? " Availability lookup covers all calendars visible to the account."
@@ -2745,7 +2869,7 @@ export class GoogleCalendarGatekeeperImpl
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<GoogleCalendarSession> {
-    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let api = new GoogleCalendarApi(opts => this.#getAccessToken(opts));
     let pendingActions = new PendingActionStore<GoogleCalendarAction>(this.ctx.storage.kv);
     return new GoogleCalendarSessionImpl(
       api,
@@ -2764,7 +2888,7 @@ export class GoogleCalendarGatekeeperImpl
       throw new Error(`Unknown pending Google Calendar action: ${actionId}`);
     }
 
-    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let api = new GoogleCalendarApi(opts => this.#getAccessToken(opts));
     switch (action.type) {
       case "createEvent": {
         let created = await api.createEvent(action.calendarId, action.event, action.sendUpdates);
@@ -2816,7 +2940,7 @@ export class GoogleCalendarGatekeeperImpl
       };
     }
 
-    let api = new GoogleCalendarApi(() => this.#getAccessToken());
+    let api = new GoogleCalendarApi(opts => this.#getAccessToken(opts));
     switch (revertInfo.type) {
       case "createdEvent":
         await api.deleteEvent(revertInfo.calendarId, revertInfo.eventId, revertInfo.sendUpdates);
@@ -3131,15 +3255,14 @@ type BigQueryGatekeeperImplProps = {
 export class BigQueryGatekeeperImpl
     extends DurableObject<Env, BigQueryGatekeeperImplProps>
     implements Gatekeeper<BigQuerySession> {
-  #accessToken: GoogleAccessToken | undefined;
-
-  async #getAccessToken(): Promise<string> {
-    if (!this.#accessToken || this.#accessToken.expires.valueOf() <= Date.now() + 30_000) {
+  #tokens = new AccessTokenCache(opts => {
       let stub: DurableObjectStub<UserAccount> = this.ctx.exports.UserAccount.get(
         this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
-      this.#accessToken = await stub.getAccessToken();
-    }
-    return this.#accessToken.token;
+    return stub.getAccessToken(opts);
+  });
+
+  async #getAccessToken(opts?: AccessTokenRequest): Promise<string> {
+    return this.#tokens.get(opts);
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -3170,7 +3293,7 @@ export class BigQueryGatekeeperImpl
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<BigQuerySession> {
-    let api = new BigQueryApi(() => this.#getAccessToken());
+    let api = new BigQueryApi(opts => this.#getAccessToken(opts));
     return new BigQuerySessionImpl(
       api,
       approvalQueue.dup(),

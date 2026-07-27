@@ -3,6 +3,8 @@
 // This file wraps the Google Docs API (v1) for use by the Google Docs gatekeeper.
 // It follows the same pattern as google-api.ts (which wraps the Gmail API).
 
+import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
+
 // ---------------------------------------------------------------------------
 // Types modeling the Google Docs API response.
 // These are internal — not exported to gadgets. Only the fields we actually
@@ -87,17 +89,15 @@ export type TextStyle = {
 const DOCS_API_BASE = "https://docs.googleapis.com/v1/documents";
 
 export class GoogleDocsApi {
-  constructor(private getAccessToken: () => Promise<string>) {}
+  constructor(private getAccessToken: AccessTokenProvider) {}
 
   /** Fetch the full document. */
   async getDocument(documentId: string): Promise<GoogleDocsDocument> {
-    let accessToken = await this.getAccessToken();
-
-    let response = await fetch(`${DOCS_API_BASE}/${encodeURIComponent(documentId)}`, {
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-      },
-    });
+    let response = await fetchWithAuthRetry(
+      `${DOCS_API_BASE}/${encodeURIComponent(documentId)}`,
+      {},
+      this.getAccessToken,
+    );
 
     if (!response.ok) {
       let errorText = await response.text();
@@ -115,15 +115,10 @@ export class GoogleDocsApi {
    * that's fine — we just parse revisionId from whatever comes back.
    */
   async getRevisionId(documentId: string): Promise<string> {
-    let accessToken = await this.getAccessToken();
-
-    let response = await fetch(
+    let response = await fetchWithAuthRetry(
       `${DOCS_API_BASE}/${encodeURIComponent(documentId)}?fields=revisionId`,
-      {
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-        },
-      },
+      {},
+      this.getAccessToken,
     );
 
     if (!response.ok) {
@@ -150,23 +145,21 @@ export class GoogleDocsApi {
     requests: any[],
     targetRevisionId?: string,
   ): Promise<string> {
-    let accessToken = await this.getAccessToken();
-
     let body: any = { requests };
     if (targetRevisionId) {
       body.writeControl = { targetRevisionId };
     }
 
-    let response = await fetch(
+    let response = await fetchWithAuthRetry(
       `${DOCS_API_BASE}/${encodeURIComponent(documentId)}:batchUpdate`,
       {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
       },
+      this.getAccessToken,
     );
 
     if (!response.ok) {
