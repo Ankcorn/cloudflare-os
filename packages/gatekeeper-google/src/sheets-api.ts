@@ -1,6 +1,7 @@
 import type {
   SpreadsheetCellValue, SpreadsheetInfo, SpreadsheetRange, SpreadsheetValueMode,
 } from "./sheets-types";
+import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
 
 const API_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const MAX_RANGES = 20;
@@ -161,14 +162,12 @@ async function readResponseText(response: Response, maxBytes: number): Promise<s
 }
 
 export class GoogleSheetsApi {
-  constructor(private getAccessToken: () => Promise<string>) {}
+  constructor(private getAccessToken: AccessTokenProvider) {}
 
   async #request<T>(url: URL): Promise<T> {
-    let accessToken = await this.getAccessToken();
-    let response = await fetch(url, {
-      headers: { "Authorization": `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    let response = await fetchWithAuthRetry(
+      url.toString(), {}, this.getAccessToken, { timeoutMs: REQUEST_TIMEOUT_MS },
+    );
 
     let text: string;
     try {

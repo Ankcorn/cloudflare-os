@@ -6,6 +6,7 @@ import { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { GmailThreadInfo, EmailAddress } from "./types";
 import { createMimeMessage } from "mimetext/browser";
 import PostalMime, { addressParser } from "postal-mime";
+import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
 
 // Internal type for parsed message info with raw label IDs (not yet resolved
 // to GmailLabel objects). The stub layer resolves labels via the label map.
@@ -47,8 +48,10 @@ export type GoogleOAuthGrant = {
   grantedScopes: string[];
 };
 
+// `signal` lets the caller bound the round trip; UserAccount holds the credential mutex across this.
 export async function exchangeAuthCode(
-    code: string, clientId: string, clientSecret: string, redirectUri: string)
+    code: string, clientId: string, clientSecret: string, redirectUri: string,
+    signal?: AbortSignal)
     : Promise<GoogleOAuthGrant> {
   let params = new URLSearchParams();
   params.set("code", code);
@@ -58,7 +61,8 @@ export async function exchangeAuthCode(
   params.set("grant_type", "authorization_code");
 
   let response = await fetch(
-      "https://oauth2.googleapis.com/token", {method: "POST", body: params});
+      "https://oauth2.googleapis.com/token",
+      {method: "POST", body: params, ...(signal ? { signal } : {})});
 
   let contentType = response.headers.get("Content-Type");
   let isJson = contentType && contentType.startsWith("application/json");
@@ -91,9 +95,16 @@ export async function exchangeAuthCode(
   };
 }
 
-// Exchange a refresh token for an access token.
-export async function getAccessToken(refreshToken: string, clientId: string, clientSecret: string)
-    : Promise<GoogleAccessToken | null> {
+export type RefreshFailure =
+  | { ok: false; reason: "revoked" }
+  | { ok: false; reason: "policyBlocked"; detail: string };
+
+export type AccessTokenResult = { ok: true; token: GoogleAccessToken } | RefreshFailure;
+
+// Exchange a refresh token for an access token. `signal` lets the caller bound the round trip
+export async function getAccessToken(
+    refreshToken: string, clientId: string, clientSecret: string, signal?: AbortSignal)
+    : Promise<AccessTokenResult> {
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: {
@@ -105,6 +116,7 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
     }),
+    ...(signal ? { signal } : {}),
   });
 
   if (!response.ok) {
@@ -114,8 +126,11 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
     if (isJson) {
       let body = await response.json<{error?: string, error_description?: string}>();
       if (body.error === "invalid_grant") {
-        // Refresh token has been expired or revoked.
-        return null;
+        return { ok: false, reason: "revoked" };
+      }
+      if (body.error === "admin_policy_enforced") {
+        return { ok: false, reason: "policyBlocked",
+                 detail: body.error_description ?? "admin_policy_enforced" };
       }
       throw new Error(
           `Failed to refresh access token: ${body.error} ${body.error_description}`);
@@ -131,8 +146,11 @@ export async function getAccessToken(refreshToken: string, clientId: string, cli
   };
 
   return {
-    token: data.access_token,
-    expires: new Date(Date.now() + data.expires_in * 1000),
+    ok: true,
+    token: {
+      token: data.access_token,
+      expires: new Date(Date.now() + data.expires_in * 1000),
+    },
   };
 }
 
@@ -183,7 +201,9 @@ export async function getGoogleVerifiedEmail(accessToken: string): Promise<strin
   return data.email;
 }
 
-export async function revokeGoogleToken(refreshToken: string): Promise<void> {
+// `signal` lets the caller bound the round trip; UserAccount holds the credential mutex across this.
+export async function revokeGoogleToken(
+    refreshToken: string, signal?: AbortSignal): Promise<void> {
   // Although we are revoking the token anyway, it's nice to avoid ever putting tokens in the
   // URL, so we instead use the format where the URL is in the POST body.
   const body = new URLSearchParams();
@@ -195,6 +215,7 @@ export async function revokeGoogleToken(refreshToken: string): Promise<void> {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
     body: body.toString(),
+    ...(signal ? { signal } : {}),
   });
 
   let contentType = response.headers.get("Content-Type");
@@ -476,9 +497,7 @@ function validateGmailId(id: string, label: string): void {
   }
 }
 
-// Fetch wrapper that retries once on 429/503 for GET requests only.
-// POST/PUT/DELETE are not retried to avoid duplicate side effects (e.g., sending
-// an email twice if the first request succeeded but returned a transient error).
+// Read a bounded prefix of an error response body for inclusion in thrown errors.
 async function readErrorText(response: Response, maxBytes = 4096): Promise<string> {
   if (!response.body) return response.statusText;
   const reader = response.body.getReader();
@@ -503,30 +522,18 @@ async function readErrorText(response: Response, maxBytes = 4096): Promise<strin
   return new TextDecoder().decode(bytes);
 }
 
-async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
-  let response = await fetch(url, init);
-  let method = (init?.method ?? "GET").toUpperCase();
-  if (method === "GET" && (response.status === 429 || response.status === 503)) {
-    let retryAfter = response.headers.get("Retry-After");
-    let delayMs = retryAfter ? Math.min(parseInt(retryAfter, 10) * 1000, 10_000) : 1000;
-    if (isNaN(delayMs)) delayMs = 1000;
-    await response.body?.cancel();
-    await new Promise(resolve => setTimeout(resolve, delayMs));
-    response = await fetch(url, init);
-  }
-  return response;
-}
-
 export class GmailApi {
   private selfEmail: string;
 
-  constructor(selfEmail: string, private getAccessToken: () => Promise<string>) {
+  constructor(selfEmail: string, private getAccessToken: AccessTokenProvider) {
     this.selfEmail = selfEmail;
   }
 
-  // All Gmail API calls go through this to get automatic retry on rate limits.
-  private fetch(url: string, init?: RequestInit): Promise<Response> {
-    return fetchWithRetry(url, init);
+  // All Gmail API calls go through this for auth + retry: it injects the Bearer token, retries
+  // once on a 401 with a force-refreshed token, and retries transient failures (429 / 5xx) with
+  // backoff on GETs only. Callers must not set the Authorization header themselves.
+  private authedFetch(url: string, init?: RequestInit): Promise<Response> {
+    return fetchWithAuthRetry(url, init ?? {}, this.getAccessToken);
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -537,8 +544,6 @@ export class GmailApi {
   // the messages array. Subject/count are enriched separately by getThreadInfo().
   async listThreads(count: number, query?: string, pageToken?: string, labelIds?: string[]):
       Promise<{ threads: Array<{ id: string; snippet?: string }>; nextPageToken?: string }> {
-    const accessToken = await this.getAccessToken();
-
     let url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=${count}`;
     if (query) {
       url += `&q=${encodeURIComponent(query)}`;
@@ -551,9 +556,7 @@ export class GmailApi {
       url += `&labelIds=${encodeURIComponent(labelId)}`;
     }
 
-    const response = await this.fetch(url, {
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-    });
+    const response = await this.authedFetch(url);
 
     if (!response.ok) {
       const errorText = await readErrorText(response);
@@ -574,11 +577,9 @@ export class GmailApi {
   // message capability when content is actually needed.
   async getThread(threadId: string): Promise<GmailThread> {
     validateGmailId(threadId, "thread ID");
-    const accessToken = await this.getAccessToken();
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
-      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
     if (!response.ok) {
@@ -604,11 +605,9 @@ export class GmailApi {
   // avoid downloading full message payloads.
   async getThreadInfo(threadId: string): Promise<GmailThreadInfo> {
     validateGmailId(threadId, "thread ID");
-    const accessToken = await this.getAccessToken();
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=Subject`,
-      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
     if (!response.ok) {
@@ -637,14 +636,12 @@ export class GmailApi {
     removeLabelIds?: string[]
   ): Promise<void> {
     validateGmailId(threadId, "thread ID");
-    const accessToken = await this.getAccessToken();
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`,
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -664,14 +661,10 @@ export class GmailApi {
   // Trash a thread.
   async trashThread(threadId: string): Promise<void> {
     validateGmailId(threadId, "thread ID");
-    const accessToken = await this.getAccessToken();
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/trash`,
-      {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-      }
+      { method: 'POST' }
     );
 
     if (!response.ok) {
@@ -689,7 +682,6 @@ export class GmailApi {
   // bodies and attachments.
   async getMessageParticipants(messageId: string): Promise<Set<string>> {
     validateGmailId(messageId, "message ID");
-    const accessToken = await this.getAccessToken();
     const url = new URL(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}`);
     url.searchParams.set("format", "metadata");
@@ -697,9 +689,7 @@ export class GmailApi {
       url.searchParams.append("metadataHeaders", header);
     }
 
-    const response = await this.fetch(url.toString(), {
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-    });
+    const response = await this.authedFetch(url.toString());
     if (!response.ok) {
       const errorText = await readErrorText(response);
       throw new Error(`Failed to get message participants: ${response.status} ${errorText}`);
@@ -721,11 +711,9 @@ export class GmailApi {
   // Get a single message with raw MIME content.
   async getMessage(messageId: string): Promise<GmailMessageRaw> {
     validateGmailId(messageId, "message ID");
-    const accessToken = await this.getAccessToken();
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=raw`,
-      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
     if (!response.ok) {
@@ -980,21 +968,21 @@ export class GmailApi {
   }
 
   // Send a pre-built raw RFC 2822 message. Optionally attach to an existing
-  // thread. Called only from applyAction(), i.e. after approval. POST is not
-  // retried by fetchWithRetry, so an approved send is attempted exactly once.
+  // thread. Called only from applyAction(), i.e. after approval. An approved send
+  // lands at most once: a POST is never replayed for a transient failure, and the
+  // one case that is replayed — a 401 — is rejected before the message is accepted
+  // for delivery.
   async sendRawMessage(raw: string, threadId?: string): Promise<{ id: string; threadId: string }> {
     if (threadId !== undefined) validateGmailId(threadId, "thread ID");
-    const accessToken = await this.getAccessToken();
 
     const message: { raw: string; threadId?: string } =
       threadId !== undefined ? { raw, threadId } : { raw };
 
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(message),
@@ -1019,11 +1007,8 @@ export class GmailApi {
 
   // Fetch all labels for this account. Returns a map of label ID → label name.
   async listLabels(): Promise<Map<string, string>> {
-    const accessToken = await this.getAccessToken();
-
-    const response = await this.fetch(
+    const response = await this.authedFetch(
       'https://gmail.googleapis.com/gmail/v1/users/me/labels',
-      { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
 
     if (!response.ok) {

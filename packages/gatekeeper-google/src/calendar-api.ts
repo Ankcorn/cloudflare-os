@@ -10,6 +10,7 @@ import type {
   GoogleCalendarInfo,
   PersonAvailability,
 } from "./calendar-types";
+import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
 
@@ -165,19 +166,21 @@ export function validateCalendarTimeWindow(timeMin: Date, timeMax: Date, maxDays
 }
 
 export class GoogleCalendarApi {
-  constructor(private getAccessToken: () => Promise<string>) {}
+  constructor(private getAccessToken: AccessTokenProvider) {}
 
   async #fetch<T>(path: string, init?: RequestInit): Promise<T> {
-    let token = await this.getAccessToken();
-    let response = await fetch(`${CALENDAR_API_BASE}${path}`, {
+    // Built from the caller's headers so anything they set wins; these are only defaults. Note a
+    // plain `{...init?.headers}` would silently drop everything if a caller passed a Headers.
+    let headers = new Headers(init?.headers);
+    if (!headers.has("Accept")) headers.set("Accept", "application/json");
+    if (init?.body && !headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
+
+    let response = await fetchWithAuthRetry(`${CALENDAR_API_BASE}${path}`, {
       ...init,
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Accept": "application/json",
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...init?.headers,
-      },
-    });
+      headers,
+    }, this.getAccessToken);
 
     if (!response.ok) {
       let text = await response.text();
