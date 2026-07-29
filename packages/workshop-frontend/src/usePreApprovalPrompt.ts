@@ -51,7 +51,7 @@ export function usePreApprovalPrompt(
       // The writes are independent, so fire them together rather than serializing N round-trips. Use
       // allSettled so one rejection doesn't abort the rest, and report how many failed.
       const results = await Promise.allSettled(
-        selected.map(a => overseer.setAutoApprovedActionKind(a.bindingName, a.actionKind)),
+        selected.map(a => overseer.setAutoApprovedActionKind(a.gatekeeperId, a.actionKind)),
       )
       const failures = results.filter(r => r.status === 'rejected')
       if (failures.length > 0) {

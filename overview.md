@@ -48,29 +48,29 @@ Every Gadget starts as a simple AI agent that is not connected to anything. Upon
 
 ## Workshop Home
 
-The Workshop UI's home page lists the user's gadgets. This looks similar to the Google Drive home page. The user can open a gadget, or create a new one.
+The Workshop UI's home page is a launcher for creating a new Gadget: it presents a prompt composer where the user writes the first message to a new Gadget's agent, alongside suggested tasks. The user's existing Gadgets — labeled "workspaces" in the UI — are listed in a persistent sidebar and on a dedicated workspaces page (similar to the Google Drive home page), from which the user can reopen any of them.
 
 ## Gadget Editor
 
-The Gadget editor has four main components:
+The Gadget editor is split between a chat log on the left and a tabbed panel on the right. Its main components are:
 
 * A chat log with the AI agent (LLM). (When a new Gadget is created, initially this is all there is.)
 
 * A code editor, for editing the Gadget's Durable Object code. While it's expected that users will usually prompt the AI agent to write code for them, the user is free to edit the code directly, and the code editor has the usual affordances of a modern IDE, like syntax highlighting, auto-complete, and jump-to-definition.
 
-* The Overseer UI. Whenever the Gadget performs actions that have side effects, those actions are logged here. The user can use this UI to see what the Gadget is doing, to approve actions that require explicit approval, and to revert actions after the fact. This UI also shows the list of external connections the Gadget currently has access to, allowing the user to edit their permissions or revoke them entirely.
+* The Activity tab. Whenever the Gadget performs actions that have side effects, those actions are logged here. The user can use this tab to see what the Gadget is doing, to approve actions that require explicit approval, and to revert actions after the fact.
+
+* The Connections tab, which shows the list of external connections the Gadget currently has access to, allowing the user to edit their permissions or revoke them entirely.
 
 * The Gadget's own UI, if it has one. The Gadget can implement a UI for itself as part of its code. This UI runs in a sandboxed iframe on the client, where it is completely isolated from everything except RPC-over-postMessage() to the parent frame. Though that RPC link, the Gadget's UI can talk to its own server-side code.
 
 ## Adding connections
 
-When the user pastes a URL into the chat window, the Workshop automatically prompts the user to decide what sort of access the Gadget should receive to this URL.
-
-The Workshop will search from among available Gatekeeper implementations for one that claims to handle the URL. (If none is found, a default Gatekeeper that merely provides the ability to fetch the web site may be used.)
+When the user includes a URL in a chat message, the Workshop automatically prompts the user to turn it into a "capsule": a connection granting the Gadget some form of access to the resource at that URL. The Workshop will search from among available Gatekeeper implementations for one that claims to handle the URL.
 
 The Workshop instantiates the Gatekeeper and displays to the user basic information about the resource, so that the user can verify they are connecting to the right thing. (If the user has never used this Gatekeeper before, the Workshop may need to direct the user to an OAuth flow to grant access -- this grants the Workshop itself access to the given service on behalf of the user, but does NOT grant permissions to a specific Gadget.)
 
-The user can also add a connection from the Workshop's connections UI. The Workshop shows a UI supplied by the Gatekeeper to guide the user through selecting a resource. When the user confirms, the Workshop gets the resource URL from the UI and uses it to instantiate the Gatekeeper.
+The user can also manage connections outside of chat. The Workshop has a Connectors page where the user connects reusable *accounts* to third-party services (typically via OAuth) once, then draws on them across many Gadgets; when adding a binding, the Workshop shows a UI supplied by the Gatekeeper to guide the user through selecting a specific resource. Some Gatekeepers auto-provision an account with no OAuth flow at all — for these, the deployment administrator chooses whether the connector is offered to users, forced on for everyone, or disabled.
 
 Once the user submits the chat message to the AI agent containing a resource URL, the Gatekeeper is then exposed to the Gadget. The agent can query its schema to learn what operations it provides and what permissions are required for each operation. The agent is then able to decide what particular permissions it needs, and can request those permissions. When it does so, the user is presented with a prompt rendered inline within the chat, outlining what permissions are requested, and asking them to approve or deny the request. The user can also open an advanced dialog in which they can specify which actions should require human-in-the-loop approval when used.
 
@@ -88,16 +88,20 @@ The user can execute code that hasn't been saved yet. Such code will be executed
 
 ## Sharing
 
-A Gadget is by default only accessible by its creator. However, the Gadget's owner can share the Gadget with other users, similar to sharing a Google Doc.
+A Gadget is by default only accessible by its creator. However, the Gadget's owner can share the Gadget with other users, similar to sharing a Google Doc — either by adding a user directly or by creating a share link. Collaborators can work in the same Gadget simultaneously, and can see each other's presence live.
 
 The owner can assign one of the following roles to each person they share with:
-* Developer: Can fully access the Gadget including talking to the Gadget's agent and editing code.
-* Operator: Can use the Gadget's sandboxed UI, including functions that cause it to perform actions on its connections.
-* Observer: Can view the Gadget's sandboxed UI in read-only mode. This is accomplished by spawning a fork of the Gadget's Durable Object which is unable to modify its storage nor perform any side-effecting actions on connections.
+* `build`: Can fully access the Gadget including talking to the Gadget's agent and editing code.
+* `use`: Can use the Gadget's sandboxed UI, including functions that cause it to perform actions on its connections.
+* `view`: Can view the Gadget's sandboxed UI in read-only mode. This is accomplished by spawning a fork of the Gadget's Durable Object which is unable to modify its storage nor perform any side-effecting actions on connections.
+
+When a collaborator (with `build` access) uses AI chat or adds a binding, it draws on *their own* AI models and connected accounts, not the owner's — so a collaborator never gains access to the owner's accounts beyond what the Gadget's existing bindings already expose.
+
+All collaborators (with any access level) are treated as "observers" of the gadget's data. Each observer must prove that they have permission to read all the underlying data that the gadget itself has read, from all of its backends, in order to access the gadget. This ensures that a gadget cannot leak secrets that its users would not be permitted to access directly.
 
 ## Blueprints
 
-A user may create a "blueprint" from an existing Gadget, which captures its current code, but not edit history nor AI chat logs. A blueprint can be used to create more Gadgets based on the same code. Blueprints can also be shared with other users.
+A user may create a "blueprint" from an existing Gadget, which captures its current code, but not edit history nor AI chat logs. A blueprint can be used to create more Gadgets based on the same code. Blueprints can be shared directly with other users, published to a gallery that others can explore, or exported to and imported from `.gadget` files.
 
 A blueprint does *not* capture the Gadget's connections – only the types of the connections. When a new Gadget is created from a blueprint, the user must specify new resources to connect to, with matching types. This is particularly important since different Gadgets – even based on the same blueprint – may be intended to interact with different resources. For instance, if you had a Gadget that implements a chat bot, and many different teams want to use the same chat bot, each team would likely configure their own copy of the Gadget with a binding that points to the team's own chat channel.
 
@@ -108,6 +112,10 @@ Sometimes even a single user wants many copies of a Gadget. For example, imagine
 The creator of a blueprint may update it over time. Other users of the blueprint can choose whether to automatically apply updates to their own Gadgets or whether to stay pinned to a specific version.
 
 When a Gadget is created from a blueprint initially, modified, and then used to create a new blueprint, the new blueprint is a "fork" of the original. The user can optionally transition other Gadgets they have that started from the original blueprint to use the fork instead.
+
+## Deployment administration
+
+The Workshop is a multi-tenant deployment that an administrator operates for a group of users. Administrators have an admin panel where they can customize the deployment: the agent's instructions, branding/theme, and announcement banners; which Gatekeeper connectors and resources are offered to users (including the three-state mode for auto-provisioning connectors described above); and which blueprints are featured. Sign-in providers and whether password login is allowed are configured separately, through deployment environment variables rather than the admin panel, so that they cannot be changed by a compromised admin session.
 
 # Security Model
 
@@ -139,6 +147,12 @@ As mentioned above, Gadgets can only access the outside world via explicit bindi
 
 A Gatekeeper implements a JavaScript RPC interface which the Gadget can call, backed by whatever API the adapted service supports (e.g. an OAuth / REST API). Gatekeepers do more than just adapt the API, though. They also adapt the security model, defining fine-grained permissions and policies to support the Gadgets security rules. Gatekeepers are also responsible for submitting all actions to an approval queue and waiting for approval before carrying out the action.
 
+Not every binding is an external third-party service: the same Gatekeeper mechanism also provides bindings such as AI model access and the ability to spawn agents to perform tasks (essentially, starting chat threads with no human present).
+
+A Gatekeeper account may additionally provide its own management UI, which appears in the nav sidebar of the workshop home page. For example, the scheduler gatekeeper handles scheduled tasks; the management UI allows the user to see all scheduled tasks across all gadgets and workspaces in one place.
+
+Some Gatekeeper accounts provide a "singleton" that becomes ambiently available in every workspace automatically, without the user having to grant explicit permission. For example, the scheduler gatekeeper is available automatically, since scheduling tasks doesn't involve permission to any external resource.
+
 # Runtime architecture
 
 A Gadget executes as part of a Durable Object. Unlike a regular Durable Object, this object is made up of multiple Workers working together: The Gadget, an Overseer, and one or more Gatekeepers.
@@ -147,7 +161,7 @@ A Gadget executes as part of a Durable Object. Unlike a regular Durable Object, 
 
 * The Overseer supervises the Gadget. All incoming requests first go to the Overseer, which decides whether they are authorized before forwarding them to the Gadget.
 
-* The Gatekeepers implement each of the Gadget's bindings, each of which provides access to one external resource. The code for each Gatekeeper is provided by its respective Adapter.
+* The Gatekeepers implement each of the Gadget's bindings, each of which provides access to one external resource. The code for each Gatekeeper is provided by a separate Gatekeeper Worker (one per integrated service).
 
 ## Overseer details
 

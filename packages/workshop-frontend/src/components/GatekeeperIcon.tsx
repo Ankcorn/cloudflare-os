@@ -1,17 +1,18 @@
 export function GatekeeperIcon({
   vendorId,
-  bindingName,
+  fallbackText,
   logoUrl,
   size = 16,
   className = 'h-8 w-8 rounded-lg',
 }: {
   vendorId?: string
-  bindingName?: string
+  // Text whose first letter is shown when no logo is available (e.g. the resource title).
+  fallbackText?: string
   logoUrl?: string
   size?: number
   className?: string
 }) {
-  const fallback = bindingName || vendorId || '?'
+  const fallback = fallbackText || vendorId || '?'
 
   if (logoUrl) {
     return (

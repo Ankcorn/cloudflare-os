@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   Pencil,
@@ -8,7 +8,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, GatekeeperMetadata, BoundHookInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
@@ -27,6 +27,11 @@ import { usePreApprovalPrompt } from './usePreApprovalPrompt'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
+  gadget: RpcStub<GadgetClient>
+  // The chat currently open in the editor, if any. Connecting a resource with a chat open makes
+  // the new binding provisional to that chat, exactly like a code edit: it works in the chat's
+  // preview immediately, and becomes permanent only when the user accepts the chat's changes.
+  chatId?: number
   authenticatedApi: RpcStub<AuthenticatedApi>
   onConnectionsChange?: () => void
   isVisible?: boolean
@@ -37,40 +42,49 @@ interface ConnectionsProps {
   onAutoApproveChange?: () => void
 }
 
-export default function Connections({ overseer, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger, onAutoApproveChange }: ConnectionsProps) {
-  const [gatekeepers, setGatekeepers] = useState<GatekeeperMetadata[]>([])
+export default function Connections({ overseer, gadget, chatId, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger, onAutoApproveChange }: ConnectionsProps) {
+  const [bindings, setBindings] = useState<GadgetBindingInfo[]>([])
+  // Identity of the gadget this tab is showing, needed to offer it to agent spawners.
+  const [gadgetInfo, setGadgetInfo] = useState<{ id: WorkpieceId; title: string } | null>(null)
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
   const vendorLogos = useVendorLogos(authenticatedApi)
   const [loading, setLoading] = useState(true)
-  const [editingGatekeeper, setEditingGatekeeper] = useState<string | null>(null)
+  const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
-  const [deleteTarget, setDeleteTarget] = useState<{ bindingName: string; resourceTitle: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ name: string; resourceTitle: string } | null>(null)
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [autoApproveRules, setAutoApproveRules] =
-    useState<Array<{ bindingName: string; actionKind: ActionKind }>>([])
-  const [deleteRuleTarget, setDeleteRuleTarget] = useState<{ bindingName: string; tag: string } | null>(null)
-  // Keyed `${bindingName}:${actionKind.tag}` -- the rule has no numeric id.
+    useState<Array<{ gatekeeperId: number; actionKind: ActionKind }>>([])
+  const [deleteRuleTarget, setDeleteRuleTarget] = useState<{ gatekeeperId: number; tag: string } | null>(null)
+  // Keyed `${gatekeeperId}:${actionKind.tag}` -- the rule has no numeric id.
   const [togglingRules, setTogglingRules] = useState<Set<string>>(new Set())
-  const [annotationTarget, setAnnotationTarget] = useState<GatekeeperMetadata | null>(null)
+  const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   // Proactive pre-approval: after connecting a resource, offer to pre-approve its auto-approvable
-  // actions. Scoped to the just-connected binding so we don't re-nag about other connections.
+  // actions. Scoped to the just-connected gatekeeper so we don't re-nag about other connections.
   const [preApprovalOpen, setPreApprovalOpen] = useState(false)
-  const [preApprovalBinding, setPreApprovalBinding] = useState<string | null>(null)
+  const [preApprovalGatekeeperId, setPreApprovalGatekeeperId] = useState<number | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
     try {
-      const [gatekeeperList, hookList, ruleList] = await Promise.all([
-        overseer.listGatekeepers(),
+      const [id, gadgetTitle, bindingList, hookList, ruleList] = await Promise.all([
+        gadget.getId(),
+        gadget.getTitle(),
+        // Pass the open chat so bindings this tab added provisionally to it are listed too.
+        gadget.listBindings(chatId),
+        // Workspace-wide; filtered to this gadget below.
         overseer.listHooks(),
         overseer.listAutoApprovedActionKinds(),
       ])
-      setGatekeepers(gatekeeperList)
-      setHooks(hookList)
+      setGadgetInfo({ id, title: gadgetTitle })
+      setBindings(bindingList)
+      // This tab shows one gadget, so drop hooks that wake a different one -- otherwise its
+      // toggle/delete controls would operate on another gadget's hooks.
+      setHooks(hookList.filter((hook) => hook.gadgetId === id))
       setAutoApproveRules(ruleList)
-      onHasGatekeepersChange?.(gatekeeperList.length > 0)
+      onHasGatekeepersChange?.(bindingList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
       reportIssue('connections.load', err)
@@ -126,14 +140,14 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
   }
 
   // Disabling removes the rule (the list only contains enabled rules), so the row drops out.
-  const handleDisableRule = async (bindingName: string, tag: string) => {
-    const key = `${bindingName}:${tag}`
+  const handleDisableRule = async (gatekeeperId: number, tag: string) => {
+    const key = `${gatekeeperId}:${tag}`
     // Optimistically drop the rule from the list.
     setAutoApproveRules((prev) =>
-      prev.filter((r) => !(r.bindingName === bindingName && r.actionKind.tag === tag)))
+      prev.filter((r) => !(r.gatekeeperId === gatekeeperId && r.actionKind.tag === tag)))
     setTogglingRules((prev) => new Set(prev).add(key))
     try {
-      await overseer.removeAutoApprovedActionKind(bindingName, tag)
+      await overseer.removeAutoApprovedActionKind(gatekeeperId, tag)
       await loadGatekeepers()
       // Let other views (the chat's pre-approval "+" menu) know this kind is pre-approvable again.
       onAutoApproveChange?.()
@@ -154,7 +168,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
   useEffect(() => {
     loadGatekeepers()
-  }, [overseer])
+  }, [overseer, chatId])
 
   // Re-load when the tab becomes visible, so rules/hooks enabled elsewhere (e.g. the "Always
   // approve" button in Activity or the chat thread) show up without a full page reload.
@@ -168,54 +182,65 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
     if (reloadTrigger) loadGatekeepers()
   }, [reloadTrigger])
 
-  const handleEditStart = (bindingName: string) => {
-    setEditingGatekeeper(bindingName)
-    setEditValue(bindingName)
+  // What an agent spawner created here may offer its agents: this gadget itself (under the same
+  // `GADGET` name the gadget's own code uses) plus each of the gadget's bindings. All are enabled
+  // by default in the modal, reproducing the pre-multi-gadget behavior where spawned agents
+  // inherited everything the gadget held.
+  const spawnerEnvCandidates = useMemo(() => {
+    if (!gadgetInfo) return []
+    return [
+      {
+        target: gadgetInfo.id,
+        targetTitle: `${gadgetInfo.title} (this gadget)`,
+        name: 'GADGET',
+      },
+      ...bindings.map((b) => ({ target: b.target, targetTitle: b.resourceTitle, name: b.name })),
+    ]
+  }, [gadgetInfo, bindings])
+
+  const handleEditStart = (name: string) => {
+    setEditingBinding(name)
+    setEditValue(name)
   }
 
-  const handleEditSave = async (bindingName: string) => {
-    if (!editValue.trim()) {
+  const handleEditSave = async (name: string) => {
+    const newName = editValue.trim()
+    if (!newName) {
       toasts.add({ title: 'Binding name cannot be empty', variant: 'error' })
       return
     }
+    if (newName === name) {
+      setEditingBinding(null)
+      return
+    }
 
-    let gatekeeper = null
     try {
-      gatekeeper = await overseer.getGatekeeper(bindingName)
-      if (gatekeeper) {
-        await gatekeeper.setBindingName(editValue.trim())
-        await loadGatekeepers()
-        onConnectionsChange?.()
-      }
+      await gadget.renameBinding(name, newName)
+      await loadGatekeepers()
+      onConnectionsChange?.()
     } catch (err) {
-      console.error('Failed to rename gatekeeper:', err)
+      console.error('Failed to rename binding:', err)
       toasts.add({ title: 'Failed to update binding name', variant: 'error' })
     } finally {
-      gatekeeper?.[Symbol.dispose]()
-      setEditingGatekeeper(null)
+      setEditingBinding(null)
     }
   }
 
   const handleEditCancel = () => {
-    setEditingGatekeeper(null)
+    setEditingBinding(null)
     setEditValue('')
   }
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return
-    let gatekeeper = null
     try {
-      gatekeeper = await overseer.getGatekeeper(deleteTarget.bindingName)
-      if (gatekeeper) {
-        await gatekeeper.remove()
-        await loadGatekeepers()
-        onConnectionsChange?.()
-      }
+      await gadget.unbind(deleteTarget.name)
+      await loadGatekeepers()
+      onConnectionsChange?.()
     } catch (err) {
-      console.error('Failed to delete gatekeeper:', err)
-      toasts.add({ title: 'Failed to delete connection', variant: 'error' })
+      console.error('Failed to remove binding:', err)
+      toasts.add({ title: 'Failed to remove connection', variant: 'error' })
     } finally {
-      gatekeeper?.[Symbol.dispose]()
       setDeleteTarget(null)
     }
   }
@@ -246,7 +271,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
             <div className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-6 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
               Loading connections...
             </div>
-          ) : gatekeepers.length === 0 ? (
+          ) : bindings.length === 0 ? (
             <EmptyState
               title="No connected resources"
               description="Connect Google Docs, GitHub, Google Sheets, and other services so this gadget can safely use external data."
@@ -255,13 +280,16 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
             />
           ) : (
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-              {gatekeepers.map((gk, index) => {
-                const isEditing = editingGatekeeper === gk.bindingName
-                const isDeleting = deleteTarget?.bindingName === gk.bindingName
+              {bindings.map((gk, index) => {
+                const isEditing = editingBinding === gk.name
+                const isDeleting = deleteTarget?.name === gk.name
+                // Still provisional to the open chat (see GadgetBindingInfo.chatId). Blueprint
+                // annotations are excluded, since a blueprint only ever exports permanent edges.
+                const isPending = gk.chatId !== undefined
 
                 return (
                   <div
-                    key={gk.bindingName}
+                    key={gk.name}
                     className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
                   >
                     {isDeleting ? (
@@ -271,7 +299,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                             Delete {gk.resourceTitle}?
                           </p>
                           <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                            The binding <span className="font-mono">{gk.bindingName}</span> will be removed from this gadget.
+                            The binding <span className="font-mono">{gk.name}</span> will be removed from this gadget.
                           </p>
                         </div>
                         <WorkshopButton
@@ -293,7 +321,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                           value={editValue}
                           onChange={(e) => setEditValue(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleEditSave(gk.bindingName)
+                            if (e.key === 'Enter') handleEditSave(gk.name)
                             if (e.key === 'Escape') handleEditCancel()
                           }}
                           placeholder="Binding name"
@@ -304,7 +332,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                         <WorkshopButton
                           tone="primary"
                           className="!h-8"
-                          onClick={() => handleEditSave(gk.bindingName)}
+                          onClick={() => handleEditSave(gk.name)}
                           disabled={!editValue.trim()}
                         >
                           Save
@@ -317,36 +345,45 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                       </div>
                     ) : (
                       <div className="flex items-center gap-3">
-                        <GatekeeperIcon vendorId={gk.vendorId} bindingName={gk.bindingName} logoUrl={gk.vendorId ? vendorLogos.get(gk.vendorId) : undefined} />
+                        <GatekeeperIcon vendorId={gk.vendorId} fallbackText={gk.resourceTitle || gk.name} logoUrl={gk.vendorId ? vendorLogos.get(gk.vendorId) : undefined} />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                            {gk.resourceTitle}
+                          <p className="flex items-center gap-2 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            <span className="min-w-0 truncate">{gk.resourceTitle}</span>
+                            {isPending && (
+                              <Tooltip content="Added in this chat; kept when you accept the chat's changes" asChild>
+                                <span className="flex-shrink-0 rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] leading-none font-medium text-kumo-subtle">
+                                  Draft
+                                </span>
+                              </Tooltip>
+                            )}
                           </p>
                           <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-                            Referenced in code as: <span className="font-mono text-kumo-subtle">{gk.bindingName}</span>
+                            Referenced in code as: <span className="font-mono text-kumo-subtle">{gk.name}</span>
                           </p>
                         </div>
                         <div className="ml-auto flex shrink-0 items-center gap-1">
                           <Tooltip content="Edit name used in code" asChild>
                             <WorkshopIconButton
-                              onClick={() => handleEditStart(gk.bindingName)}
+                              onClick={() => handleEditStart(gk.name)}
                               aria-label="Edit name used in code"
                             >
                               <Pencil size={14} />
                             </WorkshopIconButton>
                           </Tooltip>
-                          <Tooltip content="Edit blueprint settings" asChild>
-                            <WorkshopIconButton
-                              onClick={() => setAnnotationTarget(gk)}
-                              aria-label="Edit blueprint settings"
-                            >
-                              <Blueprint size={14} />
-                            </WorkshopIconButton>
-                          </Tooltip>
+                          {!isPending && (
+                            <Tooltip content="Edit blueprint settings" asChild>
+                              <WorkshopIconButton
+                                onClick={() => setAnnotationTarget(gk)}
+                                aria-label="Edit blueprint settings"
+                              >
+                                <Blueprint size={14} />
+                              </WorkshopIconButton>
+                            </Tooltip>
+                          )}
                           <Tooltip content="Delete connection" asChild>
                             <WorkshopIconButton
                               danger
-                              onClick={() => setDeleteTarget({ bindingName: gk.bindingName, resourceTitle: gk.resourceTitle })}
+                              onClick={() => setDeleteTarget({ name: gk.name, resourceTitle: gk.resourceTitle })}
                               aria-label="Delete connection"
                             >
                               <Trash size={14} />
@@ -376,7 +413,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
               {hooks.map((hook, index) => {
                 const isDeleting = deleteHookTarget?.id === hook.id
-                const vendorId = gatekeepers.find((g) => g.bindingName === hook.bindingName)?.vendorId
+                const vendorId = bindings.find((b) => b.target === hook.gatekeeperId)?.vendorId
 
                 return (
                   <div
@@ -410,7 +447,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                       <div className="flex items-center gap-3">
                         <GatekeeperIcon
                           vendorId={vendorId}
-                          bindingName={hook.bindingName}
+                          fallbackText={hook.resourceTitle}
                           logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
                         />
                         <div className="min-w-0 flex-1">
@@ -422,13 +459,9 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                               {hook.description.description}
                             </p>
                           )}
-                          {(hook.resourceTitle || hook.bindingName) && (
+                          {hook.resourceTitle && (
                             <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
                               {hook.resourceTitle}
-                              {hook.resourceTitle && hook.bindingName && ' · '}
-                              {hook.bindingName && (
-                                <span className="font-mono text-kumo-subtle">{hook.bindingName}</span>
-                              )}
                             </p>
                           )}
                         </div>
@@ -471,10 +504,10 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
               {autoApproveRules.map((rule, index) => {
-                const key = `${rule.bindingName}:${rule.actionKind.tag}`
-                const gatekeeper = gatekeepers.find((g) => g.bindingName === rule.bindingName)
-                const vendorId = gatekeeper?.vendorId
-                const isDeleting = deleteRuleTarget?.bindingName === rule.bindingName &&
+                const key = `${rule.gatekeeperId}:${rule.actionKind.tag}`
+                const binding = bindings.find((b) => b.target === rule.gatekeeperId)
+                const vendorId = binding?.vendorId
+                const isDeleting = deleteRuleTarget?.gatekeeperId === rule.gatekeeperId &&
                   deleteRuleTarget.tag === rule.actionKind.tag
 
                 return (
@@ -495,7 +528,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                         <WorkshopButton
                           tone="danger"
                           className="min-w-[68px]"
-                          onClick={() => handleDisableRule(rule.bindingName, rule.actionKind.tag)}
+                          onClick={() => handleDisableRule(rule.gatekeeperId, rule.actionKind.tag)}
                         >
                           Delete
                         </WorkshopButton>
@@ -507,25 +540,25 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
                       <div className="flex items-center gap-3">
                         <GatekeeperIcon
                           vendorId={vendorId}
-                          bindingName={rule.bindingName}
+                          fallbackText={binding?.resourceTitle}
                           logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
                         />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
                             {rule.actionKind.label}
                           </p>
-                          <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-                            {gatekeeper?.resourceTitle}
-                            {gatekeeper?.resourceTitle && ' · '}
-                            <span className="font-mono text-kumo-subtle">{rule.bindingName}</span>
-                          </p>
+                          {binding && (
+                            <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                              {binding.resourceTitle}
+                            </p>
+                          )}
                         </div>
                         <div className="ml-auto flex shrink-0 items-center gap-2">
                           <Tooltip content="Delete auto-approval rule" asChild>
                             <WorkshopIconButton
                               danger
                               disabled={togglingRules.has(key)}
-                              onClick={() => setDeleteRuleTarget({ bindingName: rule.bindingName, tag: rule.actionKind.tag })}
+                              onClick={() => setDeleteRuleTarget({ gatekeeperId: rule.gatekeeperId, tag: rule.actionKind.tag })}
                               aria-label="Delete auto-approval rule"
                             >
                               <Trash size={14} />
@@ -546,20 +579,27 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
         open={isNewConnectionModalVisible}
         onClose={() => setIsNewConnectionModalVisible(false)}
         getOverseer={() => overseer}
-        existingBindings={gatekeepers.map(g => g.bindingName)}
+        spawnerEnvCandidates={spawnerEnvCandidates}
         onCreated={async (gk) => {
           try {
-            // Naming the binding immediately (vs. leaving it an unnamed capsule) is what makes its
-            // auto-approvable actions visible to listPreApprovableActions below.
-            const bindingName = await gk.setSuggestedBindingName()
-            toasts.add({ title: 'Connection created successfully', variant: 'success' })
+            // Binding the gatekeeper into the gadget immediately (vs. leaving it an unnamed
+            // workspace-level connection) is what makes its auto-approvable actions visible to
+            // listPreApprovableActions below.
+            const gatekeeperId = await gk.getId()
+            await gadget.bindWithSuggestedName(gatekeeperId, chatId)
+            toasts.add({
+              title: chatId === undefined
+                ? 'Connection created successfully'
+                : "Connection created — accept the chat's changes to keep it",
+              variant: 'success',
+            })
             await loadGatekeepers()
             onConnectionsChange?.()
             // If this new connection brings any not-yet-approved auto-approvable actions, offer to
-            // pre-approve them right away, scoped to just this binding.
+            // pre-approve them right away, scoped to just this connection.
             const candidates = await preApproval.refresh()
-            if (candidates.some((c) => c.bindingName === bindingName)) {
-              setPreApprovalBinding(bindingName)
+            if (candidates.some((c) => c.gatekeeperId === gatekeeperId)) {
+              setPreApprovalGatekeeperId(gatekeeperId)
               setPreApprovalOpen(true)
             }
           } finally {
@@ -570,7 +610,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
       <BlueprintAnnotationModal
         target={annotationTarget}
-        overseer={overseer}
+        gadget={gadget}
         onClose={() => setAnnotationTarget(null)}
         onSaved={() => {
           toasts.add({ title: 'Blueprint settings saved.', variant: 'success' })
@@ -580,7 +620,7 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
       <PreApprovalDialog
         open={preApprovalOpen}
-        candidates={preApproval.candidates.filter((c) => c.bindingName === preApprovalBinding)}
+        candidates={preApproval.candidates.filter((c) => c.gatekeeperId === preApprovalGatekeeperId)}
         isProcessing={preApproval.isProcessing}
         onOpenChange={setPreApprovalOpen}
         onConfirm={async (selected) => {
@@ -595,12 +635,12 @@ export default function Connections({ overseer, authenticatedApi, onConnectionsC
 
 function BlueprintAnnotationModal({
   target,
-  overseer,
+  gadget,
   onClose,
   onSaved,
 }: {
-  target: GatekeeperMetadata | null
-  overseer: RpcStub<Overseer>
+  target: GadgetBindingInfo | null
+  gadget: RpcStub<GadgetClient>
   onClose: () => void
   onSaved: () => void
 }) {
@@ -619,7 +659,7 @@ function BlueprintAnnotationModal({
     let cancelled = false
     ;(async () => {
       try {
-        const loaded = await loadBindingCardData(overseer, target)
+        const loaded = await loadBindingCardData(gadget, target)
         if (!cancelled) {
           if (loaded) {
             setData(loaded)
@@ -637,22 +677,19 @@ function BlueprintAnnotationModal({
     return () => {
       cancelled = true
     }
-  }, [target, overseer])
+  }, [target, gadget])
 
   const handleSave = async () => {
     if (!data || !target) return
     setSaving(true)
     setSaveError(null)
-    let gk = null
     try {
-      gk = await overseer.getGatekeeper(target.bindingName)
-      if (gk) await gk.setBlueprintAnnotation(data.annotation)
+      await gadget.setBlueprintAnnotation(target.name, data.annotation)
       onSaved()
     } catch (err: any) {
       reportIssue('connections.binding-save', err)
       setSaveError(err?.message || 'Could not save.')
     } finally {
-      gk?.[Symbol.dispose]()
       setSaving(false)
     }
   }

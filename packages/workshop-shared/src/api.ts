@@ -134,11 +134,65 @@ export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
   includeForcedAutoProvisionedAccounts?: boolean;
 };
 
+// Identifies a workpiece within a workspace. A workpiece is a numbered thing the user (or agent)
+// is working on inside the workspace -- currently a gadget or a gatekeeper (connection), with
+// more types expected later. All workpiece types share one sequential per-workspace ID namespace,
+// so a bare number unambiguously identifies a workpiece of any type, and derived names (Yjs file
+// roots, facet names) can never collide across types.
+export type WorkpieceId = number;
+
+// Matches an ASCII JavaScript identifier, excluding `$`. Deliberately conservative: binding
+// names are typed by agents and rendered as `env.NAME`, so full Unicode identifier support buys
+// nothing; and while `$` is technically legal in identifiers, it is conventionally reserved for
+// special circumstances like code generators, so agents shouldn't be using it.
+const IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// ECMAScript reserved words (including strict-mode reservations and literals), which are valid
+// per IDENTIFIER_REGEX but cannot follow `.` in all contexts and would confuse both agents and
+// humans as binding names.
+const RESERVED_WORDS = new Set([
+  "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do",
+  "else", "enum", "export", "extends", "false", "finally", "for", "function", "if", "import",
+  "in", "instanceof", "new", "null", "return", "super", "switch", "this", "throw", "true", "try",
+  "typeof", "var", "void", "while", "with",
+  // Strict-mode / contextual reservations.
+  "await", "implements", "interface", "let", "package", "private", "protected", "public",
+  "static", "yield",
+]);
+
+// Validates a binding name, throwing a descriptive Error if it is unacceptable. This is the one
+// shared validator applied at every chokepoint that writes a binding name (gadget binding edges,
+// the workspace default binding list, chat binding maps, spawner env configs, and the agent
+// tools), wherever the map is keyed.
+//
+// A valid name is a JavaScript identifier (see IDENTIFIER_REGEX; reserved words excluded) that is
+// not a dangerous or confusing property name: anything that exists on `Object.prototype`
+// (`__proto__`, `constructor`, `hasOwnProperty`, `toString`, etc.) or `prototype` is rejected,
+// since binding maps are used as plain objects where such names would collide with inherited
+// members -- or worse, mutate the prototype chain.
+//
+// ALL_CAPS_WITH_UNDERSCORES is style guidance only (recommended in tool descriptions and used by
+// generated names), not enforced here.
+export function validateBindingName(name: string): void {
+  if (!IDENTIFIER_REGEX.test(name)) {
+    throw new Error(
+        `Invalid binding name "${name}": binding names must be JavaScript identifiers ` +
+        `(letters, digits, and '_', not starting with a digit).`);
+  }
+  if (RESERVED_WORDS.has(name)) {
+    throw new Error(`Invalid binding name "${name}": this is a reserved word in JavaScript.`);
+  }
+  if (name === "prototype" || name in Object.prototype) {
+    throw new Error(
+        `Invalid binding name "${name}": this name collides with a built-in object property.`);
+  }
+}
+
 // Describes one gatekeeper binding for which the opening user must choose a connected account
 // before they can observe the gadget. Passed to ObserverConfigCallback.configure().
 export type ObserverBindingNeed = {
-  // The overseer-assigned gatekeeper id (GatekeeperRecord.id). Echoed back in ObserverAccountChoice.
-  gatekeeperId: number;
+  // The overseer-assigned gatekeeper id (a workpiece id). Echoed back in ObserverAccountChoice.
+  gatekeeperId: WorkpieceId;
   // The vendor the user must have a connected account for (e.g. "google"). The frontend filters
   // the user's connected accounts by this to find candidates.
   vendorId: string;
@@ -152,7 +206,7 @@ export type ObserverBindingNeed = {
 // ObserverConfigCallback.configure().
 export type ObserverAccountChoice = {
   // Matches the ObserverBindingNeed.gatekeeperId being satisfied.
-  gatekeeperId: number;
+  gatekeeperId: WorkpieceId;
   // An account in the opening user's own User DO (a ConnectedAccountRecord id).
   accountId: number;
 };
@@ -256,6 +310,8 @@ export interface AuthenticatedApi extends RpcTarget {
   // connected accounts for one or more gatekeeper bindings before they can observe the gadget (see
   // ObserverConfigCallback). It is never called for the owner or an already-configured observer,
   // so the common-case open is still a single pipelined round trip.
+  //
+  // TODO(multi-gadget): This should be renamed to openWorkspace().
   openGadget(id: string, shareKey?: string,
              configureObservers?: RpcStub<ObserverConfigCallback>): Promise<RpcStub<Overseer>>;
 
@@ -264,9 +320,11 @@ export interface AuthenticatedApi extends RpcTarget {
   // Note: A gadget is considered "provisional" until it has some sort of activity, such as a
   //   chat message or code edit. Provisional gadgets do not appear on the home page and will be
   //   automatically deleted after some time. Note in particular that calling
-  //   new*Gatekeeper() will not clear the provisional bit (as long as no binding name is
-  //   assigned), so provisional gadgets are useful to allow the user to write an initial chat
-  //   message without explicitly creating a new gadget.
+  //   new*Gatekeeper() will not clear the provisional bit (as long as the gatekeeper isn't bound
+  //   into a gadget), so provisional gadgets are useful to allow the user to write an initial
+  //   chat message without explicitly creating a new gadget.
+  //
+  // TODO(multi-gadget): This should be renamed to newWorkspace().
   newGadget(): Promise<RpcStub<Overseer>>;
 
   // List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -734,14 +792,17 @@ export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> =
   },
 };
 
-// Metadata about a Gadget. Includes everything needed to render the Gadget list on the front
-// page.
+// Metadata about a workspace (one Overseer DO and everything in it). Includes everything needed
+// to render the workspace list on the front page.
+//
+// TODO(multi-gadget): Rename `WorkspaceMetadata`.
 export type GadgetMetadata = {
-  // Unique ID for this Gadget, used with `openGadget()`. This is a url-safe base64 value chosen
-  // randomly when the Gadget is created.
+  // Unique ID for this workspace, used with `openGadget()`. This is a url-safe base64 value
+  // chosen randomly when the workspace is created.
   id: string;
 
-  // Human-readable title. Can be modified.
+  // Human-readable workspace title. Can be modified. (Per-gadget titles live on the gadget
+  // workpieces themselves; see WorkpieceSummary.)
   title: string;
 
   // Total cost of AI inference in dollars, if known.
@@ -762,6 +823,14 @@ export type GadgetMetadata = {
   // True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
   // be shared with additional users or links.
   sharingProhibited?: boolean;
+
+  // Various objects in the API specify a gadgetId, but make the property optional. When omitted,
+  // the default gadget ID should be assumed. This is largely for backwards compatibility with
+  // records that were stored before workspaces could have multiple gadgets.
+  //
+  // TODO(multi-gadget): Do a migration to backfill all gadget IDs, then eliminate the concept of
+  // a default gadget from the API.
+  defaultGadgetId?: WorkpieceId;
 
   // TODO:
   // - created / modified / activity times
@@ -836,11 +905,13 @@ export interface CodeSubscriber {
 export type ActionState = "pending" | "approved" | "rejected";
 
 export type ActionLogEntry = {
-  // Sequential ID number for the action. Counts up from when the gadget was created.
+  // Sequential ID number for the action. Counts up from when the workspace was created.
   id: number;
 
-  // Which binding produced this action?
-  bindingName?: string;   // omitted for capsules
+  // Which gatekeeper produced this action? Omitted if the log entry came from a non-gatekeeper
+  // source (e.g. webFetch tool).
+  gatekeeperId?: WorkpieceId;
+
   resourceTitle: string;
   resourceUrl?: string;
 
@@ -880,7 +951,13 @@ export type ActionLogEntry = {
 
 export type BoundHookInfo = {
   id: number;
-  bindingName?: string;   // omitted for capsules
+
+  // The gatekeeper that delivers this hook.
+  gatekeeperId: WorkpieceId;
+
+  // The gadget whose code this hook wakes.
+  gadgetId: WorkpieceId;
+
   resourceTitle?: string;
   resourceUrl?: string;
   description: HookDescription;
@@ -907,19 +984,26 @@ export type AgentSpawnerConfig = {
   // same as for an agent chat where the agent fails to mark the task complete.
   modelId: string | null,
 
-  // Environment variables (bindings) to inherit from the gadget. If omitted, inherit all. This can
-  // be used to restrict agents spawned by this spawner to access only certain bindings /
-  // gatekeepers.
-  env?: string[],
+  // The bindings available to agents spawned by this spawner: binding name (as it appears as
+  // `env.NAME` in the spawned agent's executeCode environment) -> target workpiece. When an agent
+  // is spawned, this map is snapshotted into the spawned chat's seed binding layer (entries whose
+  // targets no longer exist are dropped); the spawned agent sees only these bindings, never the
+  // workspace's default binding list.
+  //
+  // The entries are deliberately not limited to bindings held by the gadget that owns the
+  // spawner: a spawner may define bindings of its own, with its own names and targets.
+  env: Record<string, WorkpieceId>,
 };
 
-// Interface to a Gadget's Overseer, used to display the Gadget Workshop shell UI around that
-// Gadget.
+// Interface to a workspace's Overseer, used to display the Gadget Workshop shell UI around that
+// workspace. Workspace-level concerns live here: the gadget registry, code sync (one Yjs doc for
+// the whole workspace), chats, actions/hooks, sharing, and blueprint listing. Per-gadget
+// operations live on the GadgetClient sub-capability (see createGadget()/getGadget()).
 export interface Overseer extends RpcTarget {
-  // Get metadata describing this gadget.
+  // Get metadata describing this workspace.
   getMetadata(): Promise<GadgetMetadata>;
 
-  // Get metadata describing this gadget and subscribe to changes.
+  // Get metadata describing this workspace and subscribe to changes.
   //
   // `callback` will be called once immediately with the current metadata, then again any time it
   // changes.
@@ -933,22 +1017,54 @@ export interface Overseer extends RpcTarget {
   // A viewer is present for the lifetime of the openGadget() session.
   subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>>;
 
-  // Change the title.
+  // Change the workspace title.
   setTitle(title: string): Promise<void>;
 
-  // Pin or unpin this gadget in the user's list.
+  // Pin or unpin this workspace in the user's list.
   setPinned(pinned: boolean): Promise<void>;
 
-  // Instruct Gadget to delete itself, removing it from the User's gadget list and deleting all
-  // data. Further method calls will fail.
+  // Instruct the workspace to delete itself, removing it from the User's workspace list and
+  // deleting all data. Further method calls will fail.
   //
   // TODO: Implement undelete, maybe using PITR...
   deleteSelf(): Promise<void>;
 
+  // Subscribe to the workspace's workpiece list.
+  //
+  // The subscriber receives one entry() per existing workpiece, followed by ready(), then
+  // incremental entry()/removed() calls as workpieces are created, renamed, or deleted. In v1
+  // only gadget-type workpieces are delivered (see WorkpieceSummary).
+  //
+  // Disposing the returned `RpcStub` will cancel the subscription.
+  subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>>;
+
+  // Create a new gadget workpiece in this workspace. `title` is required -- gadgets have no
+  // default title. The new gadget starts with no files and no bindings.
+  //
+  // If `chatId` is provided, the creation is provisional to that chat, exactly like code edits
+  // made with a chat open: a `changes` message records it in the chat log (see
+  // `createdGadgets`), and the gadget remains pending (see WorkpieceSummary.chatId) until
+  // the user accepts the chat's changes through that message (merging deletes the pending marker;
+  // reverting deletes the gadget). Without `chatId` the gadget is created permanently.
+  //
+  // `bindingName` is the name under which the gadget appears in chat envs and the workspace
+  // default binding list (see validateBindingName()). When absent, the server chooses one from
+  // the title (via the quick model when configured, else a generic fallback). Gadget binding
+  // names are unique within the workspace: throws if the name is already taken by another
+  // gadget -- including one still pending in another chat (retry after that chat's changes are
+  // accepted or reverted).
+  createGadget(title: string, chatId?: number, bindingName?: string)
+      : Promise<RpcStub<GadgetClient>>;
+
+  // Get the gadget with the given workpiece ID. To allow for pipelining, this throws an
+  // exception if there is no such gadget.
+  getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+
   // Subscribe to code updates.
   //
-  // Code is represented as a Yjs doc. The top-level Y.Doc contains a Y.Map (with empty name) which
-  // maps file names to Y.Text instances.
+  // Code is represented as a single Yjs doc shared by the whole workspace. Each workpiece that
+  // owns files has its own root Y.Map (mapping file names to Y.Text instances) within the doc,
+  // named per WorkpieceSummary.filesRoot. Updates are whole-doc and may span workpieces.
   //
   // `subscriber` will receive updates whenever it becomes out-of-date. `fromVersion` is the
   // version the subscriber already has before the subscription starts. To download the code from
@@ -963,30 +1079,8 @@ export interface Overseer extends RpcTarget {
   // is provided, the update is recorded as a live draft edit for that chat's branch.
   updateCode(update: Uint8Array, chatId?: number): Promise<void>;
 
-  // Get the Gadget's deployed UI code, to be run inside an iframe sandbox.
-  //
-  // Returns null if the gadget has no deployed UI code (e.g. if it's new, or if it's just an AI
-  // agent with no code).
-  getUiBundle(chatId?: number): Promise<UiBundle | null>;
-
-  // Open an RPC interface to the Gadget's server-side Durable Object facet. The frontend may pass
-  // this stub into the Gadget's iframe sandbox, so that the Gadget UI can communicate with its
-  // server side. It can also permit the coding agent to make direct calls.
-  //
-  // If `chatId` is specified, then the gadget will include changes currently proposed in the given
-  // chat.
-  //
-  // @ts-ignore - TODO: Fix type instantiation issue
-  connectToGadget(chatId?: number): Promise<RpcStub<any>>;
-
-  // List all the Gadget's current gatekeepers (that have been assigned binding names).
-  listGatekeepers(): Promise<GatekeeperMetadata[]>;
-
-  // Get an existing gatekeeper by binding name.
-  getGatekeeper(bindingName: string): Promise<GatekeeperClient<any> | null>;
-
-  // Get an existing gatekeeper by ID number. Throws if the ID doesn't exist.
-  getGatekeeperById(id: number): Promise<GatekeeperClient<any>>;
+  // Get an existing gatekeeper by workpiece ID. Throws if the ID doesn't exist.
+  getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
 
   // Try to create a new gatekeeper for this URL.
   //
@@ -994,8 +1088,8 @@ export interface Overseer extends RpcTarget {
   // appropriate account, use `subscribeConnectedAccounts()` with a `filter` for this URL, then
   // let the user choose one.
   //
-  // The new gatekeeper is not assigned a binding name by default. Call setSuggestedBindingName()
-  // on the returned object to assign one.
+  // The new gatekeeper is a workspace-level workpiece; it is not bound into any gadget's `env` by
+  // default. Use GadgetClient.bind() / bindWithSuggestedName() to expose it to a gadget.
   newGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any> | null>;
 
   // Create a new gatekeeper for an AI model binding. The model can be any returned by
@@ -1018,7 +1112,10 @@ export interface Overseer extends RpcTarget {
   // be approved in the future.
   rejectAction(id: number): Promise<void>;
 
-  // List information about bound hooks (which could wake up the gadget asynchronously).
+  // List information about bound hooks (which could wake up a gadget asynchronously).
+  //
+  // The list spans the whole workspace; each entry names the gadget it wakes (see
+  // BoundHookInfo.gadgetId), so a per-gadget view must filter on that.
   listHooks(): Promise<BoundHookInfo[]>;
 
   // Enable the hook with the given ID. Callbacks will begin flowing.
@@ -1031,17 +1128,20 @@ export interface Overseer extends RpcTarget {
   deleteHook(id: number): Promise<void>;
 
   // Enable auto-approval of actions carrying the given `actionKind` (the
-  // ActionDescription.actionKind) on the connection identified by `bindingName`. Future actions
+  // ActionDescription.actionKind) on the gatekeeper identified by `gatekeeperId`. Future actions
   // with that kind's tag whose author marked them `autoApprovable` are then applied automatically
   // without manual approval, and any matching action(s) already pending are applied immediately.
-  setAutoApprovedActionKind(bindingName: string, actionKind: ActionKind): Promise<void>;
+  //
+  // Auto-approval rules are workspace-wide per gatekeeper: approving an action kind approves it
+  // no matter which gadget invokes it.
+  setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind): Promise<void>;
 
-  // Remove the auto-approval rule for `tag` on `bindingName`; matching actions then require
-  // manual approval again.
-  removeAutoApprovedActionKind(bindingName: string, tag: string): Promise<void>;
+  // Remove the auto-approval rule for `tag` on the given gatekeeper; matching actions then
+  // require manual approval again.
+  removeAutoApprovedActionKind(gatekeeperId: WorkpieceId, tag: string): Promise<void>;
 
   // List the currently-enabled auto-approval rules.
-  listAutoApprovedActionKinds(): Promise<Array<{ bindingName: string; actionKind: ActionKind }>>;
+  listAutoApprovedActionKinds(): Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>>;
 
   // List action kinds across all connected gatekeepers that could be pre-approved for auto-apply,
   // for the proactive pre-approval UI. Surfaces them before any action has been submitted so an
@@ -1051,10 +1151,11 @@ export interface Overseer extends RpcTarget {
 
   // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
   // is responsible for having actually created the gatekeeper (via newGatekeeper()) and passes the
-  // resulting gatekeeper id. The gatekeeper is surfaced to the agent as a chat-scoped capsule (the
-  // agent can promote it to a permanent binding via saveCapsuleAsBinding if needed). This marks the
-  // request accepted, updates the inline card, and resumes the agent so it can use the resource.
-  acceptConnectionRequest(requestId: string, result: {gatekeeperId: number}): Promise<void>;
+  // resulting gatekeeper id. The gatekeeper is surfaced to the agent as a named binding in the
+  // chat's env, under the name the agent chose when it made the request (see
+  // `connectionRequest.bindingName`). This marks the request accepted, updates the inline card,
+  // and resumes the agent so it can use the resource.
+  acceptConnectionRequest(requestId: string, result: {gatekeeperId: WorkpieceId}): Promise<void>;
 
   // Deny an agent's pending connection request. Updates the inline card. Does NOT resume the agent:
   // the turn stays ended so the user can decide what to tell the agent to do instead.
@@ -1188,27 +1289,21 @@ export interface Overseer extends RpcTarget {
   subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>>;
 
   // --- Blueprint management ---
+  //
+  // Blueprint listing and maintenance are workspace-level (each blueprint record remembers which
+  // gadget it exports). Creating a blueprint is per-gadget: see GadgetClient.createBlueprint().
 
-  // List blueprints created from this gadget.
+  // List blueprints created from this workspace's gadgets.
   listBlueprints(): Promise<BlueprintGadgetSummary[]>;
-
-  // Create a new blueprint from the gadget's current committed code.
-  // `title` defaults to the gadget's title if omitted.
-  //
-  // The blueprint is always owned by the gadget owner, regardless of who calls this method.
-  //
-  // Steps: generate ID, snapshot code, collect binding metadata, store locally, propagate
-  // to User DO + KV + R2.
-  createBlueprint(title?: string, description?: string, screenshot?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary>;
 
   // Update an existing blueprint. Any combination of metadata and code can be updated
   // atomically in a single call with one propagation pass.
   //
   // - `title` / `description`: if provided, update the respective field.
-  // - `updateCode`: if true, snapshot the gadget's current committed code into the
+  // - `updateCode`: if true, snapshot the source gadget's current committed code into the
   //   blueprint and increment the blueprint version.
   // - `updateBindings`: if true, refresh the blueprint's connection annotations from
-  //   the gadget's current named bindings without changing the code snapshot.
+  //   the source gadget's current bindings without changing the code snapshot.
   //
   // At least one option must be provided.
   updateBlueprint(blueprintId: string, options: {
@@ -1373,14 +1468,48 @@ export type AiChatMessageBody = {
   // Represents changes made to the code by an agent tool call or by a collaborating user as part
   // of a chat. These changes are provisional until they are accepted.
   type: "changes";
-  update: Uint8Array;
+
+  // The code changes themselves, as a Yjs-encoded (V2) update against the workspace code Y.Doc.
+  // Absent when the batch records only gadget creations and/or binding additions with no
+  // accompanying code edits.
+  update?: Uint8Array;
+
+  // The workspace code version that `update` was built against. Once an agent session observes
+  // the code at some version, the chat stays locked to that version (see
+  // AiToolCall.observedCodeVersion), so history replay must learn each update's base version
+  // *before* it reconstructs the session's code state. Present whenever `update` is, except in
+  // messages persisted before this field existed. For user-authored batches this records the
+  // mainline base at the time the user's edits were captured, which may legitimately differ
+  // from the version an agent session is locked to (the user can accept changes -- advancing
+  // mainline -- and keep editing); such stamps seed a session's version lock but are never
+  // checked against it.
+  observedCodeVersion?: number;
+
+  // Gadgets created as part of this batch of changes (by the agent's `createGadget` tool, or by
+  // the user via Overseer.createGadget() with a chat open -- in the latter case `update` is
+  // omitted). Like the code changes themselves, the creations are provisional: a merge
+  // through this message makes them permanent, and a revert covering it deletes them. Titles are
+  // denormalized for display, since a reverted creation's registry record is gone. `bindingName`
+  // is the name under which the gadget appears in the creating chat's env (and, once merged, the
+  // workspace default binding list); recording it here lets the creating chat pick the name back
+  // up on replay.
+  createdGadgets?: {gadgetId: WorkpieceId, title: string, bindingName: string}[];
+
+  // Binding edges added to gadgets as part of this batch of changes (by the agent's
+  // setGadgetBinding tool, or by the user binding a connection with a chat open -- in the latter
+  // case `update` is omitted). Like `createdGadgets`, the additions are
+  // provisional: the edge is visible only from this chat until a merge through this message
+  // makes it permanent, and a revert covering it deletes the edge. `name` is the binding's name
+  // within the gadget identified by `gadgetId`; `target` is the bound workpiece.
+  addedBindings?: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[];
 } | {
   // Indicates that at this point in the chat, the user chose to merge all (non-reverted) changes
   // in this chat up to and including the given sequence number.
   type: "merge";
   mergeThrough: number;
 
-  // Code version at which the merge was applied.
+  // Code version at which the merge was applied. (A merge covering only gadget creations /
+  // binding additions writes no new code version; this then records the bumped version counter.)
   version: number;
 } | {
   // Indicates that at this point in the chat, the user chose to revert all changes starting at the
@@ -1471,9 +1600,18 @@ export type AiChatMessageBody = {
   state: "pending" | "accepted" | "denied";
 
   // Once accepted, the id of the created gatekeeper. The resource is surfaced to the agent as a
-  // chat-scoped capsule (env[N]); the agent can promote it to a permanent binding via
-  // saveCapsuleAsBinding if its gadget code needs it.
-  gatekeeperId?: number;
+  // named binding in the chat's env; the agent can additionally bind it into a gadget via
+  // setGadgetBinding if its gadget code needs it.
+  gatekeeperId?: WorkpieceId;
+
+  // The name under which the resource will appear in the chat's env (`env.NAME` in executeCode)
+  // once the request is accepted. Supplied by the agent as a required parameter of the
+  // requestConnection tool -- the agent knows why it is requesting the resource, so it picks the
+  // name itself -- and recorded here at request time. The name is claimed in the chat's scope
+  // from that moment until the request is denied. Optional only because messages persisted
+  // before named chat bindings existed lack it; those are named and stamped lazily at the
+  // turn-start naming chokepoint.
+  bindingName?: string;
 };
 
 // Bytes to upload as a chat attachment.
@@ -1515,6 +1653,11 @@ export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
 }
 
 // Describes a tool call performed by an AI agent as part of a message.
+//
+// The agent addresses workpieces by their chat binding name (the `gadget`/`workpiece` parameters
+// on several variants), never by workpiece ID. Logs persisted before multi-gadget workspaces lack
+// these names; when a name is absent, the workspace's `defaultGadgetId` (from `GadgetMetadata`)
+// is assumed, and it is an error for it to be omitted when there is no default.
 export type AiToolCall = {
   // ID of the original tool call, useful to reproduce the model messages.
   toolCallId: string;
@@ -1522,28 +1665,36 @@ export type AiToolCall = {
   // If present, this tool observed the code at the given version number.
   //
   // Note that generally once the agent observes code at a particular version, the server tries
-  // to stay at that version for the rest of the thread, to avoid confusing the agent.
+  // to stay at that version for the rest of the thread, to avoid confusing the agent. ("changes"
+  // messages record the base version of their code updates the same way; see AiChatMessageBody.)
   observedCodeVersion?: number;
 
   // If the tool failed, the error.
   error?: string;
 } & ({
+  // Any workpiece can potentially export files. Gadgets, in particular, export their source code
+  // as files, but other workpieces may export other filesystems. Hence, a file is identified by
+  // the pair of a workpiece reference (the `workpiece` chat binding name) and `filename`.
   toolName: "readFile";
-  input: {filename: string};
+  input: {workpiece?: string, filename: string};
 } | {
   toolName: "writeFile";
   input: {
+    workpiece?: string;
     filename: string;
     content: string;
   };
 } | {
   toolName: "editFile";
   input: {
+    workpiece?: string;
     filename: string;
     textToReplace: string;
     replacement: string;
   };
 } | {
+  // Describe one of the chat's bindings by name. Numeric names appear only in logs persisted
+  // before named chat bindings (they were capsule indices).
   toolName: "describeBinding";
   input: {
     name: string | number;
@@ -1555,11 +1706,60 @@ export type AiToolCall = {
     entrypoint: string | null;
   };
 } | {
+  // Wire one of the chat's bindings into a gadget's own binding list. The addition is provisional
+  // to the chat, recorded by a "changes" message (see `addedBindings`).
+  toolName: "setGadgetBinding";
+  input: {
+    // Chat binding name of the target gadget.
+    gadget: string;
+    // Chat binding name of the resource to wire into the gadget.
+    source: string;
+    // Name to bind the resource under within the gadget; defaults to `source`.
+    name?: string;
+  };
+
+  // The added binding edge as resolved when the tool ran, recorded so crash recovery can re-adopt
+  // an addition whose "changes" message never flushed (see `addedBindings`), mirroring
+  // createGadget's recorded output. `changeId` is the change number of the batch that records the
+  // addition. Absent only when the call failed (`error` is set).
+  output?: {gadgetId: WorkpieceId, name: string, target: WorkpieceId, changeId: number};
+} | {
+  // Obsolete predecessor of `setGadgetBinding`, from before named chat bindings; appears only in
+  // old chat logs. Its additions were immediate and permanent (nothing provisional to recover),
+  // so replay is a recorded no-op.
   toolName: "saveCapsuleAsBinding";
   input: {
     capsuleId: number;
     bindingName: string;
   };
+} | {
+  // Create a new gadget workpiece in the workspace, either empty or instantiated from a blueprint.
+  toolName: "createGadget";
+  input: {
+    // Human-readable title for the new gadget. Required: the agent always names its creations.
+    title: string;
+
+    // Name under which the gadget appears in the chat's env and, once merged, the workspace
+    // default binding list (see validateBindingName()).
+    bindingName: string;
+
+    // If present, the new gadget starts with the named blueprint's files (copied into the chat's
+    // proposed changes) instead of empty.
+    blueprintId?: string;
+  };
+
+  // The created gadget's workpiece ID, recorded when the gadget was actually created. History
+  // replay reconstructs tool outputs by re-running persisted calls, but a creation tool can't be
+  // re-run; replay returns this recorded result without creating anything.
+  //
+  // `changeId` is the change number of the "changes" batch that records the creation (see
+  // `createdGadgets` on the "changes" message body), reported like writeFile/editFile report
+  // theirs so reverts can be referred to precisely.
+  //
+  // `blueprintNotes` is present for blueprint instantiations: formatted text describing the files
+  // copied in and the bindings the blueprint expects the agent to wire up. Recorded so replay
+  // doesn't have to re-fetch the blueprint (whose content may have changed since).
+  output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
 } | {
   toolName: "executeCode";
   input: {
@@ -1590,6 +1790,13 @@ export type AiToolCall = {
   toolName: "observeUserChanges";
   input: {};
 } | {
+  // List the blueprints the workspace owner could instantiate (their own blueprints, their
+  // library, and the deployment's featured blueprints), so the agent can pass a blueprintId to
+  // createGadget. The formatted text output is recorded so replay doesn't re-list.
+  toolName: "listBlueprints";
+  input: {};
+  output?: string;
+} | {
   // List the resource types a gatekeeper vendor offers, so the agent can construct a resourceUrl
   // for requestConnection. Resource patterns are only surfaced on demand (not in the system prompt).
   toolName: "listConnectableResources";
@@ -1606,6 +1813,11 @@ export type AiToolCall = {
     vendorId: string;
     resourceUrl?: string;
     reason: string;
+
+    // Name under which the resource will appear in the chat's env once accepted (see
+    // `connectionRequest.bindingName`). Optional only because logs persisted before named chat
+    // bindings lack it.
+    bindingName?: string;
   };
   output?: string;
 });
@@ -1632,19 +1844,30 @@ export type CapsuleSpecifier = {
   position: number;
   length: number;
 
-  // ID of the gatekeeper, which should have been created using newGatekeeper() or similar.
-  gatekeeperId: number;
+  // ID of the workpiece, which should have been created using newGatekeeper() or similar.
+  //
+  // This can reference any workpiece, including gadgets. It should be called `workpieceId`, but
+  // when it was introduced it could only point to gatekeepers, and a name change would break
+  // existing storage.
+  gatekeeperId: WorkpieceId;
 
   // Denormalized resource description from calling GatekeeperClient.describe() at the time of
   // insertion. We store this in the chat message to avoid the need to start up the gatekeeper
   // to ask for it again every time the message is displayed.
   description: ResourceDescription;
+
+  // The name under which the pasted resource appears in the chat's env (`env.NAME` in
+  // executeCode). Stamped onto the persisted message at the turn-start naming chokepoint; absent
+  // until then. Messages from before named chat bindings existed are stamped lazily the same
+  // way. If the same workpiece already has a name in the chat's scope, that name is reused
+  // rather than minting a new one.
+  bindingName?: string;
 };
 
 // Identifies a specific slash command: the attached Gatekeeper plus that provider's opaque
 // command ID.
 export type SlashCommandId = {
-  gatekeeperId: number;
+  gatekeeperId: WorkpieceId;
   commandId: string;
 };
 
@@ -1709,12 +1932,12 @@ export type AiChatStreamEvent = {
   // Indicates which file the agent is currently editing, if any. This is emitted while a
   // writeFile/editFile call is streaming, and set to null when a non-edit tool becomes active.
   type: "setActiveFile";
-  filename: string | null;
+  file: { workpieceId: WorkpieceId, filename: string } | null;
 } | {
   // Streaming write/edit target file, used by the UI before the finalized tool call arrives.
   type: "toolCallTarget";
   toolCallId: string;
-  target: string;
+  file: { workpieceId: WorkpieceId, filename: string };
 } | {
   type: "toolOutputDelta";
   toolCallId: string;
@@ -1786,19 +2009,69 @@ export type ConsoleLogEvent = {
   message: any[];
 }
 
-// Information about one of a Gadget's gatekeepers, for the purpose of displaying it in a list.
-export type GatekeeperMetadata = {
-  bindingName: string;
+// Summary of one workpiece, delivered via Overseer.subscribeToWorkpieces(). In v1 only
+// gadget-type workpieces are published (gatekeeper workpieces -- chat capsules, ambient
+// singletons, connections -- are not listed); `type` discriminates for future workpiece types.
+export type WorkpieceSummary = {
+  id: WorkpieceId;
+  type: "gadget";
+
+  // Display title. (For a gadget, its user-renamable title.)
+  title: string;
+
+  // The name of the Y.Doc root map that holds this workpiece's files, if it owns files (see
+  // Overseer.subscribeToCode). For most gadgets this is the decimal workpiece ID; the gadget
+  // migrated from before multi-gadget support keeps the legacy unnamed root "".
+  filesRoot?: string;
+
+  // If present, this workpiece exists only in the context of the given chat. The UI should display
+  // it only while the given chat is open.
+  //
+  // For gadgets, this means the gadget is still provisional: it becomes permanent when the user
+  // accepts the chat's changes through its creation message, and is deleted if those changes are
+  // reverted (or the chat is deleted).
+  chatId?: number;
+};
+
+// Callback interface used to receive workpiece-list updates. See Overseer.subscribeToWorkpieces().
+export interface WorkpiecesSubscriber {
+  // Upsert: called once per existing workpiece when the subscription starts, then again whenever
+  // a workpiece is created or its summary changes (e.g. it is renamed).
+  entry(summary: WorkpieceSummary): void;
+
+  // The workpiece was deleted.
+  removed(id: WorkpieceId): void;
+
+  // Called after entry() has been called for all workpieces known so far.
+  ready(): void;
+}
+
+// Information about one of a gadget's bindings, for display in the Connections tab. Returned by
+// GadgetClient.listBindings().
+export type GadgetBindingInfo = {
+  // The binding name, as it appears in the gadget worker's `env`.
+  name: string;
+
+  // The workpiece that the binding points at.
+  target: WorkpieceId;
+
+  // Denormalized display info about the target.
   resourceTitle: string;
   vendorId?: string;
+
+  // If present, this binding is still provisional to the given chat (which is necessarily the
+  // `chatId` passed to listBindings(); edges pending in other chats are never listed). It becomes
+  // permanent when the user accepts that chat's changes through the message that recorded it, and
+  // is deleted if those changes are reverted.
+  chatId?: number;
 };
 
 // An action kind that could be pre-approved for auto-application on a specific connection, surfaced
 // before any action has been submitted so an unattended gadget doesn't stall waiting for approval.
 // Aggregated from each gatekeeper's getAutoApprovableActions(); `alreadyEnabled` reflects whether an
-// auto-approval rule for this (bindingName, actionKind.tag) is already in place.
+// auto-approval rule for this (gatekeeperId, actionKind.tag) is already in place.
 export type PreApprovableAction = {
-  bindingName: string;
+  gatekeeperId: WorkpieceId;
   resourceTitle: string;
   actionKind: ActionKind;
   alreadyEnabled: boolean;
@@ -1839,8 +2112,10 @@ export type GatekeeperCreationSpec = {
 };
 
 // User-provided metadata controlling how a gatekeeper binding should appear in blueprints.
-// Stored on each GatekeeperRecord. Optional: when absent, the binding is included in the
-// blueprint with a generated title, empty description, and no resource suggestion.
+// Stored on the binding edge (a gadget's binding-name -> gatekeeper mapping), not on the
+// gatekeeper itself: two gadgets binding the same gatekeeper can annotate it differently for
+// their respective blueprints. Optional: when absent, the binding is included in the blueprint
+// with a generated title, empty description, and no resource suggestion.
 //
 // Legacy field `included` may still be present on records written by older versions of
 // the workshop. The backend still honors `included: false`, but new writes omit it.
@@ -1850,12 +2125,36 @@ export type BlueprintBindingAnnotation = {
   suggestValue?: boolean;  // include the specific URL/model as a suggestion
 };
 
+// Symbolic target of one agent-spawner env entry in a blueprint. Workpiece IDs are
+// workspace-local, so a spawner's `env` (see AgentSpawnerConfig.env) can't transfer into a
+// blueprint as-is; instead each entry references either one of the blueprint's own bindings by
+// name -- the user fills it at instantiation time like any other binding, and the spawner env
+// entry resolves to the gatekeeper created for it -- or the blueprint's gadget itself, resolving
+// to the newly instantiated gadget.
+export type SpawnerEnvTarget = {
+  type: "binding";
+
+  // Key into BlueprintMetadata.bindings. May reference a binding that is also bound into the
+  // gadget, or one synthesized purely to feed this spawner (see BlueprintBinding.spawnerOnly).
+  name: string;
+} | {
+  // This spawner binding refers back to the gadget itself (the one instantiated from the
+  // blueprint).
+  type: "gadget";
+};
+
 // Describes one binding required by a blueprint. Stored in BlueprintMetadata.bindings as a
 // Record keyed by binding name. Consumers identify bindings by their key (the binding name)
 // while `title` and `description` provide user-facing text.
 export type BlueprintBinding = {
   title: string;        // friendly name shown to people using the blueprint
   description: string;  // explains what resource to connect here (may be empty)
+
+  // If true, this binding exists only to satisfy an agent spawner's env (it is referenced by
+  // some spawner's `env` entry as a SpawnerEnvTarget). The user fills it at instantiation time
+  // like any other binding, but the created gatekeeper is fed only to the spawner(s) referencing
+  // it -- it is not bound into the gadget itself.
+  spawnerOnly?: true;
 } & ({
   // A regular external-resource gatekeeper binding.
   type: "gatekeeper";
@@ -1878,7 +2177,7 @@ export type BlueprintBinding = {
   // it up to the recipient.
   suggestedModel?: {provider: string, modelName: string};
 } | {
-  // An agent spawner binding. The config carries over from the source gadget.
+  // An agent spawner binding.
   type: "agentSpawner";
 
   // The blueprint creator may suggest a particular model to use, or omit this. (The
@@ -1886,8 +2185,9 @@ export type BlueprintBinding = {
   // configured as `null`. This is different from `undefined`, which means no suggestion.)
   suggestedModel?: {provider: string, modelName: string} | null;
 
-  // Rest of the agent spawner config for the binding.
-  config: Omit<AgentSpawnerConfig, "modelId">;
+  // Symbolic form of AgentSpawnerConfig.env: env name -> target, resolved to concrete workpiece
+  // IDs at instantiation time (see SpawnerEnvTarget).
+  env: Record<string, SpawnerEnvTarget>;
 });
 
 export type BlueprintScreenshotUpload = {
@@ -1978,25 +2278,113 @@ export type BlueprintBindingAssignment = {
   modelId: string | null; // model to run, or null for no agent
 };
 
-export interface GatekeeperClient<Session extends RpcCompatible<Session>> extends RpcTarget {
-  // Remove this gatekeeper from the Gadget.
+// Common base interface for per-workpiece capabilities. Each workpiece type has its own
+// subinterface (GadgetClient, GatekeeperClient<T>) for type-specific operations; this base holds
+// the shared identity/lifecycle surface.
+export interface WorkpieceClient extends RpcTarget {
+  // Get the workpiece's ID, unique among all workpieces in the workspace (of any type).
+  getId(): Promise<WorkpieceId>;
+
+  // Human-readable title, for display. For a gadget this is its user-renamable title; for a
+  // gatekeeper it is the connected resource's title.
+  getTitle(): Promise<string>;
+
+  // Change the workpiece's title.
+  //
+  // (Note gatekeeper titles are initially based on the title of the underlying resource, but this
+  // method does not change the remote resource, only the display name used locally within this
+  // workspace.)
+  setTitle(title: string): Promise<void>;
+
+  // Permanently remove this workpiece from the workspace.
+  //
+  // For a gadget, this deletes its registry entry (including its binding map) and hooks and
+  // clears its files; gatekeepers it bound survive, possibly no longer bound by any gadget. For
+  // a gatekeeper, this destroys the connection itself -- distinct from merely unbinding it from
+  // one gadget (GadgetClient.unbind()).
   remove(): Promise<void>;
+}
 
-  // Get the gatekeeper's numeric ID. These are assigned sequentially for all gatekeepers created
-  // in a particular gadget, including those used in capsules in chat threads (which may not have
-  // a binding name assigned).
-  getId(): Promise<number>;
+// Capability representing one gadget workpiece within a workspace. Obtained from
+// Overseer.createGadget() or Overseer.getGadget(). Workspace-level concerns (code sync, chats,
+// sharing, actions, blueprint listing) stay on Overseer; this covers the per-gadget surface.
+export interface GadgetClient extends WorkpieceClient {
+  // Get the gadget's deployed UI code, to be run inside an iframe sandbox.
+  //
+  // Returns null if the gadget has no deployed UI code (e.g. if it's new, or if it's just an AI
+  // agent with no code).
+  getUiBundle(chatId?: number): Promise<UiBundle | null>;
 
-  // Get and set the binding name. A gatekeeper may not have a binding name if it is referenced
-  // only via a capsule in a particular chat thread, but a binding name can be assigned to such
-  // a gatekeeper later to promote it to a permanent member of `env`.
-  getBindingName(): Promise<string | null>;
-  setBindingName(name: string): Promise<void>;
+  // Open an RPC interface to the gadget's server-side Durable Object facet. The frontend may pass
+  // this stub into the gadget's iframe sandbox, so that the gadget UI can communicate with its
+  // server side. It can also permit the coding agent to make direct calls.
+  //
+  // If `chatId` is specified, then the gadget will include changes currently proposed in the given
+  // chat.
+  //
+  // @ts-ignore - TODO: Fix type instantiation issue
+  connectToGadget(chatId?: number): Promise<RpcStub<any>>;
 
-  // If the gatekeeper doesn't already have a binding name set, assign one based on the resource's
-  // own suggestion. Return whatever the binding name is now.
-  setSuggestedBindingName(): Promise<string>;
+  // --- Binding management ---
+  //
+  // A gadget's bindings are edges mapping a name (as it appears in the gadget worker's `env`) to
+  // a target workpiece -- today always a gatekeeper. The same gatekeeper may be bound multiple
+  // times in one gadget or by several gadgets, under independent names.
 
+  // List this gadget's bindings.
+  //
+  // If `chatId` is specified, bindings which have been proposed but not yet accepted in the given
+  // chat thread will be included.
+  listBindings(chatId?: number): Promise<GadgetBindingInfo[]>;
+
+  // Get the gatekeeper bound under the given name, or null if there is no such binding.
+  getBinding(name: string): Promise<GatekeeperClient<any> | null>;
+
+  // Bind the given workpiece (a gatekeeper) into this gadget's `env` under `name`. Throws if the
+  // name is invalid (see validateBindingName()), reserved, or already bound in this gadget
+  // (including bound provisionally by another chat).
+  //
+  // If `chatId` is provided, the binding is treated like an edit made in the given chat -- it is
+  // proposed, but someone needs to click "accept changes" (call `mergeChanges()`) to make it
+  // final. Until then it exists only in the given chat.
+  bind(name: string, target: WorkpieceId, chatId?: number): Promise<void>;
+
+  // Like bind(), but if the target isn't already bound in this gadget, choose a name based on the
+  // resource's own suggestion (deduplicated against this gadget's existing binding names). If the
+  // target is already bound, does nothing. Either way, returns the target's binding name.
+  bindWithSuggestedName(target: WorkpieceId, chatId?: number): Promise<string>;
+
+  // Remove the binding with the given name. This only removes the edge from this gadget -- the
+  // target gatekeeper itself survives (possibly no longer bound by any gadget); use
+  // GatekeeperClient.remove() to destroy the connection itself.
+  unbind(name: string): Promise<void>;
+
+  // Rename a binding while preserving its target and blueprint annotation. Throws if `oldName`
+  // does not exist or `newName` is reserved or already bound in this gadget.
+  renameBinding(oldName: string, newName: string): Promise<void>;
+
+  // Get the blueprint annotation for the named binding, if one has been set. Annotations live on
+  // the binding edge, not on the target gatekeeper (see BlueprintBindingAnnotation).
+  getBlueprintAnnotation(name: string): Promise<BlueprintBindingAnnotation | null>;
+
+  // Set the blueprint annotation for the named binding.
+  setBlueprintAnnotation(name: string, annotation: BlueprintBindingAnnotation): Promise<void>;
+
+  // Create a new blueprint from this gadget's current committed code.
+  // `title` defaults to the gadget's title if omitted.
+  //
+  // The blueprint is always owned by the workspace owner, regardless of who calls this method.
+  //
+  // Steps: generate ID, snapshot code, collect binding metadata, store locally, propagate
+  // to User DO + KV + R2. Maintenance of existing blueprints stays on Overseer (see
+  // Overseer.updateBlueprint() etc.).
+  createBlueprint(title?: string, description?: string, screenshot?: BlueprintScreenshotUpload): Promise<BlueprintGadgetSummary>;
+}
+
+// Capability representing one gatekeeper (connection) workpiece. Note that binding-edge
+// operations -- binding names and blueprint annotations -- live on GadgetClient, since a
+// gatekeeper may be bound by several gadgets under different names.
+export interface GatekeeperClient<Session extends RpcCompatible<Session>> extends WorkpieceClient {
   // Get the resource description, including the schema of its RPC interface.
   describe(): Promise<ResourceDescription>;
 
@@ -2006,13 +2394,6 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 
   // Get the creation spec describing how this gatekeeper was originally created.
   getCreationSpec(): Promise<GatekeeperCreationSpec>;
-
-  // Get the blueprint annotation for this binding, if one has been set.
-  getBlueprintAnnotation(): Promise<BlueprintBindingAnnotation | null>;
-
-  // Set the blueprint annotation for this binding. The gatekeeper must have a bindingName
-  // assigned (annotations only apply to named bindings).
-  setBlueprintAnnotation(annotation: BlueprintBindingAnnotation): Promise<void>;
 
   // TODO: Get/set permissions.
 }

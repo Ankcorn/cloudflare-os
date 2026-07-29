@@ -1,7 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi, Overseer, GadgetMetadata } from '@gadgets/workshop-shared/api'
+import {
+  AuthenticatedApi,
+  Overseer,
+  GadgetClient,
+  GadgetMetadata,
+  WorkpieceId,
+  WorkpieceSummary,
+} from '@gadgets/workshop-shared/api'
 import GadgetUI from './GadgetUI'
 import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
@@ -10,12 +17,22 @@ import TopBarNotice from './TopBarNotice'
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
 // UI (see UseOverseerInterface in the backend), so we deliberately omit the chat sidebar, the
-// Gadget/Code/Connections/Activity tab bar, and every editor-only control. The overseer passed in
-// here is the restricted capability returned by openGadget() for "use" sessions; calling anything
-// outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/getUiBundle()/connectToGadget()
+// Gadget/Code/Connections/Activity tab bar, and every editor-only control. The overseer and
+// gadget passed in here are the restricted capabilities returned by openGadget() for "use"
+// sessions; calling anything outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/
+// subscribeToWorkpieces()/getGadget() (and, on the gadget, getUiBundle()/connectToGadget())
 // would throw.
+//
+// When the workspace has more than one gadget, a simple picker in the top bar switches between
+// them (selection is owned by the parent, in the URL's `?w=` search param). Pending gadgets are
+// never listed: the restricted overseer's workpiece subscription withholds them.
 type Props = {
   overseer: RpcStub<Overseer>
+  // The selected gadget's client, or null if the workspace has no gadgets.
+  gadget: RpcStub<GadgetClient> | null
+  selectedGadgetId: WorkpieceId | null
+  gadgets: WorkpieceSummary[]
+  onSelectGadget: (id: WorkpieceId) => void
   metadata: GadgetMetadata
   authenticatedApi: RpcStub<AuthenticatedApi>
   currentUserId: string | null
@@ -26,6 +43,10 @@ const TOPBAR_H = 56
 
 export default function GadgetUseView({
   overseer,
+  gadget,
+  selectedGadgetId,
+  gadgets,
+  onSelectGadget,
   metadata,
   authenticatedApi,
   currentUserId,
@@ -57,6 +78,27 @@ export default function GadgetUseView({
           )}
         </div>
 
+        {/* Center: gadget picker (only when there's a real choice) */}
+        {gadgets.length > 1 && (
+          <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
+            {gadgets.map(g => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => onSelectGadget(g.id)}
+                aria-current={g.id === selectedGadgetId ? 'true' : undefined}
+                className={`flex-shrink-0 cursor-pointer rounded-full px-3 py-1 text-[12px] leading-4 tracking-[-0.2px] transition-colors duration-150 ease-out ${
+                  g.id === selectedGadgetId
+                    ? 'bg-kumo-contrast font-medium text-kumo-inverse'
+                    : 'bg-kumo-tint text-kumo-subtle hover:text-kumo-default'
+                }`}
+              >
+                <span className="block max-w-[160px] truncate">{g.title}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Right: presence and user menu */}
         <div className="flex items-center gap-1 flex-shrink-0">
           <GadgetPresence
@@ -72,11 +114,18 @@ export default function GadgetUseView({
 
       {/* ═══ GADGET UI ══════════════════════════════════════════════════════════ */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        <GadgetUI
-          overseer={overseer}
-          height={`calc(100vh - ${TOPBAR_H}px)`}
-          isVisible={true}
-        />
+        {gadget ? (
+          <GadgetUI
+            key={selectedGadgetId}
+            gadget={gadget}
+            height={`calc(100vh - ${TOPBAR_H}px)`}
+            isVisible={true}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center px-6 text-center">
+            <p className="text-sm text-kumo-subtle">This workspace has no gadgets yet.</p>
+          </div>
+        )}
       </div>
     </div>
   )

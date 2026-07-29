@@ -5,7 +5,7 @@ import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from 'capnweb'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Overseer, UiBundle } from '@gadgets/workshop-shared/api'
+import type { GadgetClient, UiBundle } from '@gadgets/workshop-shared/api'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -44,7 +44,7 @@ class TestGadgetTarget extends RpcTarget implements TestGadget {
   }
 }
 
-function fakeOverseer(
+function fakeGadget(
   value: string,
   bundleCode: string,
   connectToGadget = vi.fn<() => Promise<RpcStub<TestGadget>>>(
@@ -55,7 +55,7 @@ function fakeOverseer(
   return {
     connectToGadget,
     getUiBundle,
-    stub: { connectToGadget, getUiBundle } as unknown as RpcStub<Overseer>,
+    stub: { connectToGadget, getUiBundle } as unknown as RpcStub<GadgetClient>,
   }
 }
 
@@ -103,22 +103,22 @@ describe('GadgetUI RPC recovery', () => {
     return child
   }
 
-  it('reloads the iframe with capabilities from the replacement Overseer', async () => {
-    const first = fakeOverseer('first', 'document.body.textContent = "first"')
+  it('reloads the iframe with capabilities from the replacement gadget client', async () => {
+    const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {
-      root.render(<GadgetUI overseer={first.stub} height="100px" />)
+      root.render(<GadgetUI gadget={first.stub} height="100px" />)
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     const firstIframe = container.querySelector('iframe')!
     const firstChild = connectIframe(firstIframe)
     await expect(firstChild.read()).resolves.toBe('first')
 
-    const replacement = fakeOverseer(
+    const replacement = fakeGadget(
       'replacement',
       'document.body.textContent = "replacement"',
     )
     await act(async () => {
-      root.render(<GadgetUI overseer={replacement.stub} height="100px" />)
+      root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
 
     await vi.waitFor(() => {
@@ -131,20 +131,20 @@ describe('GadgetUI RPC recovery', () => {
     await expect(replacementChild.read()).resolves.toBe('replacement')
   })
 
-  it('ignores an old bundle that resolves after the Overseer is replaced', async () => {
+  it('ignores an old bundle that resolves after the gadget client is replaced', async () => {
     const oldBundle = deferred<UiBundle>()
-    const first = fakeOverseer('first', 'unused')
+    const first = fakeGadget('first', 'unused')
     first.getUiBundle.mockReturnValue(oldBundle.promise)
     await act(async () => {
-      root.render(<GadgetUI overseer={first.stub} height="100px" />)
+      root.render(<GadgetUI gadget={first.stub} height="100px" />)
     })
 
-    const replacement = fakeOverseer(
+    const replacement = fakeGadget(
       'replacement',
       'document.body.textContent = "replacement"',
     )
     await act(async () => {
-      root.render(<GadgetUI overseer={replacement.stub} height="100px" />)
+      root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
     await vi.waitFor(() => {
       expect(container.querySelector('iframe')?.srcdoc).toContain('replacement')
@@ -159,25 +159,25 @@ describe('GadgetUI RPC recovery', () => {
     expect(container.querySelector('iframe')?.srcdoc).not.toContain('stale')
   })
 
-  it('disposes a connection that resolves after the Overseer is replaced', async () => {
+  it('disposes a connection that resolves after the gadget client is replaced', async () => {
     const oldConnection = deferred<RpcStub<TestGadget>>()
-    const first = fakeOverseer(
+    const first = fakeGadget(
       'first',
       'document.body.textContent = "first"',
       vi.fn(() => oldConnection.promise),
     )
     await act(async () => {
-      root.render(<GadgetUI overseer={first.stub} height="100px" />)
+      root.render(<GadgetUI gadget={first.stub} height="100px" />)
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     dispatchIframeHandshake(container.querySelector('iframe')!, new MessageChannel().port2)
 
-    const replacement = fakeOverseer(
+    const replacement = fakeGadget(
       'replacement',
       'document.body.textContent = "replacement"',
     )
     await act(async () => {
-      root.render(<GadgetUI overseer={replacement.stub} height="100px" />)
+      root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
     await vi.waitFor(() => {
       expect(container.querySelector('iframe')?.srcdoc).toContain('replacement')
@@ -203,20 +203,20 @@ describe('GadgetUI RPC recovery', () => {
       .mockResolvedValueOnce(
         new RpcStub(new TestGadgetTarget('reloaded')) as unknown as RpcStub<TestGadget>,
       )
-    const overseer = fakeOverseer(
+    const gadget = fakeGadget(
       'initial',
       'document.body.textContent = "bundle"',
       connectToGadget,
     )
     await act(async () => {
-      root.render(<GadgetUI overseer={overseer.stub} height="100px" reloadTrigger={0} />)
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={0} />)
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     const oldIframe = container.querySelector('iframe')!
     dispatchIframeHandshake(oldIframe, new MessageChannel().port2)
 
     await act(async () => {
-      root.render(<GadgetUI overseer={overseer.stub} height="100px" reloadTrigger={1} />)
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} />)
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(oldIframe))
 

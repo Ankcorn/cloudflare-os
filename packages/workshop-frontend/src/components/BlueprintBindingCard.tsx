@@ -2,7 +2,7 @@ import { Checkbox } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import { GatekeeperIcon } from './GatekeeperIcon'
 import { WorkshopInput, WorkshopInputArea } from './WorkshopControls'
-import type { BlueprintBindingAnnotation, GatekeeperCreationSpec, Overseer } from '@gadgets/workshop-shared/api'
+import type { BlueprintBindingAnnotation, GadgetClient, GatekeeperCreationSpec } from '@gadgets/workshop-shared/api'
 
 export type BindingCardData = {
   bindingName: string
@@ -22,7 +22,7 @@ export function suggestValueLabel(spec: GatekeeperCreationSpec, title?: string):
     case 'agentSpawner':
       return displayTitle ? `Suggest "${displayTitle}" by default` : 'Suggest this agent setup by default'
     case 'ambient':
-      // Ambient capsules are auto-provided and excluded from blueprints, so this never renders.
+      // Ambient resources are auto-provided and excluded from blueprints, so this never renders.
       return 'Suggest this by default'
   }
 }
@@ -58,7 +58,7 @@ export function BlueprintBindingCard({
   return (
     <div className={containerClass}>
       <div className={headerClass}>
-        <GatekeeperIcon vendorId={vendorId} bindingName={bindingName} />
+        <GatekeeperIcon vendorId={vendorId} fallbackText={resourceTitle || bindingName} />
         <div className="min-w-0 flex-1">
           <label htmlFor={titleId} className="sr-only">Connection name</label>
           <WorkshopInput
@@ -106,21 +106,21 @@ export function defaultAnnotation(): BlueprintBindingAnnotation {
 }
 
 export async function loadBindingCardData(
-  overseer: RpcStub<Overseer>,
-  meta: { bindingName: string; resourceTitle: string; vendorId?: string },
+  gadget: RpcStub<GadgetClient>,
+  meta: { name: string; resourceTitle: string; vendorId?: string },
 ): Promise<BindingCardData | null> {
-  const gk = await overseer.getGatekeeper(meta.bindingName)
+  const gk = await gadget.getBinding(meta.name)
   try {
     if (!gk) return null
     const creationSpecP = gk.getCreationSpec()
-    const annotationP = gk.getBlueprintAnnotation()
+    const annotationP = gadget.getBlueprintAnnotation(meta.name)
     const [creationSpec, existing] = await Promise.all([creationSpecP, annotationP])
     return {
-      bindingName: meta.bindingName,
+      bindingName: meta.name,
       resourceTitle: meta.resourceTitle,
       vendorId: meta.vendorId,
       creationSpec,
-      annotation: existing ?? { ...defaultAnnotation(), title: meta.resourceTitle || meta.bindingName },
+      annotation: existing ?? { ...defaultAnnotation(), title: meta.resourceTitle || meta.name },
     }
   } finally {
     gk?.[Symbol.dispose]()

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'reac
 import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
 import { ArrowsClockwise, Check, Copy, ImageSquare, Pencil, Plus, Trash, Warning, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { BlueprintGadgetSummary, GadgetMetadata, GatekeeperMetadata, Overseer, BlueprintBindingAnnotation, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api'
+import { BlueprintGadgetSummary, GadgetClient, GadgetMetadata, Overseer, BlueprintBindingAnnotation, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput, WorkshopInputArea } from './components/WorkshopControls'
 import { copyToClipboard } from './clipboard'
 import {
@@ -65,10 +65,12 @@ type Props = {
   open: boolean
   onClose: () => void
   overseer: RpcStub<Overseer>
+  // The gadget this modal exports blueprints from (the gadget currently selected in the editor).
+  gadget: RpcStub<GadgetClient>
   metadata: GadgetMetadata
 }
 
-export default function BlueprintModal({ open, onClose, overseer, metadata }: Props) {
+export default function BlueprintModal({ open, onClose, overseer, gadget, metadata }: Props) {
   const toasts = useKumoToastManager()
 
   const [blueprints, setBlueprints] = useState<BlueprintGadgetSummary[]>([])
@@ -107,9 +109,10 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     setBindingsLoading(true)
     setBindingsError(null)
     try {
-      const list = await overseer.listGatekeepers()
-      const named = list.filter((g: GatekeeperMetadata) => g.bindingName)
-      const loaded = await Promise.all(named.map((g) => loadBindingCardData(overseer, g)))
+      // No chat scope: a blueprint exports only the gadget's permanent bindings, never a chat's
+      // still-provisional additions.
+      const list = await gadget.listBindings()
+      const loaded = await Promise.all(list.map((b) => loadBindingCardData(gadget, b)))
       setBindings(loaded.filter((b): b is BindingCardData => b !== null))
     } catch (err) {
       console.error('Failed to load bindings:', err)
@@ -117,7 +120,7 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     } finally {
       setBindingsLoading(false)
     }
-  }, [overseer])
+  }, [gadget])
 
   useEffect(() => {
     if (open) {
@@ -187,14 +190,7 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     setCreateError(null)
     try {
       await Promise.all(
-        bindings.map(async (b) => {
-          const gk = await overseer.getGatekeeper(b.bindingName)
-          try {
-            if (gk) await gk.setBlueprintAnnotation(b.annotation)
-          } finally {
-            gk?.[Symbol.dispose]()
-          }
-        }),
+        bindings.map((b) => gadget.setBlueprintAnnotation(b.bindingName, b.annotation)),
       )
 
       const screenshot: BlueprintScreenshotUpload | undefined = newScreenshotBlob
@@ -204,7 +200,7 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
         }
         : undefined
 
-      await overseer.createBlueprint(
+      await gadget.createBlueprint(
         newTitle.trim() || undefined,
         newDescription.trim() || undefined,
         screenshot,
@@ -230,14 +226,7 @@ export default function BlueprintModal({ open, onClose, overseer, metadata }: Pr
     setCreateError(null)
     try {
       await Promise.all(
-        bindings.map(async (b) => {
-          const gk = await overseer.getGatekeeper(b.bindingName)
-          try {
-            if (gk) await gk.setBlueprintAnnotation(b.annotation)
-          } finally {
-            gk?.[Symbol.dispose]()
-          }
-        }),
+        bindings.map((b) => gadget.setBlueprintAnnotation(b.bindingName, b.annotation)),
       )
 
       const screenshot: BlueprintScreenshotUpload | null | undefined = clearScreenshot

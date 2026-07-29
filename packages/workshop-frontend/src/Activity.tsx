@@ -55,7 +55,8 @@ export default function Activity({ overseer, onAutoApproveChange }: ActivityProp
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [expandedActionId, setExpandedActionId] = useState<number | null>(null)
   const [confirmAutoApprove, setConfirmAutoApprove] = useState<
-    { actionId: number; bindingName: string; actionKind: ActionKind; actionLabel: string } | null
+    { actionId: number; gatekeeperId: number; resourceTitle: string;
+      actionKind: ActionKind; actionLabel: string } | null
   >(null)
   const toasts = useKumoToastManager()
 
@@ -174,12 +175,13 @@ export default function Activity({ overseer, onAutoApproveChange }: ActivityProp
                       // action stays a manual gate even with a rule, so the button would be a no-op;
                       // and an auto-approvable action with an existing rule wouldn't still be pending.)
                       const autoApproveTarget =
-                        record.type === 'action' && record.bindingName !== undefined &&
+                        record.type === 'action' && record.gatekeeperId !== undefined &&
                         record.description.actionKind !== undefined &&
                         record.description.autoApprovable === true
                           ? {
                               actionId: record.id,
-                              bindingName: record.bindingName,
+                              gatekeeperId: record.gatekeeperId,
+                              resourceTitle: record.resourceTitle,
                               actionKind: record.description.actionKind,
                               actionLabel: record.description.title,
                             }
@@ -197,7 +199,7 @@ export default function Activity({ overseer, onAutoApproveChange }: ActivityProp
                           onReject={() => handleRejectAction(record.id)}
                           onAlwaysApprove={
                             autoApproveTarget &&
-                            !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag)
+                            !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag)
                               ? () => setConfirmAutoApprove(autoApproveTarget)
                               : undefined
                           }
@@ -239,12 +241,12 @@ export default function Activity({ overseer, onAutoApproveChange }: ActivityProp
         <AutoApproveConfirmDialog
           open
           actionLabel={confirmAutoApprove.actionLabel}
-          bindingName={confirmAutoApprove.bindingName}
+          resourceTitle={confirmAutoApprove.resourceTitle}
           isProcessing={processingActions.has(confirmAutoApprove.actionId)}
           onOpenChange={(open) => { if (!open) setConfirmAutoApprove(null) }}
           onConfirm={async () => {
-            const { actionId, bindingName, actionKind } = confirmAutoApprove
-            if (await alwaysApproveTag(actionId, bindingName, actionKind)) {
+            const { actionId, gatekeeperId, actionKind } = confirmAutoApprove
+            if (await alwaysApproveTag(actionId, gatekeeperId, actionKind)) {
               setConfirmAutoApprove(null)
             }
           }}
@@ -309,13 +311,6 @@ function ActionRow({
               </a>
             ) : (
               record.resourceTitle
-            )}
-            {record.bindingName && (
-              <>
-                {' '}
-                <span className="text-kumo-inactive">·</span>{' '}
-                <span className="font-mono">{record.bindingName}</span>
-              </>
             )}
             {' '}
             <span className="text-kumo-inactive">·</span>{' '}
@@ -453,7 +448,7 @@ function ActivityLogRow({
         </div>
         <div className="flex min-w-0 items-start gap-2 pr-4">
           <GatekeeperIcon
-            bindingName={record.bindingName}
+            fallbackText={record.resourceTitle}
             size={14}
             className="mt-0.5 h-7 w-7 rounded-md"
           />
@@ -464,11 +459,6 @@ function ActivityLogRow({
               </a>
             ) : (
               <p className="m-0 truncate font-medium text-kumo-default">{record.resourceTitle}</p>
-            )}
-            {record.bindingName && (
-              <p className="m-0 mt-0.5 truncate font-mono text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                {record.bindingName}
-              </p>
             )}
           </div>
         </div>

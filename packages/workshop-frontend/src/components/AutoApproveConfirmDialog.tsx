@@ -6,8 +6,8 @@ interface AutoApproveConfirmDialogProps {
   open: boolean
   // Human-readable label of the action kind, e.g. "Append to Google Doc".
   actionLabel: string
-  // Connection (gatekeeper binding) the rule applies to, e.g. "GOOGLE_DOC".
-  bindingName: string
+  // Title of the connection (gatekeeper) the rule applies to, e.g. "My Google Doc".
+  resourceTitle: string
   isProcessing?: boolean
   onOpenChange: (open: boolean) => void
   onConfirm: () => void
@@ -18,7 +18,7 @@ interface AutoApproveConfirmDialogProps {
 export default function AutoApproveConfirmDialog({
   open,
   actionLabel,
-  bindingName,
+  resourceTitle,
   isProcessing = false,
   onOpenChange,
   onConfirm,
@@ -41,7 +41,7 @@ export default function AutoApproveConfirmDialog({
             </Dialog.Title>
             <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
               Future <span className="font-medium text-kumo-default">{actionLabel}</span> actions on{' '}
-              <span className="font-mono text-kumo-default">{bindingName}</span> will be applied
+              <span className="font-medium text-kumo-default">{resourceTitle}</span> will be applied
               automatically, without asking for approval. This action will be applied now too.
             </Dialog.Description>
           </div>

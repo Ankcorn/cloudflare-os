@@ -1268,7 +1268,13 @@ function BlueprintBindingSummaryCard({
             ? `${binding.suggestedModel.provider} / ${binding.suggestedModel.modelName}`
             : undefined
         : undefined
-  const detail = [typeLabel, resource?.title].filter(Boolean).join(' · ')
+  // A spawnerOnly binding is connected like any other, but the resulting connection is fed only
+  // to the agent spawner that referenced it -- the gadget's own code never sees it.
+  const detail = [
+    typeLabel,
+    resource?.title,
+    binding.spawnerOnly ? 'For spawned agents only' : null,
+  ].filter(Boolean).join(' · ')
   const usingLabel = (() => {
     if (!assignment) return null
     if (assignment.type === 'gatekeeper') return assignment.resourceUrl

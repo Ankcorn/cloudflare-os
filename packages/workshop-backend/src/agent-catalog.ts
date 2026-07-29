@@ -76,20 +76,20 @@ export function formatAgentCatalogPrompt(catalog: AgentCatalog | null): string {
   return `\n${JSON.stringify(catalog)}`;
 }
 
-// Build the system-prompt section that tells the agent which always-available capsules it has (their
-// env[N] slots) plus each one's discovery catalog, and how to use/promote them. This describes the
-// agent's environment rather than anything the user said, so it lives in the system prompt alongside
-// the bindings list rather than as a synthetic user turn.
+// Build the system-prompt section that tells the agent which always-available resource bindings it
+// has (their `env.NAME` entries) plus each one's discovery catalog, and how to use them. This
+// describes the agent's environment rather than anything the user said, so it lives in the system
+// prompt alongside the bindings list rather than as a synthetic user turn.
 export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
   title: string;
-  envIndex: number;
+  name: string;
   catalog: AgentCatalog | null;
 }>): string {
   let lines = resources.map(resource =>
-    `- ${resource.title}: \`env[${resource.envIndex}]\`${formatAgentCatalogPrompt(resource.catalog)}`);
-  return `The following resources are always available to you in this conversation as capsules for ` +
-    `use with the executeCode tool (you don't need to request them):\n${lines.join("\n")}\n` +
-    `When one is relevant, use describeBinding(<n>) with the capsule's index number to learn ` +
-    `its API before using it. If your Gadget's persistent code needs one, promote it with ` +
-    `saveCapsuleAsBinding.`;
+    `- ${resource.title}: \`env.${resource.name}\`${formatAgentCatalogPrompt(resource.catalog)}`);
+  return `The following resources are always available as bindings in your env for use with the ` +
+    `executeCode tool (you don't need to request them):\n${lines.join("\n")}\n` +
+    `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
+    `using it. If a Gadget's persistent code needs one, wire it into that gadget with ` +
+    `setGadgetBinding.`;
 }
