@@ -10,6 +10,7 @@ packages/workshop-backend/src/overseer.ts
   s_1dfdf61332f5c7::t_d519bec36cd85c 3485-3486
   s_1dfdf61332f5c7::t_a2039ece597d00 809
   s_1dfdf61332f5c7::t_0d098b16177c59 810-812
+  s_1dfdf61332f5c7::t_65d122bce18dc5 3468-3470
 packages/workshop-shared/src/api.ts
   s_1dfdf61332f5c7::t_93f6a8f7fe36d0 1871-1873
   s_1dfdf61332f5c7::t_2f3a476aa54eff 1867,1896
@@ -18,6 +19,7 @@ packages/workshop-backend/src/agent-compaction.ts
   s_1dfdf61332f5c7::t_074d3aacaf63a9 2,5-13,16,19-20,22-24,27-31,36
   s_1dfdf61332f5c7::t_2f3a476aa54eff 3-4,21
   s_1dfdf61332f5c7::t_f029dee6b0a530 2,5-13,16,19-20,22-24,27-31,36
+  s_1dfdf61332f5c7::t_65d122bce18dc5 1,14-15,17-18,25-26,32-35
 packages/workshop-frontend/src/components/chat/SlashCommandPicker.tsx
   s_e5ac85fca2ef43::t_b8755853b94392 240-241
   s_1dfdf61332f5c7::t_8eb329c7f0761c 240-241
