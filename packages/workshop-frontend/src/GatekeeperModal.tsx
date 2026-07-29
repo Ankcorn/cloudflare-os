@@ -23,7 +23,12 @@ import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import ResourceConfiguratorHost from './ResourceConfiguratorHost'
-import { AgentSpawnerConfigForm } from './gatekeeper-modal/AgentSpawnerConfigForm'
+import {
+  AgentSpawnerConfigForm,
+  SpawnerEnvRow,
+  spawnerEnvFromRows,
+  validateSpawnerEnv,
+} from './gatekeeper-modal/AgentSpawnerConfigForm'
 import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionConfig'
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
 import { matchesResourceUrl } from './resourceMatching'
@@ -39,8 +44,12 @@ export interface GatekeeperModalProps {
   // the stub (e.g. assign a binding name, or insert a capsule). The modal awaits this callback
   // and shows a loading state while it runs.
   onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
-  // Existing binding names, used for the Agent Spawner's "Limit inherited bindings" feature.
-  existingBindings?: string[]
+  // Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
+  // normally the gadget the spawner is being created for plus that gadget's own bindings. All are
+  // enabled by default, reproducing the pre-multi-gadget "spawned agents inherit everything"
+  // behavior; the user may deselect or rename them. Empty (the default) means the spawner starts
+  // with an empty env, which is all a context with no gadget can offer.
+  spawnerEnvCandidates?: Omit<SpawnerEnvRow, 'enabled'>[]
   // Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor.
   // Used by the agent's requestConnection accept flow so the user lands on the right connection with
   // minimal clicks. `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the
@@ -162,7 +171,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 }
 
 export default function GatekeeperModal({
-  open, onClose, getOverseer, onCreated, existingBindings = [],
+  open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
   initialVendorId, initialResourceUrl, initialResourceUrlPattern,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
@@ -195,8 +204,13 @@ export default function GatekeeperModal({
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
-  const [spawnerLimitEnv, setSpawnerLimitEnv] = useState(false)
-  const [spawnerEnv, setSpawnerEnv] = useState<string[]>([])
+  const [spawnerEnv, setSpawnerEnv] = useState<SpawnerEnvRow[]>([])
+  const spawnerEnvError = validateSpawnerEnv(spawnerEnv)
+
+  // Read only when the modal opens, so a caller that rebuilds the candidate array on every render
+  // doesn't clobber the user's edits.
+  const spawnerEnvCandidatesRef = useRef(spawnerEnvCandidates)
+  spawnerEnvCandidatesRef.current = spawnerEnvCandidates
 
   const accountSubscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null)
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
@@ -347,8 +361,8 @@ export default function GatekeeperModal({
     setSelectedModelId(undefined)
     setSpawnerDisplayName('')
     setSpawnerModelId(null)
-    setSpawnerLimitEnv(false)
-    setSpawnerEnv([])
+    setSpawnerEnv(
+      (spawnerEnvCandidatesRef.current ?? []).map(entry => ({ ...entry, enabled: true })))
 
     authenticatedApi.listModels().then(models => {
       if (cancelled) return
@@ -675,11 +689,15 @@ export default function GatekeeperModal({
       toasts.add({ title: 'Please enter a display name', variant: 'warning' })
       return
     }
+    if (spawnerEnvError) {
+      toasts.add({ title: spawnerEnvError, variant: 'warning' })
+      return
+    }
     const config: AgentSpawnerConfig = {
       displayName: spawnerDisplayName.trim(),
       modelId: spawnerModelId,
+      env: spawnerEnvFromRows(spawnerEnv),
     }
-    if (spawnerLimitEnv) config.env = spawnerEnv
 
     setCreating(true)
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
@@ -739,7 +757,9 @@ export default function GatekeeperModal({
   const canCreate = (() => {
     if (!selectedConnection) return false
     if (selectedConnection.id === 'ai-model') return Boolean(selectedModelId)
-    if (selectedConnection.id === 'agent-spawner') return Boolean(spawnerDisplayName.trim())
+    if (selectedConnection.id === 'agent-spawner') {
+      return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
+    }
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(
@@ -861,15 +881,10 @@ export default function GatekeeperModal({
                     availableModels={availableModels}
                     displayName={spawnerDisplayName}
                     modelId={spawnerModelId}
-                    limitEnv={spawnerLimitEnv}
                     env={spawnerEnv}
-                    existingBindings={existingBindings}
+                    envError={spawnerEnvError}
                     onDisplayNameChange={setSpawnerDisplayName}
                     onModelIdChange={setSpawnerModelId}
-                    onLimitEnvChange={(checked) => {
-                      setSpawnerLimitEnv(checked)
-                      if (!checked) setSpawnerEnv([])
-                    }}
                     onEnvChange={setSpawnerEnv}
                     selectContainer={selectPortalContainer}
                   />

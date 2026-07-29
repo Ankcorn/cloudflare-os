@@ -148,6 +148,14 @@ When someone opens a blueprint link (`/blueprint/<id>`), they see the **Blueprin
 
 The new gadget is independent from the blueprint source: it has its own storage, chat history, and bindings. There is currently no mechanism for automatic updates from the blueprint to existing instances (though the Yjs-based storage format could support this in the future).
 
+### Instantiation by the agent
+
+The AI agent can also instantiate a blueprint as an *additional* gadget within an existing workspace:
+
+- The `listBlueprints` tool lists the blueprints available to the workspace owner (their own published blueprints, their library, and the deployment's featured set) as formatted text; there is no search index, so the model scans the list itself.
+- Passing a `blueprintId` to the `createGadget` tool creates the new gadget from the blueprint's code instead of empty. The gadget is provisional to the chat like any agent-created gadget, and the blueprint's files are copied into the chat's proposed changes (recorded in the same `changes` message as the creation), so accepting or reverting the chat's changes covers the files and the creation together.
+- Bindings are not auto-assigned on this path: the tool result describes the bindings the blueprint expects, and the agent wires them up itself under the same names (via `setGadgetBinding`, requesting connections as needed), or asks the user to add AI-model / agent-spawner bindings from the Connections panel.
+
 When a `.gadget` file is uploaded, the target instance creates a new local blueprint ID, stores the uploaded code snapshot in its own R2 bucket, writes the imported metadata to its own KV namespace, and records the blueprint under the importing user's account. The original blueprint author metadata is preserved, but ownership of the imported copy belongs to the importing user on the new instance.
 
 ## Orphaned Blueprints

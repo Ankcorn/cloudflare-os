@@ -84,6 +84,22 @@ export async function listFeaturedBlueprintsFromKv(
   return parseFeaturedBlueprints(raw);
 }
 
+// Read a blueprint's code snapshot (an uncompressed Yjs V2 state update of a doc whose unnamed
+// root map is filename -> Y.Text) from R2, or null if the content object doesn't exist.
+export async function readBlueprintContent(
+  env: Pick<Cloudflare.Env, 'BLUEPRINT_CONTENT'>,
+  blueprintId: string,
+  version: number,
+): Promise<Uint8Array | null> {
+  let r2Object = await env.BLUEPRINT_CONTENT.get(`${blueprintId}/${version}`);
+  if (!r2Object) {
+    return null;
+  }
+
+  let decompressed = r2Object.body.pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(decompressed).arrayBuffer());
+}
+
 export function randomBlueprintId(): string {
   let idBytes = new Uint8Array(16);
   crypto.getRandomValues(idBytes);

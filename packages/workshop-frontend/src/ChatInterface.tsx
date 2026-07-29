@@ -69,6 +69,7 @@ import {
   SlashCommandRequest,
   ChatAttachmentHandle,
   ChatAttachmentRef,
+  WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { parseSlashCommandInput } from "./components/chat/slash-command-input";
@@ -96,6 +97,13 @@ export interface StreamingProposedChanges {
   updates: Uint8Array[];
   count: number;
 }
+
+// The file an agent is currently streaming edits into. Files are identified by (workpiece,
+// filename) pairs since a chat can edit multiple gadgets.
+export type ActiveFileTarget = {
+  workpieceId: WorkpieceId;
+  filename: string;
+};
 
 type DraftUpdateEntry = {
   timestamp: Date;
@@ -443,6 +451,17 @@ function getSafeExternalUrl(url: string | undefined): string | undefined {
   }
 }
 
+// Names the binding edge a gadget-binding tool call touched, as `GADGET.BINDING` when the record
+// says which gadget owns it. (Records written before named chat bindings carry only the binding
+// name, and a still-streaming call may not have either yet.)
+function formatGadgetBindingTarget(
+  gadget: string | undefined,
+  name: string | undefined,
+): string | undefined {
+  if (!name) return gadget;
+  return gadget ? `${gadget}.${name}` : name;
+}
+
 // Convert raw tool calls into user-facing transcript labels.
 function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
   switch (tc.toolName) {
@@ -461,8 +480,16 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
           ? `${tc.input.bindingName} → ${tc.input.entrypoint}`
           : tc.input.bindingName,
       };
+    case "setGadgetBinding":
+      return {
+        verb: "Wired up",
+        target: formatGadgetBindingTarget(tc.input.gadget, tc.input.name ?? tc.input.source),
+      };
+    // Obsolete predecessor of `setGadgetBinding`; appears only in old chat logs.
     case "saveCapsuleAsBinding":
       return { verb: "Saved resource", target: tc.input.bindingName };
+    case "createGadget":
+      return { verb: "Created gadget", target: tc.input.title };
     case "executeCode": {
       // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
       // input is still streaming in, so guard against undefined.
@@ -492,6 +519,8 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
     }
     case "observeUserChanges":
       return { verb: "Observed user changes" };
+    case "listBlueprints":
+      return { verb: "Listed blueprints" };
     case "listConnectableResources":
       return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
@@ -509,6 +538,9 @@ type ChangeChatMessage = Extract<AiChatMessage, { type: "changes" }>;
 type PendingTurnChanges = {
   revertFrom: number;
   through: number;
+  // Titles of gadgets created by this turn's pending changes (see `createdGadgets` on the
+  // "changes" message body). Reverting the turn deletes them, so discard affordances name them.
+  createdGadgetTitles: string[];
 };
 type ObservationChatMessage = ActionChatMessage & {
   actionLog: NonNullable<ActionChatMessage["actionLog"]> & { type: "observation" };
@@ -556,12 +588,18 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Inspected ${pluralize(count, "binding")}`;
     case "setBindingHook":
       return `Connected ${pluralize(count, "binding")}`;
+    case "setGadgetBinding":
+      return `Wired up ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding":
       return `Saved ${pluralize(count, "resource")}`;
+    case "createGadget":
+      return `Created ${pluralize(count, "gadget")}`;
     case "observeUserChanges":
       return `Observed ${pluralize(count, "change set")}`;
     case "giveUp":
       return count === 1 ? "Stopped" : `Stopped ${count} times`;
+    case "listBlueprints":
+      return `Listed blueprints`;
     case "listConnectableResources":
       return `Listed connectable resources`;
     case "requestConnection":
@@ -585,8 +623,11 @@ function getToolIcon(toolName: AiToolCall["toolName"] | null | undefined): Phosp
     case "describeBinding":
       return MagnifyingGlass;
     case "setBindingHook":
+    case "setGadgetBinding":
     case "saveCapsuleAsBinding":
       return LinkSimple;
+    case "createGadget":
+      return Plus;
     case "observeUserChanges":
       return MagnifyingGlass;
     case "giveUp":
@@ -608,8 +649,12 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Inspecting binding";
     case "setBindingHook":
       return "Connecting binding";
+    case "setGadgetBinding":
+      return "Wiring up binding";
     case "saveCapsuleAsBinding":
       return "Saving resource";
+    case "createGadget":
+      return "Creating gadget";
     case "executeCode":
       return "Running code";
     case "webFetch":
@@ -635,11 +680,14 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "editFile": return "Editing";
     case "describeBinding": return "Inspecting";
     case "setBindingHook": return "Connecting";
-    case "saveCapsuleAsBinding": return "Saving resource";
+    case "setGadgetBinding": return "Wiring up";
+    case "saveCapsuleAsBinding": return "Saving";
+    case "createGadget": return "Creating gadget";
     case "executeCode": return "Running code";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
     case "giveUp": return "Stopping";
+    case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return "Requesting a connection";
   }
@@ -658,9 +706,12 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
     case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
+    case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
+    case "createGadget": return `Creating ${pluralize(count, "gadget")}`;
     case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
     case "giveUp": return "Stopping";
+    case "listBlueprints": return "Listing blueprints";
     case "listConnectableResources": return "Listing connectable resources";
     case "requestConnection": return `Requesting ${pluralize(count, "connection")}`;
   }
@@ -1146,7 +1197,7 @@ const ObservationDetails = memo(function ObservationDetails(
 ) {
   const log = observation.actionLog;
   const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
-  const metadata = [log.resourceTitle, log.bindingName].filter(Boolean).join(" · ");
+  const metadata = log.resourceTitle;
 
   return (
     <div className="px-1 py-1.5 text-[13px] leading-[19px] tracking-[-0.25px]">
@@ -1293,6 +1344,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
   footerChangeSequence,
   footerTimestamp,
   footerIsTrailing,
+  footerCreatedGadgetTitles,
   footerDisabled = false,
   onFooterRevert,
 }: {
@@ -1303,11 +1355,12 @@ const ToolGroupRow = memo(function ToolGroupRow({
   footerChangeSequence?: number;
   footerTimestamp?: Date;
   footerIsTrailing?: boolean;
+  footerCreatedGadgetTitles?: string[];
   footerDisabled?: boolean;
   onFooterRevert?: (sequence: number) => void;
 }) {
   const footerLabel = footerChangeSequence !== undefined
-    ? getDiscardLabel(footerIsTrailing)
+    ? getDiscardLabel(footerIsTrailing, footerCreatedGadgetTitles)
     : null;
   return (
     <div className="group -ml-0.5">
@@ -2796,8 +2849,10 @@ interface MessageState {
   mergeTimestamps: Map<number, Date>; // sequence -> timestamp of merged-through message
   revertTimestamps: Map<number, Date>; // sequence -> timestamp of reverted-from message
 
-  // The accumulated unmerged/unreverted changes (for the proposed changes view)
-  activeChanges: Uint8Array[];
+  // The accumulated unmerged/unreverted changes (for the proposed changes view). An entry's
+  // `update` is absent for batches that record only gadget creations/binding additions; such
+  // batches still count as proposed changes (they are accepted and reverted like code edits).
+  activeChanges: { sequence: number; update?: Uint8Array }[];
 }
 
 type ChatDisplayEntry =
@@ -2896,17 +2951,33 @@ function appendWorkParts(target: WorkMessageParts, source: WorkMessageParts) {
   }
 }
 
-// Label for the per-turn discard-changes button.
-function getDiscardLabel(isTrailing: boolean | undefined): string {
-  return isTrailing
-    ? "Discard changes from this response"
-    : "Discard changes from this response and later responses";
+// Suffix appended to discard labels when the discarded changes include gadget creations, since
+// reverting also deletes the created gadgets.
+function describeCreatedGadgetDeletion(titles: string[] | undefined): string {
+  if (!titles || titles.length === 0) return "";
+  const names = titles.map((t) => `“${t}”`).join(", ");
+  return ` (deletes ${titles.length === 1 ? "gadget" : "gadgets"} ${names})`;
 }
 
-function getSavedEditsDiscardLabel(isTrailing: boolean | undefined): string {
-  return isTrailing
+// Label for the per-turn discard-changes button.
+function getDiscardLabel(
+  isTrailing: boolean | undefined,
+  createdGadgetTitles?: string[],
+): string {
+  const base = isTrailing
+    ? "Discard changes from this response"
+    : "Discard changes from this response and later responses";
+  return base + describeCreatedGadgetDeletion(createdGadgetTitles);
+}
+
+function getSavedEditsDiscardLabel(
+  isTrailing: boolean | undefined,
+  createdGadgetTitles?: string[],
+): string {
+  const base = isTrailing
     ? "Discard saved edits"
     : "Discard saved edits and later changes";
+  return base + describeCreatedGadgetDeletion(createdGadgetTitles);
 }
 
 // Collapse adjacent work rows; fold trailing work into the preceding assistant
@@ -3127,7 +3198,7 @@ function computeMessageStates(messages: AiChatMessage[]): MessageState {
   const revertTimestamps = new Map<number, Date>();
 
   // Track active updates as we scan (for proposed changes computation)
-  let updates: { sequence: number; update: Uint8Array }[] = [];
+  let updates: { sequence: number; update?: Uint8Array }[] = [];
 
   for (let msg of messages) {
     if (msg.type === "changes") {
@@ -3165,7 +3236,7 @@ function computeMessageStates(messages: AiChatMessage[]): MessageState {
     changeStatus,
     mergeTimestamps,
     revertTimestamps,
-    activeChanges: updates.map((u) => u.update),
+    activeChanges: updates,
   };
 }
 
@@ -3213,7 +3284,7 @@ interface ChatInterfaceProps {
   onStreamingProposedChangesChange?: (
     updates: StreamingProposedChanges | undefined,
   ) => void;
-  onStreamingActiveFileChange?: (filename: string | null | undefined) => void;
+  onStreamingActiveFileChange?: (file: ActiveFileTarget | null | undefined) => void;
   pendingConsoleLogCount: number;
   consoleLogPreview: string;
   consoleLogSeverity: "error" | "warn" | "info";
@@ -3313,7 +3384,7 @@ type ProvisionalChatState = {
   toolCalls: ProvisionalToolCallState[];
   toolCallsById: Map<string, ProvisionalToolCallState>;
   codeUpdates: Uint8Array[];
-  activeEditingFile: string | null | undefined;
+  activeEditingFile: ActiveFileTarget | null | undefined;
 };
 
 function createProvisionalChatState(): ProvisionalChatState {
@@ -3456,7 +3527,7 @@ function ChatInterface({
   const handleGatekeeperConnected = useCallback(() => {
     // Recompute pre-approval candidates after a connect so the "+" menu reflects any already-bound
     // gatekeepers. We deliberately do NOT auto-open the dialog here: a freshly-connected gatekeeper
-    // is still an unnamed capsule (the agent binds it later), so it has no pre-approvable actions yet
+    // is bound into no gadget yet (the agent wires it in later), so it has no pre-approvable actions
     // and refresh() can't surface it. Proactive auto-open at the right moment (binding/hook-enable)
     // is handled in a follow-up PR.
     void preApproval.refresh();
@@ -3952,10 +4023,18 @@ function ChatInterface({
       return;
     }
 
+    const updatePayloads = activeChanges
+      .map((c) => c.update)
+      .filter((u): u is Uint8Array => u !== undefined);
+
+    // Creation/binding-only batches carry no code update; preserve the "proposed changes exist"
+    // signal with an empty update in that case.
     const mergedUpdate =
-      activeChanges.length === 1
-        ? activeChanges[0]
-        : Y.mergeUpdatesV2(activeChanges);
+      updatePayloads.length === 1
+        ? updatePayloads[0]
+        : updatePayloads.length > 0
+          ? Y.mergeUpdatesV2(updatePayloads)
+          : Y.encodeStateAsUpdateV2(new Y.Doc());
 
     onProposedChangesChange?.(mergedUpdate);
   }, [
@@ -4168,7 +4247,7 @@ function ChatInterface({
           break;
         }
         case "setActiveFile":
-          provisional.activeEditingFile = event.filename;
+          provisional.activeEditingFile = event.file ?? null;
           break;
         case "toolCallTarget": {
           // Surfaces the file name during streaming for writes and edits so the frontend can update.
@@ -4177,7 +4256,7 @@ function ChatInterface({
             event.toolCallId,
             null,
           );
-          toolCall.target = event.target;
+          toolCall.target = event.file.filename;
           break;
         }
         case "codeReset":
@@ -4671,7 +4750,8 @@ function ChatInterface({
 
   // Pending "always approve this type" confirmation, opened from a pending action card.
   const [autoApproveConfirm, setAutoApproveConfirm] = useState<
-    { actionId: number; bindingName: string; actionKind: ActionKind; actionLabel: string } | null
+    { actionId: number; gatekeeperId: number; resourceTitle: string;
+      actionKind: ActionKind; actionLabel: string } | null
   >(null);
 
   // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
@@ -4751,8 +4831,9 @@ function ChatInterface({
   };
 
   // Invoked by the accept-flow GatekeeperModal once the user has connected + configured a resource.
-  // The gatekeeper is left unnamed; finalizing the request surfaces it to the agent as a chat-scoped
-  // capsule (the agent promotes it to a named binding itself if its gadget code needs it).
+  // The gatekeeper is bound into no gadget; finalizing the request surfaces it to the agent as a
+  // binding in the chat's env, under the name the agent chose when it made the request (the agent
+  // wires it into a gadget itself if that gadget's code needs it).
   const handleConnectionCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
     const accept = connectionAcceptRef.current;
     if (!accept) {
@@ -4890,6 +4971,22 @@ function ChatInterface({
     [currentMessages, messageStates],
   );
 
+  // Titles of gadgets created by this chat's still-pending changes. Used by the accept banner to
+  // note that accepting keeps the new gadgets.
+  const pendingCreatedGadgetTitles = useMemo(() => {
+    const titles: string[] = [];
+    for (const m of currentMessages) {
+      if (
+        m.type === "changes" &&
+        m.createdGadgets &&
+        (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
+      ) {
+        titles.push(...m.createdGadgets.map((g) => g.title));
+      }
+    }
+    return titles;
+  }, [currentMessages, messageStates]);
+
   // Track the last visible agent message in each completed turn. This keeps hover actions like
   // copy/timestamp on the final response instead of repeating them for every streamed step.
   const completedAgentTurnMessageSeqs = useMemo(() => {
@@ -4971,9 +5068,14 @@ function ChatInterface({
         m.author.type !== "user" &&
         (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
       ) {
+        const createdTitles = (m.createdGadgets ?? []).map((g) => g.title);
         pendingTurnChanges = pendingTurnChanges === null
-          ? { revertFrom: m.sequence, through: m.sequence }
-          : { revertFrom: pendingTurnChanges.revertFrom, through: m.sequence };
+          ? { revertFrom: m.sequence, through: m.sequence, createdGadgetTitles: createdTitles }
+          : {
+              revertFrom: pendingTurnChanges.revertFrom,
+              through: m.sequence,
+              createdGadgetTitles: [...pendingTurnChanges.createdGadgetTitles, ...createdTitles],
+            };
         attachPendingTurnChanges();
       }
     }
@@ -5078,7 +5180,7 @@ function ChatInterface({
           <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-3">
             <div className="flex items-start gap-3">
               <GatekeeperIcon
-                bindingName={log.bindingName ?? log.resourceTitle}
+                fallbackText={log.resourceTitle}
                 className="h-9 w-9 flex-shrink-0 rounded-lg"
               />
               <div className="min-w-0 flex-1">
@@ -5095,31 +5197,23 @@ function ChatInterface({
                     <MarkdownMessage message={log.description.description} />
                   </div>
                 )}
-                {(log.resourceTitle || log.bindingName) && (
+                {log.resourceTitle && (
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
-                    {log.resourceTitle && (
-                      <span className="min-w-0 truncate">
-                        {safeResourceUrl ? (
-                          <a
-                            href={safeResourceUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hover:underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {log.resourceTitle}
-                          </a>
-                        ) : (
-                          log.resourceTitle
-                        )}
-                      </span>
-                    )}
-                    {log.resourceTitle && log.bindingName && (
-                      <span aria-hidden="true">·</span>
-                    )}
-                    {log.bindingName && (
-                      <span className="font-mono text-[11px]">{log.bindingName}</span>
-                    )}
+                    <span className="min-w-0 truncate">
+                      {safeResourceUrl ? (
+                        <a
+                          href={safeResourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {log.resourceTitle}
+                        </a>
+                      ) : (
+                        log.resourceTitle
+                      )}
+                    </span>
                   </div>
                 )}
               </div>
@@ -5139,10 +5233,7 @@ function ChatInterface({
     }
 
     if (!isAct) {
-      const metadata = [
-        log.resourceTitle,
-        log.bindingName,
-      ].filter(Boolean).join(" · ");
+      const metadata = log.resourceTitle;
 
       return (
         <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
@@ -5187,9 +5278,7 @@ function ChatInterface({
     // present it as a prominent callout with its details expanded by default.
     const isBlocking = isPending && log.description.awaitDecision === true;
     const showDescription = open;
-    const metadata = [log.resourceTitle, log.bindingName]
-      .filter(Boolean)
-      .join(" · ");
+    const metadata = log.resourceTitle;
     const titlePrefix = isPending ? "Approve action: " : "";
     const stateLabel = isApproved
       ? "Approved"
@@ -5204,11 +5293,12 @@ function ChatInterface({
     // auto-approvable. (A non-auto-approvable action stays a manual gate even with a rule; an
     // auto-approvable action with an existing rule wouldn't still be pending.)
     const autoApproveTarget =
-      log.bindingName !== undefined && log.description.actionKind !== undefined &&
+      log.gatekeeperId !== undefined && log.description.actionKind !== undefined &&
       log.description.autoApprovable === true
         ? {
             actionId: msg.actionId,
-            bindingName: log.bindingName,
+            gatekeeperId: log.gatekeeperId,
+            resourceTitle: log.resourceTitle,
             actionKind: log.description.actionKind,
             actionLabel: log.description.title,
           }
@@ -5222,7 +5312,7 @@ function ChatInterface({
     const actionControls = isPending ? (
       <>
         {autoApproveTarget &&
-          !isTagAutoApproved(autoApproveTarget.bindingName, autoApproveTarget.actionKind.tag) && (
+          !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag) && (
           <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
             <button
               type="button"
@@ -5257,8 +5347,8 @@ function ChatInterface({
       </>
     ) : null;
 
-    // Resource/binding label, shown at the top of the blocking callout and at the bottom of the
-    // subtle inline row.
+    // Resource label, shown at the top of the blocking callout and at the bottom of the subtle
+    // inline row.
     const resourceMeta = metadata ? (
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] leading-4 text-kumo-inactive">
         {log.resourceTitle && (
@@ -5277,12 +5367,6 @@ function ChatInterface({
               log.resourceTitle
             )}
           </span>
-        )}
-        {log.resourceTitle && log.bindingName && (
-          <span aria-hidden="true">·</span>
-        )}
-        {log.bindingName && (
-          <span className="font-mono text-[11px]">{log.bindingName}</span>
         )}
       </div>
     ) : null;
@@ -5781,9 +5865,17 @@ function ChatInterface({
                       if (entry.type === "savedChanges") {
                         const isOwnChange = entry.message.author.id === currentUser?.id;
                         const actor = isOwnChange ? "You" : entry.message.author.name;
-                        const label = `${actor} saved edits`;
+                        // A user-authored creation is recorded as a "changes" message carrying
+                        // createdGadgets over a no-op update, so label it as a creation rather
+                        // than as saved edits.
+                        const createdGadgets = entry.message.createdGadgets ?? [];
+                        const label = createdGadgets.length > 0
+                          ? `${actor} created ${createdGadgets.length === 1 ? "gadget" : "gadgets"} ${
+                              createdGadgets.map((g) => `“${g.title}”`).join(", ")}`
+                          : `${actor} saved edits`;
                         const discardLabel = getSavedEditsDiscardLabel(
                           entry.message.sequence === lastDurablePendingChange?.sequence,
+                          createdGadgets.map((g) => g.title),
                         );
                         return (
                           <div key={entry.key} className={`${entryTopClass} group/savedChanges max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
@@ -5847,6 +5939,11 @@ function ChatInterface({
                                 }
                                 footerIsTrailing={
                                   pendingChange?.through === lastDurablePendingChange?.sequence
+                                }
+                                footerCreatedGadgetTitles={
+                                  groupIndex === showFooterOnGroupIndex
+                                    ? pendingChange?.createdGadgetTitles
+                                    : undefined
                                 }
                                 footerDisabled={isAgentActive}
                                 onFooterRevert={handleRevertChanges}
@@ -5999,6 +6096,7 @@ function ChatInterface({
                                   {pendingChange && (() => {
                                     const label = getDiscardLabel(
                                       pendingChange.through === lastDurablePendingChange?.sequence,
+                                      pendingChange.createdGadgetTitles,
                                     );
                                     return (
                                     <Tooltip content={label} asChild>
@@ -6047,6 +6145,11 @@ function ChatInterface({
                                     }
                                     footerIsTrailing={
                                       pendingChange?.through === lastDurablePendingChange?.sequence
+                                    }
+                                    footerCreatedGadgetTitles={
+                                      groupIndex === showFooterOnGroupIndex
+                                        ? pendingChange?.createdGadgetTitles
+                                        : undefined
                                     }
                                     footerDisabled={isAgentActive}
                                     onFooterRevert={handleRevertChanges}
@@ -6438,7 +6541,13 @@ function ChatInterface({
                         <div className="themed-surface-inset relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
                           <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                            Accept changes to save them to the gadget.
+                            {pendingCreatedGadgetTitles.length > 0
+                              ? `Accept changes to keep ${
+                                  pendingCreatedGadgetTitles.length === 1
+                                    ? `the new gadget “${pendingCreatedGadgetTitles[0]}”`
+                                    : "the new gadgets"
+                                } and save the edits.`
+                              : "Accept changes to save them to the gadget."}
                           </span>
                           <Tooltip content={isAgentActive ? "Wait for the agent to finish before accepting changes." : "Accept the current draft update and save it to your gadget."} asChild>
                             <WorkshopButton
@@ -6502,14 +6611,14 @@ function ChatInterface({
         <AutoApproveConfirmDialog
           open
           actionLabel={autoApproveConfirm.actionLabel}
-          bindingName={autoApproveConfirm.bindingName}
+          resourceTitle={autoApproveConfirm.resourceTitle}
           isProcessing={processingActions.has(autoApproveConfirm.actionId)}
           onOpenChange={(open) => {
             if (!open) setAutoApproveConfirm(null);
           }}
           onConfirm={async () => {
-            const { actionId, bindingName, actionKind } = autoApproveConfirm;
-            if (await alwaysApproveTag(actionId, bindingName, actionKind)) {
+            const { actionId, gatekeeperId, actionKind } = autoApproveConfirm;
+            if (await alwaysApproveTag(actionId, gatekeeperId, actionKind)) {
               setAutoApproveConfirm(null);
             }
           }}

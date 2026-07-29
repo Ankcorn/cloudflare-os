@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, newMessagePortRpcSession } from 'capnweb'
-import { Overseer, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
+import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -113,7 +113,7 @@ const createSandboxedHtml = (jsCode: string): string => {
 }
 
 interface GadgetUIProps {
-  overseer: RpcStub<Overseer>
+  gadget: RpcStub<GadgetClient>
   height: string
   reloadTrigger?: number
   isVisible?: boolean
@@ -124,7 +124,7 @@ interface GadgetUIProps {
   onIframeEscape?: () => void
 }
 
-export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
+export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -148,7 +148,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
     setError(null)
     setSandboxedHtml(null)
     setHasLoaded(false)
-  }, [overseer])
+  }, [gadget])
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
@@ -183,7 +183,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         setLoading(true)
         setError(null)
 
-        const bundle = await overseer.getUiBundle(chatId)
+        const bundle = await gadget.getUiBundle(chatId)
         if (cancelled) return
         if (bundle) {
           const html = createSandboxedHtml(bundle.jsCode)
@@ -206,7 +206,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
     return () => { cancelled = true }
   // LSP reports an error here, but tsc does not.
   // The LSP error is due to bugs that need to be fixed in Cap'n Web.
-  }, [overseer, isVisible, hasLoaded, isInvalidated, chatId])
+  }, [gadget, isVisible, hasLoaded, isInvalidated, chatId])
 
   // Effect to handle iframe RPC handshake
   useEffect(() => {
@@ -237,8 +237,8 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
             rpcSessionRef.current = null
           }
 
-          // Get the gadget stub from overseer
-          gadgetStub = await overseer.connectToGadget(chatId)
+          // Open the RPC connection to the gadget's server side
+          gadgetStub = await gadget.connectToGadget(chatId)
           if (cancelled || generation !== handshakeGenerationRef.current ||
               event.source !== iframeRef.current?.contentWindow) {
             gadgetStub[Symbol.dispose]?.()
@@ -273,7 +273,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
       cancelled = true
       ++handshakeGenerationRef.current
       window.removeEventListener('message', handleMessage)
-      // Dispose stubs on cleanup (overseer/chatId change or unmount)
+      // Dispose stubs on cleanup (gadget/chatId change or unmount)
       if (gadgetStubRef.current) {
         gadgetStubRef.current[Symbol.dispose]?.()
         gadgetStubRef.current = null
@@ -283,7 +283,7 @@ export default function GadgetUI({ overseer, height, reloadTrigger, isVisible = 
         rpcSessionRef.current = null
       }
     }
-  }, [overseer, chatId])
+  }, [gadget, chatId])
 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded

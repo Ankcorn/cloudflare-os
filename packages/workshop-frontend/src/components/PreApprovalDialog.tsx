@@ -17,7 +17,7 @@ interface PreApprovalDialogProps {
 }
 
 function actionKey(a: PreApprovableAction): string {
-  return `${a.bindingName}:${a.actionKind.tag}`
+  return `${a.gatekeeperId}:${a.actionKind.tag}`
 }
 
 // Proactively offered when a gadget is set to run unattended (an enabled hook) and a connected
@@ -31,7 +31,7 @@ export default function PreApprovalDialog({
   onConfirm,
   onDismiss,
 }: PreApprovalDialogProps) {
-  // Per-row selection, keyed by `${bindingName}:${actionKind.tag}`. Default: everything on.
+  // Per-row selection, keyed by `${gatekeeperId}:${actionKind.tag}`. Default: everything on.
   const [deselected, setDeselected] = useState<Set<string>>(new Set())
 
   // Reset to "everything on" each time the dialog opens, so deselections from a previous open (or a
@@ -42,13 +42,13 @@ export default function PreApprovalDialog({
 
   // Group candidates by connection for display.
   const groups = useMemo(() => {
-    const byBinding = new Map<string, PreApprovableAction[]>()
+    const byGatekeeper = new Map<number, PreApprovableAction[]>()
     for (const a of candidates) {
-      const list = byBinding.get(a.bindingName)
+      const list = byGatekeeper.get(a.gatekeeperId)
       if (list) list.push(a)
-      else byBinding.set(a.bindingName, [a])
+      else byGatekeeper.set(a.gatekeeperId, [a])
     }
-    return [...byBinding.entries()]
+    return [...byGatekeeper.entries()]
   }, [candidates])
 
   const selected = candidates.filter(a => !deselected.has(actionKey(a)))
@@ -89,9 +89,9 @@ export default function PreApprovalDialog({
         </div>
 
         <div className="max-h-[50vh] overflow-auto px-5 py-3">
-          {groups.map(([bindingName, actions]) => (
-            <div key={bindingName} className="mb-3 last:mb-0">
-              <div className="mb-1.5 font-mono text-[11px] text-kumo-subtle">{bindingName}</div>
+          {groups.map(([gatekeeperId, actions]) => (
+            <div key={gatekeeperId} className="mb-3 last:mb-0">
+              <div className="mb-1.5 text-[11px] text-kumo-subtle">{actions[0].resourceTitle}</div>
               <div className="flex flex-col gap-1">
                 {actions.map((a) => {
                   const k = actionKey(a)

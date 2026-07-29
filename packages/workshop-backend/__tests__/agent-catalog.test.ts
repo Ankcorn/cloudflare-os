@@ -60,7 +60,7 @@ describe("normalizeAgentCatalog", () => {
     });
   });
 
-  it("inlines each capsule's catalog as JSON and omits it when empty", () => {
+  it("inlines each resource's catalog as JSON and omits it when empty", () => {
     let catalog = {
       entries: [{ id: "abc", title: "Runbooks", description: "deploy steps" }],
       truncated: true,
@@ -73,13 +73,13 @@ describe("normalizeAgentCatalog", () => {
     expect(formatAgentCatalogPrompt(null)).toBe("");
 
     let message = formatAlwaysAvailableResourcesPrompt([
-      {title: "Context", envIndex: 2, catalog},
-      {title: "Empty", envIndex: 3, catalog: {entries: []}},
+      {title: "Context", name: "CONTEXT", catalog},
+      {title: "Empty", name: "EMPTY", catalog: {entries: []}},
     ]);
-    expect(message).toContain(`- Context: \`env[2]\`\n${serialized}`);
-    // A capsule with no catalog gets just its env line, nothing inlined.
-    expect(message).toContain("- Empty: `env[3]`");
-    expect(message).not.toContain("- Empty: `env[3]`\n{");
+    expect(message).toContain(`- Context: \`env.CONTEXT\`\n${serialized}`);
+    // A resource with no catalog gets just its env line, nothing inlined.
+    expect(message).toContain("- Empty: `env.EMPTY`");
+    expect(message).not.toContain("- Empty: `env.EMPTY`\n{");
   });
 });
 
