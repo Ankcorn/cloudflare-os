@@ -9,7 +9,6 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId } from '@gadgets/workshop-shared/api'
-import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
@@ -21,9 +20,7 @@ import {
   BlueprintBindingCard,
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
-import PreApprovalDialog from './components/PreApprovalDialog'
 import { reportIssue } from './errorReporting'
-import { usePreApprovalPrompt } from './usePreApprovalPrompt'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -36,13 +33,11 @@ interface ConnectionsProps {
   onConnectionsChange?: () => void
   isVisible?: boolean
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
-  reloadTrigger?: number
-  // Called after an auto-approval rule changes here (e.g. removed), so other views (the chat's
-  // pre-approval "+" menu) can refresh without a reload.
-  onAutoApproveChange?: () => void
 }
 
-export default function Connections({ overseer, gadget, chatId, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange, reloadTrigger, onAutoApproveChange }: ConnectionsProps) {
+// Auto-approval rules live in Activity because they apply across the workspace, while this view is
+// scoped to one gadget.
+export default function Connections({ overseer, gadget, chatId, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [bindings, setBindings] = useState<GadgetBindingInfo[]>([])
   // Identity of the gadget this tab is showing, needed to offer it to agent spawners.
   const [gadgetInfo, setGadgetInfo] = useState<{ id: WorkpieceId; title: string } | null>(null)
@@ -55,35 +50,24 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [deleteTarget, setDeleteTarget] = useState<{ name: string; resourceTitle: string } | null>(null)
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
-  const [autoApproveRules, setAutoApproveRules] =
-    useState<Array<{ gatekeeperId: number; actionKind: ActionKind }>>([])
-  const [deleteRuleTarget, setDeleteRuleTarget] = useState<{ gatekeeperId: number; tag: string } | null>(null)
-  // Keyed `${gatekeeperId}:${actionKind.tag}` -- the rule has no numeric id.
-  const [togglingRules, setTogglingRules] = useState<Set<string>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
-  // Proactive pre-approval: after connecting a resource, offer to pre-approve its auto-approvable
-  // actions. Scoped to the just-connected gatekeeper so we don't re-nag about other connections.
-  const [preApprovalOpen, setPreApprovalOpen] = useState(false)
-  const [preApprovalGatekeeperId, setPreApprovalGatekeeperId] = useState<number | null>(null)
   const toasts = useKumoToastManager()
 
   const loadGatekeepers = async () => {
     try {
-      const [id, gadgetTitle, bindingList, hookList, ruleList] = await Promise.all([
+      const [id, gadgetTitle, bindingList, hookList] = await Promise.all([
         gadget.getId(),
         gadget.getTitle(),
         // Pass the open chat so bindings this tab added provisionally to it are listed too.
         gadget.listBindings(chatId),
         // Workspace-wide; filtered to this gadget below.
         overseer.listHooks(),
-        overseer.listAutoApprovedActionKinds(),
       ])
       setGadgetInfo({ id, title: gadgetTitle })
       setBindings(bindingList)
       // This tab shows one gadget, so drop hooks that wake a different one -- otherwise its
       // toggle/delete controls would operate on another gadget's hooks.
       setHooks(hookList.filter((hook) => hook.gadgetId === id))
-      setAutoApproveRules(ruleList)
       onHasGatekeepersChange?.(bindingList.length > 0)
     } catch (err) {
       console.error('Failed to load gatekeepers:', err)
@@ -93,13 +77,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       setLoading(false)
     }
   }
-
-  // Drives the pre-approval dialog. onChange fires after a pre-approve write so this tab's own
-  // auto-approval rule list refreshes and other views (the chat "+" menu) can too.
-  const preApproval = usePreApprovalPrompt(overseer, () => {
-    void loadGatekeepers()
-    onAutoApproveChange?.()
-  })
 
   const handleToggleHook = async (id: number, enabled: boolean) => {
     // Optimistically reflect the new state.
@@ -139,48 +116,16 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
-  // Disabling removes the rule (the list only contains enabled rules), so the row drops out.
-  const handleDisableRule = async (gatekeeperId: number, tag: string) => {
-    const key = `${gatekeeperId}:${tag}`
-    // Optimistically drop the rule from the list.
-    setAutoApproveRules((prev) =>
-      prev.filter((r) => !(r.gatekeeperId === gatekeeperId && r.actionKind.tag === tag)))
-    setTogglingRules((prev) => new Set(prev).add(key))
-    try {
-      await overseer.removeAutoApprovedActionKind(gatekeeperId, tag)
-      await loadGatekeepers()
-      // Let other views (the chat's pre-approval "+" menu) know this kind is pre-approvable again.
-      onAutoApproveChange?.()
-    } catch (err) {
-      console.error('Failed to disable auto-approval rule:', err)
-      toasts.add({ title: 'Failed to disable auto-approval', variant: 'error' })
-      // Reload to restore the accurate (still-enabled) state.
-      await loadGatekeepers()
-    } finally {
-      setDeleteRuleTarget(null)
-      setTogglingRules((prev) => {
-        const next = new Set(prev)
-        next.delete(key)
-        return next
-      })
-    }
-  }
-
   useEffect(() => {
     loadGatekeepers()
   }, [overseer, chatId])
 
-  // Re-load when the tab becomes visible, so rules/hooks enabled elsewhere (e.g. the "Always
-  // approve" button in Activity or the chat thread) show up without a full page reload.
+  // Re-load when the tab becomes visible, so hooks enabled elsewhere (e.g. from the Activity log)
+  // show up without a full page reload.
   useEffect(() => {
     if (isVisible) loadGatekeepers()
   }, [isVisible])
 
-  // Re-load when the parent signals a relevant change (e.g. an auto-approval rule enabled from
-  // Activity) -- covers the case where this tab is already open.
-  useEffect(() => {
-    if (reloadTrigger) loadGatekeepers()
-  }, [reloadTrigger])
 
   // What an agent spawner created here may offer its agents: this gadget itself (under the same
   // `GADGET` name the gadget's own code uses) plus each of the gadget's bindings. All are enabled
@@ -490,89 +435,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
           </section>
         )}
 
-        {!loading && autoApproveRules.length > 0 && (
-          <section className="mt-8">
-            <div className="mb-3">
-              <h2 className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default">
-                Auto-approval rules
-              </h2>
-              <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                Action types approved automatically on a connection, without prompting. Delete one
-                to require manual approval again.
-              </p>
-            </div>
-
-            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
-              {autoApproveRules.map((rule, index) => {
-                const key = `${rule.gatekeeperId}:${rule.actionKind.tag}`
-                const binding = bindings.find((b) => b.target === rule.gatekeeperId)
-                const vendorId = binding?.vendorId
-                const isDeleting = deleteRuleTarget?.gatekeeperId === rule.gatekeeperId &&
-                  deleteRuleTarget.tag === rule.actionKind.tag
-
-                return (
-                  <div
-                    key={key}
-                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
-                  >
-                    {isDeleting ? (
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
-                            Delete {rule.actionKind.label}?
-                          </p>
-                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                            This action type will require manual approval again.
-                          </p>
-                        </div>
-                        <WorkshopButton
-                          tone="danger"
-                          className="min-w-[68px]"
-                          onClick={() => handleDisableRule(rule.gatekeeperId, rule.actionKind.tag)}
-                        >
-                          Delete
-                        </WorkshopButton>
-                        <WorkshopButton onClick={() => setDeleteRuleTarget(null)}>
-                          Cancel
-                        </WorkshopButton>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-3">
-                        <GatekeeperIcon
-                          vendorId={vendorId}
-                          fallbackText={binding?.resourceTitle}
-                          logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                            {rule.actionKind.label}
-                          </p>
-                          {binding && (
-                            <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
-                              {binding.resourceTitle}
-                            </p>
-                          )}
-                        </div>
-                        <div className="ml-auto flex shrink-0 items-center gap-2">
-                          <Tooltip content="Delete auto-approval rule" asChild>
-                            <WorkshopIconButton
-                              danger
-                              disabled={togglingRules.has(key)}
-                              onClick={() => setDeleteRuleTarget({ gatekeeperId: rule.gatekeeperId, tag: rule.actionKind.tag })}
-                              aria-label="Delete auto-approval rule"
-                            >
-                              <Trash size={14} />
-                            </WorkshopIconButton>
-                          </Tooltip>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          </section>
-        )}
       </div>
 
       <GatekeeperModal
@@ -582,9 +444,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         spawnerEnvCandidates={spawnerEnvCandidates}
         onCreated={async (gk) => {
           try {
-            // Binding the gatekeeper into the gadget immediately (vs. leaving it an unnamed
-            // workspace-level connection) is what makes its auto-approvable actions visible to
-            // listPreApprovableActions below.
             const gatekeeperId = await gk.getId()
             await gadget.bindWithSuggestedName(gatekeeperId, chatId)
             toasts.add({
@@ -595,13 +454,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
             })
             await loadGatekeepers()
             onConnectionsChange?.()
-            // If this new connection brings any not-yet-approved auto-approvable actions, offer to
-            // pre-approve them right away, scoped to just this connection.
-            const candidates = await preApproval.refresh()
-            if (candidates.some((c) => c.gatekeeperId === gatekeeperId)) {
-              setPreApprovalGatekeeperId(gatekeeperId)
-              setPreApprovalOpen(true)
-            }
           } finally {
             gk[Symbol.dispose]()
           }
@@ -618,17 +470,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         }}
       />
 
-      <PreApprovalDialog
-        open={preApprovalOpen}
-        candidates={preApproval.candidates.filter((c) => c.gatekeeperId === preApprovalGatekeeperId)}
-        isProcessing={preApproval.isProcessing}
-        onOpenChange={setPreApprovalOpen}
-        onConfirm={async (selected) => {
-          await preApproval.preApprove(selected)
-          setPreApprovalOpen(false)
-        }}
-        onDismiss={() => setPreApprovalOpen(false)}
-      />
     </div>
   )
 }

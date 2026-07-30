@@ -44,6 +44,8 @@ import {
   Globe,
   MagnifyingGlass,
   Question,
+  ArrowUpRight,
+  Blueprint,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -76,17 +78,18 @@ import { parseSlashCommandInput } from "./components/chat/slash-command-input";
 import CapsuleOverlay from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
-import PreApprovalDialog from "./components/PreApprovalDialog";
-import { usePreApprovalPrompt } from "./usePreApprovalPrompt";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
+import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
+import { useResolveAction } from "./useResolveAction";
+import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
@@ -96,6 +99,70 @@ import { copyToClipboard } from "./clipboard";
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
   count: number;
+}
+
+type CreatedGadgetCardInfo = {
+  gadgetId: WorkpieceId;
+  title: string;
+  isPending: boolean;
+};
+
+function CreatedGadgetChatCard({
+  gadget,
+  onOpen,
+}: {
+  gadget: CreatedGadgetCardInfo;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="group/createdApp relative w-full max-w-[440px]">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="group flex w-full cursor-pointer items-stretch overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base text-left shadow-[0_1px_2px_rgba(82,16,0,0.04)] transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-[0_10px_28px_rgba(82,16,0,0.10)]"
+      >
+        <span
+          className="relative grid w-[88px] flex-shrink-0 place-items-center overflow-hidden border-r border-kumo-line bg-kumo-tint/40"
+          aria-hidden="true"
+        >
+          <span className="absolute inset-0 bg-gradient-to-br from-kumo-brand/[0.08] via-transparent to-transparent" />
+          <span className="relative flex h-[52px] w-[62px] flex-col overflow-hidden rounded-md border border-kumo-line bg-kumo-base shadow-sm">
+            <span className="flex h-3 items-center gap-1 border-b border-kumo-line px-1.5">
+              <span className="h-1 w-1 rounded-full bg-kumo-line" />
+              <span className="h-1 w-1 rounded-full bg-kumo-line" />
+              <span className="h-1 w-1 rounded-full bg-kumo-line" />
+            </span>
+            <span className="flex flex-1 gap-1.5 p-1.5">
+              <span className="w-2.5 rounded-sm bg-kumo-tint" />
+              <span className="flex flex-1 flex-col gap-1 pt-0.5">
+                <span className="h-1.5 w-4/5 rounded-full bg-kumo-line" />
+                <span className="h-1.5 w-full rounded-full bg-kumo-line/70" />
+                <span className="h-1.5 w-2/3 rounded-full bg-kumo-line/50" />
+              </span>
+            </span>
+          </span>
+        </span>
+        <span className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-3 pr-10">
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[14px] font-medium tracking-[-0.2px] text-kumo-default">
+              {gadget.title}
+            </span>
+            <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-kumo-subtle">
+              {gadget.isPending && (
+                <span className="rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] font-medium leading-none">
+                  Draft
+                </span>
+              )}
+              <span>{gadget.isPending ? "New app · Click to preview" : "App · Click to open"}</span>
+            </span>
+          </span>
+          <span className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-full text-kumo-inactive transition-all duration-150 group-hover:bg-kumo-tint group-hover:text-kumo-default">
+            <ArrowUpRight size={15} weight="bold" />
+          </span>
+        </span>
+      </button>
+    </div>
+  );
 }
 
 // The file an agent is currently streaming edits into. Files are identified by (workpiece,
@@ -436,21 +503,6 @@ function createCapsuleRemarkPlugin(capsulesByToken: Map<string, CapsuleSpecifier
   };
 }
 
-function getSafeExternalUrl(url: string | undefined): string | undefined {
-  if (!url) {
-    return undefined;
-  }
-
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:"
-      ? parsed.toString()
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 // Names the binding edge a gadget-binding tool call touched, as `GADGET.BINDING` when the record
 // says which gadget owns it. (Records written before named chat bindings carry only the binding
 // name, and a still-streaming call may not have either yet.)
@@ -628,6 +680,8 @@ function getToolIcon(toolName: AiToolCall["toolName"] | null | undefined): Phosp
       return LinkSimple;
     case "createGadget":
       return Plus;
+    case "listBlueprints":
+      return Blueprint;
     case "observeUserChanges":
       return MagnifyingGlass;
     case "giveUp":
@@ -824,7 +878,7 @@ function WorkIcon({ Icon }: { Icon: PhosphorIcon }) {
 }
 
 function renderCapsulePill(capsule: CapsuleSpecifier) {
-  const safeUrl = getSafeExternalUrl(capsule.description.url);
+  const safeUrl = safeExternalUrl(capsule.description.url);
   return (
     <Tooltip
       content={
@@ -865,7 +919,7 @@ function getMarkdownComponents(
         }
       }
 
-      const safeHref = getSafeExternalUrl(href);
+      const safeHref = safeExternalUrl(href);
       if (!safeHref) {
         return <>{children}</>;
       }
@@ -1196,7 +1250,7 @@ const ObservationDetails = memo(function ObservationDetails(
   { observation }: { observation: ObservationChatMessage },
 ) {
   const log = observation.actionLog;
-  const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
+  const safeResourceUrl = safeExternalUrl(log.resourceUrl);
   const metadata = log.resourceTitle;
 
   return (
@@ -1481,9 +1535,6 @@ export const ChatInput = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
-  canPreApprove = false,
-  onOpenPreApproval,
-  onGatekeeperAttached,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1525,12 +1576,9 @@ export const ChatInput = ({
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
-  canPreApprove?: boolean;
   /** Open the pre-approval dialog (owned by the parent). */
-  onOpenPreApproval?: () => void;
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
    * pre-approval catalog and proactively offer to pre-approve its actions. */
-  onGatekeeperAttached?: () => void;
 }) => {
   const toasts = useKumoToastManager();
   const [inputValue, setInputValue] = useState("");
@@ -2124,8 +2172,6 @@ export const ChatInput = ({
       const [id, description] = await Promise.all([gk.getId(), gk.describe()]);
       insertCapsuleAt(attachCursorPosRef.current, id, description);
       setAttachModalOpen(false);
-      // A new connection may bring auto-approvable actions; let the parent offer to pre-approve.
-      onGatekeeperAttached?.();
     } finally {
       gk[Symbol.dispose]();
     }
@@ -2718,17 +2764,6 @@ export const ChatInput = ({
                   </span>
                   <span className="flex-1">Upload file</span>
                 </DropdownMenu.Item>
-                {canPreApprove && onOpenPreApproval && (
-                  <DropdownMenu.Item
-                    onClick={onOpenPreApproval}
-                    className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
-                  >
-                    <span className="mr-2 inline-flex h-4 w-4 items-center justify-center text-kumo-inactive">
-                      <ShieldCheck size={14} />
-                    </span>
-                    <span className="flex-1">Pre-approve actions</span>
-                  </DropdownMenu.Item>
-                )}
               </DropdownMenu.Content>
             </DropdownMenu>
             <button
@@ -2982,6 +3017,12 @@ function getSavedEditsDiscardLabel(
 
 // Collapse adjacent work rows; fold trailing work into the preceding assistant
 // message so one turn reads as one tool/resource run.
+function transcriptToolCalls(toolCalls: AiToolCall[]): AiToolCall[] {
+  // Successful creations render as cards; failed calls retain their error summary.
+  return toolCalls.filter((tc) =>
+    tc.toolName !== "createGadget" || tc.output === undefined || Boolean(tc.error));
+}
+
 function buildChatDisplayEntries(
   messages: AiChatMessage[],
   changeStatus: ReadonlyMap<number, "pending" | "merged" | "reverted">,
@@ -3081,7 +3122,10 @@ function buildChatDisplayEntries(
         key: `work-${msg.chatId}-${msg.sequence}`,
         toolCalls: workParts.toolCalls,
         observations: workParts.observations,
-        toolCallGroups: buildToolCallGroups(workParts.toolCalls, workParts.observations),
+        toolCallGroups: buildToolCallGroups(
+          transcriptToolCalls(workParts.toolCalls),
+          workParts.observations,
+        ),
         lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
         lastMessageTimestamp: workParts.lastWorkTimestamp,
       });
@@ -3118,7 +3162,10 @@ function buildChatDisplayEntries(
           key: `msg-${msg.chatId}-${msg.sequence}`,
           message: msg,
           toolCalls: workParts.toolCalls,
-          toolCallGroups: buildToolCallGroups(workParts.toolCalls, workParts.observations),
+          toolCallGroups: buildToolCallGroups(
+            transcriptToolCalls(workParts.toolCalls),
+            workParts.observations,
+          ),
           lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
         });
         i = j;
@@ -3292,12 +3339,9 @@ interface ChatInterfaceProps {
   onDiscardConsoleLogs: () => void;
   onChatCountChange?: (count: number, hasChatZero: boolean) => void;
   onAgentActiveChange?: (chatId: number, isActive: boolean) => void;
-  // Called after an auto-approval rule is enabled from the chat thread, so other views (the
-  // Connections rule list) can refresh without a tab switch or reload.
+  // Called after an auto-approval rule is enabled from the chat thread, so the Activity pane's
+  // Auto-approval list reflects it without a reload.
   onAutoApproveChange?: () => void;
-  // Bumped by the parent when auto-approval state changes elsewhere (e.g. a rule removed on the
-  // Connections tab), so the pre-approval candidate list (and the "+" menu option) stays in sync.
-  autoApproveReloadTrigger?: number;
   sidebarMode?: boolean;
   sidebarWidth?: number;
   onSidebarResize?: (width: number) => void;
@@ -3305,6 +3349,7 @@ interface ChatInterfaceProps {
   onHasAnyCodeChange?: (hasAnyCode: boolean) => void;
   onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
   constrainChatWidth?: boolean;
+  onOpenGadget: (gadgetId: WorkpieceId) => void;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -3464,7 +3509,6 @@ function ChatInterface({
   onChatCountChange,
   onAgentActiveChange,
   onAutoApproveChange,
-  autoApproveReloadTrigger,
   sidebarMode,
   sidebarWidth = 280,
   onSidebarResize,
@@ -3472,6 +3516,7 @@ function ChatInterface({
   onHasAnyCodeChange,
   onSelectedChatHasProposedChangesChange,
   constrainChatWidth,
+  onOpenGadget,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -3514,25 +3559,6 @@ function ChatInterface({
   } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Pre-approval prompt: lists auto-approvable action kinds not yet covered by a rule. Opened on
-  // demand from the chat "+" menu, and proactively when a newly connected gatekeeper brings some.
-  const preApproval = usePreApprovalPrompt(overseer, onAutoApproveChange);
-  const [preApprovalOpen, setPreApprovalOpen] = useState(false);
-  // Re-fetch candidates when auto-approval state changes elsewhere (e.g. a rule removed on the
-  // Connections tab) so the "+" menu offers it again. Guard the initial 0 -- the hook already
-  // fetches on mount, no need to double up.
-  useEffect(() => {
-    if (autoApproveReloadTrigger) void preApproval.refresh();
-  }, [autoApproveReloadTrigger, preApproval.refresh]);
-  const handleGatekeeperConnected = useCallback(() => {
-    // Recompute pre-approval candidates after a connect so the "+" menu reflects any already-bound
-    // gatekeepers. We deliberately do NOT auto-open the dialog here: a freshly-connected gatekeeper
-    // is bound into no gadget yet (the agent wires it in later), so it has no pre-approvable actions
-    // and refresh() can't surface it. Proactive auto-open at the right moment (binding/hook-enable)
-    // is handled in a follow-up PR.
-    void preApproval.refresh();
-  }, [preApproval.refresh]);
-
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
   );
@@ -3542,8 +3568,6 @@ function ChatInterface({
   const [expandedActions, setExpandedActions] = useState<Set<number>>(
     new Set(),
   );
-  // Remember auto-expanded actions so user collapses stick.
-  const autoExpandedActionIdsRef = useRef<Set<number>>(new Set());
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
   const [processingActions, setProcessingActions] = useState<Set<number>>(
     new Set(),
@@ -4354,32 +4378,9 @@ function ChatInterface({
     setExpandedToolCalls(new Set());
     setExpandedActions(new Set());
     setExpandedErrors(new Set());
-    autoExpandedActionIdsRef.current = new Set();
     setIsEditingTitle(false);
     setSidebarActiveTab("chat");
   }, [selectedChatId]);
-
-  useEffect(() => {
-    let added: number[] | null = null;
-    for (const msg of currentMessages) {
-      if (
-        msg.type === "action" &&
-        msg.actionLog?.type === "action" &&
-        msg.actionLog.state === "pending" &&
-        !autoExpandedActionIdsRef.current.has(msg.actionId)
-      ) {
-        autoExpandedActionIdsRef.current.add(msg.actionId);
-        (added ??= []).push(msg.actionId);
-      }
-    }
-    if (added) {
-      setExpandedActions((prev) => {
-        const next = new Set(prev);
-        for (const id of added!) next.add(id);
-        return next;
-      });
-    }
-  }, [currentMessages]);
 
 
   // Load chat history when selectedChatId changes to a non-null value
@@ -4760,41 +4761,9 @@ function ChatInterface({
   const { alwaysApproveTag, isTagAutoApproved } =
     useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);
 
-  // Handle approving an action from the chat thread
-  const handleApproveAction = async (actionId: number) => {
-    setProcessingActions((prev) => new Set(prev).add(actionId));
-    try {
-      await overseer.approveAction(actionId);
-      if (applyOptimisticActionState(actionId, "approved")) forceUpdate();
-    } catch (err) {
-      console.error("Failed to approve action:", err);
-      toasts.add({ title: "Failed to approve action", variant: "error" });
-    } finally {
-      setProcessingActions((prev) => {
-        const next = new Set(prev);
-        next.delete(actionId);
-        return next;
-      });
-    }
-  };
-
-  // Handle rejecting an action from the chat thread
-  const handleRejectAction = async (actionId: number) => {
-    setProcessingActions((prev) => new Set(prev).add(actionId));
-    try {
-      await overseer.rejectAction(actionId);
-      if (applyOptimisticActionState(actionId, "rejected")) forceUpdate();
-    } catch (err) {
-      console.error("Failed to reject action:", err);
-      toasts.add({ title: "Failed to reject action", variant: "error" });
-    } finally {
-      setProcessingActions((prev) => {
-        const next = new Set(prev);
-        next.delete(actionId);
-        return next;
-      });
-    }
-  };
+  const resolveAction = useResolveAction(overseer, setProcessingActions, (actionId, state) => {
+    if (applyOptimisticActionState(actionId, state)) forceUpdate();
+  });
 
   // Handle enabling/disabling a bound hook from the chat thread.
   const handleToggleHook = async (actionId: number, hookId: number, enabled: boolean) => {
@@ -4847,8 +4816,6 @@ function ChatInterface({
         gatekeeperId: id,
       });
       setConnectionAccept(null);
-      // A newly accepted connection may bring auto-approvable actions; offer to pre-approve them.
-      void handleGatekeeperConnected();
     } catch (err) {
       console.error("Failed to finalize connection:", err);
       toasts.add({ title: "Failed to add connection", variant: "error" });
@@ -5010,6 +4977,14 @@ function ChatInterface({
     return out;
   }, [currentMessages, isAgentActive]);
 
+  const latestCompletedAgentTurnMessageSeq = useMemo(() => {
+    let latest: number | null = null;
+    for (const sequence of completedAgentTurnMessageSeqs) {
+      if (latest === null || sequence > latest) latest = sequence;
+    }
+    return latest;
+  }, [completedAgentTurnMessageSeqs]);
+
   const pendingChangeByTurnItemSeq = useMemo(() => {
     const out = new Map<number, PendingTurnChanges>();
     let lastAgentMessageSeq: number | null = null;
@@ -5078,6 +5053,79 @@ function ChatInterface({
             };
         attachPendingTurnChanges();
       }
+    }
+
+    return out;
+  }, [currentMessages, messageStates]);
+
+  // Accepted creations remain in the transcript; reverted ones disappear.
+  const createdGadgetsByTurnItemSeq = useMemo(() => {
+    const out = new Map<number, CreatedGadgetCardInfo[]>();
+    let lastAgentMessageSeq: number | null = null;
+    let lastVisibleWorkSeq: number | null = null;
+    let creations: CreatedGadgetCardInfo[] = [];
+    let creationAnchorSeq: number | null = null;
+
+    const currentAnchorSeq = () => lastAgentMessageSeq ?? lastVisibleWorkSeq;
+
+    const attachCreations = () => {
+      if (creations.length === 0) return;
+      const anchorSeq = currentAnchorSeq();
+      if (anchorSeq === null) return;
+      if (creationAnchorSeq !== null && creationAnchorSeq !== anchorSeq) {
+        out.delete(creationAnchorSeq);
+      }
+      out.set(anchorSeq, creations);
+      creationAnchorSeq = anchorSeq;
+    };
+
+    const resetTurn = () => {
+      lastAgentMessageSeq = null;
+      lastVisibleWorkSeq = null;
+      creations = [];
+      creationAnchorSeq = null;
+    };
+
+    for (const m of currentMessages) {
+      if (m.type === "slashCommand" || m.type === "merge" || m.type === "revert") {
+        resetTurn();
+        continue;
+      }
+
+      if (m.type === "message") {
+        if (m.author.type === "user") {
+          resetTurn();
+        } else if (!isEmptyAssistantMessage(m)) {
+          lastAgentMessageSeq = m.sequence;
+          lastVisibleWorkSeq = m.sequence;
+          attachCreations();
+        }
+        continue;
+      }
+
+      if (isObservationActionMessage(m) || m.type === "useGadget") {
+        lastVisibleWorkSeq = m.sequence;
+        attachCreations();
+        continue;
+      }
+
+      if (m.type !== "changes") continue;
+      if (m.author.type === "user") {
+        resetTurn();
+        continue;
+      }
+
+      const status = messageStates.changeStatus.get(m.sequence) ?? "pending";
+      if (status === "reverted" || !m.createdGadgets) continue;
+      creations = [
+        ...creations,
+        ...m.createdGadgets.map(({ gadgetId, title }) => ({
+          gadgetId,
+          title,
+          isPending: status === "pending",
+        })),
+      ];
+      attachCreations();
     }
 
     return out;
@@ -5160,7 +5208,7 @@ function ChatInterface({
     const state = log.state;
     const open = expandedActions.has(msg.actionId);
     const isProc = processingActions.has(msg.actionId);
-    const safeResourceUrl = getSafeExternalUrl(log.resourceUrl);
+    const safeResourceUrl = safeExternalUrl(log.resourceUrl);
 
     if (log.type === "bindHook") {
       const isDeleted = log.hookId === undefined;
@@ -5277,13 +5325,15 @@ function ChatInterface({
     // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
     // present it as a prominent callout with its details expanded by default.
     const isBlocking = isPending && log.description.awaitDecision === true;
-    const showDescription = open;
+    // A pending request is never collapsed: its description is the thing the user has to read in
+    // order to answer it, so hiding it behind a disclosure would just add a step before every
+    // decision. Resolved actions are history, and collapse so a long thread stays scannable.
+    const showDescription = isPending || open;
     const metadata = log.resourceTitle;
-    const titlePrefix = isPending ? "Approve action: " : "";
     const stateLabel = isApproved
       ? "Approved"
       : isRejected
-        ? "Rejected"
+        ? "Denied"
         : null;
     const stateLabelCls = isRejected
       ? "text-kumo-danger"
@@ -5304,46 +5354,30 @@ function ChatInterface({
           }
         : undefined;
 
-    // Approve/reject controls, shared between the subtle inline row and the blocking callout. The
-    // blocking callout emphasizes Approve as a filled primary button.
-    const approveButtonClass = isBlocking
-      ? "cursor-pointer rounded-md bg-kumo-brand px-3 py-1 font-medium text-white transition-[opacity,transform] duration-150 ease-out hover:opacity-90 focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
-      : "cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-default transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default-hover focus-visible:text-kumo-default-hover focus-visible:outline-none active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40";
     const actionControls = isPending ? (
       <>
         {autoApproveTarget &&
           !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag) && (
           <Tooltip content="Always approve this type of action on this connection, without future prompts." asChild>
-            <button
-              type="button"
-              onClick={() => setAutoApproveConfirm(autoApproveTarget)}
-              disabled={isProc}
-              className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Always approve
-            </button>
+            <span className="flex">
+              <AlwaysApproveButton
+                onClick={() => setAutoApproveConfirm(autoApproveTarget)}
+                disabled={isProc}
+              />
+            </span>
           </Tooltip>
         )}
-        <Tooltip content="Reject this action." asChild>
-          <button
-            type="button"
-            onClick={() => handleRejectAction(msg.actionId)}
-            disabled={isProc}
-            className="cursor-pointer rounded-md px-1 py-0.5 font-medium text-kumo-inactive transition-colors duration-150 ease-out hover:text-kumo-danger focus-visible:text-kumo-danger focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Reject
-          </button>
-        </Tooltip>
-        <Tooltip content="Approve this action." asChild>
-          <button
-            type="button"
-            onClick={() => handleApproveAction(msg.actionId)}
-            disabled={isProc}
-            className={approveButtonClass}
-          >
-            Approve
-          </button>
-        </Tooltip>
+        <ResolveButton
+          tone="deny"
+          onClick={() => void resolveAction(msg.actionId, "deny")}
+          disabled={isProc}
+        />
+        <ResolveButton
+          tone="approve"
+          variant={isBlocking ? "filled" : "quiet"}
+          onClick={() => void resolveAction(msg.actionId, "approve")}
+          disabled={isProc}
+        />
       </>
     ) : null;
 
@@ -5373,7 +5407,7 @@ function ChatInterface({
 
     // A blocking (awaitDecision) action suspends the agent turn, so present it as a prominent
     // callout laid out like the connection-request card: a permissions icon, title + resource +
-    // details, and the approve/reject actions.
+    // details, and the approve/deny actions.
     if (isBlocking) {
       return (
         <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
@@ -5384,14 +5418,16 @@ function ChatInterface({
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                  <span className="font-medium text-kumo-default">Approve action</span>
+                  <span className="min-w-0 truncate font-medium text-kumo-default">
+                    {log.description.title}
+                  </span>
                   {resourceMeta}
                 </div>
                 <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
                   <MarkdownMessage message={log.description.description} />
                 </div>
               </div>
-              <div className="ml-3 flex flex-shrink-0 items-center gap-2 self-center text-[13px] leading-4">
+              <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
               </div>
             </div>
@@ -5400,33 +5436,40 @@ function ChatInterface({
       );
     }
 
+    const titleIcon = (
+      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center" aria-hidden="true">
+        {isPending ? (
+          <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand" />
+        ) : (
+          <WorkIcon Icon={LinkSimple} />
+        )}
+      </span>
+    );
+
     return (
       <div className="group/work max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-        <div className="flex w-full items-center gap-2 px-1.5 py-1">
+        {isPending ? (
+          <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-1.5 py-1">
+            <div className="flex min-w-[8rem] flex-1 items-center gap-3">
+              {titleIcon}
+              <span className="min-w-0 flex-1 truncate text-kumo-default">
+                {log.description.title}
+              </span>
+            </div>
+            <div className="ml-auto flex flex-shrink-0 items-center gap-0.5">{actionControls}</div>
+          </div>
+        ) : (
           <button
             type="button"
             onClick={() => toggleActionExpansion(msg.actionId)}
-            className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-md text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.995]"
+            className="flex w-full cursor-pointer items-center gap-3 rounded-xl px-1.5 py-1 text-left transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
             aria-expanded={open}
           >
-            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center" aria-hidden="true">
-              {isPending ? (
-                <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand" />
-              ) : (
-                <WorkIcon Icon={LinkSimple} />
-              )}
-            </span>
-            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
-              <span className="min-w-0 truncate">
-                {titlePrefix && (
-                  <span className="font-medium text-kumo-default">{titlePrefix}</span>
-                )}
-                <span className={isPending ? "text-kumo-default" : ""}>
-                  {log.description.title}
-                </span>
-              </span>
+            {titleIcon}
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="min-w-0 truncate">{log.description.title}</span>
               {stateLabel && (
-                <span className={`text-[12px] font-medium ${stateLabelCls}`}>
+                <span className={`flex-shrink-0 text-[12px] font-medium ${stateLabelCls}`}>
                   {stateLabel}
                 </span>
               )}
@@ -5437,14 +5480,9 @@ function ChatInterface({
               />
             </span>
           </button>
-          {isPending && (
-            <div className="flex flex-shrink-0 items-center gap-2 text-[13px] leading-4">
-              {actionControls}
-            </div>
-          )}
-        </div>
+        )}
         {showDescription && (
-          <div className="ml-8 mt-1 space-y-1 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
+          <div className="themed-surface-inset ml-8 mt-1 space-y-1.5 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
             <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
@@ -5679,9 +5717,6 @@ function ChatInterface({
             onModelChange={handleModelChange}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
-            canPreApprove={preApproval.candidates.length > 0}
-            onOpenPreApproval={() => setPreApprovalOpen(true)}
-            onGatekeeperAttached={handleGatekeeperConnected}
             minRows={2}
             newChat
           />
@@ -5915,11 +5950,13 @@ function ChatInterface({
                       if (entry.type === "workRun") {
                         const pendingChange =
                           pendingChangeByTurnItemSeq.get(entry.lastMessageSequence) ?? null;
+                        const createdGadgets =
+                          createdGadgetsByTurnItemSeq.get(entry.lastMessageSequence) ?? [];
                         const showFooterOnGroupIndex = pendingChange
                           ? entry.toolCallGroups.length - 1
                           : -1;
                         return (
-                          <div key={entry.key} className={`${entryTopClass} min-w-0 w-full max-w-[860px] space-y-1`}>
+                          <div key={entry.key} className={`${entryTopClass} min-w-0 w-full max-w-[860px] space-y-2`}>
                             {entry.toolCallGroups.map((group, groupIndex) => (
                               <ToolGroupRow
                                 key={group.key}
@@ -5947,6 +5984,13 @@ function ChatInterface({
                                 }
                                 footerDisabled={isAgentActive}
                                 onFooterRevert={handleRevertChanges}
+                              />
+                            ))}
+                            {createdGadgets.map((created) => (
+                              <CreatedGadgetChatCard
+                                key={created.gadgetId}
+                                gadget={created}
+                                onOpen={() => onOpenGadget(created.gadgetId)}
                               />
                             ))}
                           </div>
@@ -6052,6 +6096,8 @@ function ChatInterface({
                             const pendingChange = pendingChangeByTurnItemSeq.get(
                               actionMessageSeq,
                             ) ?? null;
+                            const createdGadgets =
+                              createdGadgetsByTurnItemSeq.get(actionMessageSeq) ?? [];
                             const attachActionsToToolGroups =
                               !hasMessageText &&
                               !!pendingChange &&
@@ -6060,6 +6106,8 @@ function ChatInterface({
                             const showActions =
                               completedAgentTurnMessageSeqs.has(actionMessageSeq) &&
                               (hasMessageText || (!!pendingChange && !attachActionsToToolGroups));
+                            const keepActionsVisible =
+                              actionMessageSeq === latestCompletedAgentTurnMessageSeq;
                             const showFooterOnGroupIndex = attachActionsToToolGroups && pendingChange && messageToolGroups
                               ? messageToolGroups.length - 1
                               : -1;
@@ -6080,7 +6128,11 @@ function ChatInterface({
                               )}
 
                               {showActions && (
-                                <div className="mt-0.5 -ml-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 ease-out group-hover/agentMessage:opacity-100 group-focus-within/agentMessage:opacity-100">
+                                <div className={`mt-0.5 -ml-1 flex items-center gap-1 transition-opacity duration-150 ease-out ${
+                                  keepActionsVisible
+                                    ? "opacity-100"
+                                    : "opacity-0 group-hover/agentMessage:opacity-100 group-focus-within/agentMessage:opacity-100"
+                                }`}>
                                   {hasMessageText && (
                                     <Tooltip content="Copy message" asChild>
                                       <button
@@ -6123,6 +6175,14 @@ function ChatInterface({
                                 </div>
                               )}
                             </div>
+
+                            {createdGadgets.map((created) => (
+                              <CreatedGadgetChatCard
+                                key={created.gadgetId}
+                                gadget={created}
+                                onOpen={() => onOpenGadget(created.gadgetId)}
+                              />
+                            ))}
 
                             {messageToolGroups && messageToolGroups.length > 0 && (
                               <div className="space-y-1">
@@ -6520,9 +6580,6 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
-                    canPreApprove={preApproval.candidates.length > 0}
-                    onOpenPreApproval={() => setPreApprovalOpen(true)}
-                    onGatekeeperAttached={handleGatekeeperConnected}
                     blockedReason={
                       hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
@@ -6639,17 +6696,6 @@ function ChatInterface({
       <OutOfCreditsModal
         open={usageModalOpen}
         onClose={() => setUsageModalOpen(false)}
-      />
-      <PreApprovalDialog
-        open={preApprovalOpen}
-        candidates={preApproval.candidates}
-        isProcessing={preApproval.isProcessing}
-        onOpenChange={setPreApprovalOpen}
-        onConfirm={async (selected) => {
-          await preApproval.preApprove(selected)
-          setPreApprovalOpen(false)
-        }}
-        onDismiss={() => setPreApprovalOpen(false)}
       />
     </div>
   );
