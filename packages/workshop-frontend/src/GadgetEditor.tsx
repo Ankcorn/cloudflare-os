@@ -242,6 +242,8 @@ export default function GadgetEditor() {
   useDocumentTitle(metadata?.title)
   const [error, setError] = useState<string | null>(null)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
+  // Bumped by the error page's "Try again" to re-run the load effect.
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [connectionLost, setConnectionLost] = useState(false)
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
 
@@ -817,7 +819,7 @@ export default function GadgetEditor() {
       overseerStub?.[Symbol.dispose]()
       configureObservers?.[Symbol.dispose]()
     }
-  }, [id, authenticatedApi])
+  }, [id, authenticatedApi, reloadNonce])
 
   // ── workpiece list subscription ───────────────────────────────────────────────
   useEffect(() => {
@@ -970,13 +972,18 @@ export default function GadgetEditor() {
   if (error) {
     return (
       <div className="min-h-screen flex items-center justify-center flex-col gap-4 bg-kumo-base">
-        <p className="text-sm text-kumo-danger">{error}</p>
-        <WorkshopButton
-          tone="primary"
-          onClick={handleBack}
-        >
-          Back to home
-        </WorkshopButton>
+        {/* Observer-verification denials list one line per failed connection, so preserve newlines. */}
+        <p className="text-sm text-kumo-danger whitespace-pre-line text-center max-w-lg">{error}</p>
+        <div className="flex items-center gap-2">
+          <WorkshopButton tone="secondary" onClick={handleBack}>
+            Back to home
+          </WorkshopButton>
+          {/* Offered for every error state, so we don't have to classify the message to decide
+              whether a retry could help. */}
+          <WorkshopButton tone="primary" onClick={() => setReloadNonce(n => n + 1)}>
+            Try again
+          </WorkshopButton>
+        </div>
       </div>
     )
   }

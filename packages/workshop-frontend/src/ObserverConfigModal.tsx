@@ -30,6 +30,12 @@ interface AccountInfo {
   credentialsValid: boolean
 }
 
+// How to name one of the user's accounts in the UI. Falls back to the id, which is all we can show
+// for an account that has since been disconnected (so `accounts` no longer has it).
+function accountLabel(account: AccountInfo | undefined, accountId: number): string {
+  return account?.description.uniqueName || account?.description.displayName || `Account ${accountId}`
+}
+
 interface ObserverConfigModalProps {
   needs: ObserverBindingNeed[]
   authenticatedApi: RpcStub<AuthenticatedApi>
@@ -142,19 +148,25 @@ export default function ObserverConfigModal({
 
   // ── keep choices in sync with the available accounts ──────────────────────────
   // Default each binding to its first matching account, and drop a choice whose account has
-  // disappeared (e.g. disconnected in another tab).
+  // disappeared (e.g. disconnected in another tab). When a binding is being re-prompted because it
+  // just failed, prefer the account that failed: re-authenticating it in place is usually the fix,
+  // so it should be what the re-authenticate affordance is aimed at.
   useEffect(() => {
     setChoices(prev => {
       let changed = false
       const next = { ...prev }
       for (const need of needs) {
         const matching = [...accounts.values()].filter(a => a.vendorId === need.vendorId)
+        const failed = need.failure && accounts.has(need.failure.accountId)
+          ? need.failure.accountId
+          : undefined
+        const preferred = failed ?? matching[0]?.id
         const current = next[need.gatekeeperId]
         if (current !== undefined && !accounts.has(current)) {
-          next[need.gatekeeperId] = matching[0]?.id
+          next[need.gatekeeperId] = preferred
           changed = true
-        } else if (current === undefined && matching.length > 0) {
-          next[need.gatekeeperId] = matching[0].id
+        } else if (current === undefined && preferred !== undefined) {
+          next[need.gatekeeperId] = preferred
           changed = true
         }
       }
@@ -212,13 +224,22 @@ export default function ObserverConfigModal({
     onConfirm(result)
   }
 
+  // The overseer re-prompts with `failure` set when an already-configured binding failed
+  // verification on this open (typically expired credentials).
+  const isRetry = needs.some(n => n.failure)
+
   return (
     <Dialog.Root open disablePointerDismissal onOpenChange={open => { if (!open) onCancel() }}>
       <Dialog className="p-6" size="lg">
-        <Dialog.Title className="text-lg font-semibold mb-2">Confirm access</Dialog.Title>
+        <Dialog.Title className="text-lg font-semibold mb-2">
+          {isRetry ? 'Re-confirm access' : 'Confirm access'}
+        </Dialog.Title>
         <Text variant="secondary" size="sm" as="p">
-          To open this Gadget, choose which of your accounts to use for each service it relies on,
-          so we can confirm you&apos;re allowed to see the data it uses.
+          {isRetry
+            ? 'We couldn’t confirm your access to everything this Gadget has read. Re-authenticate ' +
+              'the account below, or choose a different one, then try again.'
+            : 'To open this Gadget, choose which of your accounts to use for each service it relies on, ' +
+              'so we can confirm you’re allowed to see the data it uses.'}
         </Text>
 
         {!ready || !vendorsReady ? (
@@ -235,7 +256,7 @@ export default function ObserverConfigModal({
 
               return (
                 <div key={need.gatekeeperId} className="border border-kumo-line rounded-lg p-4">
-                  <div className={`flex items-center gap-3${matching.length === 0 ? '' : ' mb-3'}`}>
+                  <div className={`flex items-center gap-3${matching.length === 0 && !need.failure ? '' : ' mb-3'}`}>
                     <Avatar src={vendor?.logo?.url} size={32} fallback={<Plus size={16} />} />
                     <div className="min-w-0 flex-1">
                       <div className="text-[14px] font-medium text-kumo-default truncate">
@@ -258,6 +279,21 @@ export default function ObserverConfigModal({
                     )}
                   </div>
 
+                  {/* Name the account that was refused and why. The reason is free text, either from
+                      the gatekeeper or authored by the overseer, and must not be parsed. */}
+                  {need.failure && (
+                    <div className={`flex items-start gap-2 px-3 py-2 rounded-md text-xs text-kumo-warning bg-kumo-warning-tint border border-kumo-warning/20${matching.length === 0 ? '' : ' mb-3'}`}>
+                      <Warning size={14} className="mt-0.5 shrink-0" />
+                      <div className="min-w-0">
+                        <span className="font-medium">
+                          {accountLabel(accounts.get(need.failure.accountId), need.failure.accountId)}
+                        </span>
+                        {' — '}
+                        {need.failure.reason}
+                      </div>
+                    </div>
+                  )}
+
                   {matching.length > 0 && (
                     <div className="flex flex-col gap-2">
                       <Select
@@ -271,20 +307,22 @@ export default function ObserverConfigModal({
                         onValueChange={v =>
                           setChoices(prev => ({ ...prev, [need.gatekeeperId]: Number(v) }))
                         }
-                        renderValue={v => {
-                          const acct = accounts.get(Number(v))
-                          return acct?.description.uniqueName || acct?.description.displayName || String(v)
-                        }}
+                        renderValue={v => accountLabel(accounts.get(Number(v)), Number(v))}
                       >
                         {matching.map(acct => (
                           <Select.Option key={acct.id} value={String(acct.id)}>
-                            {acct.description.uniqueName || acct.description.displayName || `Account ${acct.id}`}
+                            {accountLabel(acct, acct.id)}
                             {!acct.credentialsValid ? ' (expired)' : ''}
                           </Select.Option>
                         ))}
                       </Select>
 
-                      {chosen && !chosen.credentialsValid && (
+                      {/* Offer re-authentication when we know the credentials are stale, and also
+                          when this is the account that just failed verification: a gatekeeper that
+                          rejects an observer on an auth error doesn't always tell the Workshop, so
+                          `credentialsValid` can still read true. reconnectAccount() is documented as
+                          safe for an account that merely *may* be expiring. */}
+                      {chosen && (!chosen.credentialsValid || chosen.id === need.failure?.accountId) && (
                         <button
                           type="button"
                           onClick={() => handleReconnect(chosen.id)}
@@ -298,7 +336,9 @@ export default function ObserverConfigModal({
                           )}
                           {reconnecting === chosen.id
                             ? 'Re-authenticating…'
-                            : 'This account has expired — click to re-authenticate'}
+                            : chosen.credentialsValid
+                              ? 'Click to re-authenticate this account'
+                              : 'This account has expired — click to re-authenticate'}
                         </button>
                       )}
 
@@ -330,7 +370,7 @@ export default function ObserverConfigModal({
             onClick={handleConfirm}
             disabled={!ready || !vendorsReady || !allSatisfied}
           >
-            Open Gadget
+            {isRetry ? 'Try again' : 'Open Gadget'}
           </WorkshopButton>
         </div>
       </Dialog>

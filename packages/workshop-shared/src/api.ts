@@ -188,6 +188,20 @@ export function validateBindingName(name: string): void {
   }
 }
 
+// Why a previously-configured observer binding failed verification on this open attempt. Attached to
+// the ObserverBindingNeed the overseer re-prompts with, so the client can explain what went wrong
+// instead of dead-ending the open.
+export type ObserverBindingFailure = {
+  // The account that was tried and rejected (a ConnectedAccountRecord id in the opening user's own
+  // User DO). Re-authenticating it in place is usually the fix, so the client should pre-select it
+  // and aim its re-authenticate affordance at it. May no longer exist, if the user disconnected it.
+  accountId: number;
+  // Human-readable explanation for display: either the error the gatekeeper threw when it refused
+  // the account, or a message the overseer authored itself for a cause it can see directly (e.g.
+  // the chosen account is no longer connected). Free text: MUST NOT be parsed or matched on.
+  reason: string;
+};
+
 // Describes one gatekeeper binding for which the opening user must choose a connected account
 // before they can observe the gadget. Passed to ObserverConfigCallback.configure().
 export type ObserverBindingNeed = {
@@ -200,6 +214,12 @@ export type ObserverBindingNeed = {
   resourceTitle: string;
   // Canonical resource URL, if known, for display.
   resourceUrl?: string;
+  // Set only when this binding was already configured but its chosen account failed verification on
+  // this attempt (expired credentials, a revoked grant, an upstream outage, or a genuine denial).
+  // Absent for a binding that has simply never been configured. Deliberately carries no
+  // "credentials valid" flag: the client already has that live from subscribeConnectedAccounts, and
+  // a copy on the wire would go stale while the modal is open across an OAuth round trip.
+  failure?: ObserverBindingFailure;
 };
 
 // The opening user's chosen account for a single gatekeeper binding. Returned from
@@ -217,6 +237,12 @@ export type ObserverAccountChoice = {
 // open() resolves without an extra round trip. The overseer does not resolve open() until this
 // returns. If the user cannot or will not provide the needed accounts, the callback should reject,
 // and the overseer denies the open.
+//
+// `configure()` may be called a second time within one open, for the subset of bindings that failed
+// verification (each carrying an ObserverBindingNeed.failure). This lets the user repair a binding --
+// typically by re-authenticating the account whose credentials expired -- without leaving the flow.
+// The overseer bounds the number of such re-prompts, so a client that resubmits an account that
+// keeps failing eventually gets a denial rather than an endless loop.
 export interface ObserverConfigCallback extends RpcTarget {
   configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
 }
