@@ -13,6 +13,7 @@ import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai
 import { getAiGatewayConfig } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
 import { readAdminConfig } from "./admin-config";
+import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext } from "./user";
@@ -172,6 +173,11 @@ type GatekeeperRecord = {
   bindingName?: string;
   blueprintAnnotation?: BlueprintBindingAnnotation;
 };
+
+function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | undefined {
+  let spec = record?.creationSpec;
+  return spec && "vendorId" in spec ? spec.vendorId.toLowerCase() : undefined;
+}
 
 // A binding edge from one gadget to a target workpiece (today always a gatekeeper), stored in
 // GadgetRecord.bindings keyed by binding name.
@@ -477,6 +483,7 @@ type BoundHookRecord = {
   // If omitted, use `defaultGadgetId`.
   gadgetId?: WorkpieceId;
 
+  vendorId?: string;
   controller: Fetcher<HookController<RpcTarget>>;
   callback: NativeRpcStub<RpcTarget>;
   description: HookDescription;
@@ -2821,18 +2828,19 @@ class OverseerImpl implements AgentHooks {
         ? caller.gadgetId
         : this.executeCodeRestoreTarget();
 
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+
     this.storage.boundHooks.put({
       id: hookId,
       actionId,
       gatekeeperId,
       ...(gadgetId !== undefined ? {gadgetId} : {}),
+      vendorId: gatekeeperVendorId(gatekeeper),
       controller: controller as unknown as Fetcher<HookController<RpcTarget>>,
       callback: callback as unknown as NativeRpcStub<RpcTarget>,
       description,
       enabled,
     });
-
-    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
     let record: ActionRecord = {
       id: actionId,
@@ -6137,10 +6145,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  startHook(hookId: number): {callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue} {
+  async startHook(hookId: number): Promise<{
+    callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
+  }> {
     let record = this.impl.storage.boundHooks.get(hookId);
-    if (!record) {
-      throw new Error("Hook has been deleted.");
+    if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
+
+    let vendorId = record.vendorId ??
+        gatekeeperVendorId(this.impl.storage.gatekeepers.get(record.gatekeeperId));
+    if (!vendorId) throw new Error("Hook vendor is unavailable.");
+
+    let config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes(vendorId) ||
+        ambientGatekeeperMode(config, vendorId) === "disabled") {
+      throw new Error("Gatekeeper is disabled.");
     }
 
     return {
