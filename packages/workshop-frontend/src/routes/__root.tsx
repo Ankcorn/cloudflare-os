@@ -7,6 +7,7 @@ import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { markConnectionRestored } from '../main'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
+import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
 import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
@@ -117,16 +118,18 @@ function RootComponent() {
   if (!authenticatedApi) return null
   return (
     <AuthProvider authenticatedApi={authenticatedApi} onLogout={logout}>
-      <TooltipProvider>
-        <Toasty>
-          <AuthenticatedShell
-            authenticatedApi={authenticatedApi}
-            connectionLost={connectionLost}
-            isChat={isChat}
-            isGadgetEditor={isGadgetEditor}
-          />
-        </Toasty>
-      </TooltipProvider>
+      <FeatureFlagsProvider>
+        <TooltipProvider>
+          <Toasty>
+            <AuthenticatedShell
+              authenticatedApi={authenticatedApi}
+              connectionLost={connectionLost}
+              isChat={isChat}
+              isGadgetEditor={isGadgetEditor}
+            />
+          </Toasty>
+        </TooltipProvider>
+      </FeatureFlagsProvider>
     </AuthProvider>
   )
 }

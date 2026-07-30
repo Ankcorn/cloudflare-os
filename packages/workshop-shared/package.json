@@ -9,6 +9,10 @@
       "types": "./src/api.ts",
       "import": "./src/api.ts"
     },
+    "./feature-flags": {
+      "types": "./src/feature-flags.ts",
+      "import": "./src/feature-flags.ts"
+    },
     "./gatekeeper": {
       "types": "./src/gatekeeper.ts",
       "import": "./src/gatekeeper.ts"

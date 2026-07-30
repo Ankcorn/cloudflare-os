@@ -25,6 +25,7 @@
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import type { UiFeatureFlags } from "./feature-flags.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -261,6 +262,9 @@ export interface AuthenticatedApi extends RpcTarget {
   // Get AI configuration info, including whether AI Gateway mode is active and which providers
   // are available. The frontend uses this to adjust the model management UI.
   getAiConfig(): Promise<AiGatewayInfo>;
+
+  // Resolve UI feature flags for the authenticated user.
+  getUiFeatureFlags(): Promise<UiFeatureFlags>;
 
   // Get the user's preferred model, chosen during onboarding. Returns null if the user has not
   // set a preference (or explicitly chose "No agent").
