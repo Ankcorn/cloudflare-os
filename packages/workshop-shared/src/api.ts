@@ -1173,10 +1173,8 @@ export interface Overseer extends RpcTarget {
   // List the currently-enabled auto-approval rules.
   listAutoApprovedActionKinds(): Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>>;
 
-  // List action kinds across all connected gatekeepers that could be pre-approved for auto-apply,
-  // for the proactive pre-approval UI. Surfaces them before any action has been submitted so an
-  // unattended gadget (e.g. one with an enabled hook) doesn't stall waiting for approval. Each entry
-  // marks whether an auto-approval rule is `alreadyEnabled`.
+  // List the auto-approvable action kinds offered by gatekeepers bound in this workspace. Each
+  // entry identifies its connection and reports whether a matching auto-approval rule is enabled.
   listPreApprovableActions(): Promise<PreApprovableAction[]>;
 
   // Accept an agent's pending connection request (a "connectionRequest" chat message). The caller
@@ -2096,15 +2094,16 @@ export type GadgetBindingInfo = {
   chatId?: number;
 };
 
-// An action kind that could be pre-approved for auto-application on a specific connection, surfaced
-// before any action has been submitted so an unattended gadget doesn't stall waiting for approval.
-// Aggregated from each gatekeeper's getAutoApprovableActions(); `alreadyEnabled` reflects whether an
-// auto-approval rule for this (gatekeeperId, actionKind.tag) is already in place.
+// An auto-approvable action kind offered by a specific connection. Aggregated from each bound
+// gatekeeper's getAutoApprovableActions(); `alreadyEnabled` reports whether a matching rule exists.
 export type PreApprovableAction = {
   gatekeeperId: WorkpieceId;
   resourceTitle: string;
   actionKind: ActionKind;
   alreadyEnabled: boolean;
+
+  // Vendor of the gatekeeper holding this connection. Absent for vendorless gatekeepers.
+  vendorId?: string;
 };
 
 // =======================================================================================

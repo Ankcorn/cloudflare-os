@@ -7250,6 +7250,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         // second step after the record is first persisted (see addGatekeeper). It can be absent if
         // that describe() failed, or for records predating the field, so fall back to a placeholder.
         resourceTitle: gk.resourceTitle || "(title unavailable)",
+        vendorId: gk.creationSpec?.type === "gatekeeper" ? gk.creationSpec.vendorId : undefined,
         actionKind,
         alreadyEnabled:
             this.impl.storage.autoApproveTags.get(`${gk.id}:${actionKind.tag}`) !== undefined,

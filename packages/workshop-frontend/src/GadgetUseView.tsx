@@ -17,9 +17,9 @@ import TopBarNotice from './TopBarNotice'
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
 // UI (see UseOverseerInterface in the backend), so we deliberately omit the chat sidebar, the
-// Gadget/Code/Connections/Activity tab bar, and every editor-only control. The overseer and
-// gadget passed in here are the restricted capabilities returned by openGadget() for "use"
-// sessions; calling anything outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/
+// Gadget/Code/Connections controls, workspace activity, and every editor-only control. The
+// overseer and gadget passed in here are the restricted capabilities returned by openGadget() for
+// "use" sessions; calling anything outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/
 // subscribeToWorkpieces()/getGadget() (and, on the gadget, getUiBundle()/connectToGadget())
 // would throw.
 //
