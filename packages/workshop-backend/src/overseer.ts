@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -256,6 +256,17 @@ function observerVendorId(record: GatekeeperRecord): string | null {
         "This Gadget has a legacy connection that must be reconnected by its owner before it can be shared.");
   }
   return "vendorId" in record.creationSpec ? record.creationSpec.vendorId : null;
+}
+
+// Human-readable title for an observer binding -- what the user sees both in the config modal and in
+// a verification-failure message, so both must derive it the same way.
+function observerBindingTitle(record: GatekeeperRecord): string {
+  return record.resourceTitle || "Connection";
+}
+
+// Copied from normalizeText() in agent-catalog.ts, minus its length clamp
+function oneLineReason(reason: string): string {
+  return reason.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
 }
 
 // Storage record describing a non-owner collaborator who has configured their gatekeeper accounts
@@ -5536,18 +5547,23 @@ class OverseerImpl implements AgentHooks {
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
 
-    // We may need to re-prompt the configuration modal if a previously-chosen account has since
-    // been disconnected (its verifier no longer resolves). Bound the number of such re-prompts to
-    // avoid looping against a misbehaving client.
-    let goneAccountReprompts = 0;
-    const MAX_GONE_ACCOUNT_REPROMPTS = 1;
+    // Failures from the previous pass, keyed by gatekeeper id: an already-configured binding whose
+    // chosen account was disconnected, or which the gatekeeper refused.
+    let passFailures = new Map<number, ObserverBindingFailure>();
+
+    // We may need to re-prompt the configuration modal when an already-configured binding fails, so
+    // the user can fix it in place. Bound the number of such re-prompts to avoid looping against a
+    // misbehaving client (or an account that simply keeps failing).
+    let reprompts = 0;
+    const MAX_CONFIG_REPROMPTS = 1;
 
     try {
       while (true) {
         // 3. Determine uncovered bindings: in-scope gatekeepers with no account choice yet. On the
         //    first open of a Gadget with any account-requiring binding, all bindings are uncovered,
         //    so the modal appears once even when defaults are obvious. On a re-prompt, this is the
-        //    set of bindings whose chosen account turned out to be gone.
+        //    set of bindings that failed verification in the previous pass (step 5 dropped their
+        //    choices), each carrying its `passFailures` entry.
         let uncovered = inScope.filter(gk => !(gk.id in accountChoices));
 
         // 4. If there are uncovered bindings, ask the client to choose accounts for them.
@@ -5562,8 +5578,11 @@ class OverseerImpl implements AgentHooks {
           let needs: ObserverBindingNeed[] = uncovered.map(gk => ({
             gatekeeperId: gk.id,
             vendorId: observerVendorId(gk)!,
-            resourceTitle: gk.resourceTitle || "Connection",
+            resourceTitle: observerBindingTitle(gk),
             resourceUrl: gk.resourceUrl,
+            // Present only for bindings we're re-prompting because they just failed, so the client
+            // can explain what went wrong and aim its re-authenticate affordance at that account.
+            failure: passFailures.get(gk.id),
           }));
 
           let choices = await configureCb.configure(needs);
@@ -5588,9 +5607,9 @@ class OverseerImpl implements AgentHooks {
         }
 
         // 5. Verify all in-scope bindings (covered + newly chosen). For each, resolve the chosen
-        //    account's verifier and hand it to the gatekeeper's addObserver().
-        let goneAccounts: number[] = [];
-        let accessDeniedError: unknown;
+        //    account's verifier and hand it to the gatekeeper's addObserver(). Collect *every*
+        //    failure rather than just the first, so a re-prompt can present them all at once.
+        let failures = new Map<number, ObserverBindingFailure>();
 
         await Promise.all(inScope.map(async gk => {
           let accountId = accountChoices[gk.id];
@@ -5599,10 +5618,18 @@ class OverseerImpl implements AgentHooks {
             throw new Error("An observer account was requested for a non-gatekeeper binding.");
           }
 
+          let fail = (reason: string, err?: unknown) => {
+            failures.set(gk.id, {accountId, reason});
+            this.logger.warn("observer verification failed", {
+              event: "gatekeeper.observer.verify.failed",
+              gatekeeperId: gk.id, vendorId, accountId, observerId, error: err,
+            });
+          };
+
           let verifier = await clientUser.getVerifier(accountId, vendorId);
           if (!verifier) {
-            // Account gone -> re-prompt this binding. (Wrong vendor throws above.)
-            goneAccounts.push(gk.id);
+            // Account gone -> the overseer authors the reason. (Wrong vendor throws above.)
+            fail("This account is no longer connected.");
             return;
           }
 
@@ -5610,32 +5637,36 @@ class OverseerImpl implements AgentHooks {
             await this.getGatekeeperFacet(gk.id).addObserver(observerId, verifier);
             if (!preConfigured.has(gk.id)) newlyAdded.add(gk.id);
           } catch (err) {
-            if (accessDeniedError === undefined) accessDeniedError = err;
+            // Either a settled denial or an operational failure (expired credentials, upstream
+            // outage). Treat every failure as repairable and let the user try again.
+            fail(stringifyError(err), err);
           }
         }));
 
-        if (accessDeniedError !== undefined) {
-          // The user is not (or no longer) allowed to observe everything read so far.
-          throw new Error(
-              "You are not permitted to observe all of the data this Gadget has accessed: " +
-              stringifyError(accessDeniedError));
-        }
-
-        if (goneAccounts.length > 0) {
-          // A chosen account is no longer connected. Drop the stale choices and re-prompt, unless
-          // we have already done so (or have no way to prompt), in which case deny.
-          if (!configureCb || goneAccountReprompts >= MAX_GONE_ACCOUNT_REPROMPTS) {
-            throw new Error(
-                "An account this Gadget needs is no longer connected. Reconnect it and try again.");
-          }
-          goneAccountReprompts++;
-          for (let id of goneAccounts) {
+        if (failures.size > 0) {
+          // Drop the failed choices so the re-prompt asks about exactly these bindings, and forget
+          // that they were pre-configured so the `catch` below rolls back any registration a later
+          // pass makes -- otherwise a gatekeeper could be left admitting an observer on a choice we
+          // never persisted.
+          for (let id of failures.keys()) {
             delete accountChoices[id];
-            // If we'd registered this observer for the binding in an earlier pass, it's moot now
-            // (the account is gone); leave any such registration to be re-confirmed after
-            // re-prompt.
+            preConfigured.delete(id);
           }
-          continue;
+
+          // Offer the user a chance to repair (typically re-authenticate the expired account),
+          // unless we have no way to prompt or have already spent the budget.
+          if (configureCb && reprompts < MAX_CONFIG_REPROMPTS) {
+            reprompts++;
+            passFailures = failures;
+            continue;
+          }
+
+          // Terminal. Name each failed connection and account so the user knows what to fix, rather
+          // than reporting an anonymous refusal.
+          throw new Error(
+              "This Gadget could not confirm that you are permitted to observe all of the data it " +
+              "has accessed:\n" +
+              await this.#describeObserverFailures(clientUser, inScope, failures));
         }
 
         // All in-scope bindings verified successfully.
@@ -5651,6 +5682,44 @@ class OverseerImpl implements AgentHooks {
     // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
     //    the record is the canonical moment the user becomes a configured observer.
     this.storage.observers.put({profileId, observerId, accountChoices});
+  }
+
+  // Render the observer verification failures as one line per binding, naming the connection and the
+  // account that was refused: `<resourceTitle> (<account label>) — <reason>`. Cold path only (we're
+  // about to deny the open), so the extra User DO round trip per failure is fine. Discloses nothing
+  // new: the reason was either already thrown to this same user or authored by us, and the account is
+  // their own.
+  async #describeObserverFailures(
+      clientUser: DurableObjectStub<UserDurableObject>,
+      inScope: GatekeeperRecord[],
+      failures: Map<number, ObserverBindingFailure>): Promise<string> {
+    // Iterate inScope rather than `failures`: the map is filled from concurrent verification
+    // callbacks, so its insertion order varies run to run and the message would reorder on retry.
+    let failed = inScope.flatMap(gk => {
+      let failure = failures.get(gk.id);
+      return failure ? [{gk, failure}] : [];
+    });
+
+    let lines = await Promise.all(failed.map(async ({gk, failure}) => {
+      // A disconnected account has no description left, so name it by what became of it.
+      let label = "an account you have since disconnected";
+      try {
+        let description = await clientUser.describeConnectedAccount(failure.accountId);
+        if (description) {
+          label = description.uniqueName || description.displayName || `account ${failure.accountId}`;
+        }
+      } catch (err) {
+        label = `account ${failure.accountId}`;
+        this.logger.warn("failed to describe account for observer failure", {
+          event: "gatekeeper.observer.verify.describe.failed",
+          gatekeeperId: gk.id, accountId: failure.accountId, error: err,
+        });
+      }
+
+      return `${observerBindingTitle(gk)} (${label}) — ${oneLineReason(failure.reason)}`;
+    }));
+
+    return lines.join("\n");
   }
 
   // Get the owner's profile ID, using the in-memory cache when available. The owner's

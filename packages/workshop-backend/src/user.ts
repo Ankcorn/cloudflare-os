@@ -1499,6 +1499,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return await account.account.getVerifier();
   }
 
+  // Describe one of the user's connected accounts so a caller can name it in a message. Returns null
+  // if it no longer exists.
+  async describeConnectedAccount(accountId: number): Promise<AccountDescription | null> {
+    let account = this.storage.connectedAccounts.get(accountId);
+    return account ? account.description : null;
+  }
+
 }
 
 type GatekeeperConnectCallbackProps = {
