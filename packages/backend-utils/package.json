@@ -28,8 +28,8 @@
     "@gadgets/error-reporting": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260619.1",
-    "@cloudflare/vitest-pool-workers": "^0.16.18",
-    "vitest": "^4.1.9"
+    "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "vitest": "^4.1.10"
   }
 }

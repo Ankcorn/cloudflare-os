@@ -9,71 +9,26 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as WorkspacesRouteImport } from './routes/workspaces'
-import { Route as SignupRouteImport } from './routes/signup'
-import { Route as ScheduledRouteImport } from './routes/scheduled'
-import { Route as ProvidersRouteImport } from './routes/providers'
-import { Route as ProfileRouteImport } from './routes/profile'
-import { Route as OutputsRouteImport } from './routes/outputs'
-import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
-import { Route as ExploreRouteImport } from './routes/explore'
-import { Route as ContextRouteImport } from './routes/context'
-import { Route as BlueprintsRouteImport } from './routes/blueprints'
-import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
-import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
-import { Route as ChatIdRouteImport } from './routes/chat.$id'
+import { Route as AdminRouteImport } from './routes/admin'
+import { Route as BlueprintsRouteImport } from './routes/blueprints'
+import { Route as ContextRouteImport } from './routes/context'
+import { Route as ExploreRouteImport } from './routes/explore'
+import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
+import { Route as OutputsRouteImport } from './routes/outputs'
+import { Route as ProfileRouteImport } from './routes/profile'
+import { Route as ProvidersRouteImport } from './routes/providers'
+import { Route as ScheduledRouteImport } from './routes/scheduled'
+import { Route as SignupRouteImport } from './routes/signup'
+import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
+import { Route as ChatIdRouteImport } from './routes/chat.$id'
+import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
+import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 
-const WorkspacesRoute = WorkspacesRouteImport.update({
-  id: '/workspaces',
-  path: '/workspaces',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SignupRoute = SignupRouteImport.update({
-  id: '/signup',
-  path: '/signup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ScheduledRoute = ScheduledRouteImport.update({
-  id: '/scheduled',
-  path: '/scheduled',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProvidersRoute = ProvidersRouteImport.update({
-  id: '/providers',
-  path: '/providers',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ProfileRoute = ProfileRouteImport.update({
-  id: '/profile',
-  path: '/profile',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const OutputsRoute = OutputsRouteImport.update({
-  id: '/outputs',
-  path: '/outputs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const GatekeepersRoute = GatekeepersRouteImport.update({
-  id: '/gatekeepers',
-  path: '/gatekeepers',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ExploreRoute = ExploreRouteImport.update({
-  id: '/explore',
-  path: '/explore',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ContextRoute = ContextRouteImport.update({
-  id: '/context',
-  path: '/context',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BlueprintsRoute = BlueprintsRouteImport.update({
-  id: '/blueprints',
-  path: '/blueprints',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -81,19 +36,59 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const BlueprintsRoute = BlueprintsRouteImport.update({
+  id: '/blueprints',
+  path: '/blueprints',
   getParentRoute: () => rootRouteImport,
 } as any)
-const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
-  id: '/gatekeepers_/$appId',
-  path: '/gatekeepers/$appId',
+const ContextRoute = ContextRouteImport.update({
+  id: '/context',
+  path: '/context',
   getParentRoute: () => rootRouteImport,
 } as any)
-const GadgetIdRoute = GadgetIdRouteImport.update({
-  id: '/gadget/$id',
-  path: '/gadget/$id',
+const ExploreRoute = ExploreRouteImport.update({
+  id: '/explore',
+  path: '/explore',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GatekeepersRoute = GatekeepersRouteImport.update({
+  id: '/gatekeepers',
+  path: '/gatekeepers',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OutputsRoute = OutputsRouteImport.update({
+  id: '/outputs',
+  path: '/outputs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersRoute = ProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ScheduledRoute = ScheduledRouteImport.update({
+  id: '/scheduled',
+  path: '/scheduled',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignupRoute = SignupRouteImport.update({
+  id: '/signup',
+  path: '/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspacesRoute = WorkspacesRouteImport.update({
+  id: '/workspaces',
+  path: '/workspaces',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BlueprintIdRoute = BlueprintIdRouteImport.update({
+  id: '/blueprint/$id',
+  path: '/blueprint/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatIdRoute = ChatIdRouteImport.update({
@@ -101,9 +96,14 @@ const ChatIdRoute = ChatIdRouteImport.update({
   path: '/chat/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
-const BlueprintIdRoute = BlueprintIdRouteImport.update({
-  id: '/blueprint/$id',
-  path: '/blueprint/$id',
+const GadgetIdRoute = GadgetIdRouteImport.update({
+  id: '/gadget/$id',
+  path: '/gadget/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
+  id: '/gatekeepers_/$appId',
+  path: '/gatekeepers/$appId',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -240,74 +240,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/workspaces': {
-      id: '/workspaces'
-      path: '/workspaces'
-      fullPath: '/workspaces'
-      preLoaderRoute: typeof WorkspacesRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/signup': {
-      id: '/signup'
-      path: '/signup'
-      fullPath: '/signup'
-      preLoaderRoute: typeof SignupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/scheduled': {
-      id: '/scheduled'
-      path: '/scheduled'
-      fullPath: '/scheduled'
-      preLoaderRoute: typeof ScheduledRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/providers': {
-      id: '/providers'
-      path: '/providers'
-      fullPath: '/providers'
-      preLoaderRoute: typeof ProvidersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/profile': {
-      id: '/profile'
-      path: '/profile'
-      fullPath: '/profile'
-      preLoaderRoute: typeof ProfileRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/outputs': {
-      id: '/outputs'
-      path: '/outputs'
-      fullPath: '/outputs'
-      preLoaderRoute: typeof OutputsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/gatekeepers': {
-      id: '/gatekeepers'
-      path: '/gatekeepers'
-      fullPath: '/gatekeepers'
-      preLoaderRoute: typeof GatekeepersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/explore': {
-      id: '/explore'
-      path: '/explore'
-      fullPath: '/explore'
-      preLoaderRoute: typeof ExploreRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/context': {
-      id: '/context'
-      path: '/context'
-      fullPath: '/context'
-      preLoaderRoute: typeof ContextRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/blueprints': {
-      id: '/blueprints'
-      path: '/blueprints'
-      fullPath: '/blueprints'
-      preLoaderRoute: typeof BlueprintsRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -317,25 +254,81 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/blueprints': {
+      id: '/blueprints'
+      path: '/blueprints'
+      fullPath: '/blueprints'
+      preLoaderRoute: typeof BlueprintsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/gatekeepers_/$appId': {
-      id: '/gatekeepers_/$appId'
-      path: '/gatekeepers/$appId'
-      fullPath: '/gatekeepers/$appId'
-      preLoaderRoute: typeof GatekeepersAppIdRouteImport
+    '/context': {
+      id: '/context'
+      path: '/context'
+      fullPath: '/context'
+      preLoaderRoute: typeof ContextRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/gadget/$id': {
-      id: '/gadget/$id'
-      path: '/gadget/$id'
-      fullPath: '/gadget/$id'
-      preLoaderRoute: typeof GadgetIdRouteImport
+    '/explore': {
+      id: '/explore'
+      path: '/explore'
+      fullPath: '/explore'
+      preLoaderRoute: typeof ExploreRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/gatekeepers': {
+      id: '/gatekeepers'
+      path: '/gatekeepers'
+      fullPath: '/gatekeepers'
+      preLoaderRoute: typeof GatekeepersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/outputs': {
+      id: '/outputs'
+      path: '/outputs'
+      fullPath: '/outputs'
+      preLoaderRoute: typeof OutputsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers': {
+      id: '/providers'
+      path: '/providers'
+      fullPath: '/providers'
+      preLoaderRoute: typeof ProvidersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/scheduled': {
+      id: '/scheduled'
+      path: '/scheduled'
+      fullPath: '/scheduled'
+      preLoaderRoute: typeof ScheduledRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signup': {
+      id: '/signup'
+      path: '/signup'
+      fullPath: '/signup'
+      preLoaderRoute: typeof SignupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspaces': {
+      id: '/workspaces'
+      path: '/workspaces'
+      fullPath: '/workspaces'
+      preLoaderRoute: typeof WorkspacesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/blueprint/$id': {
+      id: '/blueprint/$id'
+      path: '/blueprint/$id'
+      fullPath: '/blueprint/$id'
+      preLoaderRoute: typeof BlueprintIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/chat/$id': {
@@ -345,11 +338,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/blueprint/$id': {
-      id: '/blueprint/$id'
-      path: '/blueprint/$id'
-      fullPath: '/blueprint/$id'
-      preLoaderRoute: typeof BlueprintIdRouteImport
+    '/gadget/$id': {
+      id: '/gadget/$id'
+      path: '/gadget/$id'
+      fullPath: '/gadget/$id'
+      preLoaderRoute: typeof GadgetIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/gatekeepers_/$appId': {
+      id: '/gatekeepers_/$appId'
+      path: '/gatekeepers/$appId'
+      fullPath: '/gatekeepers/$appId'
+      preLoaderRoute: typeof GatekeepersAppIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }

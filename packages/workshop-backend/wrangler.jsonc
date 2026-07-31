@@ -22,7 +22,6 @@
   // only takes effect in production or when running workerd stand-alone. That's an acceptable
   // tradeoff for dev.
   "compatibility_flags": [
-    "experimental",
     "allow_irrevocable_stub_storage",
     "nodejs_als",
     "global_fetch_strictly_public"

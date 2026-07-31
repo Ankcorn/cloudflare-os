@@ -66,7 +66,8 @@ type Env = Cloudflare.Env & {
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
-      private user: DurableObjectStub<UserDurableObject>) {
+      private user: DurableObjectStub<UserDurableObject>,
+      private abortSession: (reason: Error) => void) {
     super();
 
     this.overseers = this.ctx.exports.OverseerDurableObject;
@@ -218,7 +219,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     };
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
-        this.ctx.abort(new Error("lost connection to gadget DO"));
+        // this.ctx.abort() would be nicer here, but it is still marked experimental in the
+        // workers runtime.
+        this.abortSession(new Error("lost connection to gadget DO"));
       }
     }
 
@@ -585,6 +588,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
   constructor(private ctx: ExecutionContext, private env: Env,
+      private abortSession: (reason: Error) => void,
       private accessPayload?: JWTPayload) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
@@ -634,7 +638,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "session_token",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, stub);
+    return new AuthenticatedApiImpl(this.ctx, this.env, stub, this.abortSession);
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -659,7 +663,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, stub);
+    return new AuthenticatedApiImpl(this.ctx, this.env, stub, this.abortSession);
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -773,7 +777,23 @@ export default {
         accessPayload = payload;
       }
 
-      return newWorkersRpcResponse(req, new PublicApiImpl(ctx, env, accessPayload));
+      // HACK: Implement `abortSession` callback by closing the websocket.
+      // TODO: When ctx.abort() becomes non-experimental, consider using that instead.
+      let resp: Response | undefined;
+      let aborted = false;
+      let abortSession = (reason: Error) => {
+        aborted = true;
+        resp?.webSocket?.close();
+      };
+
+      resp = await newWorkersRpcResponse(req,
+          new PublicApiImpl(ctx, env, abortSession, accessPayload));
+
+      if (aborted) {
+        // Oops, we missed the abortSession() call while awaiting, apply now.
+        resp?.webSocket?.close();
+      }
+      return resp;
     }
 
     return new Response("Not Found", {status: 404});
