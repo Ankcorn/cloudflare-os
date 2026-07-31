@@ -13,6 +13,7 @@ import {
   Gatekeeper,
   HookController,        // Remove if no hooks
   HookInitiator,         // Remove if no hooks
+  HookTargetMetadata,    // Remove if no hooks
   ResourceDescription,
   ApprovalQueue,
   ObservationDescription,
@@ -337,8 +338,9 @@ class MyConfiguratorUI extends RpcTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Hook type — remove this section (and HookController/HookInitiator imports, the `subscribe`
-// method, the `hookTsType` field, and MyHookControllerImpl) if the gatekeeper doesn't push events.
+// Hook type — remove this section (and the HookController/HookInitiator/HookTargetMetadata
+// imports, the `subscribe` method, the `hookTsType` field, and MyHookControllerImpl) if the
+// gatekeeper doesn't push events.
 //
 // The hook interface from types.d.ts is implemented by the Gadget as an RpcTarget. Intersect it
 // with RpcTarget so it satisfies the HookController/HookInitiator generic constraints (Hook
@@ -443,7 +445,11 @@ export class MyHookControllerImpl extends WorkerEntrypoint<Env, MyHookController
   // Called when the user enables the hook. Store `initiator` somewhere it can be reached when an
   // event arrives — typically an event-source DO. Don't store other state until now; everything
   // else is already in `this.ctx.props`. If already enabled, replace the previous initiator.
-  async enable(initiator: Fetcher<HookInitiator<MyHook>>): Promise<void> {
+  //
+  // `target` identifies where the hook delivers (workspace, and gadget when pinned to one). Store
+  // it too if you display or link to the target; otherwise ignore it, but keep the parameter
+  // declared — RPC argument validation rejects arguments the receiver doesn't declare.
+  async enable(initiator: Fetcher<HookInitiator<MyHook>>, target: HookTargetMetadata): Promise<void> {
     // TODO: persist `initiator` (e.g. forward it to an event-source DO keyed by props).
   }
 

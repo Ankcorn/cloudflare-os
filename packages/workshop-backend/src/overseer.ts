@@ -7082,7 +7082,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       await record.controller.enable(
           this.impl.ctx.exports.GatekeeperHookLoopback({props}) as unknown as
-              Fetcher<HookInitiator<RpcTarget>>);
+              Fetcher<HookInitiator<RpcTarget>>,
+          {
+            workspaceId: this.impl.ctx.id.toString(),
+            ...(record.gadgetId !== undefined ? {gadgetId: record.gadgetId} : {}),
+          });
 
       record.enabled = true;
       this.impl.storage.boundHooks.put(record);

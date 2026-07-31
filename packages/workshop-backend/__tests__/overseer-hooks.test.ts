@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import { OverseerDurableObject } from "../src/overseer.js";
 
@@ -85,5 +86,65 @@ describe("OverseerDurableObject.startHook", () => {
         { enabled: false, vendorId: "email" });
 
     await expect(overseer.startHook(1)).rejects.toThrow("Hook has been deleted or disabled.");
+  });
+});
+
+async function makeTargetOverseer(gadgetId?: number) {
+  let controllerEnable = vi.fn(async (_initiator: object, _target: object) => {});
+  let record = {
+    id: 4,
+    actionId: 12,
+    gatekeeperId: 1,
+    gadgetId,
+    controller: {enable: controllerEnable},
+    callback: {},
+    description: {title: "Incoming email", description: "Receives email"},
+    enabled: false,
+  };
+  let overseer = {
+    open: OverseerDurableObject.prototype.open,
+    impl: {
+      ownerId: "user-id",
+      ensureAmbientCapsules: async () => {},
+      joinPresence: () => () => {},
+      users: {
+        idFromString: (id: string) => id,
+        get: () => ({
+          whoami: async () => ({id: "profile-id", name: "Test User"}),
+        }),
+      },
+      ctx: {
+        id: {toString: () => "workspace-id"},
+        exports: {GatekeeperHookLoopback: ({props}: {props: object}) => props},
+      },
+      storage: {
+        prohibitAllSharing: {get: () => false},
+        boundHooks: {get: () => record, put: vi.fn()},
+        actions: {get: () => undefined, put: vi.fn()},
+      },
+    },
+  } satisfies Pick<OverseerDurableObject, "open"> & {impl: object};
+  let notifyClosed = new NativeRpcStub<() => void>(() => {});
+  let client = await overseer.open("user-id", "profile-id", notifyClosed);
+  return {client, controllerEnable};
+}
+
+describe("hook target", () => {
+
+  it("passes the workspace and gadget IDs to enable()", async () => {
+    let {client, controllerEnable} = await makeTargetOverseer(17);
+
+    await client.enableHook(4);
+
+    expect(controllerEnable).toHaveBeenCalledTimes(1);
+    expect(controllerEnable.mock.calls[0][1]).toEqual({workspaceId: "workspace-id", gadgetId: 17});
+  });
+
+  it("omits the gadget ID for a hook that is not pinned to one", async () => {
+    let {client, controllerEnable} = await makeTargetOverseer();
+
+    await client.enableHook(4);
+
+    expect(controllerEnable.mock.calls[0][1]).toEqual({workspaceId: "workspace-id"});
   });
 });
