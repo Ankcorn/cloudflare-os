@@ -7,6 +7,7 @@ import {
   Gatekeeper,
   HookController,
   HookInitiator,
+  HookTargetMetadata,
   ResourceDescription,
   ApprovalQueue,
   VendorDescription,
@@ -581,7 +582,10 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
 @validateRpc()
 export class EmailHookControllerImpl extends WorkerEntrypoint<Env, EmailGatekeeperImplProps>
     implements HookController<EmailHookTarget> {
-  async enable(initiator: Fetcher<HookInitiator<EmailHookTarget>>): Promise<void> {
+  // `_target` is unused -- email doesn't display its hooks -- but must be declared, since RPC
+  // argument validation is generated from this signature and would reject the extra argument.
+  async enable(initiator: Fetcher<HookInitiator<EmailHookTarget>>,
+               _target: HookTargetMetadata): Promise<void> {
     return this.#setHook(initiator);
   }
 

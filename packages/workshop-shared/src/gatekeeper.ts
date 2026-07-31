@@ -1051,6 +1051,21 @@ export type HookDescription = {
   description: string;
 }
 
+// Identifies where a hook delivers its events, for display and navigation by a gatekeeper that
+// surfaces its hooks in a UI. Passed to `HookController.enable()`.
+//
+// Both fields are fixed when the hook is bound, so a gatekeeper may persist them alongside the
+// initiator and never needs to refresh them. They are opaque display/routing identifiers: they
+// must not be used for authorization, identity, or storage scoping.
+export type HookTargetMetadata = {
+  // The workspace the hook delivers into.
+  workspaceId: string;
+
+  // The specific gadget within that workspace, when the hook is pinned to one. Absent means the
+  // workspace's current default gadget.
+  gadgetId?: number;
+}
+
 // Object passed to `ApprovalQueue.bindHook()`, providing the overseer with callbacks to enable
 // or disable a hook.
 export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint {
@@ -1058,7 +1073,12 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
   // be called first, before actually invoking the hook.
   //
   // If the hook was already enabled, the previously-registered `initiator` should be replaced.
-  enable(initiator: Fetcher<HookInitiator<Hook>>): Promise<void>;
+  //
+  // `target` identifies where the hook delivers, for gatekeepers that display or link to it. A
+  // gatekeeper that doesn't need it may ignore the value, but must still *declare* the parameter:
+  // RPC argument validation is generated from the declared signature, and a call carrying an
+  // argument the receiver does not declare is rejected.
+  enable(initiator: Fetcher<HookInitiator<Hook>>, target: HookTargetMetadata): Promise<void>;
 
   // Unregister the hook, so that future events stop being delivered. The gatekeeper should forget
   // the `initiator` previously registered by `enable()`.
