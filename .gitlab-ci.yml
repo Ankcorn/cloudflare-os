@@ -56,3 +56,4 @@ include:
     inputs:
       stage: review
       runOnMR: true
+      ASSIGN_REVIEWERS: false
