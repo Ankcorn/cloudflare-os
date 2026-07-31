@@ -12,16 +12,16 @@
     "clean": "rm -rf dist src/generated"
   },
   "dependencies": {
-    "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "^0.8.0",
     "capnweb-validate": "0.2.1",
     "mimetext": "^3.0.28",
-    "postal-mime": "^2.7.4"
+    "postal-mime": "^2.7.5"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "wrangler": "^4.103.0"
+    "wrangler": "^4.115.0"
   }
 }
