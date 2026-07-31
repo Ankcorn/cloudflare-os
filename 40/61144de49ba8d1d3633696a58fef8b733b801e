@@ -15,9 +15,9 @@ packages/workshop-backend/src/overseer.ts
 packages/workshop-backend/src/agent.ts
   s_1dfdf61332f5c7::t_0834ac3421c26b 125-126,128-131
   s_1dfdf61332f5c7::t_76d68a662e35eb 2011-2015
-  s_766ca11e0f4218::t_9d0dcfcb585656 1,79-101,127,132-136,926-930,939-940,2770-2771
+  s_766ca11e0f4218::t_9d0dcfcb585656 1,79-101,127,127-128,132-136,133-136,926-930,939-940,2770-2771
   s_1dfdf61332f5c7::t_1bf992464df0d5 102-105,107-109
-  s_1dfdf61332f5c7::t_def1cacffb7e5f 106,117-124
+  s_1dfdf61332f5c7::t_def1cacffb7e5f 106,117-124,117,118-124
   s_1dfdf61332f5c7::t_c861f53c24b7de 110-116
 packages/workshop-frontend/src/components/chat/SlashCommandPicker.tsx
   s_1dfdf61332f5c7::t_1c0ab8c7ca6c5b 240-241
