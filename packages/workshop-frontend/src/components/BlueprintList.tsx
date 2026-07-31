@@ -7,8 +7,9 @@ import {
   MagnifyingGlass,
   Star,
   Trash,
+  UploadSimple,
 } from '@phosphor-icons/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../AuthContext'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
@@ -25,6 +26,11 @@ type BlueprintItem = {
   inLibrary: boolean
   isOwn: boolean
 }
+
+// Chrome shared by the page's secondary actions. `w-full` + `justify-center` are what let a pair of
+// these sit in a 2-column grid and come out the same width whatever their labels say.
+const ACTION_BUTTON =
+  'press inline-flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint disabled:cursor-default disabled:opacity-50'
 
 function formatRelativeTime(date: Date): string {
   const diff = Date.now() - date.getTime()
@@ -122,6 +128,8 @@ export default function BlueprintList() {
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const uploadInputRef = useRef<HTMLInputElement>(null)
 
   // A generation counter so a retry (or unmount) invalidates any in-flight load: only the most
   // recent request is allowed to write state, avoiding races between concurrent loads.
@@ -176,6 +184,25 @@ export default function BlueprintList() {
     return () => { loadGenRef.current++ }
   }, [load])
 
+  // Import a `.gadget` archive exported from another Workshop instance, then refresh the list.
+  const handleBlueprintSelected = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    // Clear immediately so re-picking the same file fires `change` again.
+    event.target.value = ''
+    if (!file) return
+    setUploading(true)
+    try {
+      await authenticatedApi.importBlueprint(file.stream() as ReadableStream<Uint8Array>)
+      toasts.add({ title: 'Blueprint uploaded', variant: 'success' })
+      load()
+    } catch (err) {
+      console.error('Failed to upload blueprint:', err)
+      toasts.add({ title: 'Failed to upload blueprint', variant: 'error' })
+    } finally {
+      setUploading(false)
+    }
+  }, [authenticatedApi, load, toasts])
+
   const handleTogglePin = async (item: BlueprintItem) => {
     const nextPinned = !item.pinned
     setItems((prev) => sortItems(prev.map((b) => (b.id === item.id ? { ...b, pinned: nextPinned } : b))))
@@ -213,10 +240,20 @@ export default function BlueprintList() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Search — hidden when the user has no blueprints */}
+      {/* Hidden picker backing both Upload buttons. */}
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept=".gadget"
+        className="hidden"
+        onChange={handleBlueprintSelected}
+      />
+
+      {/* Toolbar — search plus the page's actions. Hidden when the user has no blueprints, since
+          the empty state carries its own copies of the same two actions. */}
       {!loading && items.length > 0 && (
-        <div className="mb-4 px-3">
-          <div className="relative">
+        <div className="mb-4 flex items-center gap-2 px-3">
+          <div className="relative flex-1">
             <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-kumo-inactive" />
             <input
               type="text"
@@ -225,6 +262,24 @@ export default function BlueprintList() {
               placeholder="Search blueprints…"
               className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
             />
+          </div>
+          {/* Grid, not flex: 1fr columns give the two buttons a matching width, where flex would
+              size each to its own label. */}
+          <div className="grid shrink-0 grid-cols-2 gap-2">
+            <Link to="/explore" className={ACTION_BUTTON}>
+              <Compass size={14} />
+              Explore
+            </Link>
+            <button
+              type="button"
+              onClick={() => uploadInputRef.current?.click()}
+              disabled={uploading}
+              title="Upload a .gadget archive"
+              className={ACTION_BUTTON}
+            >
+              <UploadSimple size={14} weight="bold" />
+              {uploading ? 'Uploading…' : 'Upload'}
+            </button>
           </div>
         </div>
       )}
@@ -257,13 +312,21 @@ export default function BlueprintList() {
                   Publish a workspace as a blueprint, or add one from Explore.
                 </p>
               </div>
-              <Link
-                to="/explore"
-                className="press inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint"
-              >
-                <Compass size={14} />
-                Explore blueprints
-              </Link>
+              <div className="grid grid-cols-2 gap-2">
+                <Link to="/explore" className={ACTION_BUTTON}>
+                  <Compass size={14} />
+                  Explore blueprints
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => uploadInputRef.current?.click()}
+                  disabled={uploading}
+                  className={ACTION_BUTTON}
+                >
+                  <UploadSimple size={14} weight="bold" />
+                  {uploading ? 'Uploading…' : 'Upload .gadget'}
+                </button>
+              </div>
             </div>
           )
         ) : (
