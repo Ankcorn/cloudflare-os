@@ -1,0 +1,53 @@
+# Builds an immutable deploy release per push to main and publishes it to R2 (bundles + release
+# manifest). The deploy service PUTs these prebuilt, byte-identical bundles into customer
+# accounts — no per-deploy builds ever happen downstream, so this workflow is the only place
+# customer-run code is compiled.
+#
+# PRs run the build for validation but never publish (fork PRs have no R2 secrets, and the
+# publish step is gated on the push event anyway).
+
+name: Publish release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # Publishes are serialized and never cancelled mid-push: a release is all-or-nothing, and the
+  # manifest-last upload order only protects releases that are allowed to finish.
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace libraries
+        run: pnpm run build
+
+      - name: Build release
+        run: node scripts/release/build-release.mjs --out release-out
+
+      - name: Upload release to R2
+        if: github.event_name == 'push'
+        env:
+          R2_ENDPOINT: ${{ secrets.RELEASES_R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.RELEASES_R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.RELEASES_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_R2_SECRET_ACCESS_KEY }}
+        run: node scripts/release/upload-release.mjs --release release-out

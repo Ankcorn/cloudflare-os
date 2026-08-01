@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      aws4fetch:
+        specifier: ^1.0.20
+        version: 1.0.20
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
@@ -5389,8 +5392,7 @@ snapshots:
     dependencies:
       possible-typed-array-names: 1.1.0
 
-  aws4fetch@1.0.20:
-    optional: true
+  aws4fetch@1.0.20: {}
 
   babel-dead-code-elimination@1.0.12:
     dependencies:
