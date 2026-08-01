@@ -46,6 +46,11 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
 // instances don't have. The bundle still ships in the release so the entry stays auditable.
 const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
 
+// Gatekeepers that must stay one-per-instance. Everything else can be installed repeatedly
+// (e.g. two Google accounts), each install under its own slug/binding suffix — the runtime
+// keys everything off the GATEKEEPER_* binding-name suffix, never the package.
+const SINGLETON = new Set(["gatekeeper-context"]);
+
 export const DEFAULT_CRED_INPUTS = [
   {
     name: "CLIENT_ID",
@@ -194,6 +199,8 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
     kind,
     ...(kind === "gatekeeper" ? { shortName: shortName(pkgName) } : {}),
     installable,
+    // Optional flag (the deploy service defaults it to false), so no MANIFEST_VERSION bump.
+    ...(SINGLETON.has(pkgName) ? { singleton: true } : {}),
     mainModule,
     modules: modules.map(({ name, type, sha256, size }) => ({
       name, type, sha256, size, r2Key: moduleR2Key(sha256),

@@ -200,6 +200,7 @@
         }
       },
       "shortName": "context",
+      "singleton": true,
       "vars": {
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/context"
       }
