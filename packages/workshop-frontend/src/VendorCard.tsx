@@ -27,6 +27,7 @@ export default function VendorCard({
     >
       <Avatar
         src={vendor.logo?.url}
+        background={vendor.color}
         size={48}
         fallback={<LinkSimple size={22} />}
       />

@@ -13,7 +13,7 @@ import { useAutoApproval, autoApprovalKey, type AutoApprovalEntry } from './useA
 import { useAlwaysApproveTag } from './useAlwaysApproveTag'
 import { useAuthenticatedApi } from './AuthContext'
 import { useAvatar } from './useAvatar'
-import { useVendorLogos } from './useVendorLogos'
+import { useVendorBranding } from './useVendorBranding'
 import { useResolveAction } from './useResolveAction'
 import { safeExternalUrl } from './utils/safeExternalUrl'
 import AutoApproveConfirmDialog from './components/AutoApproveConfirmDialog'
@@ -303,7 +303,7 @@ export default function Activity({
               </div>
               {historyGroups.map(group => (
                 <section key={group.label}>
-                  <h3 className="sticky top-0 z-[1] m-0 border-b border-kumo-line bg-kumo-base/90 px-5 py-1 text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive backdrop-blur-sm">
+                  <h3 className="sticky top-0 m-0 border-b border-kumo-line bg-kumo-base/90 px-5 py-1 text-[11px] font-medium uppercase tracking-[0.06em] text-kumo-inactive backdrop-blur-sm">
                     {group.label}
                   </h3>
                   {group.records.map(record => (
@@ -355,7 +355,7 @@ function AutoApprovalPanel({
 }) {
   const { entries, isLoading, loadError, pending, refresh, setEnabled } = useAutoApproval(overseer)
   const { authenticatedApi } = useAuthenticatedApi()
-  const vendorLogos = useVendorLogos(authenticatedApi)
+  const vendorBranding = useVendorBranding(authenticatedApi)
 
   const previousReloadTrigger = useRef(reloadTrigger)
   useEffect(() => {
@@ -438,10 +438,10 @@ function AutoApprovalPanel({
       <div className="min-h-0 flex-1 overflow-auto">
         {groups.map(group => (
           <section key={group.gatekeeperId}>
-            <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-kumo-line bg-kumo-base/90 px-5 py-1.5 backdrop-blur-sm">
+            <div className="sticky top-0 flex items-center gap-2 border-b border-kumo-line bg-kumo-base/90 px-5 py-1.5 backdrop-blur-sm">
               <GatekeeperIcon
                 vendorId={group.vendorId}
-                logoUrl={group.vendorId ? vendorLogos.get(group.vendorId) : undefined}
+                {...(group.vendorId ? vendorBranding.get(group.vendorId) : undefined)}
                 fallbackText={group.title}
                 size={12}
                 className="h-5 w-5 rounded-md [&>img]:p-px"

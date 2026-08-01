@@ -12,7 +12,7 @@ import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, Authenticated
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
-import { useVendorLogos } from './useVendorLogos'
+import { useVendorBranding } from './useVendorBranding'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { EmptyState } from './components/EmptyState'
 import {
@@ -42,7 +42,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   // Identity of the gadget this tab is showing, needed to offer it to agent spawners.
   const [gadgetInfo, setGadgetInfo] = useState<{ id: WorkpieceId; title: string } | null>(null)
   const [hooks, setHooks] = useState<BoundHookInfo[]>([])
-  const vendorLogos = useVendorLogos(authenticatedApi)
+  const vendorBranding = useVendorBranding(authenticatedApi)
   const [loading, setLoading] = useState(true)
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
@@ -290,7 +290,11 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                       </div>
                     ) : (
                       <div className="flex items-center gap-3">
-                        <GatekeeperIcon vendorId={gk.vendorId} fallbackText={gk.resourceTitle || gk.name} logoUrl={gk.vendorId ? vendorLogos.get(gk.vendorId) : undefined} />
+                        <GatekeeperIcon
+                          vendorId={gk.vendorId}
+                          fallbackText={gk.resourceTitle || gk.name}
+                          {...(gk.vendorId ? vendorBranding.get(gk.vendorId) : undefined)}
+                        />
                         <div className="min-w-0 flex-1">
                           <p className="flex items-center gap-2 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
                             <span className="min-w-0 truncate">{gk.resourceTitle}</span>
@@ -393,7 +397,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         <GatekeeperIcon
                           vendorId={vendorId}
                           fallbackText={hook.resourceTitle}
-                          logoUrl={vendorId ? vendorLogos.get(vendorId) : undefined}
+                          {...(vendorId ? vendorBranding.get(vendorId) : undefined)}
                         />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">

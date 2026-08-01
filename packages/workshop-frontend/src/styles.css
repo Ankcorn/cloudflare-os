@@ -418,6 +418,18 @@ html {
   box-shadow: 0 8px 20px -18px rgba(0, 0, 0, 0.58);
 }
 
+/* Base UI positions an anchored popup by putting a `transform` on its positioner, the element that
+   wraps the popup inside the portal. That transform makes the positioner a stacking context, so the
+   z-index the popup carries only orders it against its own siblings and counts for nothing against
+   the page: a `z-[1]` sticky table header outranked a `z-[1100]` popover. Put the z-index where the
+   stacking context is.
+
+   Matched on the popup Kumo puts inside, not on `[role="presentation"]` alone, which dialogs also
+   use for their backdrop and viewport — raising those would bury a dialog under its own backdrop. */
+[data-base-ui-portal] > [role="presentation"]:has(> .kumo-popover-popup) {
+  z-index: 1100;
+}
+
 /* Keep global notifications above dialogs, which use z-indexes up to 1200. */
 [role="region"][aria-label="Notifications"] {
   z-index: 2000;
