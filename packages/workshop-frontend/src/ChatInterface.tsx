@@ -106,7 +106,7 @@ import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
-import { useVendorLogos } from "./useVendorLogos";
+import { useVendorBranding } from "./useVendorBranding";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -970,8 +970,8 @@ function SlashCommandMention(
 
 function CapsuleMention({ capsule }: { capsule: CapsuleSpecifier }) {
   const { authenticatedApi } = useAuthenticatedApi();
-  const vendorLogos = useVendorLogos(authenticatedApi);
-  const logo = capsule.vendorId ? vendorLogos.get(capsule.vendorId) : undefined;
+  const vendorBranding = useVendorBranding(authenticatedApi);
+  const logo = capsule.vendorId ? vendorBranding.get(capsule.vendorId)?.logoUrl : undefined;
   const safeUrl = safeExternalUrl(capsule.description.url);
   const body = (
     <>
@@ -1687,7 +1687,7 @@ export const ChatInput = ({
   // Caret position and text the URL overlay was last resolved for, to skip repeated scans.
   const lastUrlScanRef = useRef({position: -1, text: ""});
   const { authenticatedApi } = useAuthenticatedApi();
-  const vendorLogos = useVendorLogos(authenticatedApi);
+  const vendorBranding = useVendorBranding(authenticatedApi);
   const selectedSlashCommandRef = useRef(selectedSlashCommand);
   selectedSlashCommandRef.current = selectedSlashCommand;
   const sendInFlightRef = useRef(false);
@@ -2004,7 +2004,7 @@ export const ChatInput = ({
   };
 
   const capsuleTokenText = (description: ResourceDescription, vendorId?: string) =>
-    (vendorId && vendorLogos.has(vendorId) ? CAPSULE_LOGO_SLOT : "") + description.title;
+    (vendorId && vendorBranding.get(vendorId)?.logoUrl ? CAPSULE_LOGO_SLOT : "") + description.title;
 
   // The picker parses at the caret, but only its token matters, so refresh its copy of the caret
   // when that changes rather than on every movement. Plain caret movement then re-renders nothing.
@@ -2650,7 +2650,7 @@ export const ChatInput = ({
       length,
       // Painted into the em space the token starts with, so it costs no layout.
       logo: inputValue.startsWith(CAPSULE_LOGO_SLOT, start)
-        ? cssLogoUrl(vendorId ? vendorLogos.get(vendorId) : undefined)
+        ? cssLogoUrl(vendorId ? vendorBranding.get(vendorId)?.logoUrl : undefined)
         : undefined,
     })),
     ...(selectedSlashCommand ? [{
@@ -2658,7 +2658,7 @@ export const ChatInput = ({
       start: selectedSlashCommand.start,
       length: selectedSlashCommand.length,
     }] : []),
-  ], [capsules, inputValue, selectedSlashCommand, vendorLogos]);
+  ], [capsules, inputValue, selectedSlashCommand, vendorBranding]);
 
   // Console log severity is communicated by the dot colour only; the banner
   // chrome stays neutral so a noisy error doesn't paint a red bar above the
