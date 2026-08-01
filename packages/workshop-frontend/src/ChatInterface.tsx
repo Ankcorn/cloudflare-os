@@ -1719,7 +1719,7 @@ export const ChatInput = ({
         mimeType,
         content,
         name,
-      });
+      }, selectedModel);
       if (!mountedRef.current || !pendingAttachmentsRef.current.some((attachment) => attachment.id === id)) {
         deleteStagedAttachment(ref);
         return;

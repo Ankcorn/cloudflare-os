@@ -1253,10 +1253,11 @@ export interface Overseer extends RpcTarget {
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void>;
 
   // Upload an attachment for use in a future chat message. This way by the time the user wants to
-  // send the message, likely uploading is complete.
+  // send the message, likely uploading is complete. `modelId` determines whether the
+  // selected provider can receive a raw file attachment.
   //
   // Pass the returned handle to newChat() or sendChatMessage() to commit the attachment into chat history.
-  uploadChatAttachment(attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle>;
+  uploadChatAttachment(attachment: ChatAttachmentUpload, modelId: string | null): Promise<ChatAttachmentHandle>;
 
   // Fetch the bytes of a committed chat attachment over RPC. The canonical metadata is already
   // present in the message's ChatAttachmentRef. Images are inlined there, so this is normally used
