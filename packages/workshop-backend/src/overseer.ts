@@ -29,6 +29,11 @@ import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
+import {
+  assertChatAttachmentSupportedByProvider,
+  isAllowedChatAttachmentImageMimeType,
+  validateChatAttachmentUpload,
+} from "./chat-attachment-validation";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
@@ -353,7 +358,6 @@ function validateBlueprintScreenshotUpload(screenshot: BlueprintScreenshotUpload
 }
 
 const MAX_CHAT_ATTACHMENTS_PER_MESSAGE = 5;
-const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
 // Staged attachments (not associated with chat) older than this may be deleted when the gadget next stages an attachment.
 const MAX_STAGED_CHAT_ATTACHMENT_AGE_MS = 24 * 60 * 60 * 1000;
@@ -379,52 +383,6 @@ type ChatAttachmentContentRecord = {
         chatId: number;
       };
 };
-
-const ALLOWED_CHAT_ATTACHMENT_IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-function sanitizeChatAttachmentMimeType(mimeType: string | undefined): string {
-  if (!mimeType || /[\r\n]/.test(mimeType)) return "application/octet-stream";
-  return mimeType.split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
-}
-
-function sanitizeChatAttachmentName(name: string | undefined): string | undefined {
-  if (!name) return undefined;
-  let result = name.replace(/[\r\n]/g, " ").slice(0, 255).trim();
-  return result || undefined;
-}
-
-function validateChatAttachmentUpload(attachment: ChatAttachmentUpload): ChatAttachmentUpload {
-  attachment.mimeType = sanitizeChatAttachmentMimeType(attachment.mimeType);
-  attachment.name = sanitizeChatAttachmentName(attachment.name);
-  if (attachment.content.byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
-    throw new Error("Chat attachment is too large.");
-  }
-
-  if (attachment.mimeType.startsWith("image/")) {
-    if (!isAllowedChatAttachmentImageMimeType(attachment.mimeType)) {
-      throw new Error("Unsupported chat image type.");
-    }
-
-    let data = attachment.content;
-    let isJpeg = data[0] === 0xFF && data[1] === 0xD8 && data[2] === 0xFF;
-    let isPng = data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47;
-    let isWebp = data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 &&
-        data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50;
-    let matchesMime =
-        (attachment.mimeType === "image/jpeg" && isJpeg) ||
-        (attachment.mimeType === "image/png" && isPng) ||
-        (attachment.mimeType === "image/webp" && isWebp);
-    if (!matchesMime) {
-      throw new Error("Chat image content does not match its MIME type.");
-    }
-  }
-
-  return attachment;
-}
-
-function isAllowedChatAttachmentImageMimeType(mimeType: string): boolean {
-  return ALLOWED_CHAT_ATTACHMENT_IMAGE_MIME_TYPES.has(mimeType);
-}
 
 // Sentinel gatekeeperId used on ActionRecords that originated from built-in agent tools
 // (e.g. webFetch) rather than from a real gatekeeper. Real gatekeeper IDs are assigned
@@ -2600,7 +2558,7 @@ class OverseerImpl implements AgentHooks {
   hydrateChatMessageForClient(msg: AiChatMessage): AiChatMessage {
     if (msg.type !== "message" || !msg.attachments?.length) return msg;
     let attachments = msg.attachments.map((a) => {
-      if (!isAllowedChatAttachmentImageMimeType(sanitizeChatAttachmentMimeType(a.mimeType))) {
+      if (!isAllowedChatAttachmentImageMimeType(a.mimeType)) {
         return a;
       }
       let content = this.storage.chatAttachmentContent.get(a.id);
@@ -2614,7 +2572,10 @@ class OverseerImpl implements AgentHooks {
   //
   // The send message request only contains staged attachment IDs. This fills in metadata from
   // upload records before the message is stored in chat history.
-  canonicalizeChatAttachmentRefs(attachments?: ChatAttachmentHandle[]): ChatAttachmentRef[] | undefined {
+  canonicalizeChatAttachmentRefs(
+    attachments?: ChatAttachmentHandle[],
+    provider?: AiModelConfig["provider"],
+  ): ChatAttachmentRef[] | undefined {
     if (!attachments || attachments.length === 0) return undefined;
     if (attachments.length > MAX_CHAT_ATTACHMENTS_PER_MESSAGE) {
       throw new Error(`You can attach up to ${MAX_CHAT_ATTACHMENTS_PER_MESSAGE} attachments.`);
@@ -2631,9 +2592,7 @@ class OverseerImpl implements AgentHooks {
       if (!content || content.state.type !== "staged") {
         throw new Error("Chat attachment not found.");
       }
-      if (content.data.byteLength > MAX_CHAT_ATTACHMENT_BYTES) {
-        throw new Error("Chat attachment is too large.");
-      }
+      assertChatAttachmentSupportedByProvider(provider, content.state.mimeType, content.data.byteLength);
       total += content.data.byteLength;
       result.push({
         id,
@@ -3171,7 +3130,8 @@ class OverseerImpl implements AgentHooks {
     if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
-    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
+        attachments, userMeta.aiModel?.config.provider);
     let prepared = await this.#prepareChatMessage(
         initialMessage, (canonicalAttachments?.length ?? 0) > 0);
 
@@ -3247,7 +3207,8 @@ class OverseerImpl implements AgentHooks {
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
-    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
+    let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
+        attachments, userMeta.aiModel?.config.provider);
     this.assertChatNotActive(chatId);
     using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
     let prepared = await this.#prepareChatMessage(
@@ -7413,8 +7374,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.listSlashCommands();
   }
 
-  async uploadChatAttachment(attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> {
-    attachment = validateChatAttachmentUpload(attachment);
+  async uploadChatAttachment(
+    attachment: ChatAttachmentUpload,
+    modelId: string | null,
+  ): Promise<ChatAttachmentHandle> {
+    let provider: AiModelConfig["provider"] | undefined;
+    if (modelId !== null) {
+      provider = (await this.clientUser.getChatContext(modelId)).aiModel?.config.provider;
+    }
+    attachment = validateChatAttachmentUpload(
+      attachment,
+      provider,
+    );
 
     this.impl.sweepStagedChatAttachments();
 
@@ -8323,7 +8294,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
                         _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> {
     this.#deny();
   }
-  async uploadChatAttachment(_attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> { this.#deny(); }
+  async uploadChatAttachment(
+    _attachment: ChatAttachmentUpload,
+    _modelId: string | null,
+  ): Promise<ChatAttachmentHandle> { this.#deny(); }
   async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
   async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
   async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
