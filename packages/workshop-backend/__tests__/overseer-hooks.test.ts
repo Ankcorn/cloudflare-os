@@ -7,7 +7,7 @@ vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
 
 function makeOverseer(
     getConfig: () => Promise<string | null>,
-    hook: { enabled: boolean; vendorId?: string; callback?: object } =
+    hook: { enabled: boolean; vendorId?: string; callback?: object } | null =
         { enabled: true, vendorId: "email" },
     legacyVendorId?: string,
 ): OverseerDurableObject {
@@ -16,7 +16,7 @@ function makeOverseer(
     env: { BLUEPRINTS: { get: getConfig } },
     impl: {
       storage: {
-        boundHooks: { get: () => ({ ...hook, gatekeeperId: 1 }) },
+        boundHooks: { get: () => hook && ({ ...hook, gatekeeperId: 1 }) },
         gatekeepers: {
           get: () => legacyVendorId && {
             creationSpec: {
@@ -87,6 +87,13 @@ describe("OverseerDurableObject.startHook", () => {
 
     await expect(overseer.startHook(1)).rejects.toThrow("Hook has been deleted or disabled.");
   });
+
+  it("rejects delivery when the hook was deleted", async () => {
+    let overseer = makeOverseer(
+        async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG), null);
+
+    await expect(overseer.startHook(1)).rejects.toThrow("Hook has been deleted or disabled.");
+  });
 });
 
 async function makeTargetOverseer(gadgetId?: number) {
@@ -147,4 +154,5 @@ describe("hook target", () => {
 
     expect(controllerEnable.mock.calls[0][1]).toEqual({workspaceId: "workspace-id"});
   });
+
 });

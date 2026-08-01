@@ -2,7 +2,6 @@ import { Link } from '@tanstack/react-router'
 import {
   Blueprint,
   BookOpen,
-  Clock,
   Compass,
   Hexagon,
   House,
@@ -135,12 +134,6 @@ export default function Sidebar({
               to="/outputs"
               label="Outputs"
               icon={<Stack size={14} weight="regular" />}
-              collapsed={collapsed}
-            />
-            <SidebarItem
-              to="/scheduled"
-              label="Scheduled"
-              icon={<Clock size={14} weight="regular" />}
               collapsed={collapsed}
             />
             {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
