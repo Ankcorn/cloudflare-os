@@ -1,43 +1,16 @@
-/* Floating overlay that appears above the textarea when cursor is in a URL */
+/* Floating panel that appears when the cursor is in a URL. Shares the shape of the activity
+ * popover: one surface, hairline border, floating shadow, and rows that pad themselves. */
 .capsuleOverlay {
   position: absolute;
-  bottom: calc(100% + 4px);
   left: 0;
+  /* Default offset, overridden with the measured line the URL sits on. Matches
+   * CAPSULE_OVERLAY_GAP. */
+  bottom: calc(100% + 8px);
   width: min(420px, 100%);
+  max-width: 100%;
   z-index: 1000;
-  background: var(--color-kumo-overlay);
+  overflow: hidden;
   border: 1px solid var(--color-kumo-line);
   border-radius: 8px;
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.1);
-  padding: 8px 8px 4px;
-  max-width: 100%;
-}
-
-.capsuleOverlayBelow {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  width: min(420px, 100%);
-  z-index: 1000;
-  background: var(--color-kumo-overlay);
-  border: 1px solid var(--color-kumo-line);
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  padding: 8px 8px 4px;
-  max-width: 100%;
-}
-
-.capsuleOverlayHeader {
-  font-size: 12px;
-  margin-bottom: 4px;
-  display: block;
-  padding: 0 8px;
-}
-
-[data-mode="dark"] .capsuleOverlay {
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.32);
-}
-
-[data-mode="dark"] .capsuleOverlayBelow {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
+  background: var(--color-kumo-base);
 }

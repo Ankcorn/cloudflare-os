@@ -5,6 +5,10 @@ import { RpcStub, RpcTarget } from 'capnweb'
 import { AuthenticatedApi, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
+import { GatekeeperIcon } from './components/GatekeeperIcon'
+import {
+  PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
+} from './components/pickerRows'
 
 export interface VendorOption {
   id: string
@@ -45,12 +49,29 @@ export interface ResourcePickerProps {
     vendorDescription: VendorDescription,
   ) => void
   onRefine?: (newUrl: string, placeholderStart: number, placeholderEnd: number) => void
+  // Fires once the vendors and the connected accounts are both known. Until then the list grows a
+  // row at a time, so a floating caller should stay hidden rather than resize under the pointer.
+  onReadyChange?: (ready: boolean) => void
   compact?: boolean
   style?: React.CSSProperties
   activeIndex?: number
   onItems?: (items: SelectableItem[]) => void
   activateRef?: MutableRefObject<((index: number) => void) | null>
 }
+
+type AccountEntry = {
+  description: AccountDescription
+  vendor: VendorDescription
+  supportedResources: SupportedResource[]
+  credentialsValid: boolean
+}
+
+// The picker mounts and unmounts as a URL is typed, and loads the same vendors and accounts every
+// time. The last snapshot lets a reopen render complete, with the fresh load correcting it in place.
+const sessionSnapshots = new WeakMap<RpcStub<AuthenticatedApi>, {
+  vendors: VendorOption[]
+  accounts: Map<number, AccountEntry>
+}>()
 
 function missingResourceGrants(account: AccountDescription, resource: SupportedResource): string[] {
   if (!resource.grantable) return []
@@ -61,7 +82,7 @@ function missingResourceGrants(account: AccountDescription, resource: SupportedR
 }
 
 export default function ResourcePicker({
-  authenticatedApi, searchText, onSelectAccount, onRefine, compact, style,
+  authenticatedApi, searchText, onSelectAccount, onRefine, onReadyChange, compact, style,
   activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
   const toasts = useKumoToastManager()
@@ -71,11 +92,13 @@ export default function ResourcePicker({
     return newUrl.replace(/\*$/, '')
   }, [searchText])
 
-  const [allAccounts, setAllAccounts] = useState<
-    Map<number, { description: AccountDescription, vendor: VendorDescription, supportedResources: SupportedResource[], credentialsValid: boolean }>
-  >(new Map())
-  const [allVendors, setAllVendors] = useState<VendorOption[]>([])
+  const snapshot = sessionSnapshots.get(authenticatedApi)
+  const [allAccounts, setAllAccounts] = useState<Map<number, AccountEntry>>(
+    () => snapshot?.accounts ?? new Map())
+  const [allVendors, setAllVendors] = useState<VendorOption[]>(() => snapshot?.vendors ?? [])
   const [vendorsLoading, setVendorsLoading] = useState(false)
+  // The subscription reports the accounts it already has before calling `ready()`.
+  const [accountsLoaded, setAccountsLoaded] = useState(snapshot !== undefined)
   const [connectingVendor, setConnectingVendor] = useState<string | null>(null)
   const [reconnectingAccount, setReconnectingAccount] = useState<number | null>(null)
   const [grantingAccount, setGrantingAccount] = useState<number | null>(null)
@@ -111,6 +134,7 @@ export default function ResourcePicker({
       }
 
       ready() {
+        setAccountsLoaded(true)
         const seen = seenAccountIdsRef.current
         seenAccountIdsRef.current = new Set()
         setAllAccounts(prev => {
@@ -134,6 +158,8 @@ export default function ResourcePicker({
         subscriptionRef.current = { stub }
       } catch (error) {
         console.error('Failed to subscribe to connected accounts:', error)
+        // Nothing more is coming, so show what we have rather than hiding forever.
+        setAccountsLoaded(true)
       }
     }
     subscribe()
@@ -149,7 +175,7 @@ export default function ResourcePicker({
   // Load all vendors on mount.
   useEffect(() => {
     const loadVendors = async () => {
-      setVendorsLoading(true)
+      setVendorsLoading(snapshot === undefined)
       try {
         const vendorList = await authenticatedApi.listGatekeeperVendors()
         const unavailable = vendorList.filter(v => v.unavailable)
@@ -328,9 +354,21 @@ export default function ResourcePicker({
     return items
   }, [matchedResources, allAccounts, lowerSearch, onRefine])
 
+  const ready = !vendorsLoading && accountsLoaded
+
+  // Nothing is selectable until the panel is showing a list, or a caller hiding it while it loads
+  // would still activate rows by keyboard.
   useEffect(() => {
-    onItems?.(selectableItems)
-  }, [selectableItems, onItems])
+    onItems?.(ready ? selectableItems : [])
+  }, [onItems, ready, selectableItems])
+
+  useEffect(() => {
+    onReadyChange?.(ready)
+  }, [onReadyChange, ready])
+
+  useEffect(() => {
+    if (ready) sessionSnapshots.set(authenticatedApi, {vendors: allVendors, accounts: allAccounts})
+  }, [allAccounts, allVendors, authenticatedApi, ready])
 
   // Expose an activate function so the parent can trigger selection by index.
   useEffect(() => {
@@ -428,22 +466,18 @@ export default function ResourcePicker({
 
   return (
     <div style={style}>
-      <div className="border border-kumo-line rounded-lg overflow-hidden overflow-y-auto" style={{ maxHeight }}>
-        {vendorsLoading ? (
-          <div className="text-center py-4">
-            <div className="inline-block w-4 h-4 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-          </div>
+      <div className="overflow-y-auto" style={{ maxHeight }}>
+        {!ready ? (
+          <p className={PICKER_EMPTY}>Loading connections…</p>
         ) : matchedResources.length === 0 ? (
-          <div className="px-4 py-3">
-            <span className="text-kumo-subtle text-sm">No matching resources.</span>
-          </div>
+          <p className={PICKER_EMPTY}>No matching resources.</p>
         ) : (() => {
           let itemIdx = 0
           return matchedResources.map(({ resource, vendor, classification, suffix, replaceSearch, accountsOnly }, i) => {
             // --- Prefix match: render as a single compact "refine" row ---
             if (classification === 'prefix' && onRefine && suffix) {
               const isActive = itemIdx === activeIndex
-              const currentIdx = itemIdx++
+              itemIdx++
               return (
                 <div
                   key={`${vendor.id}-${resource.urlPattern}`}
@@ -456,16 +490,15 @@ export default function ResourcePicker({
                       onRefine(newUrl, newUrl.length, newUrl.length)
                     }
                   }}
-                  className={`px-4 py-1.5 cursor-pointer flex items-center ${i > 0 ? 'border-t border-kumo-line' : ''} ${isActive ? 'bg-kumo-tint' : ''}`}
-                  onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
-                  onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
+                  className={`${PICKER_ROW} ${i > 0 ? 'border-t border-kumo-line' : ''} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
                 >
-                  <div className="flex-1 min-w-0">
-                    <span className="text-[13px] font-medium text-kumo-default">{resource.title}</span>
-                  </div>
-                  <span className="text-xs font-mono text-kumo-subtle flex-shrink-0">
+                  <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default">
+                    {resource.title}
+                  </span>
+                  <span className="flex-shrink-0 font-mono text-[11.5px] leading-4 text-kumo-inactive">
                     {resource.urlPattern.replace(/^https?:\/\//, '')}
                   </span>
+                  {isActive && <TabHint />}
                 </div>
               )
             }
@@ -491,16 +524,17 @@ export default function ResourcePicker({
 
             return (
               <div key={`${vendor.id}-${resource.urlPattern}`} className={i > 0 ? 'border-t border-kumo-line' : ''}>
-                {/* Resource header */}
-                <div className="px-4 py-2 bg-kumo-elevated">
-                  <span className="font-medium text-[13px] text-kumo-default">{resource.title}</span>
-                  <span className="text-xs text-kumo-subtle ml-1.5">{resource.description}</span>
+                <div className="flex items-baseline gap-2 px-3.5 pb-1 pt-2.5">
+                  <span className={`flex-shrink-0 ${PICKER_CAPTION}`}>{resource.title}</span>
+                  <span className="min-w-0 flex-1 truncate text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-subtle">
+                    {resource.description}
+                  </span>
                 </div>
 
                 {/* Existing account rows */}
                 {vendorAccounts.map(account => {
                   const isActive = itemIdx === activeIndex
-                  const currentIdx = itemIdx++
+                  itemIdx++
                   const isExpired = !account.credentialsValid
                   const isReconnecting = reconnectingAccount === account.id
                   const missingGrants = missingResourceGrants(account.description, resource)
@@ -518,39 +552,46 @@ export default function ResourcePicker({
                           onSelectAccount(account.id, vendor.id, resource, account.description, vendor.description)
                         }
                       }}
-                      className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''} ${
+                      className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''} ${
                         ((isExpired && !isReconnecting) || needsAccess || searchHasPlaceholders) ? 'opacity-70' : ''
                       }`}
                       style={{
                         cursor: searchHasPlaceholders ? 'default' : (isReconnecting || isGranting) ? 'wait' : 'pointer',
                       }}
-                      onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
-                      onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
                     >
-                      <div className="flex-1 min-w-0">
-                        <span className="text-[13px] text-kumo-default">
+                      <GatekeeperIcon
+                        vendorId={vendor.id}
+                        logoUrl={vendor.description.logo?.url}
+                        fallbackText={vendor.description.displayName}
+                        size={14}
+                        className="h-6 w-6 rounded-md"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default">
                           {account.description.uniqueName || account.description.displayName}
                         </span>
                         {hostname && hostname !== '*' && (
-                          <span className="text-xs text-kumo-subtle ml-1.5">
+                          <span className="block truncate text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
                             {hostname}
                           </span>
                         )}
-                      </div>
+                      </span>
                       {isReconnecting || isGranting ? (
-                        <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                        <div className="h-3 w-3 flex-shrink-0 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
                       ) : isExpired ? (
-                        <span className="flex items-center flex-shrink-0 gap-1">
+                        <span className="flex flex-shrink-0 items-center gap-1">
                           <Warning size={12} className="text-kumo-warning" />
-                          <span className="text-[11px] text-kumo-warning">Expired — click to re-authenticate</span>
+                          <span className="text-[11.5px] leading-4 text-kumo-warning">Expired — click to re-authenticate</span>
                         </span>
                       ) : needsAccess ? (
-                        <span className="flex items-center flex-shrink-0 gap-1">
+                        <span className="flex flex-shrink-0 items-center gap-1">
                           <Warning size={12} className="text-kumo-warning" />
-                          <span className="text-[11px] text-kumo-warning">Grant access</span>
+                          <span className="text-[11.5px] leading-4 text-kumo-warning">Grant access</span>
                         </span>
+                      ) : isActive && !searchHasPlaceholders ? (
+                        <TabHint />
                       ) : (
-                        <CaretRight size={10} className="text-kumo-inactive flex-shrink-0" />
+                        <CaretRight size={12} className="flex-shrink-0 text-kumo-inactive" />
                       )}
                     </div>
                   )
@@ -569,25 +610,26 @@ export default function ResourcePicker({
                 {(() => {
                   if (accountsOnly) return null
                   const isActive = itemIdx === activeIndex
-                  const currentIdx = itemIdx++
+                  itemIdx++
                   return (
                   <div
                     onClick={() => !connectingVendor && handleConnectNew(vendor.id, resource.grantable ? [resource.urlPattern] : undefined)}
-                    className={`pl-8 pr-4 py-1.5 flex items-center border-t border-kumo-fill ${isActive ? 'bg-kumo-tint' : ''}`}
+                    className={`${PICKER_ROW} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
                     style={{
                       cursor: connectingVendor === vendor.id ? 'wait' : 'pointer',
                     }}
-                    onMouseEnter={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = 'var(--color-kumo-elevated)' }}
-                    onMouseLeave={e => { if (currentIdx !== activeIndex) e.currentTarget.style.backgroundColor = '' }}
                   >
-                    {connectingVendor === vendor.id ? (
-                      <div className="w-3 h-3 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin mr-2" />
-                    ) : (
-                      <Plus size={11} className="mr-2 text-kumo-subtle" />
-                    )}
-                    <span className="text-xs text-kumo-subtle">
-                      {connectingVendor === vendor.id ? 'Opening...' : 'Connect new account'}
+                    <span className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-md border border-dashed border-kumo-line text-kumo-inactive">
+                      {connectingVendor === vendor.id ? (
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
+                      ) : (
+                        <Plus size={11} />
+                      )}
                     </span>
+                    <span className="flex-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+                      {connectingVendor === vendor.id ? 'Opening…' : 'Connect new account'}
+                    </span>
+                    {isActive && <TabHint />}
                   </div>
                   )
                 })()}

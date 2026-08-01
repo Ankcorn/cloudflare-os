@@ -154,50 +154,25 @@
   font-size: 0.85em;
 }
 
-/* ── Capsule input mirror ─────────────────────────────────────────────────── */
+/* ── Composer text ────────────────────────────────────────────────────────── */
+/* Stacks the textarea over the mirror that paints its text (see ComposerMirror.module.css). */
 .capsuleInputWrapper {
   position: relative;
   flex: 1;
 }
-.capsuleMirrorClip {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  overflow: hidden;
-  pointer-events: none;
-  z-index: 0;
-}
-.capsuleMirror {
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  pointer-events: none;
-  overflow: visible;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  box-sizing: border-box;
-  color: transparent;
-}
 
-.capsuleHighlight {
-  background-color: var(--color-selection-bg);
-  border: 1px solid var(--color-kumo-brand);
-  border-radius: 10px;
-  padding: 0 0.5px;
-  margin: 0 -3px;
-  color: transparent;
+/* ── Capsule in messages ──────────────────────────────────────────────────── */
+/* A capsule reads as a mention: the vendor's logo leading a brand-colored title. It links to the
+ * resource, taking its color and hover underline from `.markdownContent a`. */
+.capsuleMention {
+  color: var(--color-kumo-brand);
 }
-
-/* ── Capsule pill in messages ─────────────────────────────────────────────── */
-.capsulePill {
+/* Two classes to outrank `.markdownContent img`, which would otherwise reset the height. Height-only
+ * sizing keeps non-square logos in aspect. */
+.capsuleMention .capsuleMentionLogo {
   display: inline-block;
-  background-color: var(--color-kumo-tint);
-  border: 1px solid color-mix(in srgb, var(--color-kumo-brand) 24%, var(--color-kumo-line));
-  border-radius: 10px;
-  padding: 1px 8px;
-  margin: 0 2px;
-  font-size: 12px;
-  color: var(--text-color-kumo-strong);
-  cursor: default;
-  vertical-align: baseline;
-  line-height: 1.4;
+  height: 0.9em;
+  width: auto;
+  margin-right: 0.35em;
+  vertical-align: -0.1em;
 }

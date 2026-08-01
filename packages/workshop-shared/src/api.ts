@@ -1885,6 +1885,11 @@ export type CapsuleSpecifier = {
   // to ask for it again every time the message is displayed.
   description: ResourceDescription;
 
+  // Vendor whose gatekeeper the resource came from, denormalized at insertion like `description`
+  // and trusted no more than it is, so the message can show the vendor's logo without starting the
+  // gatekeeper. Display metadata only, never authority.
+  vendorId?: string;
+
   // The name under which the pasted resource appears in the chat's env (`env.NAME` in
   // executeCode). Stamped onto the persisted message at the turn-start naming chokepoint; absent
   // until then. Messages from before named chat bindings existed are stamped lazily the same
