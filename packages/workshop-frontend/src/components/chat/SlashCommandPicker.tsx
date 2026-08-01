@@ -12,7 +12,7 @@ import {
   exactSlashCommandMatches, filterSlashCommandCatalog, parseSlashCommandInput,
   slashCommandTokenKey, type ParsedSlashCommandInput,
 } from "./slash-command-input";
-import { loadSlashCommandCatalog } from "./slash-command-catalog";
+import { loadSlashCommandCatalog, slashCommandKey } from "./slash-command-catalog";
 
 type SlashCommandPopupLayout = {
   left: number;
@@ -55,6 +55,7 @@ export function useSlashCommandPicker({
   anchorRef,
   getOverseer,
   onSelect,
+  chatExists,
 }: {
   inputValue: string;
   cursorPosition: number;
@@ -63,6 +64,10 @@ export function useSlashCommandPicker({
   anchorRef: RefObject<HTMLElement | null>;
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
   onSelect: (choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => void;
+
+  // Whether the composer is attached to an existing chat. A built-in command acts on the chat it is
+  // sent to, so starting a new one with it would leave an empty thread and do nothing.
+  chatExists: boolean;
 }) {
   const [choices, setChoices] = useState<SlashCommandChoice[]>([]);
   const [choicesQuery, setChoicesQuery] = useState<string | null>(null);
@@ -78,6 +83,12 @@ export function useSlashCommandPicker({
   const popupRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
+  // A built-in command acts on the chat it is sent to, so a new-chat composer hides it rather than
+  // starting an empty thread that does nothing.
+  const offerable = useCallback((catalog: SlashCommandChoice[]) =>
+      chatExists ? catalog : catalog.filter(choice => choice.selection.builtin !== true),
+    [chatExists]);
+
   const parsed = selectedCommand || disabled
     ? null
     : parseSlashCommandInput(inputValue, cursorPosition);
@@ -88,7 +99,7 @@ export function useSlashCommandPicker({
   const query = parsed?.query ?? "";
   const selectable = choicesQuery === query && !loading && error === null;
   const exactMatches = parsed && selectable
-    ? exactSlashCommandMatches(catalogRef.current ?? choices, parsed)
+    ? exactSlashCommandMatches(offerable(catalogRef.current ?? choices), parsed)
     : [];
   const exactIndex = exactMatches.length === 1 ? choices.indexOf(exactMatches[0]) : -1;
   const requiresExplicitChoice = exactMatches.length > 1;
@@ -126,10 +137,9 @@ export function useSlashCommandPicker({
   }, [activeToken]);
 
   const resolveExact = useCallback(async (current: ParsedSlashCommandInput) => {
-    let catalog = await loadCatalog();
-    let matches = exactSlashCommandMatches(catalog, current);
+    let matches = exactSlashCommandMatches(offerable(await loadCatalog()), current);
     return matches.length === 1 ? matches[0] : null;
-  }, [loadCatalog]);
+  }, [loadCatalog, offerable]);
 
   useEffect(() => {
     if (!parsed) {
@@ -145,7 +155,7 @@ export function useSlashCommandPicker({
     loadCatalog()
       .then((catalog) => {
         if (cancelled) return;
-        setChoices(filterSlashCommandCatalog(catalog, query));
+        setChoices(filterSlashCommandCatalog(offerable(catalog), query));
         setChoicesQuery(query);
         setIndex(0);
         setLoading(false);
@@ -159,14 +169,14 @@ export function useSlashCommandPicker({
     return () => {
       cancelled = true;
     };
-  }, [loadCatalog, parsed !== null, query]);
+  }, [loadCatalog, offerable, parsed !== null, query]);
 
   useEffect(() => {
     if (!parsed || !selectable || selectedCommand ||
         inputValue.length <= parsed.tokenEnd) return;
-    let matches = exactSlashCommandMatches(catalogRef.current ?? [], parsed);
+    let matches = exactSlashCommandMatches(offerable(catalogRef.current ?? []), parsed);
     if (matches.length === 1) select(matches[0]);
-  }, [choices, inputValue, parsed, select, selectable, selectedCommand]);
+  }, [choices, inputValue, offerable, parsed, select, selectable, selectedCommand]);
 
   useEffect(() => {
     if (exactIndex >= 0) setIndex(exactIndex);
@@ -233,7 +243,7 @@ export function useSlashCommandPicker({
         ) : choices.length > 0 ? (
           choices.map((choice, optionIndex) => (
             <button
-              key={`${choice.selection.gatekeeperId}:${choice.selection.commandId}`}
+              key={slashCommandKey(choice.selection)}
               id={`${listboxId}-option-${optionIndex}`}
               data-index={optionIndex}
               type="button"

@@ -790,33 +790,43 @@ export type AiModelConfig = {
   apiUrl?: string;
 };
 
-// These well-known model identifiers are provided to make the UI simpler. The user can either
-// choose one of these or can choose a provider and then specify the model name manually.
-//
-// This map maps provider name -> model ID -> display name. When the user chooses one of these,
-// the model ID should be used both for `AiModelConfig.model` and `AiChatAuthorInfo.id`.
-export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, string>> = {
+// Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the
+// model's window, so every Cloudflare model reserves this much of it for the response.
+export const WORKERS_AI_OUTPUT_LIMIT = 32768;
+
+// Models offered in the picker. `contextWindow` is the maximum tokens one request may total.
+// `outputLimit`, when present, is both the requested response cap and the space reserved for it,
+// leaving the remainder as the prompt budget context compaction sizes against.
+export const SUGGESTED_MODELS: Record<
+  AiModelProvider,
+  Record<string, {name: string, contextWindow: number, outputLimit?: number}>
+> = {
   "cloudflare": {
-    "@cf/moonshotai/kimi-k2.7-code": "Kimi K2.7 Code (Workers AI)",
-    "@cf/zai-org/glm-5.2": "GLM 5.2 (Workers AI)",
+    "@cf/moonshotai/kimi-k2.7-code": {
+      name: "Kimi K2.7 Code (Workers AI)", contextWindow: 262144,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
+    "@cf/zai-org/glm-5.2": {
+      name: "GLM 5.2 (Workers AI)", contextWindow: 262144, outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
   },
   "anthropic": {
-    "claude-opus-4-8": "Claude Opus 4.8",
-    "claude-opus-4-7": "Claude Opus 4.7",
-    "claude-opus-4-6": "Claude Opus 4.6",
-    "claude-sonnet-5": "Claude Sonnet 5",
-    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "claude-opus-4-8": {name: "Claude Opus 4.8", contextWindow: 1000000},
+    "claude-opus-4-7": {name: "Claude Opus 4.7", contextWindow: 1000000},
+    "claude-opus-4-6": {name: "Claude Opus 4.6", contextWindow: 1000000},
+    "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
+    "claude-sonnet-4-6": {name: "Claude Sonnet 4.6", contextWindow: 1000000},
   },
   "openai": {
-    "gpt-5.6": "GPT 5.6",
-    "gpt-5.6-sol": "GPT 5.6 Sol",
-    "gpt-5.6-luna": "GPT 5.6 Luna",
-    "gpt-5.6-terra": "GPT 5.6 Terra",
-    "gpt-5.5": "GPT 5.5",
-    "gpt-5.4": "GPT 5.4",
+    "gpt-5.6": {name: "GPT 5.6", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.6-luna": {name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.6-terra": {name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.5": {name: "GPT 5.5", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.4": {name: "GPT 5.4", contextWindow: 1050000, outputLimit: 128000},
   },
   "google": {
-    "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
+    "gemini-3.1-pro-preview": {name: "Gemini 3.1 Pro", contextWindow: 1048576},
   },
   "ollama": {
   },
@@ -1200,7 +1210,8 @@ export interface Overseer extends RpcTarget {
   // chosen something else.
   listModels(): Promise<AiChatAuthorInfo[]>;
 
-  // Fetch messages in the chat history for the given chat thread.
+  // Fetch one page of messages in the chat history for the given chat thread. If `beforeSequence`
+  // is absent, fetch the current tail. Otherwise, fetch messages before that sequence.
   //
   // Note that if you plan to subscribe to updates, you should initiate the subscription first,
   // before fetching history. Otherwise, you could theoretically miss a message that is sent
@@ -1208,7 +1219,7 @@ export interface Overseer extends RpcTarget {
   //
   // In typical usage, the client subscribes to all chat activity upfront, but only fetches
   // histories if and when the user opens a specific.
-  getChatHistory(chatId: number): Promise<AiChatMessage[]>;
+  getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage>;
 
   // Fetch a single message from a chat thread.
   getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined>;
@@ -1439,11 +1450,37 @@ export type AiChatMetadata = {
   // If this was started from an agent spawner, the spawner's display name.
   spawnerName?: string;
 
-  // Total tokens in this conversation so far, if known.
+  // Tokens the model reported for this conversation's last step, if known. Cleared when compaction
+  // changes what the next prompt will contain, until a step measures it again.
   totalTokens?: number;
 
   // Total cost of this conversation so far, in dollars, if known.
   totalCost?: number;
+
+  // First sequence this chat still replays. Everything before it is covered by a compaction
+  // checkpoint; those messages remain in canonical history but no longer drive current-state reads.
+  compactedTo?: number;
+};
+
+// One page of a chat's history, bounded below by a compaction checkpoint. Compaction doesn't delete
+// messages, so a long thread is read one checkpoint-delimited page at a time.
+export type AiChatHistoryPage = {
+  // The page's messages, ascending by sequence.
+  messages: AiChatMessage[];
+
+  // The checkpoint bounding this page below, absent once the page reaches the thread's start.
+  compacted?: {
+    // First sequence in this page. Pass as `getChatHistory`'s `beforeSequence` for the page before.
+    to: number;
+
+    // Summary that replaces the messages before `to` in subsequent model prompts, exposed so the
+    // user can inspect the context kept across the boundary.
+    summary: string;
+
+    // Changes still proposed before `to`, merged into one update, so the client can show pending
+    // changes without loading the messages that recorded them.
+    proposedChanges?: Uint8Array;
+  };
 };
 
 export type AiChatAuthorInfo = {
@@ -1495,8 +1532,10 @@ export type AiChatMessageBody = {
   // Clients use this to group the two records for display.
   generatedBySlashCommandSequence?: number;
 } | {
-  // A slash command exactly as requested by the client. This record is retained for display but is
-  // not included in model context and does not itself trigger an agent turn.
+  // A slash command exactly as requested by the client, retained for display and never included in
+  // model context. A gatekeeper command does not itself start an agent turn -- the prompt it expands
+  // to arrives as a separate `message`. A built-in command is handled by the Workshop, and this
+  // record is what drives the turn it runs.
   type: "slashCommand";
   request: SlashCommandRequest;
 
@@ -1907,11 +1946,14 @@ export type CapsuleSpecifier = {
   bindingName?: string;
 };
 
-// Identifies a specific slash command: the attached Gatekeeper plus that provider's opaque
-// command ID.
+// Identifies a Gatekeeper slash command or the built-in `/compact` command.
 export type SlashCommandId = {
   gatekeeperId: WorkpieceId;
   commandId: string;
+  builtin?: never;
+} | {
+  builtin: true;
+  commandId: "compact";
 };
 
 // A slash command invocation parsed by the client.
@@ -1934,7 +1976,8 @@ export type SlashCommandChoice = {
   // Short description shown in the picker.
   description: string;
 
-  // Title of the Gatekeeper that offered this command.
+  // Name of the command's provider: the offering Gatekeeper's title, or the Workshop itself for a
+  // built-in command.
   providerLabel: string;
 
   // Optional resource label used when multiple commands share a name.
@@ -1949,6 +1992,17 @@ export type SlashCommandChoice = {
 // corresponding durable `message()` and/or `changes` message arrives, or when the agent stops
 // running (`activeAgent` becomes unset in the chat metadata).
 export type AiChatStreamEvent = {
+  // The turn is summarizing older context before it can continue, or before `/compact` ends.
+  type: "compacting";
+} | {
+  // The compaction attempt ended, whether it compacted, failed, was cancelled, or found nothing to
+  // do.
+  type: "compacted";
+
+  // Set when the attempt made no checkpoint because nothing precedes the newest message to
+  // summarize. Only `/compact` reports this, since an explicit command is otherwise silent.
+  nothingToCompact?: boolean;
+} | {
   type: "textDelta";
   delta: string;
 } | {

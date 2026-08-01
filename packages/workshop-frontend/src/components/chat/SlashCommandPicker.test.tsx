@@ -26,6 +26,13 @@ const choices: SlashCommandChoice[] = [{
   providerLabel: "Context",
 }];
 
+const compact: SlashCommandChoice = {
+  selection: {builtin: true, commandId: "compact"},
+  name: "compact",
+  description: "Summarize older context while preserving recent messages.",
+  providerLabel: "Workshop",
+};
+
 function pickerOverseer(result: SlashCommandChoice[]) {
   return {
     listSlashCommands: vi.fn<() => Promise<SlashCommandChoice[]>>(async () => result),
@@ -37,11 +44,13 @@ function Harness({
   cursorPosition = inputValue.length,
   getOverseer,
   onSelect,
+  chatExists = true,
 }: {
   inputValue: string;
   cursorPosition?: number;
   getOverseer: () => RpcStub<Overseer>;
   onSelect: (choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => void;
+  chatExists?: boolean;
 }) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const picker = useSlashCommandPicker({
@@ -52,6 +61,7 @@ function Harness({
     anchorRef,
     getOverseer,
     onSelect,
+    chatExists,
   });
   return <>
     <div ref={(element) => {
@@ -213,6 +223,40 @@ describe("SlashCommandPicker", () => {
     await act(async () => chooseSecond.click());
     expect(document.querySelector('[data-testid="active-command"]')?.textContent).toBe("debug");
     expect(document.querySelectorAll('[role="option"][aria-selected="true"]')).toHaveLength(1);
+  });
+
+  it("offers a built-in command only once the chat exists", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let getOverseer = () => pickerOverseer([compact, ...choices]);
+
+    await act(async () => root.render(
+      <Harness inputValue="/" getOverseer={getOverseer} onSelect={() => {}} chatExists={false} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 2);
+    expect([...document.querySelectorAll('[role="option"]')].map(o => o.textContent))
+        .not.toContain(expect.stringContaining("compact"));
+
+    await act(async () => root.render(
+      <Harness inputValue="/" getOverseer={getOverseer} onSelect={() => {}} chatExists={true} />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 3);
+  });
+
+  // An exact `/compact` must not resolve either, or the filtered command would still be sent.
+  it("does not resolve a built-in command typed in full without a chat", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let onSelect = vi.fn<(choice: SlashCommandChoice, tailStart: number) => void>();
+
+    await act(async () => root.render(
+      <Harness inputValue="/compact now" getOverseer={() => pickerOverseer([compact])}
+               onSelect={onSelect} chatExists={false} />,
+    ));
+    await act(async () => { await Promise.resolve(); });
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
 });

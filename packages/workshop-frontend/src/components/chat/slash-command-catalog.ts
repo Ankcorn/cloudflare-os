@@ -24,8 +24,10 @@ export function loadSlashCommandCatalog(source: OverseerSource): Promise<SlashCo
   return load;
 }
 
-function idKey(id: SlashCommandId): string {
-  return `${id.gatekeeperId}:${id.commandId}`;
+// Identifies a command across providers. A built-in has no Gatekeeper, so it gets its own namespace
+// rather than colliding on an undefined one.
+export function slashCommandKey(id: SlashCommandId): string {
+  return `${id.builtin === true ? "builtin" : id.gatekeeperId}:${id.commandId}`;
 }
 
 // Looks up a command a message was sent with. Names aren't unique across providers, so this matches
@@ -36,7 +38,7 @@ export function useSlashCommandChoice(
   id: SlashCommandId | undefined,
 ): SlashCommandChoice | undefined {
   const [resolved, setResolved] = useState<{key: string; choice?: SlashCommandChoice}>();
-  const key = id && idKey(id);
+  const key = id && slashCommandKey(id);
 
   useEffect(() => {
     if (key === undefined) return;
@@ -44,7 +46,7 @@ export function useSlashCommandChoice(
     loadSlashCommandCatalog(source)
       .then((catalog) => {
         if (cancelled) return;
-        setResolved({key, choice: catalog.find((entry) => idKey(entry.selection) === key)});
+        setResolved({key, choice: catalog.find((entry) => slashCommandKey(entry.selection) === key)});
       })
       .catch(() => {
         // A description the user can only reach by hovering isn't worth reporting a failure over.

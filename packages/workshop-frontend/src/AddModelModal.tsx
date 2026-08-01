@@ -37,7 +37,7 @@ function decodeSelection(value: string): SelectionType {
   const colonIndex = value.indexOf(':')
   const provider = value.substring(0, colonIndex) as AiModelProvider
   const modelId = value.substring(colonIndex + 1)
-  const displayName = SUGGESTED_MODELS[provider][modelId]
+  const displayName = SUGGESTED_MODELS[provider][modelId].name
   return { type: 'suggested', provider, modelId, displayName }
 }
 
@@ -51,10 +51,10 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
 
     // In gateway mode, suggested models are already built-in, so don't list them.
     if (!gatewayMode) {
-      for (const [modelId, displayName] of Object.entries(SUGGESTED_MODELS[provider])) {
+      for (const [modelId, model] of Object.entries(SUGGESTED_MODELS[provider])) {
         options.push({
           value: encodeSelection(provider, modelId),
-          label: displayName,
+          label: model.name,
           provider,
         })
       }

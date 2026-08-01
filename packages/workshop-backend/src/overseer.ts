@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -11,8 +11,9 @@ import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
 import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs } from "./agent";
+import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type CompactionCheckpoint } from "./agent";
 import { readAdminConfig } from "./admin-config";
+import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
@@ -155,6 +156,11 @@ type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
   return record.resourceTitle || bindingName || "Connection";
+}
+
+// Storage key of a chat's compaction checkpoint. See the `chatCompactions` collection.
+function compactionKey(chatId: number, compactedTo: number): string {
+  return `${keyString(chatId)}.${keyString(compactedTo)}`;
 }
 
 // A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
@@ -769,6 +775,14 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 
       chatContext: collection<AiChatAgentContext>()({
         primaryKey: "chatId"
+      }),
+
+      // Compaction checkpoints, keyed by `chatId.compactedTo` so a chat's checkpoints sort by
+      // boundary. A chat keeps every checkpoint it has published, not just the newest: reverting
+      // across a boundary needs the one before it (see rollbackChatCompaction), and only that path
+      // and deleting the chat remove any.
+      chatCompactions: collection<CompactionCheckpoint>()({
+        primaryKey: (checkpoint) => compactionKey(checkpoint.chatId, checkpoint.compactedTo),
       }),
 
       // Tracks in-progress agent turns so they can be resumed after a server restart. See
@@ -2977,29 +2991,43 @@ class OverseerImpl implements AgentHooks {
   // they are neither merged nor reverted. An entry's `update` is absent for batches that record
   // only gadget creations/binding additions (which still count as proposed changes: they are
   // merged and reverted like code edits).
-  getProposedChanges(chatId: number, endBefore?: number): {sequence: number, update?: Uint8Array}[] {
-    let updates: {sequence: number, update?: Uint8Array}[] = [];
-    let listOptions = {
-      prefix: `${keyString(chatId)}.`,
-      endBefore: endBefore === undefined ? undefined :
-          `${keyString(chatId)}.${keyString(endBefore)}`
-    };
-    for (let msg of this.storage.chats.list(listOptions)) {
-      if (msg.type === "changes") {
-        updates.push({sequence: msg.sequence, update: msg.update});
-      } else if (msg.type === "merge") {
-        // Drop changes that were already merged.
-        while (updates.length > 0 && updates[0].sequence <= msg.mergeThrough) {
-          updates.shift();
-        }
-      } else if (msg.type === "revert") {
-        // Drop changes that were reverted.
-        while (updates.length > 0 && updates[updates.length - 1].sequence >= msg.revertFrom) {
-          updates.pop();
-        }
+  //
+  // The compacted prefix seeds one entry, addressed at the last sequence it covers, so a single
+  // merge through it accepts everything before the boundary. `endBefore` must stay at or above that
+  // boundary: below it the prefix has already folded away batches a full scan would still report.
+  getProposedChanges(chatId: number, endBefore?: number): ChangeBatch[] {
+    let checkpoint = this.getActiveChatCompaction(chatId);
+    let seed: ChangeBatch[] = [];
+    if (checkpoint) {
+      // A creation-only prefix has no update to carry, so the registry rows it left behind are what
+      // reveal it (see CompactionCheckpoint.proposedChanges).
+      if (checkpoint.proposedChanges || this.#hasPendingStructure(chatId, checkpoint.compactedTo)) {
+        seed.push({sequence: checkpoint.compactedTo - 1, update: checkpoint.proposedChanges});
       }
     }
-    return updates;
+    return foldProposedChanges(
+        this.storage.chats.list({
+          prefix: `${keyString(chatId)}.`,
+          start: checkpoint && compactionKey(chatId, checkpoint.compactedTo),
+          end: endBefore === undefined ? undefined : compactionKey(chatId, endBefore),
+        }),
+        seed).proposed;
+  }
+
+  // Whether the chat still owns a provisional gadget or binding edge recorded before `compactedTo`.
+  // Those carry no Y.Doc update, so this is how a creation-only compacted prefix stays visible as a
+  // proposed change.
+  #hasPendingStructure(chatId: number, compactedTo: number): boolean {
+    for (let gadget of this.storage.gadgets.list()) {
+      let stamped = (pending: {chatId: number, sequence?: number} | undefined) =>
+          pending?.chatId === chatId && pending.sequence !== undefined &&
+          pending.sequence < compactedTo;
+      if (stamped(gadget.pending)) return true;
+      for (let edge of Object.values(gadget.bindings)) {
+        if (stamped(edge.pending)) return true;
+      }
+    }
+    return false;
   }
 
   // Get the sequence number that should be assigned to the next message in the given chat thread.
@@ -3031,6 +3059,14 @@ class OverseerImpl implements AgentHooks {
       message: string | SlashCommandRequest,
       hasAttachments: boolean): Promise<PreparedChatMessage> {
     if (typeof message !== "string") {
+      // A built-in command is handled by the Workshop, not a Gatekeeper: there is nothing to invoke
+      // here. Committing the event is what makes the turn a compaction turn (see isCompactionTurn).
+      // The name is typed but arrives over RPC, and one we don't implement would commit an event and
+      // then start a turn with no prompt for the model to answer, so reject it here.
+      if (message.id.builtin === true) {
+        if (message.id.commandId !== "compact") throw new Error("Unknown built-in slash command.");
+        return {slashCommand: message};
+      }
       let record = this.storage.gatekeepers.get(message.id.gatekeeperId);
       if (!record?.hasSlashCommands) throw new Error("Slash command provider is not available.");
       using authorizer = new NativeRpcStub<ObservationAuthorizer>(
@@ -3226,7 +3262,10 @@ class OverseerImpl implements AgentHooks {
     let result = this.materializeChatDraft(chatId, meta);
     if (result) meta = result.meta;
     meta.lastActive = this.getChatTimestamp();
-    if (prepared.message !== undefined && userMeta.aiModel) {
+    // A built-in command runs a turn without a prompt: `/compact` compacts and ends.
+    let runsAgentTurn = prepared.message !== undefined ||
+        prepared.slashCommand?.id.builtin === true;
+    if (runsAgentTurn && userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
     this.ctx.storage.transactionSync(() => {
@@ -3246,7 +3285,7 @@ class OverseerImpl implements AgentHooks {
       }
     });
 
-    if (prepared.message !== undefined && userMeta.aiModel) {
+    if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
                       clientUser.id.toString(), false, needsAgentTurnKeepAlive);
@@ -3444,6 +3483,92 @@ class OverseerImpl implements AgentHooks {
     this.bindWorkpiece(gadget.id, name, target, chatId);
   }
 
+  // Returns the checkpoint named by `chatMeta.compactedTo`.
+  getActiveChatCompaction(chatId: number): CompactionCheckpoint | undefined {
+    let compactedTo = this.storage.chatMeta.get(chatId)?.compactedTo;
+    return compactedTo === undefined
+        ? undefined : this.storage.chatCompactions.get(compactionKey(chatId, compactedTo));
+  }
+
+  // Returns the newest checkpoint whose boundary is strictly below `sequence`, for paging history
+  // backwards without selecting the checkpoint that bounds the current page.
+  getChatCompactionBelow(chatId: number, sequence: number): CompactionCheckpoint | undefined {
+    // Boundaries are never negative, and keyString doesn't order negative numbers, so a negative
+    // bound would select records instead of none.
+    if (sequence <= 0) return undefined;
+    for (let checkpoint of this.storage.chatCompactions.list({
+      prefix: `${keyString(chatId)}.`,
+      end: compactionKey(chatId, sequence),
+      reverse: true,
+      limit: 1,
+    })) {
+      return checkpoint;
+    }
+    return undefined;
+  }
+
+  // Returns the newest checkpoint whose boundary is at or before `sequence`. Rollback uses the
+  // inclusive bound because a checkpoint at `revertFrom` covers only unaffected earlier messages.
+  #getChatCompactionAtOrBefore(
+      chatId: number, sequence: number): CompactionCheckpoint | undefined {
+    return this.getChatCompactionBelow(chatId, sequence + 1);
+  }
+
+  // Returns messages at and after the checkpoint boundary. Older messages stay in storage for
+  // history paging.
+  #listChatTail(chatId: number, checkpoint?: CompactionCheckpoint): AiChatMessage[] {
+    return [...this.storage.chats.list({
+      prefix: `${keyString(chatId)}.`,
+      start: checkpoint && compactionKey(chatId, checkpoint.compactedTo),
+    })];
+  }
+
+  // Publishes a checkpoint: stores it and points the chat at it. `runAgent` produces the checkpoint,
+  // for both automatic compaction and `/compact`, so there is one path here rather than two.
+  //
+  // Safe to call after the summary's model I/O even though that releases the input gate: the turn
+  // that produced this checkpoint is still the chat's active agent, and every operation that could
+  // invalidate it -- merge, revert, and the rollback a revert triggers -- refuses while a turn is
+  // active. So the checkpoint cannot be stale by the time it lands.
+  #commitChatCompaction(chatId: number, checkpoint: CompactionCheckpoint): void {
+    this.ctx.storage.transactionSync(() => {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta) return;  // Chat deleted while the summary was being written.
+      this.storage.chatCompactions.put(checkpoint);
+      meta.compactedTo = checkpoint.compactedTo;
+      // The prompt is about to shrink, so the recorded total no longer describes it. Without this
+      // the next turn would weigh a short prompt's usage against a long one and never re-trigger.
+      delete meta.totalTokens;
+      this.storage.chatMeta.put(meta);
+    });
+  }
+
+  // Points the chat at the newest checkpoint a revert leaves intact. A revert erases Yjs history from
+  // `revertFrom` onward, so any checkpoint that folded in those changes can never be replayed again
+  // and is deleted; earlier ones stay, which is what lets a revert cross a boundary at all.
+  rollbackChatCompaction(meta: AiChatMetadata, revertFrom: number): void {
+    // Buffer the keys first: deleting invalidates the list cursor.
+    let stale = Array.from(
+        this.storage.chatCompactions.list({
+          prefix: `${keyString(meta.id)}.`,
+          start: compactionKey(meta.id, revertFrom + 1),
+        }),
+        checkpoint => compactionKey(meta.id, checkpoint.compactedTo));
+    for (let key of stale) this.storage.chatCompactions.delete(key);
+
+    let previousBoundary = meta.compactedTo;
+    let checkpoint = this.#getChatCompactionAtOrBefore(meta.id, revertFrom);
+    if (checkpoint) {
+      meta.compactedTo = checkpoint.compactedTo;
+    } else {
+      delete meta.compactedTo;
+    }
+    if (meta.compactedTo !== previousBoundary) {
+      // Replay now starts further back, so the prompt is longer than the recorded total describes.
+      delete meta.totalTokens;
+    }
+  }
+
   // Start an agent turn for the given chat (fire-and-forget). Persists an `ActiveAgentRecord` so
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
   // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
@@ -3543,11 +3668,25 @@ class OverseerImpl implements AgentHooks {
       let hasBeenNudged = false;
       let outcome: "ok" | "callbacks_stalled" = "ok";
       while (true) {
-        let chatMessages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})];
+        let checkpoint = this.getActiveChatCompaction(chatId);
+        let chatMessages = this.#listChatTail(chatId, checkpoint);
         let callbackCountBefore = liveChat.activeAgentCallbacks.size;
 
-        await runAgent(this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
-                       initiator, callbackInitiated);
+        let compactionTurn = isCompactionTurn(chatMessages);
+        let newCheckpoint = await runAgent(
+            this, chosenModel, chatId, aiModel.profile, chatMessages, controller.signal,
+            initiator, callbackInitiated, {
+              checkpoint,
+              modelConfig: aiModel.config,
+              measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
+            });
+        if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
+        // `/compact` is done once it has compacted. An automatic compaction returned before
+        // prompting the model, so rerun the turn now that the history is shorter. Each compaction
+        // moves the boundary strictly forward and can never pass the newest turn start, so this
+        // reruns a bounded number of times.
+        if (compactionTurn) break;
+        if (newCheckpoint) continue;
 
         // If not callback-initiated, or all callbacks are resolved, we're done.
         if (!callbackInitiated || liveChat.activeAgentCallbacks.size === 0) {
@@ -4230,6 +4369,16 @@ class OverseerImpl implements AgentHooks {
     for (let [name, target] of Object.entries(seedMap)) {
       if (!nameByTarget.has(target)) nameByTarget.set(target, name);
     }
+    // Names allocated before the compaction boundary aren't in `chatMessages`, so take them from the
+    // checkpoint. Skipping them would hand a new resource a name the prefix already bound, and replay
+    // -- which seeds its map from the same checkpoint -- would keep resolving that name to the older
+    // target while rendering the new resource's link with it.
+    for (let [name, entry] of this.getActiveChatCompaction(chatId)?.chatBindings ?? []) {
+      taken.add(name);
+      if (entry.type === "workpiece" && !nameByTarget.has(entry.id)) {
+        nameByTarget.set(entry.id, name);
+      }
+    }
     let namingLog = chatMessages;
     let anythingToName = false;
     let callbackNameCounter = 0;
@@ -4414,7 +4563,12 @@ class OverseerImpl implements AgentHooks {
         providerLabel: record.resourceTitle || `Gatekeeper ${record.id}`,
         gatekeeper: this.getGatekeeperFacet(record.id),
       }));
-    return collectSlashCommands(sources);
+    return [{
+      selection: {builtin: true, commandId: "compact"},
+      name: "compact",
+      description: "Summarize older context while preserving recent messages.",
+      providerLabel: "Workshop",
+    }, ...await collectSlashCommands(sources)];
   }
 
   // =======================================================================================
@@ -7434,9 +7588,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
   }
 
-  async getChatHistory(chatId: number): Promise<AiChatMessage[]> {
-    let result = [...this.impl.storage.chats.list({prefix: `${keyString(chatId)}.`})];
-    return Promise.all(result.map((msg) => this.#getChatMessageForClient(msg)));
+  // Compaction boundaries delimit the pages: the newest page is the tail replay still scans, and each
+  // earlier page is the span one checkpoint summarized. A thread that was never compacted has a
+  // single page.
+  async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
+    let checkpoint = beforeSequence === undefined
+        ? this.impl.getActiveChatCompaction(chatId)
+        : this.impl.getChatCompactionBelow(chatId, beforeSequence);
+    let result = [...this.impl.storage.chats.list({
+      prefix: `${keyString(chatId)}.`,
+      start: checkpoint && compactionKey(chatId, checkpoint.compactedTo),
+      end: beforeSequence === undefined ? undefined : compactionKey(chatId, beforeSequence),
+    })];
+    return {
+      messages: await Promise.all(result.map((msg) => this.#getChatMessageForClient(msg))),
+      compacted: checkpoint && {
+        to: checkpoint.compactedTo,
+        summary: checkpoint.summary,
+        proposedChanges: checkpoint.proposedChanges,
+      },
+    };
   }
 
   async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
@@ -7800,6 +7971,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     });
 
     meta.lastActive = timestamp;
+    this.impl.rollbackChatCompaction(meta, revertFrom);
     this.impl.storage.chatMeta.put(meta);
     this.impl.recomputeHasProposedChanges(chatId, meta);
     this.impl.proposedChangesChanged(chatId);
@@ -7831,6 +8003,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     this.impl.storage.chatMeta.delete(chatId);
     this.impl.storage.chatContext.delete(chatId);
+    // Buffer the keys first: deleting invalidates the list cursor.
+    let checkpoints = Array.from(
+        this.impl.storage.chatCompactions.list({prefix: `${keyString(chatId)}.`}),
+        checkpoint => compactionKey(chatId, checkpoint.compactedTo));
+    for (let key of checkpoints) this.impl.storage.chatCompactions.delete(key);
     this.impl.deleteChatDraftUpdates(chatId);
 
     // Delete the chat's messages and the attachment content referenced by them. Attachment metadata
@@ -8303,7 +8480,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listChats(): Promise<AiChatMetadata[]> { this.#deny(); }
   async listModels(): Promise<AiChatAuthorInfo[]> { this.#deny(); }
-  async getChatHistory(_chatId: number): Promise<AiChatMessage[]> { this.#deny(); }
+  async getChatHistory(_chatId: number, _beforeSequence?: number): Promise<AiChatHistoryPage> {
+    this.#deny();
+  }
   async getChatMessage(_chatId: number, _sequence: number): Promise<AiChatMessage | undefined> { this.#deny(); }
   async listSlashCommands(): Promise<SlashCommandChoice[]> { this.#deny(); }
   async subscribeToChat(

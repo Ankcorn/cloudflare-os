@@ -31,8 +31,8 @@ export class AiGatewayConfig {
     let result: AiChatAuthorInfo[] = [];
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
       if (this.providers.has(provider)) {
-        for (let [id, name] of Object.entries(models)) {
-          result.push({ type: "agent", id, name });
+        for (let [id, model] of Object.entries(models)) {
+          result.push({ type: "agent", id, name: model.name });
         }
       }
     }
@@ -47,7 +47,7 @@ export class AiGatewayConfig {
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
       if (this.providers.has(provider) && modelId in models) {
         return {
-          profile: { type: "agent", id: modelId, name: models[modelId] },
+          profile: { type: "agent", id: modelId, name: models[modelId].name },
           config: {
             provider: provider as AiModelConfig["provider"],
             model: modelId,

@@ -480,7 +480,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (gwConfig) {
       for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
         if (gwConfig.providers.has(provider) && id in models) {
-          throw new Error(`Cannot delete built-in model "${models[id]}".`);
+          throw new Error(`Cannot delete built-in model "${models[id].name}".`);
         }
       }
     }
