@@ -15,7 +15,12 @@ function makeStorage(): SharingStorage {
       collaborators: collection<CollaboratorRecord>()({
         primaryKey: (record: CollaboratorRecord) => record.profile.id,
       }),
-      shareKeys: collection<ShareKeyRecord>()({ primaryKey: "id" }),
+      shareKeys: collection<ShareKeyRecord>()({
+        primaryKey: "id",
+        nonUniqueIndexes: {
+          byAlias(record: ShareKeyRecord) { return record.alias ?? null; }
+        }
+      }),
     },
   });
 }
@@ -43,9 +48,18 @@ function seedCollaborator(storage: SharingStorage, id: string, addedBy: Permissi
   storage.collaborators.put({ profile: profile(id), addedBy });
 }
 
-function seedKey(
-    storage: SharingStorage, id: string, createdBy: string, role: CollaboratorRole = "build") {
-  storage.shareKeys.put({ id, created: new Date(), createdBy, role });
+// Seed a share link. A link is stored as its first key, so `linkId` is that key's hash -- which is
+// what `shareKey` edges reference.
+function seedLink(
+    storage: SharingStorage, linkId: string, createdBy: string, role: CollaboratorRole = "build") {
+  storage.shareKeys.put({ id: linkId, created: new Date(), createdBy, role });
+}
+
+// Read back a link record, asserting that the id names a link rather than one of its aliases.
+function link(storage: SharingStorage, linkId: string) {
+  let record = storage.shareKeys.get(linkId)!;
+  if (record.alias !== undefined) throw new Error(`${linkId} is an alias, not a link`);
+  return record;
 }
 
 function ids(list: { profile: AiChatAuthorInfo }[]): string[] {
@@ -87,11 +101,11 @@ describe("authorization", () => {
     let { storage, mgr } = makeManager();
     expect(mgr.hasAnyShares()).toBe(false);
 
-    // An active share key counts as a share.
-    seedKey(storage, "k1", OWNER);
+    // An active share link counts as a share.
+    seedLink(storage, "k1", OWNER);
     expect(mgr.hasAnyShares()).toBe(true);
 
-    // A revoked key does not.
+    // A revoked link does not.
     storage.shareKeys.put({ id: "k1", created: new Date(), createdBy: OWNER, revoked: true });
     expect(mgr.hasAnyShares()).toBe(false);
 
@@ -108,7 +122,7 @@ describe("authorization", () => {
 describe("redeemShareKey", () => {
   it("creates a new collaborator (fetching profile) when the key is valid", async () => {
     let { storage, mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "build" });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
 
     let fetched = 0;
     await mgr.redeemShareKey({
@@ -124,7 +138,7 @@ describe("redeemShareKey", () => {
 
   it("stamps the redeemed edge with the key's role", async () => {
     let { storage, mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "use" });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
 
     await mgr.redeemShareKey({
       rawKey: key, profileId: "a",
@@ -138,7 +152,7 @@ describe("redeemShareKey", () => {
 
   it("adds a key edge to an existing collaborator without fetching the profile", async () => {
     let { storage, mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "build" });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
     seedCollaborator(storage, "a", [userEdge(OWNER)]);
 
     let fetched = 0;
@@ -153,7 +167,7 @@ describe("redeemShareKey", () => {
 
   it("does not duplicate an edge for the same key", async () => {
     let { storage, mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "build" });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
 
     await mgr.redeemShareKey({
       rawKey: key, profileId: "a",
@@ -269,12 +283,12 @@ describe("computeEffectiveRoles", () => {
     expect(roles.has("b")).toBe(false);
   });
 
-  it("cascades share-key revocation through dependent users", () => {
+  it("cascades share-link revocation through dependent users", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
+    seedLink(storage, "k1", OWNER);
     seedCollaborator(storage, "a", [keyEdge("k1")]);
     seedCollaborator(storage, "b", [userEdge("a")]);
-    let roles = mgr.computeEffectiveRoles({ revokedKeyId: "k1" });
+    let roles = mgr.computeEffectiveRoles({ revokedLinkId: "k1" });
     expect(roles.has("a")).toBe(false);
     expect(roles.has("b")).toBe(false);
   });
@@ -416,31 +430,31 @@ describe("removeCollaborator", () => {
   });
 });
 
-describe("revokeShareKey", () => {
-  it("soft-revokes the key and cuts off users supported only by it", () => {
+describe("revokeShareLink", () => {
+  it("soft-revokes the link and cuts off users supported only by it", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
+    seedLink(storage, "k1", OWNER);
     seedCollaborator(storage, "a", [keyEdge("k1")]);
     seedCollaborator(storage, "b", [userEdge("a")]);
 
-    let affected = mgr.revokeShareKey(owner, "k1", []);
+    let affected = mgr.revokeShareLink(owner, "k1", []);
     expect(ids(affected)).toEqual(["a", "b"]);
-    // The key record is retained but marked revoked.
-    expect(storage.shareKeys.get("k1")!.revoked).toBe(true);
+    // The link record is retained but marked revoked.
+    expect(link(storage, "k1").revoked).toBe(true);
     expect(mgr.getEffectiveRole("a")).toBeUndefined();
     expect(mgr.getEffectiveRole("b")).toBeUndefined();
   });
 
-  it("does not cascade-revoke keys created by cut-off users (lazy)", () => {
+  it("does not cascade-revoke links created by cut-off users (lazy)", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
+    seedLink(storage, "k1", OWNER);
     seedCollaborator(storage, "a", [keyEdge("k1")]);
-    seedKey(storage, "k2", "a");  // key created by a
+    seedLink(storage, "k2", "a");  // link created by a
     seedCollaborator(storage, "b", [keyEdge("k2")]);
 
-    mgr.revokeShareKey(owner, "k1", []);
+    mgr.revokeShareLink(owner, "k1", []);
     // k2 is left untouched, but b is unreachable because a (k2's creator) is unreachable.
-    expect(storage.shareKeys.get("k2")!.revoked).toBeFalsy();
+    expect(link(storage, "k2").revoked).toBeFalsy();
     expect(mgr.getEffectiveRole("b")).toBeUndefined();
 
     // Undo: re-add a, and b regains access through k2.
@@ -448,12 +462,12 @@ describe("revokeShareKey", () => {
     expect(mgr.getEffectiveRole("b")).toBe("build");
   });
 
-  it("a revoked key can no longer be redeemed", async () => {
+  it("a revoked link's keys can no longer be redeemed", async () => {
     let { storage, mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "build" });
-    let keyId = mgr.listShareKeyRecords()[0].id;
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
+    let linkId = mgr.listShareLinkRecords()[0].id;
 
-    mgr.revokeShareKey(owner, keyId, []);
+    mgr.revokeShareLink(owner, linkId, []);
 
     await mgr.redeemShareKey({
       rawKey: key, profileId: "a",
@@ -462,28 +476,128 @@ describe("revokeShareKey", () => {
     expect(storage.collaborators.get("a")).toBeUndefined();
   });
 
-  it("forbids a non-owner from revoking a key they didn't create", () => {
+  it("forbids a non-owner from revoking a link they didn't create", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
-    expect(() => mgr.revokeShareKey(collab("a"), "k1", [])).toThrow(/only revoke/);
+    seedLink(storage, "k1", OWNER);
+    expect(() => mgr.revokeShareLink(collab("a"), "k1", [])).toThrow(/only revoke/);
   });
 });
 
-describe("createShareKey", () => {
+describe("createShareLink", () => {
   it("persists the granted role", async () => {
     let { mgr } = makeManager();
-    let { key } = await mgr.createShareKey({ caller: owner, role: "use" });
+    let { key, linkId } = await mgr.createShareLink({ caller: owner, role: "use" });
     expect(key).toMatch(/^[0-9a-f]{32}$/);
-    let records = mgr.listShareKeyRecords();
+    let records = mgr.listShareLinkRecords();
     expect(records).toHaveLength(1);
     expect(records[0].role).toBe("use");
+    // The caller is told which link it created, so it never has to infer it from the list.
+    expect(linkId).toBe(records[0].id);
   });
 
-  it("forbids creating a key with a higher role than the caller's own", () => {
+  it("forbids creating a link with a higher role than the caller's own", () => {
     let { storage, mgr } = makeManager();
     seedCollaborator(storage, "a", [userEdge(OWNER, "use")]);
-    expect(() => mgr.createShareKey({ caller: collab("a"), role: "build" }))
+    expect(() => mgr.createShareLink({ caller: collab("a"), role: "build" }))
         .rejects.toThrow(/higher than your own/);
+  });
+});
+
+describe("newShareLinkKey", () => {
+  it("mints a new key for the same link that redeems to one grant", async () => {
+    let { storage, mgr } = makeManager();
+    let { key: key1 } = await mgr.createShareLink({ caller: owner, role: "use", note: "team" });
+    let linkId = mgr.listShareLinkRecords()[0].id;
+
+    let { key: key2 } = await mgr.newShareLinkKey({ caller: owner, linkId });
+    expect(key2).not.toBe(key1);
+
+    // Two secret records, one logical link: listing still shows a single entry, and the new
+    // secret inherits the link's note/role.
+    expect([...storage.shareKeys.list()]).toHaveLength(2);
+    let listed = mgr.listShareLinkRecords();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].role).toBe("use");
+    expect(listed[0].note).toBe("team");
+
+    // Both secrets redeem, and a user redeeming both gets a single (deduplicated) edge.
+    await mgr.redeemShareKey({ rawKey: key1, profileId: "a", fetchProfile: async () => profile("a") });
+    await mgr.redeemShareKey({ rawKey: key2, profileId: "a", fetchProfile: async () => profile("a") });
+    expect(storage.collaborators.get("a")!.addedBy).toHaveLength(1);
+    expect(mgr.getEffectiveRole("a")).toBe("use");
+  });
+
+  it("revoking a link revokes every key minted for it", async () => {
+    let { storage, mgr } = makeManager();
+    let { key: key1 } = await mgr.createShareLink({ caller: owner, role: "build" });
+    let linkId = mgr.listShareLinkRecords()[0].id;
+    let { key: key2 } = await mgr.newShareLinkKey({ caller: owner, linkId });
+
+    mgr.revokeShareLink(owner, linkId, []);
+    expect(link(storage, linkId).revoked).toBe(true);
+    // The copies are reclaimed; the link row stays, since edges point at it.
+    expect([...storage.shareKeys.list()].map(r => r.id)).toEqual([linkId]);
+
+    // Neither the original nor the copied secret can be redeemed anymore.
+    for (let rawKey of [key1, key2]) {
+      await mgr.redeemShareKey({ rawKey, profileId: "a", fetchProfile: async () => profile("a") });
+    }
+    expect(storage.collaborators.get("a")).toBeUndefined();
+  });
+
+  it("forbids a non-owner from copying a link they didn't create", () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "k1", OWNER);
+    seedCollaborator(storage, "a", [userEdge(OWNER, "build")]);
+    expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
+        .rejects.toThrow(/only copy/);
+  });
+
+  it("forbids copying a link that now grants a higher role than the caller's own", () => {
+    let { storage, mgr } = makeManager();
+    // "a" created a build link, then was downgraded to use.
+    seedLink(storage, "k1", "a", "build");
+    seedCollaborator(storage, "a", [userEdge(OWNER, "use")]);
+    expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
+        .rejects.toThrow(/higher than your own/);
+  });
+
+  it("cannot manage a link through the id of one of its copies", async () => {
+    let { storage, mgr } = makeManager();
+    await mgr.createShareLink({ caller: owner, role: "build" });
+    let linkId = mgr.listShareLinkRecords()[0].id;
+    await mgr.newShareLinkKey({ caller: owner, linkId });
+
+    // A copy has its own hash in the same table. Mistaking one for a link would make revocation a
+    // silent no-op: redemption resolves the copy through to the link, which would go untouched.
+    let aliasId = [...storage.shareKeys.list()].find(r => r.alias !== undefined)!.id;
+    expect(mgr.listShareLinkRecords().map(r => r.id)).toEqual([linkId]);
+    expect(mgr.newShareLinkKey({ caller: owner, linkId: aliasId })).rejects.toThrow(/not found/);
+    expect(() => mgr.updateShareLink(owner, aliasId, "x")).toThrow(/not found/);
+    expect(() => mgr.revokeShareLink(owner, aliasId, [])).toThrow(/not found/);
+  });
+
+});
+
+describe("pre-copy share keys", () => {
+  it("reads a key written before link copies existed as a link", async () => {
+    let { storage, mgr } = makeManager();
+    // A key written before copies existed already has the shape of a link, and its edges already
+    // point at the hash, so it reads back as a link with no migration.
+    storage.shareKeys.put({
+      id: "hash1", note: "team", created: new Date("2025-01-01"), createdBy: OWNER, role: "use",
+    });
+    seedCollaborator(storage, "a", [keyEdge("hash1", "use")]);
+
+    expect(mgr.listShareLinkRecords()).toMatchObject(
+        [{ id: "hash1", note: "team", createdBy: OWNER, role: "use" }]);
+    expect(mgr.getEffectiveRole("a")).toBe("use");
+
+    // Such a link can also be copied, and the copy grants the same access.
+    let { key } = await mgr.newShareLinkKey({ caller: owner, linkId: "hash1" });
+    await mgr.redeemShareKey(
+        { rawKey: key, profileId: "b", fetchProfile: async () => profile("b") });
+    expect(mgr.getEffectiveRole("b")).toBe("use");
   });
 });
 
@@ -506,26 +620,26 @@ describe("listCollaborators", () => {
   });
 });
 
-describe("listShareKeyRecords", () => {
-  it("omits revoked keys", () => {
+describe("listShareLinkRecords", () => {
+  it("omits revoked links", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
+    seedLink(storage, "k1", OWNER);
     storage.shareKeys.put({ id: "k2", created: new Date(), createdBy: OWNER, revoked: true });
-    expect(mgr.listShareKeyRecords().map(r => r.id)).toEqual(["k1"]);
+    expect(mgr.listShareLinkRecords().map(r => r.id)).toEqual(["k1"]);
   });
 });
 
-describe("updateShareKey", () => {
-  it("owner can edit any key's note", () => {
+describe("updateShareLink", () => {
+  it("owner can edit any link's note", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", "a");
-    mgr.updateShareKey(owner, "k1", "renamed");
-    expect(storage.shareKeys.get("k1")!.note).toBe("renamed");
+    seedLink(storage, "k1", "a");
+    mgr.updateShareLink(owner, "k1", "renamed");
+    expect(link(storage, "k1").note).toBe("renamed");
   });
 
-  it("non-owner cannot edit a key they didn't create", () => {
+  it("non-owner cannot edit a link they didn't create", () => {
     let { storage, mgr } = makeManager();
-    seedKey(storage, "k1", OWNER);
-    expect(() => mgr.updateShareKey(collab("a"), "k1", "x")).toThrow(/only edit/);
+    seedLink(storage, "k1", OWNER);
+    expect(() => mgr.updateShareLink(collab("a"), "k1", "x")).toThrow(/only edit/);
   });
 });

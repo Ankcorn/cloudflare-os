@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareKeyInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -832,8 +832,15 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: record => record.profile.id
       }),
 
+      // Share links and their copies; see ShareKeyRecord. The index groups a link's copies under
+      // the link's id, so a GC can enumerate or drop them together (`byAlias.delete(linkId)`).
       shareKeys: collection<ShareKeyRecord>()({
-        primaryKey: "id"
+        primaryKey: "id",
+        nonUniqueIndexes: {
+          byAlias(record: ShareKeyRecord) {
+            return record.alias ?? null;
+          }
+        }
       }),
 
       blueprints: collection<BlueprintGadgetRecord>()({
@@ -2914,7 +2921,7 @@ class OverseerImpl implements AgentHooks {
   //   leaving the removed user still authorized.
   // - We delay the abort briefly so the triggering RPC's response can reach the caller (typically
   //   the owner, who is also connected and will be disconnected) before their connection drops.
-  //   Without the delay their own removeCollaborator()/revokeShareKey() call might reject with a
+  //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
   //   connection error even though it succeeded.
   async scheduleRevocationRestart(): Promise<void> {
     await this.ctx.storage.sync();
@@ -8040,14 +8047,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return affected;
   }
 
-  async previewRevokeShareKey(keyId: string): Promise<AffectedCollaborator[]> {
+  async previewRevokeShareLink(linkId: string): Promise<AffectedCollaborator[]> {
     return (await this.impl.getSharingManager())
-        .previewRevokeShareKey(this.#sharingCaller(), keyId);
+        .previewRevokeShareLink(this.#sharingCaller(), linkId);
   }
 
-  async revokeShareKey(keyId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
+  async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
     let affected = (await this.impl.getSharingManager())
-        .revokeShareKey(this.#sharingCaller(), keyId, keepUsers);
+        .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
     await this.impl.tearDownLostObservers(affected);
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
@@ -8057,9 +8064,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return affected;
   }
 
-  // --- Share key management ---
+  // --- Share link management ---
 
-  async createShareKey(role: CollaboratorRole, note?: string): Promise<{ key: string }> {
+  async createShareLink(role: CollaboratorRole, note?: string)
+      : Promise<{ key: string; linkId: string }> {
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
@@ -8067,18 +8075,29 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     return (await this.impl.getSharingManager())
-        .createShareKey({ caller: this.#sharingCaller(), role, note });
+        .createShareLink({ caller: this.#sharingCaller(), role, note });
   }
 
-  async listShareKeys(): Promise<ShareKeyInfo[]> {
+  async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+    if (this.impl.storage.prohibitAllSharing.get()) {
+      throw new Error(
+          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "shared.");
+    }
+
+    return (await this.impl.getSharingManager())
+        .newShareLinkKey({ caller: this.#sharingCaller(), linkId });
+  }
+
+  async listShareLinks(): Promise<ShareLinkInfo[]> {
     let sharing = await this.impl.getSharingManager();
 
     // Collect all records synchronously to release the kv.list() iterator before any await
     // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
     // calls (e.g. listCollaborators) may start their own.
-    let records = sharing.listShareKeyRecords();
+    let records = sharing.listShareLinkRecords();
 
-    let result: ShareKeyInfo[] = [];
+    let result: ShareLinkInfo[] = [];
     // Cache profile lookups.
     let profileCache = new Map<string, AiChatAuthorInfo>();
 
@@ -8101,7 +8120,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         profileCache.set(record.createdBy, createdBy);
       }
       result.push({
-        keyId: record.id,
+        linkId: record.id,
         note: record.note,
         created: record.created,
         createdBy,
@@ -8111,9 +8130,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return result;
   }
 
-  async updateShareKey(keyId: string, note?: string): Promise<void> {
+  async updateShareLink(linkId: string, note?: string): Promise<void> {
     (await this.impl.getSharingManager())
-        .updateShareKey(this.#sharingCaller(), keyId, note);
+        .updateShareLink(this.#sharingCaller(), linkId, note);
   }
 }
 
@@ -8335,15 +8354,17 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async previewRemoveCollaborator(_profileId: string): Promise<AffectedCollaborator[]> {
     this.#deny();
   }
-  async createShareKey(_role: CollaboratorRole, _note?: string): Promise<{ key: string }> {
+  async createShareLink(_role: CollaboratorRole, _note?: string)
+      : Promise<{ key: string; linkId: string }> {
     this.#deny();
   }
-  async listShareKeys(): Promise<ShareKeyInfo[]> { this.#deny(); }
-  async updateShareKey(_keyId: string, _note?: string): Promise<void> { this.#deny(); }
-  async revokeShareKey(_keyId: string, _keepUsers: string[]): Promise<AffectedCollaborator[]> {
+  async newShareLinkKey(_linkId: string): Promise<{ key: string }> { this.#deny(); }
+  async listShareLinks(): Promise<ShareLinkInfo[]> { this.#deny(); }
+  async updateShareLink(_linkId: string, _note?: string): Promise<void> { this.#deny(); }
+  async revokeShareLink(_linkId: string, _keepUsers: string[]): Promise<AffectedCollaborator[]> {
     this.#deny();
   }
-  async previewRevokeShareKey(_keyId: string): Promise<AffectedCollaborator[]> { this.#deny(); }
+  async previewRevokeShareLink(_linkId: string): Promise<AffectedCollaborator[]> { this.#deny(); }
 }
 
 // Capability representing one gadget workpiece, handed to "build"-role sessions via

@@ -1385,31 +1385,40 @@ export interface Overseer extends RpcTarget {
   // caller can present checkboxes for which to keep vs. remove.
   previewRemoveCollaborator(profileId: string): Promise<AffectedCollaborator[]>;
 
-  // --- Share key management ---
+  // --- Share link management ---
+  //
+  // A share *link* may back several keys: `createShareLink` mints the first and `newShareLinkKey`
+  // mints more on demand. Renaming, revoking, and grants apply to the link.
 
-  // Create a share key. The server generates a random 128-bit key, stores its HMAC-SHA-256
-  // hash, and returns the raw key (hex-encoded). The caller constructs a URL from it. The
-  // raw key is never stored server-side. `role` is the access level granted to anyone who
-  // redeems the key; the caller may not grant a role higher than their own effective role.
-  createShareKey(role: CollaboratorRole, note?: string): Promise<{ key: string }>;
+  // Create a share link. The server generates a random 128-bit key, stores its HMAC-SHA-256
+  // hash, and returns the raw key (hex-encoded) along with the id of the link it created. The
+  // caller constructs a URL from the key. The raw key is never stored server-side. `role` is the
+  // access level granted to anyone who redeems the link; the caller may not grant a role higher
+  // than their own effective role.
+  createShareLink(role: CollaboratorRole, note?: string)
+      : Promise<{ key: string; linkId: string }>;
 
-  // List active share keys (for management UI).
-  listShareKeys(): Promise<ShareKeyInfo[]>;
+  // Mint a fresh secret for an existing link so the user can copy a new URL without creating a
+  // whole new link. The old secrets remain valid, and revoking the link revokes them all together.
+  newShareLinkKey(linkId: string): Promise<{ key: string }>;
 
-  // Update share key management metadata. The raw share key is not available after creation;
+  // List active share links (for management UI).
+  listShareLinks(): Promise<ShareLinkInfo[]>;
+
+  // Update a share link's management metadata. The raw secrets are not available after creation;
   // this only edits the stored note used by the management UI.
-  updateShareKey(keyId: string, note?: string): Promise<void>;
+  updateShareLink(linkId: string, note?: string): Promise<void>;
 
-  // Revoke a share key by its ID (the HMAC hash). Users who gained access through this key may be
-  // transitively removed or downgraded. `keepUsers` lists profile.ids of users who should be
-  // retained at their prior role with fresh edges from the caller. Returns the list of users
-  // whose access actually changed (removed or downgraded).
-  revokeShareKey(keyId: string, keepUsers: string[]): Promise<AffectedCollaborator[]>;
+  // Revoke a share link by its `linkId`, which revokes every secret ever minted for it. Users who
+  // gained access through the link may be transitively removed or downgraded. `keepUsers` lists
+  // profile.ids of users who should be retained at their prior role with fresh edges from the
+  // caller. Returns the list of users whose access actually changed (removed or downgraded).
+  revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]>;
 
-  // Preview what would happen if a share key were revoked. Returns the list of users whose access
+  // Preview what would happen if a share link were revoked. Returns the list of users whose access
   // would change (lose access or be downgraded to a lower role) as a consequence, so the caller
   // can present checkboxes for which to keep vs. remove.
-  previewRevokeShareKey(keyId: string): Promise<AffectedCollaborator[]>;
+  previewRevokeShareLink(linkId: string): Promise<AffectedCollaborator[]>;
 }
 
 export type AiChatMetadata = {
@@ -2471,7 +2480,10 @@ export type PermissionEdge = {
 } | {
   // Gained by redeeming a share key.
   type: "shareKey";
-  keyId: string;   // HMAC-SHA-256 hex of the raw key
+
+  // The id of the share link that was redeemed (the hash of its first key). Every key of the link
+  // resolves to this id, so redeeming any of them yields this one edge.
+  keyId: string;
 });
 
 // Information about a single collaborator, returned by list/add operations.
@@ -2498,14 +2510,15 @@ export type AffectedCollaborator = {
   newRole: CollaboratorRole | null;
 };
 
-// Information about a share key, for the management UI.
-export type ShareKeyInfo = {
-  keyId: string;
+// Information about a share link, for the management UI. Each link may have one or more keys.
+// When users "copy" an existing link, they are getting a new key.
+export type ShareLinkInfo = {
+  linkId: string;
   note?: string;
   created: Date;
   createdBy: AiChatAuthorInfo;
 
-  // The role granted to anyone who redeems this key. Absent implies "build" for keys created
+  // The role granted to anyone who redeems this link. Absent implies "build" for links created
   // before roles were introduced.
   role?: CollaboratorRole;
 };
