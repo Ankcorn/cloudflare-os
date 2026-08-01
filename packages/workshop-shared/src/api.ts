@@ -97,9 +97,16 @@ export interface PublicApi extends RpcTarget {
   //
   // See login() (above) for an explanation of the password hashing algorithm.
   //
+  // When the deployment has a setup token configured (SETUP_TOKEN), usernames listed in `ADMINS`
+  // are reserved: creating one of them requires passing the matching `setupToken` (delivered to
+  // the deployment's creator via the deploy wizard's setup link), otherwise the call throws. A
+  // valid token also permits creating the admin account while signups are disabled. When no setup
+  // token is configured (e.g. self-hosted), `setupToken` is ignored and admin usernames are not
+  // reserved.
+  //
   // This API may be disabled when the server uses SSO for authentication.
-  createAccount(username: string, displayName: string, passwordHash: Uint8Array)
-      : Promise<string | null>;
+  createAccount(username: string, displayName: string, passwordHash: Uint8Array,
+      setupToken?: string): Promise<string | null>;
 
   // Fetch blueprint metadata by ID. Returns null if the blueprint doesn't exist. No
   // authentication required (knowing the ID is sufficient, since a blueprint is "just data").
@@ -728,6 +735,11 @@ export type ServerConfig = {
   // Deployment accent (brand) color as a hex string, or "" to use the default theme. The client
   // overrides the brand CSS variables with this (and derived shades) at runtime.
   accentColor: string;
+
+  // URL of the deploy wizard that created this instance, when it was created by one. Drives the
+  // "Add gatekeepers" calls-to-action shown when no gatekeepers are configured. Absent on
+  // self-hosted deployments.
+  deployUrl?: string;
 };
 
 // Usage + Cloudflare-connection status for the optional limits flow. Returned by

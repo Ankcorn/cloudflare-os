@@ -113,7 +113,8 @@ type CloudflareBilling = {
   creditsUpdatedAt?: number;
 };
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+// Constant-time byte comparison (aside from the length short-circuit) for comparing secrets.
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length != b.length) {
     return false;
   }

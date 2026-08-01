@@ -31,6 +31,7 @@ import { getVendorIconBackground } from './components/vendorColors'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import { invalidateAvatarCache } from './useAvatar'
 import { useTheme } from './ThemeContext'
+import { useServerConfig } from './ServerConfigContext'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,9 @@ export default function OnboardingWizard({
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
+  // Deploy wizard URL, when this instance was created by one — drives the "Add gatekeepers" CTA
+  // in the connections step's empty state.
+  const deployUrl = useServerConfig()?.deployUrl
 
   // Wizard state
   const [step, setStep] = useState(0) // 0 = avatar, 1 = model, 2 = connections
@@ -574,11 +578,29 @@ export default function OnboardingWizard({
                     <div className="w-6 h-6 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
                   </div>
                 ) : vendors.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-kumo-subtle">
-                      No services available
-                    </p>
-                  </div>
+                  deployUrl ? (
+                    <div className="text-center py-8">
+                      <p className="text-sm text-kumo-subtle mb-1">
+                        No services connected to this deployment yet
+                      </p>
+                      <p className="text-xs text-kumo-inactive mb-4">
+                        Add gatekeepers from the deploy wizard to make services available here.
+                      </p>
+                      <button
+                        onClick={() => window.open(deployUrl, '_blank', 'noopener,noreferrer')}
+                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-kumo-subtle border border-dashed border-kumo-line rounded-xl hover:border-kumo-fill hover:text-kumo-default hover:bg-kumo-tint transition-colors"
+                      >
+                        <Plus size={14} weight="bold" />
+                        Add gatekeepers
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-center py-8">
+                      <p className="text-sm text-kumo-subtle">
+                        No services available
+                      </p>
+                    </div>
+                  )
                 ) : (
                   <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
                     {sortedVendors.map((vendor) => {

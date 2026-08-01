@@ -9,6 +9,17 @@ declare global {
       // Deployment-wide admin usernames.
       ADMINS?: string[];
 
+      // Unguessable per-instance setup token baked in by the deploy service. When set, usernames
+      // listed in ADMINS are reserved: creating one via signup requires presenting this token
+      // (delivered to the deployment's creator via the deploy wizard's setup link). Never log or
+      // otherwise expose this value.
+      SETUP_TOKEN?: string;
+
+      // URL of the deploy wizard that created this instance. Exposed to the client via
+      // ServerConfig.deployUrl to drive "Add gatekeepers" calls-to-action. Absent on self-hosted
+      // deployments.
+      DEPLOY_URL?: string;
+
       // AI Gateway mode: when CF_AI_GATEWAY is set, all model requests are routed through
       // Cloudflare AI Gateway with server-managed keys. Users don't need to provide their own
       // API keys.

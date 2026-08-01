@@ -203,6 +203,9 @@ for (const gk of gatekeepers) {
   const OPTIONAL_FEATURE_VARS = [
     "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
     "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
+    // Deploy-service handoff — lets you test the setup link + "Add gatekeepers" CTAs locally:
+    //   SETUP_TOKEN=devtoken DEPLOY_URL=http://localhost:8787 node run-dev-server.js
+    "SETUP_TOKEN", "DEPLOY_URL",
     // Platform AI Gateway — makes the cross-provider model catalog available.
     "CF_AI_GATEWAY", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_ACCOUNT_ID",
     "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_WAI",

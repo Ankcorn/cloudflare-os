@@ -54,5 +54,6 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     banner: config.banner.text,
     bannerColor: config.banner.color,
     accentColor: config.accentColor,
+    deployUrl: env.DEPLOY_URL || undefined,
   };
 }

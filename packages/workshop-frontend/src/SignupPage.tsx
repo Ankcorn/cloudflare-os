@@ -11,25 +11,35 @@ import OAuthButtons from "./components/auth/OAuthButtons";
 
 interface SignupPageProps {
   rpcStub: RpcStub<PublicApi>;
+  // Username to prefill, from the deploy wizard's setup link. Locked (field disabled) when a
+  // setup token is also present, since the token only unlocks that specific username.
+  initialUsername?: string;
+  // One-time setup token from the setup link's URL fragment. Passed to createAccount() to claim
+  // a reserved admin username; also lets the form show while signups are closed.
+  setupToken?: string;
 }
 
-export default function SignupPage({ rpcStub }: SignupPageProps) {
+export default function SignupPage({ rpcStub, initialUsername, setupToken }: SignupPageProps) {
   const serverConfig = useServerConfig();
   const siteName = useSiteName();
   useDocumentTitle("Create account");
   const authVendors = serverConfig?.authVendors ?? [];
-  const signupsEnabled = serverConfig?.signupsEnabled ?? true;
+  // A setup token can create the admin account even while signups are closed, so treat signups
+  // as open for this visit (and suppress the signups-closed banner).
+  const signupsEnabled = (serverConfig?.signupsEnabled ?? true) || !!setupToken;
   // The password create-account form requires both password auth AND open signups.
   const passwordAuthEnabled = (serverConfig?.passwordAuthEnabled ?? true) && signupsEnabled;
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(initialUsername ?? "");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const usernameLocked = !!initialUsername && !!setupToken;
 
+  // Matches the server's normalizeUsername() so the form never accepts a name the server rejects.
   const usernameError =
-    username && !/^[a-z0-9_-]+$/i.test(username)
-      ? "Letters, numbers, underscores, and hyphens only"
+    username && !/^[a-z][a-z0-9_]*$/.test(username)
+      ? "Lowercase letters, numbers, and underscores, starting with a letter"
       : undefined;
 
   const passwordError =
@@ -63,6 +73,7 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
         username,
         username,
         passwordHash,
+        setupToken,
       );
       if (token) {
         localStorage.setItem("authToken", token);
@@ -123,10 +134,10 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
                 label="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                autoFocus
+                autoFocus={!usernameLocked}
                 autoComplete="username"
-                disabled={loading}
-                placeholder="your-username"
+                disabled={loading || usernameLocked}
+                placeholder="your_username"
                 error={usernameError}
               />
 
@@ -135,6 +146,7 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
                 label="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoFocus={usernameLocked}
                 autoComplete="new-password"
                 disabled={loading}
                 placeholder="••••••••"

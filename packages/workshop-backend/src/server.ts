@@ -5,6 +5,7 @@ import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, Ai
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
+import { checkAdminSetup, getAdminUsernames } from "./auth/setup-token.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
@@ -80,21 +81,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   #isAdmin(): boolean {
     let name = this.user.id.name;
-    let admins = this.env.ADMINS;
+    if (!name) return false;
 
-    if (!name || !admins) return false;
-
-    if (typeof admins === "string") {
-      // Admins should be a JSON binding of array type, but `.env` doesn't actually let you
-      // specify JSON bindings, so we also support a string that parses as JSON array.
-      admins = JSON.parse(admins);
-    }
-
-    if (!Array.isArray(admins)) {
-      throw new TypeError("ADMINS must be configured as an array of usernames.");
-    }
-
-    return admins.includes(name);
+    // Compare against the normalized list so a hand-configured entry like "Admin" still matches
+    // the (always-normalized) user id.
+    return getAdminUsernames(this.env).includes(name);
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -687,19 +678,28 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return `${username}:${token}`;
   }
 
-  async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
-      : Promise<string | null> {
+  async createAccount(username: string, displayName: string, passwordHash: Uint8Array,
+      setupToken?: string): Promise<string | null> {
     if (this.env.CF_ACCESS_AUD) {
       throw new Error("This deployment requires Cloudflare Access authentication.");
     }
     if (!isPasswordAuthEnabled(this.env)) {
       throw new Error("Password signup is disabled on this deployment. Use a sign-in option.");
     }
-    if (!(await readAdminConfig(this.env)).signupsEnabled) {
-      throw new Error("New signups are currently disabled on this deployment.");
-    }
 
     username = normalizeUsername(username);
+
+    // When a setup token is configured, admin usernames are reserved for whoever holds the token
+    // (the deployment's creator, via the deploy wizard's setup link). A valid token also allows
+    // creating the admin account while signups are disabled.
+    let { reservedAdmin, tokenOk } = checkAdminSetup(this.env, username, setupToken);
+    if (reservedAdmin && !tokenOk) {
+      throw new Error("This username is reserved for the deployment administrator. Use the " +
+          "setup link from your deployment's success page to claim it.");
+    }
+    if (!(reservedAdmin && tokenOk) && !(await readAdminConfig(this.env)).signupsEnabled) {
+      throw new Error("New signups are currently disabled on this deployment.");
+    }
 
     let id = this.users.idFromName(username);
     let user = this.users.get(id);

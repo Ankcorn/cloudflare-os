@@ -23,6 +23,7 @@ import {
 } from '@gadgets/workshop-shared/gatekeeper'
 import { ConnectedAccountsSubscriber, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { useServerConfig } from '../ServerConfigContext'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -442,6 +443,9 @@ function ConnectorsPage() {
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  // Deploy wizard URL, when this instance was created by one — drives the "Add gatekeepers" CTA
+  // in the empty state.
+  const deployUrl = useServerConfig()?.deployUrl
 
   const [search, setSearch] = useState('')
   const [view, setView] = useState<'grid' | 'list'>(() => {
@@ -862,6 +866,12 @@ function ConnectorsPage() {
                   : 'Gatekeepers will appear here as they become available in your workspace.'
               }
               icon={Plugs}
+              actionLabel={!search && deployUrl ? 'Add gatekeepers' : undefined}
+              onAction={
+                !search && deployUrl
+                  ? () => window.open(deployUrl, '_blank', 'noopener,noreferrer')
+                  : undefined
+              }
             />
           )}
 
