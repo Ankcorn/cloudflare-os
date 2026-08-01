@@ -47,6 +47,19 @@ function readConfiguratorModule(runtime) {
   return JSON.parse(match[1]);
 }
 
+function readRuntimeFunctions(runtime, ...names) {
+  const constants = [...runtime.matchAll(/^const [A-Z_]+ = .*;$/gm)].map(match => match[0]);
+  const definitions = names.map(name => {
+    const match = runtime.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
+    assert.ok(match, `generated runtime should define ${name}`);
+    return match[0];
+  });
+  // The generated runtime is trusted build output and production executes the same function.
+  // oxlint-disable-next-line no-new-func
+  return new Function(
+    `${constants.join("\n")}\n${definitions.join("\n")}\nreturn { ${names.join(", ")} };`)();
+}
+
 function originalPositionFor(sourceMap, line, column) {
   const mapping = [...ts.decodeMappings(sourceMap.mappings)]
     .findLast(candidate =>
@@ -130,6 +143,15 @@ describe("generated configurator error reporting", () => {
     assert.equal(exception.truncated, true);
   });
 
+  it("reports handled option-loading failures", async () => {
+    const runtime = await readRuntime(fixtureDir);
+
+    assert.match(runtime, /reportFrontendIssue\("configurator\.checkbox-list-load", error\)/);
+    assert.match(runtime, /reportFrontendIssue\("configurator\.autocomplete-load", error\)/);
+    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-resource-load", error\)/);
+    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-values-load", error\)/);
+  });
+
   it("disables reporting and removes source-map artifacts when reporting is disabled", async () => {
     const generatedDir = join(disabledFixtureDir, "src", "generated");
     const runtime = await readRuntime(disabledFixtureDir);
@@ -138,5 +160,66 @@ describe("generated configurator error reporting", () => {
     assert.doesNotMatch(runtime, /sourceURL=.*serialize-exception/);
     await assert.rejects(access(join(generatedDir, "test-ui.js")), { code: "ENOENT" });
     await assert.rejects(access(join(generatedDir, "test-ui.js.map")), { code: "ENOENT" });
+  });
+});
+
+describe("generated configurator option sanitizing", () => {
+  it("truncates an overflowing suggestion list but refuses an overflowing grant list", async () => {
+    const { sanitizeOptions } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "optionText", "sanitizeOptions");
+    const options = Array.from({ length: 201 }, (_, index) => ({
+      value: `tool-${index}`,
+      title: `Tool ${index}`,
+    }));
+
+    assert.equal(sanitizeOptions(options, "truncate").length, 200);
+    assert.throws(() => sanitizeOptions(options, "refuse"), /at most 200 options/i);
+  });
+
+  it("keeps every option when the list is within the limit", async () => {
+    const { sanitizeOptions } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "optionText", "sanitizeOptions");
+    const options = Array.from({ length: 200 }, (_, index) => ({
+      value: `tool-${index}`,
+      title: `Tool ${index}`,
+    }));
+
+    assert.equal(sanitizeOptions(options).length, options.length);
+  });
+
+  it("keeps stale selections visible so they can be cleared", async () => {
+    const { withUnavailableOptions } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "splitList", "withUnavailableOptions");
+    assert.deepEqual(withUnavailableOptions(
+      [{ value: "current", title: "Current" }], "current,removed"), [
+      { value: "current", title: "Current" },
+      { value: "removed", title: "removed (unavailable)" },
+    ]);
+  });
+
+  it("presents every option as selected when requested", async () => {
+    const { checkboxSelection } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "splitList", "checkboxSelection");
+    assert.deepEqual(
+        [...checkboxSelection([{ value: "read" }, { value: "write" }], null, true)],
+        ["read", "write"]);
+  });
+
+  it("only blocks failed checkbox lists that are enabled", async () => {
+    const { hasBlockingCheckboxFailure } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "hasBlockingCheckboxFailure");
+    assert.equal(hasBlockingCheckboxFailure({ tools: { status: "failed", disabled: true } }), false);
+    assert.equal(hasBlockingCheckboxFailure({ tools: { status: "failed", disabled: false } }), true);
+  });
+
+  it("prunes checkbox lists absent from the current render", async () => {
+    const { pruneCheckboxEntries } = readRuntimeFunctions(
+      await readRuntime(fixtureDir), "pruneCheckboxEntries");
+    const entries = {
+      "tools:old": { status: "failed", disabled: false },
+      "tools:new": { status: "ready", disabled: false },
+    };
+    pruneCheckboxEntries(entries, new Set(["tools:new"]));
+    assert.deepEqual(entries, { "tools:new": { status: "ready", disabled: false } });
   });
 });

@@ -165,6 +165,21 @@ const SHARED_GATEKEEPER_CREDS = {
   "gatekeeper-slack": { id: "SLACK_CLIENT_ID", secret: "SLACK_CLIENT_SECRET" },
 };
 
+// Deployment-configured vars a gatekeeper reads that its committed `wrangler.jsonc` deliberately
+// leaves unset, passed through from the shell or the root `.dev.vars`.
+//
+// Without this the only way to point the portal connector somewhere for local testing is to edit a
+// tracked file, and a URL committed there becomes the default for everyone who deploys this repo.
+// `.dev.vars` is gitignored, so it cannot leave the machine. Secrets travel the same way
+// `CLIENT_SECRET` already does, via SHARED_GATEKEEPER_CREDS above.
+const PASSTHROUGH_GATEKEEPER_VARS = {
+  "gatekeeper-mcp-portal": [
+    "MCP_PORTAL_URL", "MCP_PORTAL_NAME", "MCP_PORTAL_AUTH", "MCP_PORTAL_TOKEN",
+    "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_ALLOW_INSECURE",
+  ],
+  "gatekeeper-mcp": ["MCP_ALLOW_INSECURE"],
+};
+
 for (const gk of gatekeepers) {
   const srcPath = join(gk.dir, "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
@@ -175,6 +190,15 @@ for (const gk of gatekeepers) {
     config.vars = config.vars || {};
     if (config.vars.CLIENT_ID === undefined) config.vars.CLIENT_ID = process.env[shared.id];
     if (config.vars.CLIENT_SECRET === undefined) config.vars.CLIENT_SECRET = process.env[shared.secret];
+  }
+
+  // The shell wins over the committed default, so `MCP_ALLOW_INSECURE=true` can override the
+  // `"false"` in wrangler.jsonc without editing it.
+  for (const name of PASSTHROUGH_GATEKEEPER_VARS[gk.name] ?? []) {
+    if (process.env[name] !== undefined) {
+      config.vars = config.vars || {};
+      config.vars[name] = process.env[name];
+    }
   }
 
   const outPath = join(gk.dir, "wrangler.dev.jsonc");

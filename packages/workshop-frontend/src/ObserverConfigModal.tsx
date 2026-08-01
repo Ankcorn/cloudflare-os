@@ -257,7 +257,12 @@ export default function ObserverConfigModal({
               return (
                 <div key={need.gatekeeperId} className="border border-kumo-line rounded-lg p-4">
                   <div className={`flex items-center gap-3${matching.length === 0 && !need.failure ? '' : ' mb-3'}`}>
-                    <Avatar src={vendor?.logo?.url} size={32} fallback={<Plus size={16} />} />
+                    <Avatar
+                      src={vendor?.logo?.url}
+                      background={vendor?.color}
+                      size={32}
+                      fallback={<Plus size={16} />}
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="text-[14px] font-medium text-kumo-default truncate">
                         {need.resourceTitle}

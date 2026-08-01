@@ -107,6 +107,38 @@ export function RadioCards(_props: {
   throw new Error("RadioCards is provided by the configurator UI sandbox runtime.");
 }
 
+/**
+ * Multi-select checkbox list provided by the sandbox runtime.
+ *
+ * Because {@link ConfiguratorUIValues} are flat strings, the selection is passed and returned as a
+ * comma-separated list of option values.
+ *
+ * **Option values must not contain a comma.** One that does cannot survive the round trip: it would
+ * be read back as two selected values, silently changing what was chosen. A configurator whose
+ * values may contain commas should encode them before passing them in, or use a different control.
+ */
+export function CheckboxList(_props: {
+  name: string;
+  /** Comma-separated list of selected option values. */
+  value?: string | null;
+  /**
+   * Loads every selectable option at once. Called once per `name`; the runtime caches the result
+   * and re-renders when it arrives, so the render function stays synchronous.
+   *
+   * Unlike {@link Autocomplete}, this takes no query: the list is expected to be small enough to
+   * load whole and filter in the browser. May return an already-in-flight promise, which is how a
+   * configurator prefetches the options before the list is first shown.
+   */
+  loadOptions(): Promise<ConfiguratorUIOption[]>;
+  /** Receives the new comma-separated selection, or null when nothing is selected. */
+  onChange(value: string | null): void;
+  /** Displays every loaded option as selected without changing `value`. */
+  allSelected?: boolean;
+  disabled?: boolean;
+}): unknown {
+  throw new Error("CheckboxList is provided by the configurator UI sandbox runtime.");
+}
+
 /** Async option selection component provided by the sandbox runtime. */
 export function Autocomplete(_props: {
   name: string;

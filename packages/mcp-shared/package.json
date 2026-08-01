@@ -1,0 +1,47 @@
+{
+  "name": "@gadgets/mcp-shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./account": "./src/account.ts",
+    "./action-store": "./src/action-store.ts",
+    "./base-types": "./src/base-types.ts",
+    "./catalog": "./src/catalog.ts",
+    "./client": "./src/client.ts",
+    "./connect-nonce": "./src/connect-nonce.ts",
+    "./connection": "./src/connection.ts",
+    "./endpoint": "./src/endpoint.ts",
+    "./fetch": "./src/fetch.ts",
+    "./facet": "./src/facet.ts",
+    "./html": "./src/html.ts",
+    "./log": "./src/log.ts",
+    "./oauth": "./src/oauth.ts",
+    "./oauth-callback": "./src/oauth-callback.ts",
+    "./portal": "./src/portal.ts",
+    "./schema-to-ts": "./src/schema-to-ts.ts",
+    "./scope": "./src/scope.ts",
+    "./session": "./src/session.ts",
+    "./session-methods": "./src/session-methods.ts",
+    "./sharing-policy": "./src/sharing-policy.ts",
+    "./tools": "./src/tools.ts",
+    "./types": "./src/types.d.ts",
+    "./util": "./src/util.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "types:check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260429.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -95,6 +95,7 @@ if (frontendReportingEnabled) {
   ));
 }
 
+const MAX_OPTIONS = 200;
 const root = document.getElementById("root");
 let host;
 let ui;
@@ -103,6 +104,16 @@ let values = {};
 let queryByName = {};
 let validationErrorByName = {};
 let touchedInputs = {};
+// Loaded once per list name and never invalidated, so a configurator that needs a fresh list must
+// vary the name (the gateway's tool list is keyed by the chosen server for exactly this reason).
+//
+// These outlive nothing: the host mints a new iframe whenever the account or resource pattern
+// changes, and the sandbox has no allow-same-origin, so each realm starts empty. That is what keeps
+// one account's options from appearing in another's picker -- if SandboxedResourceConfigurator ever
+// stops being remounted on a fresh key, these must be cleared explicitly instead.
+let checkboxOptionsByName = {};
+let checkboxFilterByName = {};
+let renderedCheckboxNames = new Set();
 let isRendering = false;
 let suppressAutocompleteFocusRefresh = false;
 let renderGeneration = 0;
@@ -111,6 +122,7 @@ let Section;
 let Field;
 let TextInput;
 let RadioCards;
+let CheckboxList;
 let Autocomplete;
 
 function childrenArray(children) {
@@ -165,9 +177,18 @@ function getFocusState() {
 }
 
 let lastPostedReady;
+function hasBlockingCheckboxFailure(entries) {
+  return Object.values(entries).some(entry => entry.status === "failed" && !entry.disabled);
+}
+
+function pruneCheckboxEntries(entries, renderedNames) {
+  for (const name of Object.keys(entries)) if (!renderedNames.has(name)) delete entries[name];
+}
+
 function postSelectionState() {
   if (typeof spec?.isReady !== "function") return;
-  const ready = Boolean(spec.isReady({ values }));
+  const ready = !hasBlockingCheckboxFailure(checkboxOptionsByName)
+    && Boolean(spec.isReady({ values }));
   if (ready === lastPostedReady) return;
   lastPostedReady = ready;
   host?.setSelectionReady(ready);
@@ -208,15 +229,41 @@ function optionText(value) {
   return typeof value === "string" ? value.slice(0, 240) : undefined;
 }
 
-function sanitizeOptions(options) {
+// The overflow policy is per control, and deliberately has no default. "truncate" suits a
+// suggestion list, where stopping early is an inconvenience. "refuse" suits a list that states what
+// a grant covers, where silently dropping entries would misstate it.
+function sanitizeOptions(options, overflow) {
   if (!Array.isArray(options)) return [];
-  return options.slice(0, 100).flatMap(option => {
+  if (options.length > MAX_OPTIONS) {
+    if (overflow === "refuse") {
+      throw new Error("Configurator controls support at most " + MAX_OPTIONS + " options.");
+    }
+    options = options.slice(0, MAX_OPTIONS);
+  }
+  return options.flatMap(option => {
     if (!option || typeof option !== "object") return [];
     const value = optionText(option.value);
     const title = optionText(option.title);
     if (!value || !title) return [];
     return [{ value, title, subtitle: optionText(option.subtitle), meta: optionText(option.meta) }];
   });
+}
+
+// Configurator values are flat strings, so multi-select state travels as a comma-separated list.
+function splitList(value) {
+  if (typeof value !== "string") return [];
+  return value.split(",").map(entry => entry.trim()).filter(Boolean);
+}
+
+function checkboxSelection(options, value, allSelected) {
+  return new Set(allSelected ? options.map(option => option.value) : splitList(value));
+}
+
+function withUnavailableOptions(options, value) {
+  const available = new Set(options.map(option => option.value));
+  return [...options, ...splitList(value)
+    .filter(selected => !available.has(selected))
+    .map(selected => ({ value: selected, title: selected + " (unavailable)" }))];
 }
 
 const components = {
@@ -274,6 +321,168 @@ const components = {
     }));
   },
 
+  CheckboxList({ name, value, loadOptions, onChange, allSelected, disabled }) {
+    renderedCheckboxNames.add(name);
+    // First render for this list: kick off the one-time load and re-render when it lands.
+    if (!checkboxOptionsByName[name]) {
+      checkboxOptionsByName[name] = { status: "loading", options: [] };
+      Promise.resolve()
+        .then(() => loadOptions())
+        .then(loaded => {
+          checkboxOptionsByName[name] = {
+            status: "ready", options: sanitizeOptions(loaded, "refuse"),
+          };
+        })
+        .catch(error => {
+          reportFrontendIssue("configurator.checkbox-list-load", error);
+          checkboxOptionsByName[name] = {
+            status: "failed",
+            options: [],
+            message: error?.message || String(error),
+          };
+        })
+        .then(() => {
+          if (!isRendering) render(null);
+        });
+    }
+
+    checkboxOptionsByName[name].disabled = Boolean(disabled);
+    const { status, options, message } = checkboxOptionsByName[name];
+    const selected = checkboxSelection(options, value, allSelected);
+
+    const notice = text => el("div", { className: "checkbox-list", "data-name": name }, [
+      el("p", { className: "checkbox-empty", text }),
+    ]);
+    if (status === "loading") return notice("Loading...");
+    if (status === "failed") return notice(message);
+    const shownOptions = withUnavailableOptions(options, value);
+    if (shownOptions.length === 0) return notice("This server published no tools.");
+
+    // The filter only earns its space once the list is long enough to scroll.
+    const filterName = \`\${name}__filter\`;
+    const showFilter = shownOptions.length > 6;
+    const filter = showFilter ? (checkboxFilterByName[name] || "") : "";
+    const needle = filter.trim().toLowerCase();
+    const matches = needle ? shownOptions.filter(option =>
+      option.value.toLowerCase().includes(needle)
+      || option.title.toLowerCase().includes(needle)
+      || (option.subtitle || "").toLowerCase().includes(needle)) : shownOptions;
+
+    const emit = next => {
+      const ordered = shownOptions.map(option => option.value).filter(option => next.has(option));
+      onChange(ordered.length > 0 ? ordered.join(",") : null);
+    };
+
+    const children = [];
+
+    if (showFilter) {
+      children.push(el("div", { className: "checkbox-filter" }, [
+        el("span", { className: "search-icon" }, [
+          el("svg", { viewBox: "0 0 16 16", width: "13", height: "13", "aria-hidden": "true" }, [
+            el("path", {
+              d: "M7 2.25a4.75 4.75 0 1 0 0 9.5 4.75 4.75 0 0 0 0-9.5ZM1.25 7a5.75 5.75 0 1 1 10.21 3.63l3.2 3.2a.59.59 0 0 1-.83.83l-3.2-3.2A5.75 5.75 0 0 1 1.25 7Z",
+              fill: "currentColor",
+            }),
+          ]),
+        ]),
+        el("input", {
+          className: "input",
+          "data-configurator-input": filterName,
+          value: filter,
+          placeholder: "Filter tools...",
+          disabled,
+          autocomplete: "off",
+          type: "search",
+          "aria-label": "Filter tools...",
+          oninput: event => {
+            checkboxFilterByName[name] = event.currentTarget.value;
+            render(getFocusState());
+          },
+        }),
+      ]));
+    }
+
+    // Toolbar: how many are chosen on the left, bulk actions on the right. Bulk actions apply to
+    // what is currently visible, so filtering then "select all" is a deliberate, narrow gesture.
+    const allMatchesSelected = matches.length > 0
+      && matches.every(option => selected.has(option.value));
+    const bulk = [];
+    if (matches.length > 0 && !allMatchesSelected) {
+      bulk.push(el("button", {
+        type: "button",
+        className: "checkbox-action",
+        disabled,
+        text: needle ? \`Select \${matches.length} shown\` : "Select all",
+        onclick: () => {
+          const next = new Set(selected);
+          for (const option of matches) next.add(option.value);
+          emit(next);
+        },
+      }));
+    }
+    // Clearing a filtered list must leave hidden selections alone.
+    const clearable = matches.filter(option => selected.has(option.value));
+    if (clearable.length > 0) {
+      bulk.push(el("button", {
+        type: "button",
+        className: "checkbox-action",
+        disabled,
+        text: needle ? \`Clear \${clearable.length} shown\` : "Clear",
+        onclick: () => {
+          const next = new Set(selected);
+          for (const option of clearable) next.delete(option.value);
+          emit(next);
+        },
+      }));
+    }
+
+    children.push(el("div", { className: "checkbox-toolbar" }, [
+      el("span", {
+        className: selected.size > 0 ? "checkbox-count selected" : "checkbox-count",
+        text: selected.size > 0
+          ? \`\${selected.size} of \${shownOptions.length} selected\`
+          : \`None of \${shownOptions.length} selected\`,
+      }),
+      bulk.length > 0 ? el("span", { className: "checkbox-actions" }, bulk) : null,
+    ]));
+
+    if (matches.length === 0) {
+      children.push(el("p", { className: "checkbox-empty", text: \`Nothing matches "\${filter.trim()}".\` }));
+      return el("div", { className: "checkbox-list", "data-name": name }, children);
+    }
+
+    const rows = matches.map(option => {
+      const isSelected = selected.has(option.value);
+      return el("label", {
+        className: isSelected ? "checkbox-row selected" : "checkbox-row",
+      }, [
+        el("input", {
+          type: "checkbox",
+          checked: isSelected,
+          disabled,
+          onchange: () => {
+            const next = new Set(selected);
+            if (next.has(option.value)) next.delete(option.value);
+            else next.add(option.value);
+            emit(next);
+          },
+        }),
+        el("span", { className: "checkbox-text" }, [
+          el("span", { className: "checkbox-heading" }, [
+            el("span", { className: "checkbox-title", text: option.title }),
+            option.meta ? el("span", { className: "checkbox-meta", text: option.meta }) : null,
+          ]),
+          option.subtitle
+            ? el("span", { className: "checkbox-subtitle", text: option.subtitle })
+            : null,
+        ]),
+      ]);
+    });
+
+    children.push(el("div", { className: "checkbox-rows", "data-internal-scroller": "" }, rows));
+    return el("div", { className: "checkbox-list", "data-name": name }, children);
+  },
+
   Autocomplete({ name, value, placeholder, loadOptions, onChange, optional, onClear, disabled }) {
     const queryName = name || placeholder;
     if (disabled && !value) queryByName[queryName] = "";
@@ -296,7 +505,7 @@ const components = {
       "aria-expanded": "false",
       "aria-haspopup": "listbox",
     });
-    const popup = el("div", { className: "autocomplete-popup", role: "listbox", "data-floating-popup": "", style: { display: "none" } });
+    const popup = el("div", { className: "autocomplete-popup", role: "listbox", "data-floating-popup": "", "data-internal-scroller": "", style: { display: "none" } });
     let requestId = 0;
     let debounceTimer;
     const generation = renderGeneration;
@@ -372,7 +581,7 @@ const components = {
       const currentRequest = ++requestId;
       renderPopup({ loading: true });
       try {
-        const options = sanitizeOptions(await loadOptions(input.value));
+        const options = sanitizeOptions(await loadOptions(input.value), "truncate");
         if (currentRequest !== requestId) return;
         renderPopup({ options });
       } catch (error) {
@@ -426,17 +635,20 @@ Section = components.Section;
 Field = components.Field;
 TextInput = components.TextInput;
 RadioCards = components.RadioCards;
+CheckboxList = components.CheckboxList;
 Autocomplete = components.Autocomplete;
 
 function render(focusState = undefined) {
   if (!root || !spec) return;
   if (focusState === undefined) focusState = getFocusState();
   renderGeneration++;
+  renderedCheckboxNames = new Set();
   isRendering = true;
   root.replaceChildren(el("div", { id: "layout-root" }, [
     spec.render({ ui, values, setValues, clearFields, components }),
   ]));
   isRendering = false;
+  pruneCheckboxEntries(checkboxOptionsByName, renderedCheckboxNames);
   if (focusState?.name) {
     const input = root.querySelector('[data-configurator-input="' + CSS.escape(focusState.name) + '"]');
     if (input instanceof HTMLInputElement) {
@@ -452,6 +664,9 @@ function render(focusState = undefined) {
 
 class ResourceConfiguratorIframe extends RpcTarget {
   async collectResourceUrl() {
+    if (hasBlockingCheckboxFailure(checkboxOptionsByName)) {
+      throw new Error("Configurator options did not load.");
+    }
     const resourceUrl = await spec?.resourceUrl?.({ values, ui });
     if (typeof resourceUrl !== "string" || resourceUrl.length === 0) {
       throw new Error("Configurator did not provide a resource URL.");
@@ -507,6 +722,7 @@ async function seedInitialValues() {
   try {
     initialResource = await host.getInitialResource();
   } catch (error) {
+    reportFrontendIssue("configurator.initial-resource-load", error);
     return;
   }
   if (!initialResource || !initialResource.resourceUrl) return;
@@ -521,6 +737,7 @@ async function seedInitialValues() {
         })
       : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
   } catch (error) {
+    reportFrontendIssue("configurator.initial-values-load", error);
     return;
   }
   if (!seeded || typeof seeded !== "object") return;
@@ -540,7 +757,7 @@ async function main() {
   host = newMessagePortRpcSession(port1, new ResourceConfiguratorIframe());
   ui = host.gatekeeper;
 
-  Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, Autocomplete });
+  Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, CheckboxList, Autocomplete });
   spec = new Function(${JSON.stringify(configuratorUIModuleSource)})();
   if (!spec) throw new Error("Configurator UI module did not define a configurator UI.");
   values = { ...(spec.initial || {}) };
@@ -560,19 +777,23 @@ main().catch(error => {
 new ResizeObserver(postHeight).observe(document.documentElement);
 
 // Forward wheel/touch scrolls to the parent so the user can scroll the host modal even when the
-// cursor is over the iframe. We skip events that originate inside an internally-scrollable
-// element (e.g. an open autocomplete popup) so those scroll their own content first.
-function isInsideInternalScroller(target) {
-  for (let node = target instanceof Element ? target : null; node; node = node.parentElement) {
-    if (node.hasAttribute && node.hasAttribute("data-floating-popup") && node.style.display !== "none") {
-      if (node.scrollHeight > node.clientHeight) return true;
-    }
-  }
-  return false;
+// cursor is over the iframe. Events that something inside the iframe can consume itself are left
+// alone, so a scrollable control scrolls rather than moving the modal underneath it.
+//
+function hasInternalScroller(target, deltaX, deltaY) {
+  const scroller = target instanceof Element ? target.closest("[data-internal-scroller]") : null;
+  if (!scroller) return false;
+  // ponytail: configurator controls mark their own scroller; add the marker to future controls.
+  if (deltaY < 0 && scroller.scrollTop > 0) return true;
+  if (deltaY > 0 && scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1) return true;
+  if (deltaX < 0 && scroller.scrollLeft > 0) return true;
+  return deltaX > 0 && scroller.scrollLeft + scroller.clientWidth < scroller.scrollWidth - 1;
 }
 
 window.addEventListener("wheel", event => {
-  if (isInsideInternalScroller(event.target)) return;
+  // Returning leaves the event to the browser, which already scrolls the right element inside the
+  // iframe -- including trackpad momentum, which a manual scrollBy would lose.
+  if (hasInternalScroller(event.target, event.deltaX, event.deltaY)) return;
   forwardScroll(event.deltaX, event.deltaY);
 }, { passive: true });
 
@@ -605,15 +826,12 @@ window.addEventListener("touchstart", event => {
 window.addEventListener("touchmove", event => {
   const touch = event.touches[0];
   if (!touch) return;
-  if (isInsideInternalScroller(event.target)) {
-    lastTouchY = touch.clientY;
-    lastTouchX = touch.clientX;
-    return;
-  }
+  // A drag up the screen scrolls content down, matching wheel's sign convention.
   const deltaY = lastTouchY - touch.clientY;
   const deltaX = lastTouchX - touch.clientX;
   lastTouchY = touch.clientY;
   lastTouchX = touch.clientX;
+  if (hasInternalScroller(event.target, deltaX, deltaY)) return;
   forwardScroll(deltaX, deltaY);
 }, { passive: true });
 `;
@@ -688,6 +906,32 @@ window.addEventListener("touchmove", event => {
     .radio-card { display: grid; gap: 2px; width: 100%; border: 1px solid var(--color-kumo-line, #ded7d0); border-radius: 10px; padding: 10px; background: var(--color-kumo-base, #fff); color: inherit; text-align: left; cursor: pointer; }
     .radio-card:hover { background: var(--color-kumo-elevated, #f8f5f1); }
     .radio-card.selected { border-color: var(--color-kumo-ring, #ff6a00); background: var(--color-kumo-tint, #fff3eb); }
+    .checkbox-list { display: grid; gap: 8px; }
+    .checkbox-filter { position: relative; display: flex; align-items: center; }
+    .checkbox-filter .search-icon { position: absolute; left: 9px; display: flex; color: var(--color-kumo-subtle, #7d746c); pointer-events: none; }
+    .checkbox-filter .input { padding-left: 28px; }
+    .checkbox-filter .input::-webkit-search-cancel-button { -webkit-appearance: none; }
+    .checkbox-toolbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .checkbox-count { color: var(--color-kumo-subtle, #7d746c); font-size: 12px; }
+    .checkbox-count.selected { color: inherit; font-weight: 500; }
+    .checkbox-actions { display: flex; flex-shrink: 0; gap: 10px; }
+    .checkbox-action { border: 0; background: none; padding: 0; color: var(--color-kumo-ring, #ff6a00); font: inherit; font-size: 12px; cursor: pointer; }
+    .checkbox-action:hover { text-decoration: underline; }
+    .checkbox-action:disabled { color: var(--color-kumo-subtle, #7d746c); cursor: not-allowed; text-decoration: none; }
+    .checkbox-rows { display: grid; gap: 3px; max-height: 264px; overflow-y: auto; padding: 1px; }
+    .checkbox-row { display: flex; align-items: flex-start; gap: 9px; width: 100%; border: 1px solid transparent; border-radius: 7px; padding: 7px 9px; background: var(--color-kumo-base, #fff); color: inherit; text-align: left; cursor: pointer; }
+    .checkbox-row:hover { background: var(--color-kumo-elevated, #f8f5f1); }
+    .checkbox-row.selected { border-color: var(--color-kumo-ring, #ff6a00); background: var(--color-kumo-tint, #fff3eb); }
+    .checkbox-row:has(input:focus-visible) { outline: 2px solid var(--color-kumo-ring, #ff6a00); outline-offset: 1px; }
+    .checkbox-row:has(input:disabled) { cursor: not-allowed; opacity: .55; }
+    .checkbox-row input { flex-shrink: 0; width: 14px; height: 14px; margin: 2px 0 0; accent-color: var(--color-kumo-ring, #ff6a00); }
+    .checkbox-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
+    .checkbox-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .checkbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .checkbox-meta { flex-shrink: 0; margin-left: auto; border-radius: 4px; background: var(--color-kumo-elevated, #f8f5f1); padding: 1px 5px; color: var(--color-kumo-subtle, #7d746c); font-size: 10.5px; letter-spacing: .01em; white-space: nowrap; }
+    .checkbox-row.selected .checkbox-meta { background: var(--color-kumo-base, #fff); }
+    .checkbox-subtitle { overflow: hidden; color: var(--color-kumo-subtle, #7d746c); font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+    .checkbox-empty { margin: 0; color: var(--color-kumo-subtle, #7d746c); font-size: 12px; }
     .radio-title { font-weight: 600; }
     .radio-description { color: var(--color-kumo-subtle, #7d746c); font-size: 12px; line-height: 16px; }
     .error { white-space: pre-wrap; color: var(--color-kumo-danger); border: 1px solid var(--color-kumo-danger-line); border-radius: 10px; padding: 10px; background: var(--color-kumo-danger-tint); }
