@@ -1,33 +1,57 @@
 import type {SlashCommandChoice} from "@gadgets/workshop-shared/api";
+import type {ComposerRange} from "./composer-tokens";
 
 export type ParsedSlashCommandInput = {
   // Text between `/` and the first whitespace, lowercased for matching.
   query: string;
-  // Index just after the command token.
+  // Range occupied by the command token.
+  tokenStart: number;
   tokenEnd: number;
-  // Index where the trailing message begins (after whitespace).
+  // Index where text following the command begins (after whitespace).
   tailStart: number;
-  // Trailing message text.
+  // Text following the command token.
   tail: string;
 };
 
-// Parses a leading `/command` from composer input. `//` is treated as a literal leading slash, not
-// a command.
-export function parseSlashCommandInput(input: string): ParsedSlashCommandInput | null {
-  if (!input.startsWith("/") || input.startsWith("//")) return null;
-  let tokenEnd = 1;
-  while (tokenEnd < input.length && !/\s/.test(input[tokenEnd])) {
-    tokenEnd++;
-  }
-  let query = input.slice(1, tokenEnd).toLowerCase();
+// Parses the `/command` token at the cursor. A command may appear anywhere at a word boundary;
+// `//` is treated as a literal slash, not a command. Whitespace immediately before the cursor is
+// skipped back over, so typing `/command ` still resolves the command.
+export function parseSlashCommandInput(
+    input: string, cursorPosition: number): ParsedSlashCommandInput | null {
+  let probe = Math.max(0, Math.min(cursorPosition, input.length));
+  while (probe > 0 && /\s/.test(input[probe - 1])) probe--;
+
+  let tokenStart = probe;
+  while (tokenStart > 0 && !/\s/.test(input[tokenStart - 1])) tokenStart--;
+  let tokenEnd = probe;
+  while (tokenEnd < input.length && !/\s/.test(input[tokenEnd])) tokenEnd++;
+
+  if (input[tokenStart] !== "/" || input[tokenStart + 1] === "/") return null;
+
   let tailStart = tokenEnd;
   while (tailStart < input.length && /\s/.test(input[tailStart])) tailStart++;
   return {
-    query,
+    query: input.slice(tokenStart + 1, tokenEnd).toLowerCase(),
+    tokenStart,
     tokenEnd,
     tailStart,
     tail: input.slice(tailStart),
   };
+}
+
+// Identifies the command token at the cursor, or null if the cursor isn't on one. Two positions
+// with the same key parse the same way, so callers can treat them as interchangeable.
+export function slashCommandTokenKey(input: string, cursorPosition: number): string | null {
+  let parsed = parseSlashCommandInput(input, cursorPosition);
+  return parsed && `${parsed.tokenStart}:${input.slice(parsed.tokenStart, parsed.tokenEnd)}`;
+}
+
+// Removes the command token from the text sent as the command's arguments.
+export function stripSlashCommandToken(input: string, token: ComposerRange): string {
+  let before = input.slice(0, token.start);
+  let after = input.slice(token.start + token.length);
+  if (/\s$/.test(before) && /^\s/.test(after)) after = after.slice(1);
+  return (before + after).trim();
 }
 
 // Entries whose name exactly equals the parsed token.

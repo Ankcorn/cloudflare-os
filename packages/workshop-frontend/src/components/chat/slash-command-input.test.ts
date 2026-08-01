@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { SlashCommandChoice } from "@gadgets/workshop-shared/api";
 import {
   exactSlashCommandMatches, filterSlashCommandCatalog, parseSlashCommandInput,
+  stripSlashCommandToken,
 } from "./slash-command-input";
 
-function parsed(input: string) {
-  let result = parseSlashCommandInput(input);
+// Most cases put the caret inside the command token itself.
+function parsed(input: string, cursorPosition = 1) {
+  let result = parseSlashCommandInput(input, cursorPosition);
   expect(result).not.toBeNull();
   if (!result) throw new Error(`Expected slash command input: ${input}`);
   return result;
@@ -38,9 +40,25 @@ describe("slash command composer input", () => {
     });
   });
 
-  it("leaves ordinary text and escaped leading slashes out of command parsing", () => {
-    expect(parseSlashCommandInput("deploy staging")).toBeNull();
-    expect(parseSlashCommandInput("//deploy staging")).toBeNull();
+  it("opens on a bare slash, wherever it is typed", () => {
+    expect(parseSlashCommandInput("/", 1)).toMatchObject({query: "", tokenStart: 0, tokenEnd: 1});
+    expect(parseSlashCommandInput("hello /", 7))
+      .toMatchObject({query: "", tokenStart: 6, tokenEnd: 7});
+  });
+
+  it("finds a command at the cursor anywhere in the message", () => {
+    const input = "Please use /deploy for staging";
+    expect(parseSlashCommandInput(input, input.indexOf("deploy") + 3)).toMatchObject({
+      query: "deploy",
+      tokenStart: 11,
+      tokenEnd: 18,
+    });
+  });
+
+  it("leaves ordinary text and escaped slashes out of command parsing", () => {
+    expect(parseSlashCommandInput("deploy staging", 1)).toBeNull();
+    expect(parseSlashCommandInput("//deploy staging", 2)).toBeNull();
+    expect(parseSlashCommandInput("try //deploy staging", 8)).toBeNull();
   });
 
   it("requires selection when command names are ambiguous", () => {
@@ -54,13 +72,22 @@ describe("slash command composer input", () => {
   });
 
   it("parses non-whitespace command tokens", () => {
-    expect(parseSlashCommandInput("/skill:deploy")).toMatchObject({query: "skill:deploy"});
+    expect(parseSlashCommandInput("/skill:deploy", 1)).toMatchObject({query: "skill:deploy"});
     let weird: SlashCommandChoice = {
       ...choices[0],
       name: "skill:deploy",
       selection: {gatekeeperId: 1, commandId: "skill:deploy"},
     };
     expect(exactSlashCommandMatches([weird], parsed("/skill:deploy"))).toEqual([weird]);
+  });
+
+  it("strips a selected command token from the provider arguments", () => {
+    expect(stripSlashCommandToken("Please use /deploy for staging", {start: 11, length: 7}))
+      .toBe("Please use for staging");
+    expect(stripSlashCommandToken("/deploy staging", {start: 0, length: 7})).toBe("staging");
+    expect(stripSlashCommandToken("/deploy ", {start: 0, length: 7})).toBe("");
+    expect(stripSlashCommandToken("ship it with /deploy", {start: 13, length: 7}))
+      .toBe("ship it with");
   });
 
   it("matches provider names without regard to case", () => {

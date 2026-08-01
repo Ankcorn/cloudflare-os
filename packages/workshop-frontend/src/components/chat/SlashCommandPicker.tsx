@@ -1,5 +1,3 @@
-import { Tooltip } from "@cloudflare/kumo";
-import { Terminal } from "@phosphor-icons/react";
 import { RpcStub } from "capnweb";
 import { createPortal } from "react-dom";
 import {
@@ -8,9 +6,13 @@ import {
 } from "react";
 import type { Overseer, SlashCommandChoice } from "@gadgets/workshop-shared/api";
 import {
+  PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
+} from "../pickerRows";
+import {
   exactSlashCommandMatches, filterSlashCommandCatalog, parseSlashCommandInput,
-  type ParsedSlashCommandInput,
+  slashCommandTokenKey, type ParsedSlashCommandInput,
 } from "./slash-command-input";
+import { loadSlashCommandCatalog } from "./slash-command-catalog";
 
 type SlashCommandPopupLayout = {
   left: number;
@@ -21,7 +23,7 @@ type SlashCommandPopupLayout = {
 };
 
 function computePopupLayout(anchor: HTMLElement): SlashCommandPopupLayout {
-  let popup = { margin: 12, gap: 8, minHeight: 160, maxHeight: 360 };
+  let popup = { margin: 12, gap: 8, minHeight: 120, maxHeight: 320 };
   let rect = anchor.getBoundingClientRect();
   let viewportWidth = window.innerWidth;
   let viewportHeight = window.innerHeight;
@@ -47,6 +49,7 @@ function computePopupLayout(anchor: HTMLElement): SlashCommandPopupLayout {
 
 export function useSlashCommandPicker({
   inputValue,
+  cursorPosition,
   selectedCommand,
   disabled,
   anchorRef,
@@ -54,28 +57,34 @@ export function useSlashCommandPicker({
   onSelect,
 }: {
   inputValue: string;
+  cursorPosition: number;
   selectedCommand: SlashCommandChoice | null;
   disabled: boolean;
   anchorRef: RefObject<HTMLElement | null>;
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
-  onSelect: (choice: SlashCommandChoice, tailStart: number) => void;
+  onSelect: (choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => void;
 }) {
   const [choices, setChoices] = useState<SlashCommandChoice[]>([]);
   const [choicesQuery, setChoicesQuery] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dismissedInput, setDismissedInput] = useState<string | null>(null);
-  const [explicitChoiceInput, setExplicitChoiceInput] = useState<string | null>(null);
+  const [dismissedToken, setDismissedToken] = useState<string | null>(null);
+  const [explicitChoiceToken, setExplicitChoiceToken] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
   const [layout, setLayout] = useState<SlashCommandPopupLayout | null>(null);
   // Catalog for this mounted Gadget editor. Loaded when the picker first opens and filtered locally.
   const catalogRef = useRef<SlashCommandChoice[] | null>(null);
-  const catalogLoadRef = useRef<Promise<SlashCommandChoice[]> | null>(null);
   const catalogSourceRef = useRef(getOverseer);
   const popupRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
-  const parsed = selectedCommand || disabled ? null : parseSlashCommandInput(inputValue);
-  const open = parsed !== null && dismissedInput !== inputValue;
+  const parsed = selectedCommand || disabled
+    ? null
+    : parseSlashCommandInput(inputValue, cursorPosition);
+  // Dismissal is remembered per token, so editing elsewhere in the message keeps the picker
+  // closed, while changing or moving to another token reopens it.
+  const activeToken = parsed ? slashCommandTokenKey(inputValue, cursorPosition) : null;
+  const open = parsed !== null && dismissedToken !== activeToken;
   const query = parsed?.query ?? "";
   const selectable = choicesQuery === query && !loading && error === null;
   const exactMatches = parsed && selectable
@@ -83,45 +92,38 @@ export function useSlashCommandPicker({
     : [];
   const exactIndex = exactMatches.length === 1 ? choices.indexOf(exactMatches[0]) : -1;
   const requiresExplicitChoice = exactMatches.length > 1;
-  const activeChoice = !requiresExplicitChoice || explicitChoiceInput === inputValue
+  const activeChoice = !requiresExplicitChoice || explicitChoiceToken === activeToken
     ? choices[index]
     : undefined;
   const selectIndex = (next: SetStateAction<number>) => {
     setIndex(next);
-    setExplicitChoiceInput(inputValue);
+    setExplicitChoiceToken(activeToken);
   };
   if (catalogSourceRef.current !== getOverseer) {
     catalogSourceRef.current = getOverseer;
     catalogRef.current = null;
-    catalogLoadRef.current = null;
   }
 
   const loadCatalog = useCallback(async () => {
     if (catalogRef.current) return catalogRef.current;
-    if (catalogLoadRef.current) return catalogLoadRef.current;
     let source = getOverseer;
-    let load = Promise.resolve(source()).then(overseer => overseer.listSlashCommands());
-    catalogLoadRef.current = load;
-    try {
-      let catalog = await load;
-      if (catalogSourceRef.current === source) catalogRef.current = catalog;
-      return catalog;
-    } finally {
-      if (catalogLoadRef.current === load) catalogLoadRef.current = null;
-    }
+    let catalog = await loadSlashCommandCatalog(source);
+    if (catalogSourceRef.current === source) catalogRef.current = catalog;
+    return catalog;
   }, [getOverseer]);
 
   const select = useCallback((choice: SlashCommandChoice) => {
-    let current = parseSlashCommandInput(inputValue);
-    onSelect(choice, current?.tailStart ?? 0);
+    let current = parseSlashCommandInput(inputValue, cursorPosition);
+    if (!current) return;
+    onSelect(choice, current.tokenStart, current.tokenEnd);
     setChoices([]);
     setChoicesQuery(null);
-    setDismissedInput(null);
-  }, [inputValue, onSelect]);
+    setDismissedToken(null);
+  }, [cursorPosition, inputValue, onSelect]);
 
   useEffect(() => {
-    setExplicitChoiceInput(null);
-  }, [inputValue]);
+    setExplicitChoiceToken(null);
+  }, [activeToken]);
 
   const resolveExact = useCallback(async (current: ParsedSlashCommandInput) => {
     let catalog = await loadCatalog();
@@ -187,22 +189,28 @@ export function useSlashCommandPicker({
     };
   }, [anchorRef, choices.length, error, loading, open]);
 
+  // Scroll the active row into view on keyboard navigation.
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`)
+      ?.scrollIntoView({block: "nearest"});
+  }, [index]);
+
   useEffect(() => {
     if (!open) return;
     let onPointerDown = (event: PointerEvent) => {
       let target = event.target;
       if (!(target instanceof Node)) return;
       if (popupRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
-      setDismissedInput(inputValue);
+      setDismissedToken(activeToken);
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [anchorRef, inputValue, open]);
+  }, [activeToken, anchorRef, open]);
 
   let popup = open && layout ? createPortal(
     <div
       ref={popupRef}
-      className="fixed z-[1000] overflow-hidden rounded-xl border border-kumo-line bg-kumo-base shadow-[0_18px_50px_rgba(82,16,0,0.14)]"
+      className="themed-floating-shadow fixed z-[1000] flex flex-col overflow-hidden rounded-lg border border-kumo-line bg-kumo-base"
       style={{
         left: layout.left,
         top: layout.top,
@@ -211,77 +219,54 @@ export function useSlashCommandPicker({
         maxHeight: layout.maxHeight,
       }}
     >
-      <div className="flex items-center gap-2 border-b border-kumo-line bg-kumo-elevated px-3 py-2">
-        <span className="grid h-7 w-7 place-items-center rounded-lg bg-kumo-brand/10 text-kumo-brand">
-          <Terminal size={15} weight="duotone" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-kumo-default">Slash Commands</div>
-          <div className="text-[11px] text-kumo-subtle">
-            {error
-              ? "Couldn’t load commands."
-              : "Choose a command or type to filter."}
-          </div>
-        </div>
-      </div>
+      <p className={`m-0 shrink-0 px-3.5 pb-1 pt-2.5 ${PICKER_CAPTION}`}>Commands</p>
       <div
+        ref={listRef}
         id={listboxId}
         role="listbox"
         aria-label="Slash commands"
         aria-busy={loading}
-        className="overflow-auto p-1"
-        style={{maxHeight: Math.max(80, layout.maxHeight - 52)}}
+        className="sidebar-scroll min-h-0 flex-1 overflow-y-auto"
       >
         {loading && choices.length === 0 ? (
-          <div className="px-3 py-3 text-sm text-kumo-subtle">Loading commands...</div>
+          <p className={PICKER_EMPTY}>Loading commands…</p>
         ) : choices.length > 0 ? (
           choices.map((choice, optionIndex) => (
-            <Tooltip
+            <button
               key={`${choice.selection.gatekeeperId}:${choice.selection.commandId}`}
-              content={choice.description}
-              asChild
+              id={`${listboxId}-option-${optionIndex}`}
+              data-index={optionIndex}
+              type="button"
+              role="option"
+              aria-selected={optionIndex === index && activeChoice !== undefined}
+              disabled={!selectable}
+              title={[
+                `/${choice.name}`,
+                choice.description,
+                [choice.providerLabel, choice.resourceLabel].filter(Boolean).join(" · "),
+              ].join("\n")}
+              className={`${PICKER_ROW} w-full text-left text-[13px] leading-[18px] tracking-[-0.25px] disabled:cursor-wait disabled:opacity-60 ${optionIndex === index ? `${PICKER_ROW_ACTIVE} text-kumo-strong` : "text-kumo-default"}`}
+              onMouseMove={() => setIndex(optionIndex)}
+              onClick={() => select(choice)}
             >
-              <button
-                id={`${listboxId}-option-${optionIndex}`}
-                type="button"
-                role="option"
-                aria-selected={optionIndex === index && activeChoice !== undefined}
-                disabled={!selectable}
-                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left disabled:cursor-wait disabled:opacity-60 ${optionIndex === index ? "bg-kumo-tint" : "hover:bg-kumo-tint"}`}
-                onMouseEnter={() => setIndex(optionIndex)}
-                onClick={() => select(choice)}
-              >
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-kumo-brand/10 text-kumo-brand">
-                  <Terminal size={15} weight="duotone" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-mono text-sm font-medium text-kumo-default">
-                    /{choice.name}
-                  </span>
-                  <span className="block truncate text-xs text-kumo-subtle">
-                    {choice.description}
-                  </span>
-                  <span className="block truncate text-[11px] text-kumo-subtle">
-                    {choice.providerLabel}{choice.resourceLabel ? ` · ${choice.resourceLabel}` : ""}
-                  </span>
-                </span>
-              </button>
-            </Tooltip>
+              <span className="max-w-[45%] shrink-0 truncate">
+                <span className="text-kumo-inactive">/</span>{choice.name}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-kumo-subtle">{choice.description}</span>
+              <span className="max-w-[30%] shrink-0 truncate text-[11.5px] leading-4 text-kumo-inactive">
+                {choice.providerLabel}
+              </span>
+              {optionIndex === index && selectable && <TabHint />}
+            </button>
           ))
-        ) : error ? (
-          <div className="px-3 py-3">
-            <div className="text-sm font-medium text-kumo-default">Couldn’t load commands</div>
-            <div className="mt-1 text-xs leading-5 text-kumo-subtle">
-              {error}
-            </div>
-          </div>
         ) : (
-          <div className="px-3 py-3">
-            <div className="text-sm font-medium text-kumo-default">No commands found</div>
-            <div className="mt-1 text-xs leading-5 text-kumo-subtle">
-              {query ? "No commands match your search." : "No commands are available."}
-            </div>
-          </div>
+          <p className={PICKER_EMPTY}>
+            {error
+              ? `Couldn’t load commands. ${error}`
+              : query
+                ? "No commands match your search."
+                : "No commands are available."}
+          </p>
         )}
       </div>
     </div>,
@@ -294,7 +279,7 @@ export function useSlashCommandPicker({
       ? `${listboxId}-option-${index}`
       : undefined,
     choices,
-    dismiss: () => setDismissedInput(inputValue),
+    dismiss: () => setDismissedToken(activeToken),
     listboxId,
     open,
     popup,

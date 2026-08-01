@@ -6,7 +6,9 @@ import {
   useRef,
   useMemo,
   useCallback,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -68,14 +70,26 @@ import {
   AiChatStreamEvent,
   AiToolCall,
   SlashCommandChoice,
+  SlashCommandId,
   SlashCommandRequest,
   ChatAttachmentHandle,
   ChatAttachmentRef,
   WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
-import { parseSlashCommandInput } from "./components/chat/slash-command-input";
-import CapsuleOverlay from "./CapsuleOverlay";
+import {
+  parseSlashCommandInput, slashCommandTokenKey, stripSlashCommandToken,
+} from "./components/chat/slash-command-input";
+import {
+  ComposerMirror, composerTextareaClass, type ComposerMirrorHandle, type MirrorToken,
+} from "./components/chat/ComposerMirror";
+import {
+  useSlashCommandChoice, type OverseerSource,
+} from "./components/chat/slash-command-catalog";
+import {
+  removeComposerToken, snapCaretOutOfRanges, spliceComposerToken, type ComposerRange,
+} from "./components/chat/composer-tokens";
+import CapsuleOverlay, { CAPSULE_OVERLAY_GAP } from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
@@ -91,6 +105,7 @@ import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
+import { useVendorLogos } from "./useVendorLogos";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -278,7 +293,44 @@ interface InputCapsule {
   length: number;
   gatekeeperId: number;
   description: ResourceDescription;
+  // Which service the resource came from, so the composer can show its logo.
+  vendorId?: string;
 }
+
+// A capsule's text begins with an em space, which reserves the box the mirror paints the vendor
+// logo into, and a no-break space, which is the gap between the logo and the title. The word
+// joiner keeps the two spaces (and the title) on one line, since the logo must not wrap away from
+// what it labels.
+const CAPSULE_LOGO_SLOT = "\u2003\u2060\u00a0";
+
+const cssLogoUrls = new Map<string, string>();
+
+// Vendor logo URLs are server-provided but end up inside a CSS `url()`, so check the scheme and
+// escape what could terminate the string. Whitespace is rejected rather than escaped: no real logo
+// URL contains any, and it keeps newlines out of the declaration.
+function cssLogoUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  // Logos are inline SVG data URLs of a few kilobytes and the mirror re-renders on every
+  // keystroke, so escape each one once.
+  let cached = cssLogoUrls.get(url);
+  if (cached === undefined) {
+    cached = /^(https?:\/\/|data:image\/)/.test(url) && !/\s/.test(url)
+      ? `url("${url.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}")`
+      : "";
+    cssLogoUrls.set(url, cached);
+  }
+  return cached || undefined;
+}
+
+function firstAccountIndex(items: readonly SelectableItem[]): number {
+  const index = items.findIndex((item) => item.type === "account");
+  return index > 0 ? index : 0;
+}
+
+// A slash command the user picked, tracked as the range of composer text that names it.
+type SelectedSlashCommand = ComposerRange & {
+  choice: SlashCommandChoice;
+};
 
 type PendingAttachment = {
   id: string;
@@ -877,27 +929,66 @@ function WorkIcon({ Icon }: { Icon: PhosphorIcon }) {
   return <Icon size={15} className="text-kumo-inactive" />;
 }
 
-function renderCapsulePill(capsule: CapsuleSpecifier) {
-  const safeUrl = safeExternalUrl(capsule.description.url);
+function SlashCommandMention(
+  { name, args, id, getOverseer }: {
+    name?: string;
+    args: string;
+    id: SlashCommandId;
+    getOverseer: OverseerSource;
+  },
+) {
+  const choice = useSlashCommandChoice(getOverseer, name ? id : undefined);
+  const mention = name ? <span className="text-kumo-brand">/{name}</span> : null;
   return (
-    <Tooltip
-      content={
-        safeUrl
-          ? (
-            <a
-              href={safeUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: "inherit" }}
-            >
-              {capsule.description.url}
-            </a>
-          )
-          : capsule.description.url
-      }
+    <>
+      {choice
+        ? (
+          <Tooltip
+            content={
+              <span className="block max-w-xs">
+                {/* No `block` here: it would outrank the `-webkit-box` that line-clamp needs. */}
+                <span className="line-clamp-3">{choice.description}</span>
+                {/* Provider, then whatever identifies the command within it: for a skill that is
+                    its collection and path. Same line the picker shows. */}
+                <span className="mt-0.5 block truncate text-kumo-subtle">
+                  {[choice.providerLabel, choice.resourceLabel].filter(Boolean).join(" · ")}
+                </span>
+              </span>
+            }
+            asChild
+          >
+            {mention}
+          </Tooltip>
+        )
+        : mention}
+      {name && args ? " " : ""}
+      {args}
+    </>
+  );
+}
+
+function CapsuleMention({ capsule }: { capsule: CapsuleSpecifier }) {
+  const { authenticatedApi } = useAuthenticatedApi();
+  const vendorLogos = useVendorLogos(authenticatedApi);
+  const logo = capsule.vendorId ? vendorLogos.get(capsule.vendorId) : undefined;
+  const safeUrl = safeExternalUrl(capsule.description.url);
+  const body = (
+    <>
+      {logo && <img src={logo} alt="" className={styles.capsuleMentionLogo} />}
+      {capsule.description.title}
+    </>
+  );
+  return safeUrl ? (
+    <a
+      href={safeUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.capsuleMention}
     >
-      <span className={styles.capsulePill}>{capsule.description.title}</span>
-    </Tooltip>
+      {body}
+    </a>
+  ) : (
+    <span className={styles.capsuleMention}>{body}</span>
   );
 }
 
@@ -915,7 +1006,7 @@ function getMarkdownComponents(
         const token = decodeURIComponent(href.slice(CAPSULE_LINK_PREFIX.length));
         const capsule = capsulesByToken.get(token);
         if (capsule) {
-          return renderCapsulePill(capsule);
+          return <CapsuleMention capsule={capsule} />;
         }
       }
 
@@ -1586,7 +1677,18 @@ export const ChatInput = ({
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [isAttachmentDragActive, setIsAttachmentDragActive] = useState(false);
-  const [selectedSlashCommand, setSelectedSlashCommand] = useState<SlashCommandChoice | null>(null);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<SelectedSlashCommand | null>(null);
+  // The caret the slash command picker parses at. Deliberately updated only when it moves to a
+  // different command token (see `syncPickerCaret`): the mirror owns the caret the user sees,
+  // so ordinary caret movement doesn't have to re-render the composer.
+  const [cursorPosition, setCursorPosition] = useState(0);
+  const pickerCaretRef = useRef<{key: string | null; text: string}>({key: null, text: ""});
+  // Caret position and text the URL overlay was last resolved for, to skip repeated scans.
+  const lastUrlScanRef = useRef({position: -1, text: ""});
+  const { authenticatedApi } = useAuthenticatedApi();
+  const vendorLogos = useVendorLogos(authenticatedApi);
+  const selectedSlashCommandRef = useRef(selectedSlashCommand);
+  selectedSlashCommandRef.current = selectedSlashCommand;
   const sendInFlightRef = useRef(false);
   const pendingAttachmentsRef = useRef<PendingAttachment[]>([]);
   pendingAttachmentsRef.current = pendingAttachments;
@@ -1601,6 +1703,18 @@ export const ChatInput = ({
   const [overlayIndex, setOverlayIndex] = useState(0);
   const overlayItemsRef = useRef<SelectableItem[]>([]);
   const overlayActivateRef = useRef<((index: number) => void) | null>(null);
+  // Once the user moves the overlay's selection, the default stops applying.
+  const overlayNavigatedRef = useRef(false);
+  const [urlLineOffset, setUrlLineOffset] = useState<number | undefined>(undefined);
+  const navigateOverlay: Dispatch<SetStateAction<number>> = (index) => {
+    overlayNavigatedRef.current = true;
+    setOverlayIndex(index);
+  };
+  // Accounts arrive from a subscription, so they can land after the panel first renders.
+  const handleOverlayItems = useCallback((items: SelectableItem[]) => {
+    overlayItemsRef.current = items;
+    if (!overlayNavigatedRef.current) setOverlayIndex(firstAccountIndex(items));
+  }, []);
 
   // Attach modal state
   const [attachModalOpen, setAttachModalOpen] = useState(false);
@@ -1610,7 +1724,7 @@ export const ChatInput = ({
   // Refs for the mirror div and the textarea wrapper.
   const wrapperRef = useRef<HTMLDivElement>(null);
   const promptCardRef = useRef<HTMLDivElement>(null);
-  const mirrorRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<ComposerMirrorHandle>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
@@ -1644,7 +1758,7 @@ export const ChatInput = ({
     if (!textarea) return;
 
     const syncMirror = () => {
-      const mirror = mirrorRef.current;
+      const mirror = mirrorRef.current?.node;
       if (!mirror) return;
 
       // Copy computed styles from the textarea to the mirror so text layout matches exactly.
@@ -1656,8 +1770,10 @@ export const ChatInput = ({
       mirror.style.letterSpacing = cs.letterSpacing;
       mirror.style.padding = cs.padding;
       mirror.style.border = `${cs.borderWidth} solid transparent`;
-      mirror.style.height = `${textarea.offsetHeight}px`;
-      mirror.style.width = `${textarea.offsetWidth}px`;
+      // Client box, not offset box: once the textarea scrolls, its scrollbar narrows the width
+      // that text wraps at, and the mirror has to wrap at exactly the same width.
+      mirror.style.height = `${textarea.clientHeight}px`;
+      mirror.style.width = `${textarea.clientWidth}px`;
       mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
     };
 
@@ -1671,17 +1787,58 @@ export const ChatInput = ({
   }, []);
 
   const syncMirrorScroll = (textarea: HTMLTextAreaElement) => {
-    const mirror = mirrorRef.current;
+    const mirror = mirrorRef.current?.node;
     if (!mirror) return;
     mirror.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
   };
 
-  // Reset overlay selection when the overlay appears or changes URL.
+  // Reset overlay selection when the overlay appears or changes URL, preferring a connected account
+  // so Tab never reaches for "Connect new account" first.
   useEffect(() => {
-    setOverlayIndex(0);
+    setOverlayIndex(firstAccountIndex(overlayItemsRef.current));
+    overlayNavigatedRef.current = false;
   }, [activeUrl]);
 
+  // Measure the line the URL starts on, so the panel sits with that line rather than above a
+  // composer the URL may have wrapped over several lines. The mirror's geometry is the textarea's.
+  useLayoutEffect(() => {
+    const mirror = mirrorRef.current?.node;
+    const wrapper = wrapperRef.current;
+    if (!activeUrl || !mirror || !wrapper) {
+      setUrlLineOffset(undefined);
+      return;
+    }
+    const walker = document.createTreeWalker(mirror, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = node.textContent?.length ?? 0;
+      if (consumed + length <= activeUrl.start) {
+        consumed += length;
+        continue;
+      }
+      const offset = activeUrl.start - consumed;
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.setEnd(node, Math.min(offset + 1, length));
+      const line = range.getBoundingClientRect();
+      const box = wrapper.getBoundingClientRect();
+      // Never below the composer's own bottom edge, in case the line is scrolled out of view.
+      setUrlLineOffset(Math.max(
+          CAPSULE_OVERLAY_GAP, box.bottom - line.top + CAPSULE_OVERLAY_GAP));
+      return;
+    }
+    setUrlLineOffset(undefined);
+  }, [activeUrl, inputValue]);
+
   const isBlocked = !!blockedReason;
+
+  // A disabled textarea stops firing mouse events, so drop the hover state the token hit-testing
+  // below leaves behind; otherwise the cursor outlives `disabled:cursor-not-allowed`.
+  useEffect(() => {
+    if (!isBlocked) return;
+    mirrorRef.current?.setHoveredToken(null);
+    if (composerTextareaRef.current) composerTextareaRef.current.style.cursor = "";
+  }, [isBlocked]);
 
   const deleteStagedAttachment = (ref: ChatAttachmentHandle) => {
     void (async () => {
@@ -1835,16 +1992,112 @@ export const ChatInput = ({
     void addFiles(event.dataTransfer.files);
   };
 
-  const applySlashCommandSelection = useCallback((choice: SlashCommandChoice, tailStart: number) => {
-    setSelectedSlashCommand(choice);
-    setInputValue(inputValue.slice(tailStart));
-    setCapsules(previous => previous.flatMap(capsule =>
-      capsule.start >= tailStart ? [{...capsule, start: capsule.start - tailStart}] : []));
-  }, [inputValue]);
+  // Ranges the caret addresses as single units: resource capsules and the resolved command. Read
+  // from refs so callbacks scheduled off a render (rAF, awaited RPC) see current positions.
+  const currentTokenRanges = (): ComposerRange[] => {
+    const command = selectedSlashCommandRef.current;
+    return [
+      ...capsulesRef.current.map(({start, length}) => ({start, length})),
+      ...(command ? [{start: command.start, length: command.length}] : []),
+    ];
+  };
+
+  const capsuleTokenText = (description: ResourceDescription, vendorId?: string) =>
+    (vendorId && vendorLogos.has(vendorId) ? CAPSULE_LOGO_SLOT : "") + description.title;
+
+  // The picker parses at the caret, but only its token matters, so refresh its copy of the caret
+  // when that changes rather than on every movement. Plain caret movement then re-renders nothing.
+  const syncPickerCaret = (position: number) => {
+    const text = inputValueRef.current;
+    const key = slashCommandTokenKey(text, position);
+    if (key !== pickerCaretRef.current.key || text !== pickerCaretRef.current.text) {
+      pickerCaretRef.current = {key, text};
+      setCursorPosition(position);
+    }
+  };
+
+  const moveCaret = (position: number) => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+    textarea.setSelectionRange(position, position);
+    syncPickerCaret(position);
+  };
+
+  const removeTokenAt = (range: ComposerRange) => {
+    const rangeEnd = range.start + range.length;
+    const removal = removeComposerToken(inputValueRef.current, range);
+    setInputValue(removal.value);
+    setCapsules(previous => previous
+      .filter(capsule => capsule.start !== range.start)
+      .map(capsule => capsule.start >= rangeEnd
+        ? {...capsule, start: capsule.start + removal.delta}
+        : capsule));
+    setSelectedSlashCommand(previous => {
+      if (!previous || previous.start === range.start) return null;
+      return previous.start >= rangeEnd
+        ? {...previous, start: previous.start + removal.delta}
+        : previous;
+    });
+    requestAnimationFrame(() => moveCaret(removal.caret));
+  };
+
+  // Hit-tests the pointer against the mirror's token spans, which lay out identically to the
+  // textarea's text.
+  const tokenAtPoint = (clientX: number, clientY: number):
+      {start: number; edge: number} | null => {
+    const mirror = mirrorRef.current?.node;
+    // Runs on every pointer move, and `getClientRects()` below forces a layout, so do nothing at
+    // all in the common case of a composer with no tokens in it.
+    if (!mirror || (capsulesRef.current.length === 0 && !selectedSlashCommandRef.current)) {
+      return null;
+    }
+    for (const span of mirror.querySelectorAll<HTMLElement>("[data-token-start]")) {
+      // One rect per line the token occupies.
+      for (const rect of Array.from(span.getClientRects())) {
+        if (clientX < rect.left || clientX > rect.right ||
+            clientY < rect.top || clientY > rect.bottom) continue;
+        return {
+          start: Number(span.dataset.tokenStart),
+          edge: clientX < rect.left + rect.width / 2
+            ? Number(span.dataset.tokenStart)
+            : Number(span.dataset.tokenEnd),
+        };
+      }
+    }
+    return null;
+  };
+
+  // Completing a command leaves the `/name` text in place (only its color changes) and parks the
+  // caret past it so the next keystroke doesn't grow the token.
+  const applySlashCommandSelection = useCallback((
+      choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => {
+    const splice = spliceComposerToken(
+        inputValueRef.current, tokenStart, tokenEnd, `/${choice.name}`);
+    setInputValue(splice.value);
+    setCapsules(previous => previous.map(capsule =>
+      capsule.start >= tokenEnd
+        ? {...capsule, start: capsule.start + splice.delta}
+        : capsule));
+    setSelectedSlashCommand({choice, start: splice.start, length: splice.length});
+    requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+      moveCaret(splice.caret);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keeps the resolved command anchored to its text when text is inserted or removed before it.
+  const shiftSelectedSlashCommand = (position: number, delta: number) => {
+    if (delta === 0) return;
+    setSelectedSlashCommand(previous => previous && previous.start >= position
+      ? {...previous, start: previous.start + delta}
+      : previous);
+  };
 
   const slashCommandPicker = useSlashCommandPicker({
     inputValue,
-    selectedCommand: selectedSlashCommand,
+    cursorPosition,
+    selectedCommand: selectedSlashCommand?.choice ?? null,
     disabled: isBlocked,
     anchorRef: promptCardRef,
     getOverseer,
@@ -1875,9 +2128,12 @@ export const ChatInput = ({
     try {
       let messageInput = inputValue;
       let inputCapsules = capsules;
-      let slashCommand = selectedSlashCommand;
-      if (!slashCommand && inputValue.startsWith("/") && !inputValue.startsWith("//")) {
-        let parsed = parseSlashCommandInput(inputValue);
+      let slashCommand = selectedSlashCommand?.choice ?? null;
+      if (selectedSlashCommand) {
+        messageInput = stripSlashCommandToken(inputValue, selectedSlashCommand);
+      } else if (inputValue.startsWith("/") && !inputValue.startsWith("//")) {
+        // A leading command that was typed but never resolved: resolve it now or refuse to send.
+        let parsed = parseSlashCommandInput(inputValue, 1);
         if (!parsed) {
           toasts.add({ title: "Slash command is invalid", variant: "error" });
           return;
@@ -1900,7 +2156,7 @@ export const ChatInput = ({
           capsule.start >= parsed.tailStart
             ? [{...capsule, start: capsule.start - parsed.tailStart}]
             : []);
-      } else if (!slashCommand && inputValue.startsWith("//")) {
+      } else if (inputValue.startsWith("//")) {
         messageInput = inputValue.slice(1);
         inputCapsules = capsules.map(capsule => ({
           ...capsule,
@@ -1941,6 +2197,7 @@ export const ChatInput = ({
             length: placeholder.length,
             gatekeeperId: c.gatekeeperId,
             description: c.description,
+            vendorId: c.vendorId,
           });
           cumulativeShift += placeholder.length - c.length;
         }
@@ -1989,7 +2246,7 @@ export const ChatInput = ({
   // Called when the user selects an account in the CapsuleOverlay.
   // Creates a capsule gatekeeper, fetches its description, and replaces the URL
   // in the input text with the resource title highlighted as a capsule.
-  const handleCapsuleCreate = async (accountId: number) => {
+  const handleCapsuleCreate = async (accountId: number, vendorId: string) => {
     if (!activeUrl) return;
 
     try {
@@ -2010,47 +2267,30 @@ export const ChatInput = ({
         // Snapshot the activeUrl position before any state updates.
         const urlStart = activeUrl.start;
         const urlEnd = activeUrl.end;
-        // Pad the title with spaces so the mirror highlight has visible interior padding.
-        const paddedTitle = ` ${description.title} `;
-        const lengthDiff = paddedTitle.length - (urlEnd - urlStart);
+        const splice = spliceComposerToken(
+            inputValueRef.current, urlStart, urlEnd, capsuleTokenText(description, vendorId));
 
-        // Replace the URL text with the padded title in inputValue.
-        setInputValue(
-          (prev) => prev.slice(0, urlStart) + paddedTitle + prev.slice(urlEnd),
-        );
+        setInputValue(splice.value);
 
         // Adjust positions of existing capsules and add the new one.
-        setCapsules((prev) => {
-          const adjusted = prev.map((c) => {
-            if (c.start >= urlEnd) {
-              return { ...c, start: c.start + lengthDiff };
-            }
-            return c;
-          });
-          return [
-            ...adjusted,
-            {
-              start: urlStart,
-              length: paddedTitle.length,
-              gatekeeperId: id,
-              description,
-            },
-          ];
-        });
+        shiftSelectedSlashCommand(urlEnd, splice.delta);
+        setCapsules((prev) => [
+          ...prev.map((c) => c.start >= urlEnd ? { ...c, start: c.start + splice.delta } : c),
+          {
+            start: splice.start,
+            length: splice.length,
+            gatekeeperId: id,
+            description,
+            vendorId,
+          },
+        ]);
 
         // Clear activeUrl so the overlay dismisses.
         setActiveUrl(null);
 
-        // Move cursor to end of inserted title on next tick.
         requestAnimationFrame(() => {
-          const wrapper = wrapperRef.current;
-          if (!wrapper) return;
-          const textarea = wrapper.querySelector("textarea");
-          if (textarea) {
-            const cursorPos = urlStart + paddedTitle.length;
-            textarea.setSelectionRange(cursorPos, cursorPos);
-            textarea.focus();
-          }
+          composerTextareaRef.current?.focus();
+          moveCaret(splice.caret);
         });
       } finally {
         gk[Symbol.dispose]();
@@ -2079,6 +2319,7 @@ export const ChatInput = ({
     );
 
     // Adjust positions of any capsules that come after the URL.
+    shiftSelectedSlashCommand(urlEnd, lengthDiff);
     if (lengthDiff !== 0) {
       setCapsules((prev) => {
         const adjusted = prev.map((c) =>
@@ -2135,32 +2376,24 @@ export const ChatInput = ({
     insertPos: number,
     id: number,
     description: ResourceDescription,
+    vendorId?: string,
   ) => {
-    // Pad the title with spaces so the mirror highlight has visible interior padding.
-    const paddedTitle = ` ${description.title} `;
+    const splice = spliceComposerToken(
+        inputValueRef.current, insertPos, insertPos, capsuleTokenText(description, vendorId));
 
-    setInputValue(
-      (prev) => prev.slice(0, insertPos) + paddedTitle + prev.slice(insertPos),
-    );
+    setInputValue(splice.value);
 
     // Shift any existing capsules after the insertion point.
-    setCapsules((prev) => {
-      const adjusted = prev.map((c) =>
-        c.start >= insertPos ? { ...c, start: c.start + paddedTitle.length } : c,
-      );
-      return [
-        ...adjusted,
-        { start: insertPos, length: paddedTitle.length, gatekeeperId: id, description },
-      ];
-    });
+    shiftSelectedSlashCommand(insertPos, splice.delta);
+    setCapsules((prev) => [
+      ...prev.map((c) =>
+        c.start >= insertPos ? { ...c, start: c.start + splice.delta } : c),
+      { start: splice.start, length: splice.length, gatekeeperId: id, description, vendorId },
+    ]);
 
     requestAnimationFrame(() => {
-      const textarea = wrapperRef.current?.querySelector("textarea");
-      if (textarea) {
-        const cursorPos = insertPos + paddedTitle.length;
-        textarea.setSelectionRange(cursorPos, cursorPos);
-        textarea.focus();
-      }
+      composerTextareaRef.current?.focus();
+      moveCaret(splice.caret);
     });
   };
 
@@ -2168,23 +2401,23 @@ export const ChatInput = ({
   // Inserts a capsule at the previously-saved cursor position.
   const handleAttachCreated = async (gk: RpcStub<GatekeeperClient<any>>) => {
     try {
-      // Fetch ID and description in parallel (promise pipelining).
-      const [id, description] = await Promise.all([gk.getId(), gk.describe()]);
-      insertCapsuleAt(attachCursorPosRef.current, id, description);
+      // Fetch everything in parallel (promise pipelining).
+      const [id, description, creationSpec] = await Promise.all([
+        gk.getId(), gk.describe(), gk.getCreationSpec(),
+      ]);
+      insertCapsuleAt(attachCursorPosRef.current, id, description,
+          creationSpec.type === "gatekeeper" ? creationSpec.vendorId : undefined);
       setAttachModalOpen(false);
     } finally {
       gk[Symbol.dispose]();
     }
   };
 
-  // Handle text changes: detect if edits overlap any capsule and remove broken ones.
+  // Handle text changes: capsules are atomic, so an edit overlapping one removes it, while an
+  // edit overlapping the resolved command only detaches the resolution. Both shift when text is
+  // inserted or removed before them.
   const handleInputChange = (newValue: string, editCursorPos?: number) => {
     const oldValue = inputValueRef.current;
-
-    if (capsulesRef.current.length === 0) {
-      setInputValue(newValue);
-      return;
-    }
 
     // Find the region that changed by comparing old and new values.
     let diffStart = 0;
@@ -2226,6 +2459,16 @@ export const ChatInput = ({
     }
 
     const isPureInsertion = oldEnd === diffStart;
+    const command = selectedSlashCommandRef.current;
+    const commandEdited = command !== null &&
+      diffStart < command.start + command.length && oldEnd > command.start;
+    if (commandEdited) setSelectedSlashCommand(null);
+
+    if (capsulesRef.current.length === 0) {
+      if (!commandEdited) shiftSelectedSlashCommand(oldEnd, newEnd - oldEnd);
+      setInputValue(newValue);
+      return;
+    }
 
     // If the insertion (no deletion) landed inside a capsule, reject the edit.
     if (isPureInsertion) {
@@ -2305,6 +2548,7 @@ export const ChatInput = ({
 
     // Second pass: keep non-broken capsules, adjusting positions.
     const totalShift = editShift + extraShift;
+    if (!commandEdited) shiftSelectedSlashCommand(oldEnd, totalShift);
     const surviving: InputCapsule[] = [];
     for (const capsule of capsulesRef.current) {
       const capsuleEnd = capsule.start + capsule.length;
@@ -2342,14 +2586,27 @@ export const ChatInput = ({
   // Detect whether the cursor is currently inside a URL in the input text.
   // Called on every cursor movement (select, click, keyup).
   const handleCursorChange = () => {
-    const wrapper = wrapperRef.current;
-    if (!wrapper) return;
-
-    const textarea = wrapper.querySelector("textarea");
+    const textarea = composerTextareaRef.current;
     if (!textarea) return;
 
-    const cursorPos = textarea.selectionStart;
+    // A click, Home/End, or a word jump can land the caret inside a token; bounce it to the
+    // closer edge. Ranged selections are left alone.
+    let cursorPos = textarea.selectionStart;
+    if (cursorPos === textarea.selectionEnd) {
+      const snapped = snapCaretOutOfRanges(cursorPos, currentTokenRanges(), "nearest");
+      if (snapped !== cursorPos) {
+        cursorPos = snapped;
+        textarea.setSelectionRange(snapped, snapped);
+      }
+    }
+    syncPickerCaret(cursorPos);
+
+    // One keystroke reaches this through `select`, `keyup`, and the frame after the edit. The scan
+    // below only depends on the caret and the text, so do it once per distinct position.
     const text = inputValueRef.current;
+    const scanned = lastUrlScanRef.current;
+    if (scanned.position === cursorPos && scanned.text === text) return;
+    lastUrlScanRef.current = {position: cursorPos, text};
 
     // Find all URL matches in the current text.
     URL_REGEX.lastIndex = 0;
@@ -2382,46 +2639,24 @@ export const ChatInput = ({
     setActiveUrl(null);
   };
 
-  // Build the mirror div content: transparent text with highlighted capsule regions.
-  const renderMirrorContent = () => {
-    const segments: React.ReactNode[] = [];
-    const boundaries = new Set([0, inputValue.length]);
-    for (const capsule of capsules) {
-      boundaries.add(capsule.start);
-      boundaries.add(capsule.start + capsule.length);
-    }
-
-    const positions = [...boundaries]
-      .filter((position) => position >= 0 && position <= inputValue.length)
-      .toSorted((a, b) => a - b);
-
-    for (let i = 0; i < positions.length; i++) {
-      const start = positions[i];
-      const end = positions[i + 1];
-      if (end === undefined || end <= start) continue;
-
-      const text = inputValue.slice(start, end);
-      const capsule = capsules.find(
-        (c) => start >= c.start && end <= c.start + c.length,
-      );
-      if (capsule) {
-        segments.push(
-          <span key={`c${start}`} className={styles.capsuleHighlight}>
-            {text}
-          </span>,
-        );
-      } else {
-        segments.push(<span key={`t${start}`}>{text}</span>);
-      }
-    }
-
-    // Ensure at least a space so the div has nonzero height when empty.
-    if (segments.length === 0) {
-      segments.push(<span key="empty"> </span>);
-    }
-
-    return <>{segments}</>;
-  };
+  // What the mirror paints as objects rather than text. Memoized because the composer re-renders for
+  // plenty of reasons that leave the text alone (attachments, agent activity, menus).
+  const mirrorTokens = useMemo<MirrorToken[]>(() => [
+    ...capsules.map(({start, length, vendorId}) => ({
+      kind: "capsule" as const,
+      start,
+      length,
+      // Painted into the em space the token starts with, so it costs no layout.
+      logo: inputValue.startsWith(CAPSULE_LOGO_SLOT, start)
+        ? cssLogoUrl(vendorId ? vendorLogos.get(vendorId) : undefined)
+        : undefined,
+    })),
+    ...(selectedSlashCommand ? [{
+      kind: "command" as const,
+      start: selectedSlashCommand.start,
+      length: selectedSlashCommand.length,
+    }] : []),
+  ], [capsules, inputValue, selectedSlashCommand, vendorLogos]);
 
   // Console log severity is communicated by the dot colour only; the banner
   // chrome stays neutral so a noisy error doesn't paint a red bar above the
@@ -2534,70 +2769,35 @@ export const ChatInput = ({
         {draftUpdateBanner}
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
-          {selectedSlashCommand && (
-            <div className="mb-2 flex items-center gap-2">
-              <Tooltip
-                content={
-                  <span className="block max-w-sm space-y-1">
-                    <span className="block font-mono">/{selectedSlashCommand.name}</span>
-                    <span className="block">{selectedSlashCommand.description}</span>
-                    <span className="block text-kumo-subtle">
-                      {selectedSlashCommand.providerLabel}
-                      {selectedSlashCommand.resourceLabel
-                        ? ` · ${selectedSlashCommand.resourceLabel}`
-                        : ""}
-                    </span>
-                  </span>
-                }
-                asChild
-              >
-                <span
-                  tabIndex={0}
-                  className="cursor-pointer rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand transition-colors hover:bg-kumo-brand/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-brand/40"
-                >
-                  Skill: {selectedSlashCommand.name}
-                </span>
-              </Tooltip>
-              <button
-                type="button"
-                className="cursor-pointer text-xs text-kumo-subtle hover:text-kumo-default"
-                onClick={() => {
-                  setSelectedSlashCommand(null);
-                }}
-                aria-label={`Remove selected command /${selectedSlashCommand.name}`}
-              >
-                Remove
-              </button>
-            </div>
-          )}
           {slashCommandPicker.popup}
+          {/* The resolved command is marked by color alone, so announce it for screen readers. */}
           <div className="sr-only" aria-live="polite">
-            {slashCommandPicker.status}
+            {slashCommandPicker.status ||
+              (selectedSlashCommand
+                ? `Slash command /${selectedSlashCommand.choice.name} from ${selectedSlashCommand.choice.providerLabel} is ready to send`
+                : "")}
           </div>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
             {activeUrl && (
               <CapsuleOverlay
                 url={activeUrl.text}
-                onSelectAccount={(accountId) => {
-                  handleCapsuleCreate(accountId);
+                onSelectAccount={(accountId, vendorId) => {
+                  handleCapsuleCreate(accountId, vendorId);
                 }}
                 onRefine={handleRefine}
                 onDismiss={() => setActiveUrl(null)}
+                lineOffset={urlLineOffset}
                 activeIndex={overlayIndex}
-                onItems={(items) => {
-                  overlayItemsRef.current = items;
-                }}
+                onItems={handleOverlayItems}
                 activateRef={overlayActivateRef}
               />
             )}
-            <div className={styles.capsuleMirrorClip} aria-hidden="true">
-              <div
-                ref={mirrorRef}
-                className={styles.capsuleMirror}
-              >
-                {renderMirrorContent()}
-              </div>
-            </div>
+            <ComposerMirror
+              ref={mirrorRef}
+              value={inputValue}
+              tokens={mirrorTokens}
+              disabled={isBlocked}
+            />
             <textarea
               value={inputValue}
               role="combobox"
@@ -2607,6 +2807,7 @@ export const ChatInput = ({
               aria-activedescendant={slashCommandPicker.activeDescendant}
               onChange={(e) => {
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
+                syncPickerCaret(e.target.selectionStart ?? 0);
                 requestAnimationFrame(handleCursorChange);
                 // Auto-resize after value change
                 autoResizeTextarea(e.target, minRows, newChat ? 10 : 4);
@@ -2615,6 +2816,27 @@ export const ChatInput = ({
               onSelect={handleCursorChange}
               onClick={handleCursorChange}
               onKeyUp={handleCursorChange}
+
+              onMouseDown={(e) => {
+                if (e.button !== 0) return;
+                const token = tokenAtPoint(e.clientX, e.clientY);
+                if (!token) return;
+                e.preventDefault();
+                e.currentTarget.focus();
+                moveCaret(token.edge);
+              }}
+              onMouseMove={(e) => {
+                const token = tokenAtPoint(e.clientX, e.clientY);
+                mirrorRef.current?.setHoveredToken(token?.start ?? null);
+                const cursor = token ? "default" : "";
+                if (e.currentTarget.style.cursor !== cursor) {
+                  e.currentTarget.style.cursor = cursor;
+                }
+              }}
+              onMouseLeave={(e) => {
+                mirrorRef.current?.setHoveredToken(null);
+                e.currentTarget.style.cursor = "";
+              }}
               onScroll={(e) => {
                 syncMirrorScroll(e.currentTarget);
               }}
@@ -2667,6 +2889,33 @@ export const ChatInput = ({
                     (current + direction + slashCommandPicker.choices.length) % slashCommandPicker.choices.length);
                   return;
                 }
+                // Delete a whole capsule or command rather than eating into it.
+                if ((e.key === "Backspace" || e.key === "Delete") &&
+                    !e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey &&
+                    e.currentTarget.selectionStart === e.currentTarget.selectionEnd) {
+                  const caret = e.currentTarget.selectionStart;
+                  const range = currentTokenRanges().find(({start, length}) =>
+                    e.key === "Backspace" ? caret === start + length : caret === start);
+                  if (range) {
+                    e.preventDefault();
+                    removeTokenAt(range);
+                    return;
+                  }
+                }
+                // Step over a whole capsule or command rather than through its characters.
+                if ((e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+                    !e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey &&
+                    e.currentTarget.selectionStart === e.currentTarget.selectionEnd) {
+                  const direction = e.key === "ArrowRight" ? 1 : -1;
+                  const target = e.currentTarget.selectionStart + direction;
+                  const snapped = snapCaretOutOfRanges(
+                      target, currentTokenRanges(), direction > 0 ? "right" : "left");
+                  if (snapped !== target) {
+                    e.preventDefault();
+                    moveCaret(snapped);
+                    return;
+                  }
+                }
                 // Enter sends message (unless Shift is held)
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -2679,7 +2928,7 @@ export const ChatInput = ({
                     activeUrl.text,
                     activeUrl.start,
                     overlayIndex,
-                    setOverlayIndex,
+                    navigateOverlay,
                     overlayItemsRef,
                     overlayActivateRef,
                   );
@@ -2693,7 +2942,7 @@ export const ChatInput = ({
                   syncMirrorScroll(el);
                 }
               }}
-              className="relative z-[1] w-full resize-none border-none bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive disabled:cursor-not-allowed disabled:text-kumo-inactive"
+              className={`relative z-[1] w-full resize-none border-none bg-transparent p-0 text-[14px] leading-[22px] tracking-[-0.25px] outline-none placeholder:text-kumo-inactive disabled:cursor-not-allowed ${composerTextareaClass}`}
             />
           </div>
         </div>
@@ -6005,14 +6254,14 @@ function ChatInterface({
                         {msg.type === "slashCommand" && (
                           <div className="group/message relative flex flex-col items-end">
                             <div className="themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default">
-                              {msg.skillName && (
-                                <div className="mb-2 flex flex-wrap justify-end gap-1.5">
-                                  <span className="rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand">
-                                    Skill: {msg.skillName}
-                                  </span>
-                                </div>
-                              )}
-                              <span className="whitespace-pre-wrap">{msg.request.args}</span>
+                              <span className="whitespace-pre-wrap">
+                                <SlashCommandMention
+                                  name={msg.skillName}
+                                  args={msg.request.args}
+                                  id={msg.request.id}
+                                  getOverseer={getOverseer}
+                                />
+                              </span>
                             </div>
                             <div className="mt-0.5 flex items-center justify-end gap-2 pr-1 text-[11px] leading-4 text-kumo-inactive opacity-0 transition-opacity duration-150 ease-out group-hover/message:opacity-100 group-focus-within/message:opacity-100">
                               {!(hideOwnUserName && msg.author.id === currentUser?.id) && (
@@ -6033,13 +6282,6 @@ function ChatInterface({
                           msg.author.type === "user" ? (
                             <div className="group/message relative flex flex-col items-end">
                               <div className={`themed-user-bubble-shadow w-fit max-w-[min(680px,78%)] rounded-[24px] rounded-br-lg border border-transparent bg-kumo-bubble-user px-4 py-2.5 text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
-                                {entry.slashCommand?.skillName && (
-                                  <div className="mb-2 flex flex-wrap justify-end gap-1.5">
-                                    <span className="rounded-full border border-kumo-brand/50 bg-kumo-brand/20 px-2 py-1 text-xs font-medium text-kumo-brand">
-                                      Skill: {entry.slashCommand.skillName}
-                                    </span>
-                                  </div>
-                                )}
                                 {msg.attachments && msg.attachments.length > 0 && (
                                   <ChatAttachmentGrid
                                     attachments={msg.attachments}
@@ -6047,22 +6289,16 @@ function ChatInterface({
                                   />
                                 )}
                                 {entry.slashCommand ? (
-                                  <>
-                                    {entry.slashCommand.request.args && (
-                                      <div className="whitespace-pre-wrap">{entry.slashCommand.request.args}</div>
-                                    )}
-                                    {msg.message && (
-                                      <details className="mt-2 text-left text-xs text-kumo-subtle">
-                                        <summary className="cursor-pointer select-none">Generated by slash command</summary>
-                                        <div className={`mt-2 text-[14px] leading-[22px] text-kumo-default ${styles.markdownContent}`}>
-                                          <MarkdownMessage
-                                            message={msg.message}
-                                            capsules={msg.capsules}
-                                          />
-                                        </div>
-                                      </details>
-                                    )}
-                                  </>
+                                  // What the command expanded into is the agent's context, not
+                                  // something to re-read here.
+                                  <div className="whitespace-pre-wrap">
+                                    <SlashCommandMention
+                                      name={entry.slashCommand.skillName}
+                                      args={entry.slashCommand.request.args}
+                                      id={entry.slashCommand.request.id}
+                                      getOverseer={getOverseer}
+                                    />
+                                  </div>
                                 ) : msg.message.trim() && (
                                   // pre-wrap renders users' single newlines as hard breaks.
                                   <div className="whitespace-pre-wrap">

@@ -11,6 +11,8 @@ import type {
 import { useSlashCommandPicker } from "./SlashCommandPicker";
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+// jsdom implements no layout, so it ships no scrollIntoView.
+Element.prototype.scrollIntoView ??= () => {};
 
 const choices: SlashCommandChoice[] = [{
   selection: {gatekeeperId: 1, commandId: "deploy"},
@@ -32,16 +34,19 @@ function pickerOverseer(result: SlashCommandChoice[]) {
 
 function Harness({
   inputValue,
+  cursorPosition = inputValue.length,
   getOverseer,
   onSelect,
 }: {
   inputValue: string;
+  cursorPosition?: number;
   getOverseer: () => RpcStub<Overseer>;
-  onSelect: (choice: SlashCommandChoice, tailStart: number) => void;
+  onSelect: (choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => void;
 }) {
   const anchorRef = useRef<HTMLDivElement>(null);
   const picker = useSlashCommandPicker({
     inputValue,
+    cursorPosition,
     selectedCommand: null,
     disabled: false,
     anchorRef,
@@ -134,18 +139,59 @@ describe("SlashCommandPicker", () => {
     expect(overseer.listSlashCommands).toHaveBeenCalledTimes(1);
   });
 
+  it("reopens for another token after dismissing without changing the message", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    let overseer = pickerOverseer(choices);
+    const inputValue = "try /dep or /deb";
+
+    await act(async () => root.render(
+      <Harness
+        inputValue={inputValue}
+        cursorPosition={inputValue.indexOf("dep") + 2}
+        getOverseer={() => overseer}
+        onSelect={() => {}}
+      />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 1);
+
+    await act(async () => {
+      document.body.dispatchEvent(new Event("pointerdown", {bubbles: true}));
+    });
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    await act(async () => root.render(
+      <Harness
+        inputValue={inputValue}
+        cursorPosition={inputValue.indexOf("deb") + 2}
+        getOverseer={() => overseer}
+        onSelect={() => {}}
+      />,
+    ));
+    await waitFor(() => document.querySelectorAll('[role="option"]').length === 1);
+    expect(document.body.textContent).toContain("/debug");
+  });
+
   it("selects a unique exact command when trailing message text starts", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    let onSelect = vi.fn<(choice: SlashCommandChoice, tailStart: number) => void>();
+    let onSelect = vi.fn<(
+      choice: SlashCommandChoice, tokenStart: number, tokenEnd: number,
+    ) => void>();
     let getOverseer = () => pickerOverseer(choices);
 
     await act(async () => root.render(
-      <Harness inputValue="/deploy production" getOverseer={getOverseer} onSelect={onSelect} />,
+      <Harness
+        inputValue="/deploy production"
+        cursorPosition={8}
+        getOverseer={getOverseer}
+        onSelect={onSelect}
+      />,
     ));
     await waitFor(() => onSelect.mock.calls.length === 1);
-    expect(onSelect).toHaveBeenCalledWith(choices[0], 8);
+    expect(onSelect).toHaveBeenCalledWith(choices[0], 0, 7);
   });
 
   it("does not default an ambiguous exact command", async () => {
