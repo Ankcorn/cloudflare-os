@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useNavigate } from '@tanstack/react-router'
 import {
   Blueprint,
-  Clock,
   MagnifyingGlass,
   Plus,
   SquaresFour,
@@ -217,12 +216,6 @@ export default function CommandPalette({
         label: 'Blueprints',
         icon: <Blueprint size={15} />,
         run: () => navigate({ to: '/explore' }),
-      },
-      {
-        id: 'nav-scheduled',
-        label: 'Scheduled tasks',
-        icon: <Clock size={15} />,
-        run: () => navigate({ to: '/scheduled' }),
       },
     ]
 

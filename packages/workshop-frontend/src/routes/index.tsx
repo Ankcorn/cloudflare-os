@@ -18,13 +18,25 @@ import {
   persistSelectedModel,
 } from "../modelSelection";
 import { useDocumentTitle } from "../useDocumentTitle";
+import { homePromptFromSearch } from "../homePrompt";
 
-export const Route = createFileRoute("/")({ component: HomePage });
+type HomeSearch = { prompt?: string };
+
+export const Route = createFileRoute("/")({
+  component: HomePage,
+  validateSearch: (search: Record<string, unknown>): HomeSearch => ({
+    prompt: homePromptFromSearch(search.prompt),
+  }),
+});
 
 // The Home page is the "new workspace" launcher. Persistent navigation (recents, favorites) lives
 // in the AppShell rail, so this page focuses on a single thing: composing the first message of a
 // new gadget — a centered column with a hero, the prompt composer, and a few task suggestions.
 function HomePage() {
+  return <HomePageContent prompt={Route.useSearch().prompt} />;
+}
+
+export function HomePageContent({ prompt }: HomeSearch) {
   useDocumentTitle("Home");
 
   const { authenticatedApi } = useAuthenticatedApi();
@@ -35,6 +47,12 @@ function HomePage() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   // Bumped each time a task suggestion is picked; the composer re-seeds its text off the nonce.
   const [seed, setSeed] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
+
+  useEffect(() => {
+    if (!prompt) return;
+    setSeed((previous) => ({ text: prompt, nonce: previous.nonce + 1 }));
+    navigate({ to: "/", search: {}, replace: true });
+  }, [navigate, prompt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -169,8 +187,8 @@ function HomePage() {
 
         {/* A few example work tasks to spark ideas. Picking one seeds the composer above. */}
         <HomeTaskSuggestions
-          onPick={(prompt) =>
-            setSeed((prev) => ({ text: prompt, nonce: prev.nonce + 1 }))
+          onPick={(suggestion) =>
+            setSeed((prev) => ({ text: suggestion, nonce: prev.nonce + 1 }))
           }
         />
       </div>

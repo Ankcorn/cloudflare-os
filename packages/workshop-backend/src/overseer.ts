@@ -1556,16 +1556,17 @@ class OverseerImpl implements AgentHooks {
 
   // Which gadget do persistent stubs sealed inside executeCode restore to? Letting executed code
   // choose an owner per callback is a follow-up change; for now restore targets the workspace's
-  // first gadget: the default gadget when it exists, else the lowest-numbered *permanent* gadget
-  // (a provisional gadget may yet be rejected, so a persistent callback must not target it), else
-  // undefined (in which case restoration of such a stub fails with an explicit error).
+  // first gadget: the default gadget when it exists, else the lowest-numbered gadget (including a
+  // provisional one — hooks recorded against it are torn down by removeGadget() if the provisional
+  // gadget is later rejected), else undefined (in which case restoration of such a stub fails with
+  // an explicit error).
   // TODO(multi-gadget): Figure out how to allow ctx.restore() to work with multiple gadgets; may
   // require runtime changes.
   executeCodeRestoreTarget(): WorkpieceId | undefined {
     let def = this.defaultGadgetId;
     if (def !== undefined && this.storage.gadgets.get(def) !== undefined) return def;
     for (let gadget of this.storage.gadgets.list()) {
-      if (!gadget.pending) return gadget.id;
+      return gadget.id;
     }
     return undefined;
   }
@@ -7038,6 +7039,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         hookId: id,
       }
 
+      // TODO(hooks): enable()/disable() race. controller.enable() is awaited RPC to the gatekeeper;
+      // a concurrent disableHook() can finish its controller.disable() first, then this enable()
+      // still lands and recreates gatekeeper-side state (e.g. a scheduler driver row + alarm).
+      // Live firings stay safe because startHook() re-checks record.enabled, but the resurrected
+      // row can keep consuming quota/alarms until cleaned up.
       await record.controller.enable(
           this.impl.ctx.exports.GatekeeperHookLoopback({props}) as unknown as
               Fetcher<HookInitiator<RpcTarget>>,

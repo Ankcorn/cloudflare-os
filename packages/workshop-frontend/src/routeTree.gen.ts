@@ -18,7 +18,6 @@ import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
 import { Route as OutputsRouteImport } from './routes/outputs'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
-import { Route as ScheduledRouteImport } from './routes/scheduled'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
@@ -71,11 +70,6 @@ const ProvidersRoute = ProvidersRouteImport.update({
   path: '/providers',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ScheduledRoute = ScheduledRouteImport.update({
-  id: '/scheduled',
-  path: '/scheduled',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
@@ -117,7 +111,6 @@ export interface FileRoutesByFullPath {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -135,7 +128,6 @@ export interface FileRoutesByTo {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -154,7 +146,6 @@ export interface FileRoutesById {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/scheduled': typeof ScheduledRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -174,7 +165,6 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
-    | '/scheduled'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -192,7 +182,6 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
-    | '/scheduled'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -210,7 +199,6 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
-    | '/scheduled'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -229,7 +217,6 @@ export interface RootRouteChildren {
   OutputsRoute: typeof OutputsRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
-  ScheduledRoute: typeof ScheduledRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
@@ -303,13 +290,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProvidersRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/scheduled': {
-      id: '/scheduled'
-      path: '/scheduled'
-      fullPath: '/scheduled'
-      preLoaderRoute: typeof ScheduledRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/signup': {
       id: '/signup'
       path: '/signup'
@@ -365,7 +345,6 @@ const rootRouteChildren: RootRouteChildren = {
   OutputsRoute: OutputsRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
-  ScheduledRoute: ScheduledRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,

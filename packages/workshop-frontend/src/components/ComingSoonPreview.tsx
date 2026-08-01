@@ -2,7 +2,7 @@ import type { Icon as PhosphorIcon } from '@phosphor-icons/react'
 import type { ReactNode } from 'react'
 
 // Wraps a non-functional design mock: renders the (frosted, non-interactive) mock as `children`
-// and lays a centered "coming soon" card on top. Used by Outputs, Scheduled, and Context & Skills
+// and lays a centered "coming soon" card on top. Used by Outputs and Context & Skills
 // so every not-yet-built destination gets the same treatment.
 export default function ComingSoonPreview({
   icon: Icon,

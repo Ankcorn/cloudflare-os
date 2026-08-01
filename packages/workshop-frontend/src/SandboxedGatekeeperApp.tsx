@@ -1,11 +1,18 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
+import { useNavigate } from '@tanstack/react-router'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { createRateLimitedCapability } from './rateLimitedCapability'
 import { useTheme } from './ThemeContext'
 import type { ResolvedThemeMode } from './theme'
 import { forwardTrustedFrameError } from './errorReporting'
+import { useAuthenticatedApi } from './AuthContext'
+import {
+  normalizeGatekeeperAppPrompt,
+  parseGatekeeperAppWorkspaceTarget,
+  type GatekeeperAppWorkspaceTarget,
+} from './gatekeeperAppNavigation'
 
 // A receiver, defined by the sandboxed app, that the host calls to push theme changes into the frame.
 interface ThemeReceiver extends RpcTarget {
@@ -23,8 +30,20 @@ type PresentAck = { rect: OverlayRect | null; willResize: boolean }
 
 // Grows the app's iframe to a full-viewport overlay for app-level modals (true) or restores it (false).
 type PresentController = (active: boolean) => PresentAck
+type OpenTarget = (target: GatekeeperAppWorkspaceTarget) => void
+// Resolves workspace IDs the app already holds to their live titles; null for a workspace the user
+// can no longer see. Deliberately a lookup, not an enumeration: the app learns nothing new.
+type ResolveWorkspaceTitles = (ids: string[]) => Promise<(string | null)[]>
+type OpenPrompt = (prompt: string) => void
 
 type OverlayState = 'full' | null
+
+// Upper bound on one workspace-title lookup, matching the app's page size.
+const MAX_RESOLVED_WORKSPACES = 100
+
+// How long one gadget listing is reused across title lookups. The untrusted frame calls this once
+// per page of rows (and could call it in a loop), so the listing is shared rather than repeated.
+const WORKSPACE_TITLES_TTL_MS = 10_000
 
 // Near the max int, so the full-viewport iframe sits above all Workshop chrome.
 const overlayZIndex = 2147483000
@@ -60,6 +79,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
   readonly #ui: RpcStub<RpcTarget>
   readonly #disposeRateLimiter: () => void
   readonly #present: PresentController
+  readonly #openTarget: OpenTarget
+  readonly #openPrompt: OpenPrompt
+  readonly #resolveWorkspaceTitles: ResolveWorkspaceTitles
   #presenting = false
   #themeMode: ResolvedThemeMode
   #themeReceiver: RpcStub<ThemeReceiver> | null = null
@@ -68,7 +90,14 @@ class GatekeeperAppHostImpl extends RpcTarget {
   #pendingResolvers: ((ack: PresentAck) => void)[] = []
   #frameId: number | null = null
 
-  constructor(capability: any, present: PresentController, themeMode: ResolvedThemeMode) {
+  constructor(
+    capability: any,
+    present: PresentController,
+    themeMode: ResolvedThemeMode,
+    openTarget: OpenTarget,
+    openPrompt: OpenPrompt,
+    resolveWorkspaceTitles: ResolveWorkspaceTitles,
+  ) {
     super()
     this.#themeMode = themeMode
     const { capability: ui, dispose } = createRateLimitedCapability(capability, {
@@ -81,10 +110,32 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#ui = ui
     this.#disposeRateLimiter = dispose
     this.#present = present
+    this.#openTarget = openTarget
+    this.#openPrompt = openPrompt
+    this.#resolveWorkspaceTitles = resolveWorkspaceTitles
   }
 
   get ui(): RpcStub<RpcTarget> {
     return this.#ui
+  }
+
+  // Navigate to a workspace the app knows about. The IDs are validated here because the app is
+  // untrusted; navigation stays in-app rather than handing the frame a URL to follow.
+  openWorkspace(workspaceId: string, gadgetId?: number): void {
+    this.#openTarget(parseGatekeeperAppWorkspaceTarget(workspaceId, gadgetId))
+  }
+
+  // Resolve live titles for workspaces the app already references, so it never renders a stale
+  // snapshot. Bounded per call; unknown or no-longer-visible workspaces come back as null.
+  resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]> {
+    if (!Array.isArray(ids) || ids.length > MAX_RESOLVED_WORKSPACES) {
+      throw new TypeError('Invalid workspace title lookup.')
+    }
+    return this.#resolveWorkspaceTitles(ids)
+  }
+
+  openPrompt(prompt: string): void {
+    this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
   }
 
   // The app calls this once to learn the current mode and register a receiver for later changes.
@@ -164,6 +215,8 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
 }) {
+  const navigate = useNavigate()
+  const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const sessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
   const hostRef = useRef<GatekeeperAppHostImpl | null>(null)
@@ -203,6 +256,35 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         : null
     return { rect, willResize }
   }, [setOverlayPhase])
+  const openTarget = useCallback<OpenTarget>(({ workspaceId, gadgetId }) => {
+    navigate({
+      to: '/gadget/$id',
+      params: { id: workspaceId },
+      search: gadgetId === undefined ? {} : { w: gadgetId },
+    })
+  }, [navigate])
+  const titlesRef = useRef<{ at: number, titles: Promise<Map<string, string>> } | null>(null)
+  const resolveWorkspaceTitles = useCallback<ResolveWorkspaceTitles>(async (ids) => {
+    let entry = titlesRef.current
+    if (!entry || Date.now() - entry.at >= WORKSPACE_TITLES_TTL_MS) {
+      entry = {
+        at: Date.now(),
+        titles: authenticatedApi.listGadgets()
+          .then((gadgets) => new Map(gadgets.map((gadget) => [gadget.id, gadget.title]))),
+      }
+      titlesRef.current = entry
+      // Don't cache a failure: drop it so the next lookup retries.
+      const failed = entry
+      entry.titles.catch(() => {
+        if (titlesRef.current === failed) titlesRef.current = null
+      })
+    }
+    const titles = await entry.titles
+    return ids.map((id) => titles.get(id) ?? null)
+  }, [authenticatedApi])
+  const openPrompt = useCallback<OpenPrompt>((prompt) => {
+    navigate({ to: '/', search: { prompt } })
+  }, [navigate])
   // The gatekeeper capability is `any`: its method shape is gatekeeper-defined and opaque to us.
   const capabilityRef = useRef<any>(null)
   capabilityRef.current = frame.ui
@@ -227,7 +309,14 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         port.close()
         return
       }
-      const host = new GatekeeperAppHostImpl(capabilityRef.current, present, themeModeRef.current)
+      const host = new GatekeeperAppHostImpl(
+        capabilityRef.current,
+        present,
+        themeModeRef.current,
+        openTarget,
+        openPrompt,
+        resolveWorkspaceTitles,
+      )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
       connectedRef.current = true
@@ -259,7 +348,8 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, present, setOverlayPhase])
+  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget,
+      present, resolveWorkspaceTitles, setOverlayPhase])
 
   return (
     <iframe

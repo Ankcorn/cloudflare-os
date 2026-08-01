@@ -48,6 +48,9 @@ To enable support for external APIs, you must do further configuration to regist
 * [Spotify](packages/gatekeeper-spotify/README.md)
 * [ZoomInfo API](packages/gatekeeper-zoominfo/README.md)
 
+The built-in [Scheduled Tasks](packages/gatekeeper-scheduler/README.md) gatekeeper requires no external
+credentials; its documentation covers scheduling behavior, deployment, and the management UI.
+
 # Running as a public, multi-user service
 
 By default the Workshop uses built-in username/password accounts (or Cloudflare Access) and gives
