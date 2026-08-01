@@ -1,6 +1,8 @@
 {
   "name": "dev-router",
-  "main": "dev-router.js",
+  // The router package doubles as the dev router: with no ASSETS binding configured here, it
+  // proxies frontend requests to the Vite dev server (see packages/router/src/index.ts).
+  "main": "packages/router/src/index.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["enable_ctx_exports"],
 
