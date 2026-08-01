@@ -61,6 +61,7 @@ import {
 import {
   Overseer,
   GatekeeperClient,
+  AiChatHistoryPage,
   AiChatMetadata,
   AiChatMessage,
   AiChatSubscriber,
@@ -2102,6 +2103,7 @@ export const ChatInput = ({
     anchorRef: promptCardRef,
     getOverseer,
     onSelect: applySlashCommandSelection,
+    chatExists: !newChat,
   });
 
   const handleSend = async () => {
@@ -3141,6 +3143,11 @@ interface MessageState {
 
 type ChatDisplayEntry =
   | {
+      type: "compactionBoundary";
+      key: string;
+      boundary: CompactionBoundary;
+    }
+  | {
       type: "modelChange";
       key: string;
       author: AiChatAuthorInfo;
@@ -3272,12 +3279,27 @@ function transcriptToolCalls(toolCalls: AiToolCall[]): AiToolCall[] {
     tc.toolName !== "createGadget" || tc.output === undefined || Boolean(tc.error));
 }
 
-function buildChatDisplayEntries(
+export function buildChatDisplayEntries(
   messages: AiChatMessage[],
   changeStatus: ReadonlyMap<number, "pending" | "merged" | "reverted">,
+  // Loaded compaction boundaries, oldest first. Each is shown where the cut fell rather than above
+  // the thread, so the marker stays put no matter how much history is loaded around it.
+  boundaries: readonly CompactionBoundary[] = [],
 ): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
+  let nextBoundary = 0;
+
+  const maybePushBoundaries = (sequence: number) => {
+    while (nextBoundary < boundaries.length && boundaries[nextBoundary].to <= sequence) {
+      const boundary = boundaries[nextBoundary++];
+      result.push({
+        type: "compactionBoundary",
+        key: `compacted-${boundary.to}`,
+        boundary,
+      });
+    }
+  };
 
   const maybePushModelChange = (msg: AiChatMessage) => {
     if (msg.type !== "message" || msg.author.type !== "agent" || isEmptyAssistantMessage(msg)) return;
@@ -3302,9 +3324,16 @@ function buildChatDisplayEntries(
 
   for (let i = 0; i < messages.length; ) {
     const msg = messages[i];
+    maybePushBoundaries(msg.sequence);
     maybePushModelChange(msg);
 
     if (msg.type === "slashCommand") {
+      // A built-in command is handled by the Workshop itself: it carries no prompt and gets no
+      // provider reply, so there is no message to show. The compaction boundary marks its result.
+      if (msg.request.id.builtin === true) {
+        i++;
+        continue;
+      }
       let next = messages[i + 1];
       if (next?.type === "message" && next.generatedBySlashCommandSequence === msg.sequence) {
         result.push({
@@ -3443,9 +3472,13 @@ function isUserMessageEntry(entry: ChatDisplayEntry): boolean {
   );
 }
 
+// How close to the top of the transcript pulls in the previous page. Roughly a screenful of slack,
+// so the messages are there by the time the user scrolls to them.
+const EARLIER_PAGE_PREFETCH_PX = 600;
+
 function isPureWorkRowEntry(entry: ChatDisplayEntry): boolean {
   if (entry.type === "workRun") return true;
-  if (entry.type === "modelChange") return false;
+  if (entry.type === "modelChange" || entry.type === "compactionBoundary") return false;
   const m = entry.message;
   return (
     m.type === "action" ||
@@ -3488,13 +3521,32 @@ function rhythmTopClass(
   return "mt-4";
 }
 
-function computeMessageStates(messages: AiChatMessage[]): MessageState {
+export function computeMessageStates(
+  messages: AiChatMessage[],
+  // Compaction boundary bounding the oldest loaded page, if the chat has one.
+  compacted?: CompactionBoundary,
+): MessageState {
   const changeStatus = new Map<number, "pending" | "merged" | "reverted">();
   const mergeTimestamps = new Map<number, Date>();
   const revertTimestamps = new Map<number, Date>();
 
   // Track active updates as we scan (for proposed changes computation)
   let updates: { sequence: number; update?: Uint8Array }[] = [];
+
+  // The boundary carries the still-proposed pre-boundary changes merged into one update. Fold it
+  // in at the last pre-boundary sequence, so it counts as proposed and a later merge or revert
+  // reaching across the boundary still resolves it. Skipped once the page before the boundary has
+  // loaded, since its own "changes" messages would then count the same edits again.
+  //
+  // Only the bytes appear here, because that is all these entries are read for: reconstructing the
+  // proposed code. A prefix that only created gadgets carries none, and stays reachable through the
+  // server's own cut -- see the accept-changes banner.
+  if (
+    compacted?.proposedChanges !== undefined &&
+    (messages.length === 0 || messages[0].sequence >= compacted.to)
+  ) {
+    updates.push({ sequence: compacted.to - 1, update: compacted.proposedChanges });
+  }
 
   for (let msg of messages) {
     if (msg.type === "changes") {
@@ -3654,10 +3706,16 @@ function formatChatRowTime(date: Date, bucket: ChatTimeBucket, now: Date): strin
   );
 }
 
+// A compaction checkpoint reported with a history page.
+export type CompactionBoundary = NonNullable<AiChatHistoryPage["compacted"]>;
+
 // Client-side cache for chats and messages (survives reconnects)
 interface ChatCache {
   chats: Map<number, AiChatMetadata>;
   messages: Map<number, AiChatMessage[]>;
+  // Compaction boundaries seen so far for each chat, oldest first. Every loaded page contributes
+  // one, so a thread compacted several times shows a marker at each cut.
+  compacted: Map<number, CompactionBoundary[]>;
   actionMessages: Map<number, Map<string, { chatId: number; sequence: number }>>;
   lastMessageTimestamp: Date | null;
 }
@@ -3675,6 +3733,8 @@ type ProvisionalToolCallState = {
 type ProvisionalChatState = {
   text: string;
   reasoning: string;
+  // The turn is summarizing older context and can't produce output until it finishes.
+  compacting: boolean;
   toolCalls: ProvisionalToolCallState[];
   toolCallsById: Map<string, ProvisionalToolCallState>;
   codeUpdates: Uint8Array[];
@@ -3685,6 +3745,7 @@ function createProvisionalChatState(): ProvisionalChatState {
   return {
     text: "",
     reasoning: "",
+    compacting: false,
     toolCalls: [],
     toolCallsById: new Map(),
     codeUpdates: [],
@@ -3711,6 +3772,7 @@ function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
   return (
     state.text === "" &&
     state.reasoning === "" &&
+    !state.compacting &&
     state.toolCalls.length === 0 &&
     state.codeUpdates.length === 0 &&
     state.activeEditingFile === undefined
@@ -3774,6 +3836,7 @@ function ChatInterface({
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
+    compacted: new Map(),
     actionMessages: new Map(),
     lastMessageTimestamp: null,
   });
@@ -3794,6 +3857,8 @@ function ChatInterface({
   const [chatListScope, setChatListScope] = useState<ChatListScope>("all");
   const [chatListVersion, setChatListVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  // Fetching the page before the selected chat's compaction boundary.
+  const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
   const [updateCounter, setUpdateCounter] = useState(0); // Force re-render when cache updates
   const [proposedChangesVersion, setProposedChangesVersion] = useState(0); // Incremented only for change-affecting messages
   const [draftChangesVersion, setDraftChangesVersion] = useState(0);
@@ -3818,6 +3883,7 @@ function ChatInterface({
     new Set(),
   );
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
+  const [expandedCompactions, setExpandedCompactions] = useState<Set<number>>(new Set());
   const [processingActions, setProcessingActions] = useState<Set<number>>(
     new Set(),
   );
@@ -3901,6 +3967,49 @@ function ChatInterface({
       }
       if (locations.size === 0) cacheRef.current.actionMessages.delete(actionId);
     }
+  };
+
+  // Fold one history page into the cache. Messages are stored at their sequence index, so filling
+  // in an older page and re-receiving a message the subscription already delivered are both
+  // harmless. The page's boundary joins the ones already known, keyed by its cut so the same page
+  // fetched twice contributes one marker.
+  const cacheHistoryPage = (chatId: number, page: AiChatHistoryPage) => {
+    let messages = cacheRef.current.messages.get(chatId);
+    if (!messages) {
+      messages = [];
+      cacheRef.current.messages.set(chatId, messages);
+    }
+
+    for (const msg of page.messages) {
+      messages[msg.sequence] = msg;
+      indexActionMessage(msg);
+    }
+
+    if (page.compacted) {
+      let boundaries = cacheRef.current.compacted.get(chatId) ?? [];
+      cacheRef.current.compacted.set(chatId, [
+        ...boundaries.filter(({to}) => to !== page.compacted!.to), page.compacted,
+      ].toSorted((a, b) => a.to - b.to));
+    }
+  };
+
+  // Held in a ref for the same reason as `refreshBoundaryRef` below: the subscriber outlives the
+  // render that created it, and the toast manager is a fresh object each render.
+  const toastsRef = useRef(toasts);
+  toastsRef.current = toasts;
+
+  // Refetches a loaded chat's newest page. Held in a ref because the chat subscriber is constructed
+  // once, while `overseer` and `cacheHistoryPage` are recreated each render.
+  const refreshBoundaryRef = useRef<(chatId: number) => void>(() => {});
+  refreshBoundaryRef.current = (chatId: number) => {
+    void (async () => {
+      try {
+        cacheHistoryPage(chatId, await overseer.getChatHistory(chatId));
+        forceUpdate();
+      } catch (err) {
+        reportIssue("chat.compaction-boundary-refresh", err, {handled: true});
+      }
+    })();
   };
 
   // Apply page-level cursor + user-select only while a resize is in progress.
@@ -4038,9 +4147,14 @@ function ChatInterface({
       (msg) => msg !== undefined,
     );
   }, [selectedChatId, updateCounter]);
+  const currentCompactions = useMemo(() => {
+    if (selectedChatId === null) return [];
+    return cacheRef.current.compacted.get(selectedChatId) ?? [];
+  }, [selectedChatId, updateCounter]);
   const messageStates = useMemo(
-    () => computeMessageStates(currentMessages),
-    [currentMessages],
+    // The oldest boundary is the one whose proposed changes no loaded message accounts for.
+    () => computeMessageStates(currentMessages, currentCompactions[0]),
+    [currentMessages, currentCompactions],
   );
   // A pending agent connection request blocks the composer: the user must accept ("Set up") or deny
   // it before continuing the conversation.
@@ -4066,8 +4180,8 @@ function ChatInterface({
       // Hide agent checkpoints; surface them as turn-level discard actions. User-saved
       // checkpoints get their own compact row so the discard action is attached to the
       // edit that actually created it.
-      buildChatDisplayEntries(currentMessages, messageStates.changeStatus),
-    [currentMessages, messageStates],
+      buildChatDisplayEntries(currentMessages, messageStates.changeStatus, currentCompactions),
+    [currentMessages, messageStates, currentCompactions],
   );
 
   const entryTopClasses = useMemo(() => {
@@ -4188,10 +4302,13 @@ function ChatInterface({
     };
   }, [selectedChatId, currentStreamingChanges, currentStreamingChangesCount]);
 
+  const isCompacting = currentProvisionalState?.compacting === true;
+
   const hasVisibleProvisionalContent =
     !!currentProvisionalState &&
     (currentProvisionalState.text !== "" ||
       currentProvisionalState.reasoning !== "" ||
+      currentProvisionalState.compacting ||
       provisionalToolCalls.length > 0);
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
@@ -4211,6 +4328,14 @@ function ChatInterface({
     }
   }, [isAgentActive, selectedChatId]);
 
+  // Loads the page before the oldest message on screen. Held in a ref because the scroll handler is
+  // built once, while the loader closes over state that changes each render.
+  const loadEarlierRef = useRef<() => void>(() => {});
+
+  // Height of the message area just before an earlier page is prepended. Restoring against it keeps
+  // the user on what they were reading instead of jumping them backwards.
+  const prependAnchorRef = useRef<number | undefined>(undefined);
+
   // Track whether user is scrolled to the bottom of the messages area.
   const handleMessagesScroll = useCallback(() => {
     const el = messagesContainerRef.current;
@@ -4218,7 +4343,22 @@ function ChatInterface({
     // Allow a small tolerance for fractional scroll positions and layout rounding.
     isScrolledToBottomRef.current =
       el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+    // Approaching the top pulls in the previous page, so a compacted thread reads as one continuous
+    // scroll rather than making the user ask for their own history.
+    if (el.scrollTop <= EARLIER_PAGE_PREFETCH_PX) loadEarlierRef.current();
   }, []);
+
+  useLayoutEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    if (prependAnchorRef.current !== undefined) {
+      el.scrollTop += el.scrollHeight - prependAnchorRef.current;
+      prependAnchorRef.current = undefined;
+    } else if (el.scrollHeight <= el.clientHeight) {
+      // A short page leaves nothing to scroll, so no scroll event would ever ask for the rest.
+      loadEarlierRef.current();
+    }
+  });
 
   // Auto-scroll to bottom when messages change, but only if already at bottom
   useLayoutEffect(() => {
@@ -4289,7 +4429,12 @@ function ChatInterface({
             (msg) => msg !== undefined,
           )
         : [];
-    const { activeChanges } = computeMessageStates(messages);
+    const { activeChanges } = computeMessageStates(
+      messages,
+      selectedChatId !== null
+        ? cacheRef.current.compacted.get(selectedChatId)?.[0]
+        : undefined,
+    );
 
     if (activeChanges.length === 0) {
       onProposedChangesChange?.(undefined);
@@ -4359,6 +4504,26 @@ function ChatInterface({
         provisionalRef.current.delete(chat.id);
       }
 
+      // A revert reaching across a boundary rolls compaction back, lowering or clearing
+      // `compactedTo` and deleting the checkpoints above it. Drop those here so their markers stop
+      // claiming history that is whole again.
+      let boundaries = cacheRef.current.compacted.get(chat.id);
+      if (boundaries !== undefined) {
+        let live = boundaries.filter(({to}) => to <= (chat.compactedTo ?? -1));
+        if (live.length < boundaries.length) cacheRef.current.compacted.set(chat.id, live);
+      }
+
+      // A compaction that lands while the chat is open publishes a boundary the client only gets
+      // with a page, so refetch instead of waiting for a reload. Asking whether that boundary is
+      // already loaded makes this idempotent: paging back adds boundaries rather than replacing
+      // them, so an extra fetch can neither miss a compaction nor undo an expansion. Rolling the
+      // last boundary away needs the same fetch, since the history it used to hide is live again.
+      if (cacheRef.current.messages.has(chat.id) && (chat.compactedTo === undefined
+          ? prevChat?.compactedTo !== undefined
+          : !cacheRef.current.compacted.get(chat.id)?.some(({to}) => to === chat.compactedTo))) {
+        refreshBoundaryRef.current(chat.id);
+      }
+
       cacheRef.current.chats.set(chat.id, chat);
       bumpChatListVersion();
       forceUpdate();
@@ -4368,6 +4533,7 @@ function ChatInterface({
       // Remove from cache
       cacheRef.current.chats.delete(chatId);
       cacheRef.current.messages.delete(chatId);
+      cacheRef.current.compacted.delete(chatId);
       removeChatFromActionMessageIndex(chatId);
       provisionalRef.current.delete(chatId);
       draftRef.current.delete(chatId);
@@ -4478,6 +4644,17 @@ function ChatInterface({
       }
 
       switch (event.type) {
+        case "compacting":
+          provisional.compacting = true;
+          break;
+        case "compacted":
+          provisional.compacting = false;
+          if (event.nothingToCompact) {
+            toastsRef.current.add({
+              title: "Nothing to compact — there are no earlier messages to summarize.",
+            });
+          }
+          break;
         case "textDelta":
           provisional.text += event.delta;
           break;
@@ -4627,6 +4804,7 @@ function ChatInterface({
     setExpandedToolCalls(new Set());
     setExpandedActions(new Set());
     setExpandedErrors(new Set());
+    setIsLoadingEarlier(false);
     setIsEditingTitle(false);
     setSidebarActiveTab("chat");
   }, [selectedChatId]);
@@ -4642,27 +4820,14 @@ function ChatInterface({
       setIsLoading(true);
       (async () => {
         try {
-          const history = await overseer.getChatHistory(selectedChatId);
+          const page = await overseer.getChatHistory(selectedChatId);
           if (cancelled) return;
 
-          // Get or initialize messages array for this chat
-          let messages = cacheRef.current.messages.get(selectedChatId);
-          if (!messages) {
-            messages = [];
-            cacheRef.current.messages.set(selectedChatId, messages);
-          }
-
-          // Populate using sequence numbers as indices
-          // If subscription already added some messages, this will fill in the gaps
-          // (and harmlessly overwrite any that match, since content is identical)
-          history.forEach((msg) => {
-            messages[msg.sequence] = msg;
-            indexActionMessage(msg);
-          });
+          cacheHistoryPage(selectedChatId, page);
 
           // Update last message timestamp if needed
-          if (history.length > 0) {
-            const lastMsg = history[history.length - 1];
+          if (page.messages.length > 0) {
+            const lastMsg = page.messages[page.messages.length - 1];
             if (
               !cacheRef.current.lastMessageTimestamp ||
               lastMsg.timestamp > cacheRef.current.lastMessageTimestamp
@@ -4696,6 +4861,35 @@ function ChatInterface({
     // LSP reports an error here, but tsc does not.
     // The LSP error is due to bugs that need to be fixed in Cap'n Web.
   }, [selectedChatId, overseer]);
+
+  // Sequence of the oldest message loaded, or undefined once the thread's start is loaded. Paging
+  // asks for what precedes it, so the control disappears exactly when there is nothing earlier.
+  const oldestLoadedSequence = currentMessages[0]?.sequence;
+  const hasEarlierMessages = oldestLoadedSequence !== undefined && oldestLoadedSequence > 0;
+
+  // Load the page before the oldest message on screen. Those messages are all older than anything
+  // the subscription delivers, so lastMessageTimestamp is left alone.
+  const handleShowEarlierMessages = async () => {
+    if (selectedChatId === null || !hasEarlierMessages || isLoadingEarlier) return;
+
+    setIsLoadingEarlier(true);
+    try {
+      const page = await overseer.getChatHistory(selectedChatId, oldestLoadedSequence);
+      prependAnchorRef.current = messagesContainerRef.current?.scrollHeight;
+      cacheHistoryPage(selectedChatId, page);
+
+      // The page's own change-affecting messages now stand in for the boundary's merged update.
+      setProposedChangesVersion((prev) => prev + 1);
+      forceUpdate();
+    } catch (err) {
+      console.error("Failed to load earlier messages:", err);
+      toasts.add({ title: "Failed to load earlier messages", variant: "error" });
+    } finally {
+      setIsLoadingEarlier(false);
+    }
+  };
+
+  loadEarlierRef.current = () => { void handleShowEarlierMessages(); };
 
   // Handle sending a message (always called from ChatInput with explicit messageText)
   const handleSend = async (
@@ -5131,6 +5325,16 @@ function ChatInterface({
     });
   };
 
+
+  // Compaction summaries are collapsed by default: the marker answers where the cut fell, and the
+  // summary is there for anyone who wants to see what the model was left with.
+  const toggleCompactionSummary = (to: number) => {
+    setExpandedCompactions((prev) => {
+      const next = new Set(prev);
+      if (next.has(to)) next.delete(to); else next.add(to);
+      return next;
+    });
+  };
 
   // Toggle error message expansion
   const toggleErrorExpansion = (messageKey: string) => {
@@ -6129,8 +6333,47 @@ function ChatInterface({
                   <div
                     className={`flex flex-col px-6 pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
                   >
+                    {isLoadingEarlier && (
+                      <div className="mx-auto mb-6 text-[12px] leading-4 font-medium text-kumo-inactive">
+                        Loading earlier messages…
+                      </div>
+                    )}
+
                     {displayEntries.map((entry, entryIndex) => {
                       const entryTopClass = entryTopClasses[entryIndex] ?? "";
+                      if (entry.type === "compactionBoundary") {
+                        const expanded = expandedCompactions.has(entry.boundary.to);
+                        return (
+                          <div key={entry.key} className={`${entryTopClass} mb-4 max-w-[860px]`}>
+                            <div className="flex items-center gap-3" role="separator" aria-label="Context compacted">
+                              <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
+                              <button
+                                type="button"
+                                onClick={() => toggleCompactionSummary(entry.boundary.to)}
+                                aria-expanded={expanded}
+                                className="flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-[11px] leading-4 font-medium tracking-[0.6px] text-kumo-inactive uppercase transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
+                              >
+                                <Brain size={13} aria-hidden="true" />
+                                Context compacted
+                                <CaretRight
+                                  size={11}
+                                  weight="bold"
+                                  className={`transition-transform duration-150 ease-out ${expanded ? "rotate-90" : ""}`}
+                                />
+                              </button>
+                              <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
+                            </div>
+                            {expanded && (
+                              <div className="themed-surface-inset mt-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3.5">
+                                <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
+                                  <MarkdownMessage message={entry.boundary.summary} />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
                       if (entry.type === "modelChange") {
                         return (
                           <div key={entry.key} className={`${entryTopClass} max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
@@ -6683,6 +6926,7 @@ function ChatInterface({
                         lastMessage.author.type === "user" ||
                         lastMessage.author.type === "gadget";
                       const showThinking =
+                        !isCompacting &&
                         awaitingFirstResponse &&
                         !currentProvisionalState?.text &&
                         !hasShownReasoning &&
@@ -6704,6 +6948,12 @@ function ChatInterface({
 
                       return (
                         <div className={`group/agent min-w-0 w-full max-w-[860px] space-y-2 ${provisionalTopClass}`}>
+                          {isCompacting && (
+                            <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
+                              Compacting…
+                            </div>
+                          )}
+
                           {showThinking && (
                             <div className={`inline-flex px-1.5 py-1 text-[14px] leading-5 tracking-[-0.25px] ${styles.thinkingShimmer}`}>
                               Thinking
@@ -6826,10 +7076,20 @@ function ChatInterface({
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata?.hasProposedChanges) return null;
 
+                      // Merge through the newest still-proposed batch, but never below the cut the
+                      // server seeds the compacted prefix at. That prefix is accepted as a unit, so
+                      // addressing anything under it drains nothing -- which is reachable both when
+                      // it only created gadgets (no Yjs bytes, hence no entry here) and when paging
+                      // backward leaves the newest loaded batch below the boundary.
                       const { activeChanges } = messageStates;
-                      if (activeChanges.length === 0) return null;
-                      const lastActiveChange = lastDurablePendingChange;
-                      if (!lastActiveChange) return null;
+                      const cuts = [
+                        ...(activeChanges.length > 0
+                          ? [activeChanges[activeChanges.length - 1].sequence] : []),
+                        ...(currentChatMetadata.compactedTo !== undefined
+                          ? [currentChatMetadata.compactedTo - 1] : []),
+                      ];
+                      if (cuts.length === 0) return null;
+                      const mergeThrough = Math.max(...cuts);
                       return (
                         <div className="themed-surface-inset relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
@@ -6846,9 +7106,7 @@ function ChatInterface({
                             <WorkshopButton
                               disabled={isAgentActive}
                               onClick={() =>
-                                handleMergeChanges(lastActiveChange.sequence, {
-                                  includeDraft: true,
-                                })
+                                handleMergeChanges(mergeThrough, { includeDraft: true })
                               }
                               tone="primary"
                               className="!h-7 !cursor-pointer gap-1 text-[12px]"
