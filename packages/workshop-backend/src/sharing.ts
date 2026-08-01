@@ -8,8 +8,8 @@
 //
 // LAZY REVOCATION MODEL: Access is determined by reachability from the owner in the permission
 // graph, recomputed live at every open() (see `getEffectiveRole`). Revocation is therefore lazy:
-// removing a collaborator only severs the edges granting *them* access, and revoking a share key
-// only sets its `revoked` flag. Nothing cascades, no records are deleted, and downstream edges are
+// removing a collaborator only severs the edges granting *them* access, and revoking a share link
+// only flags the link revoked. Nothing cascades, no records are deleted, and downstream edges are
 // never touched -- users who lose their only path to the owner simply become unreachable and are
 // denied at open() time. Because the graph is never destructively pruned, revocation is reversible:
 // re-adding a removed collaborator restores them and, transitively, everyone they had shared with.
@@ -23,7 +23,7 @@
 
 import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator }
     from "@gadgets/workshop-shared/api";
-import { Collection } from "@gadgets/typed-storage";
+import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
 
 // Roles are totally ordered: build > use. Higher rank means strictly more access.
 function roleRank(role: CollaboratorRole): number {
@@ -73,29 +73,54 @@ export type CollaboratorRecord = {
   addedBy: PermissionEdge[];
 };
 
-// Share keys table. The actual key is never stored server-side; only its HMAC hash.
-export type ShareKeyRecord = {
-  id: string;        // HMAC-SHA-256 hex of the raw key
+// A share link. This is what the management UI shows and operates on, and it owns all of a link's
+// metadata. A link may have one or more keys (see ShareKeyAliasRecord): creating a link mints its
+// first key, and copying it later mints another for the same link.
+export type ShareLinkRecord = {
+  id: string;        // HMAC-SHA-256 hex of the raw key; also the link id
+
+  // Never set on a link; present only on aliases, which discriminates the union.
+  alias?: never;
+
   note?: string;
   created: Date;
   createdBy: string; // profile.id of the creator
 
-  // The role granted to anyone who redeems this key. Absent on keys created before roles were
+  // The role granted to anyone who redeems the link. Absent on links created before roles were
   // introduced; treated as "build".
   role?: CollaboratorRole;
 
-  // Soft-revocation flag. Revoking a key sets this rather than deleting the record, so that the
+  // Soft-revocation flag. Revoking a link sets this rather than deleting the record, so that the
   // permission graph keeps its `shareKey` edges intact (no dangling references) and access could
-  // be restored in the future. A revoked key contributes nothing to the permission graph and
-  // cannot be redeemed.
+  // be restored in the future. A revoked link contributes nothing to the permission graph and its
+  // keys can no longer be redeemed.
   revoked?: boolean;
 };
+
+// Another key for an existing link, minted when the user copies it. Carries no metadata of its
+// own: redeeming it resolves to the link record, so all of a link's keys behave identically.
+export type ShareKeyAliasRecord = {
+  id: string;        // HMAC-SHA-256 hex of the raw key
+  alias: string;     // id of the link this key is a copy of
+};
+
+// A row of the share keys table: either a link or a copy of one. Because a link is itself a key
+// record, keys written before copies existed are already valid links -- no migration needed.
+export type ShareKeyRecord = ShareLinkRecord | ShareKeyAliasRecord;
 
 // The slice of Overseer storage this module operates on. Satisfied by the real OverseerStorage
 // and easily constructed over a Map-backed mock DurableObjectStorage in tests.
 export interface SharingStorage {
   collaborators: Collection<CollaboratorRecord>;
-  shareKeys: Collection<ShareKeyRecord>;
+  shareKeys: Collection<ShareKeyRecord> & {
+    // A link's copies, keyed by the link they alias.
+    byAlias: NonUniqueIndex<ShareKeyRecord, string>;
+  };
+}
+
+// Narrow a key record to a link, or undefined if it's an alias.
+function asLink(record: ShareKeyRecord | undefined): ShareLinkRecord | undefined {
+  return record !== undefined && record.alias === undefined ? record : undefined;
 }
 
 // Per-session caller identity. Mirrors the fields the OverseerClientInterface holds for the
@@ -119,16 +144,24 @@ export class SharingManager {
   // True if anyone other than the owner can currently access the gadget. Used by the Overseer's
   // `prohibitAllSharing` policy to decide whether a sensitive observation must be blocked.
   //
-  // Because removed collaborators and revoked keys linger in storage (the lazy revocation model;
-  // see the module header and removeCollaborator/revokeShareKey), this must reflect *current*
+  // Because removed collaborators and revoked links linger in storage (the lazy revocation model;
+  // see the module header and removeCollaborator/revokeShareLink), this must reflect *current*
   // reachability, not mere table membership: a collaborator with a live path from the owner, or
-  // an un-revoked share key that anyone could still redeem.
+  // an un-revoked share link whose keys anyone could still redeem.
   hasAnyShares(): boolean {
     if (this.computeEffectiveRoles().size > 0) return true;
-    for (let keyRecord of this.storage.shareKeys.list()) {
-      if (!keyRecord.revoked) return true;
+    for (let link of this.#listLinks()) {
+      if (!link.revoked) return true;
     }
     return false;
+  }
+
+  // Every share link, revoked or not. Aliases are skipped.
+  *#listLinks(): Generator<ShareLinkRecord> {
+    for (let record of this.storage.shareKeys.list()) {
+      let link = asLink(record);
+      if (link) yield link;
+    }
   }
 
   // ---------------------------------------------------------------------------------------
@@ -149,35 +182,41 @@ export class SharingManager {
   }
 
   // Redeem a raw share key on behalf of a user opening the gadget. If the key exists, ensures the
-  // user is a collaborator with a `shareKey` edge for it (adding the edge if missing, or creating
-  // the collaborator record if they're new). Does nothing if the key is unknown.
+  // user is a collaborator with a `shareKey` edge for its link (adding the edge if missing, or
+  // creating the collaborator record if they're new). Does nothing if the key is unknown.
   //
   // The raw key is hashed internally; the plaintext is never stored. `fetchProfile` is invoked
   // (an RPC, in production) only when a brand-new collaborator must be created, so existing
   // collaborators are redeemed without any RPC.
   //
-  // A revoked key behaves like an unknown key (it cannot be redeemed).
+  // A key whose link is revoked behaves like an unknown key (it cannot be redeemed).
   async redeemShareKey(opts: {
     rawKey: string;
     profileId: string;
     fetchProfile: () => Promise<AiChatAuthorInfo>;
   }): Promise<void> {
-    let keyId = await hashShareKey(opts.rawKey);
-    let keyRecord = this.storage.shareKeys.get(keyId);
-    if (!keyRecord || keyRecord.revoked) return;
+    let hash = await hashShareKey(opts.rawKey);
+    let keyRecord = this.storage.shareKeys.get(hash);
+    if (!keyRecord) return;
 
-    let role = keyRecord.role ?? "build";
+    // Edges point at the link, not the individual key, so a link's keys collapse to one grant.
+    // A copy of a link is an alias; follow it to the link that owns the metadata.
+    let link = keyRecord.alias === undefined
+        ? keyRecord : asLink(this.storage.shareKeys.get(keyRecord.alias));
+    if (!link || link.revoked) return;
+    let linkId = link.id;
+    let role = link.role ?? "build";
 
     let existing = this.storage.collaborators.get(opts.profileId);
     if (existing) {
       // User is already a collaborator. Only add an edge if they don't already have one for this
-      // exact key.
+      // link (redeeming a second key of the same link is a no-op).
       let alreadyHasEdge = existing.addedBy.some(
-          e => e.type === "shareKey" && e.keyId === keyId);
+          e => e.type === "shareKey" && e.keyId === linkId);
       if (!alreadyHasEdge) {
         existing.addedBy.push({
           type: "shareKey",
-          keyId,
+          keyId: linkId,
           created: new Date(),
           role,
         });
@@ -190,7 +229,7 @@ export class SharingManager {
         profile,
         addedBy: [{
           type: "shareKey",
-          keyId,
+          keyId: linkId,
           created: new Date(),
           role,
         }],
@@ -341,39 +380,81 @@ export class SharingManager {
   }
 
   // ---------------------------------------------------------------------------------------
-  // Share key management
+  // Share link management
 
-  async createShareKey(
+  // Enforce that `caller` may manage `link`: the owner can manage any link; a collaborator only
+  // the links they created. `action` is the user-facing verb (e.g. "revoke", "edit", "copy").
+  #requireLinkManager(caller: SharingCaller, link: ShareLinkRecord, action: string): void {
+    if (!caller.isOwner && link.createdBy !== caller.profileId) {
+      throw new Error(`You can only ${action} share links that you created.`);
+    }
+  }
+
+  // Look up a link by id, throwing the caller-facing error if the id is unknown or names an alias..
+  #requireLink(linkId: string): ShareLinkRecord {
+    let link = asLink(this.storage.shareKeys.get(linkId));
+    if (!link) {
+      throw new Error("Share link not found.");
+    }
+    return link;
+  }
+
+  async createShareLink(
       opts: { caller: SharingCaller; role: CollaboratorRole; note?: string })
-      : Promise<{ key: string }> {
+      : Promise<{ key: string; linkId: string }> {
     let callerRole = this.#requireCallerRole(opts.caller);
     if (roleRank(opts.role) > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");
     }
 
-    let rawBytes = new Uint8Array(16);
-    crypto.getRandomValues(rawBytes);
-    let key = rawBytes.toHex();
-    let keyId = await hashShareKey(key);
-
+    // The link is stored as its first key: the record is keyed by that key's hash.
+    let { key, hash } = await this.#mintKey();
     this.storage.shareKeys.put({
-      id: keyId,
+      id: hash,
       note: opts.note,
       created: new Date(),
       createdBy: opts.caller.profileId,
       role: opts.role,
     });
+    return { key, linkId: hash };
+  }
+
+  // Mints another key for an existing link.
+  async newShareLinkKey(opts: { caller: SharingCaller; linkId: string }): Promise<{ key: string }> {
+    let link = this.#requireLink(opts.linkId);
+    if (link.revoked) {
+      throw new Error("Share link not found.");
+    }
+    this.#requireLinkManager(opts.caller, link, "copy");
+
+    // Re-check the ceiling: the caller's role may have dropped below the link's since it was
+    // created, and a fresh key must never grant more than the caller currently has.
+    let callerRole = this.#requireCallerRole(opts.caller);
+    if (roleRank(link.role ?? "build") > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
+
+    let { key, hash } = await this.#mintKey();
+    this.storage.shareKeys.put({ id: hash, alias: link.id });
     return { key };
   }
 
-  // Active (non-revoked) share key records, in storage order. The Overseer maps each `createdBy`
-  // profile.id to a display profile (which may require RPC) to produce `ShareKeyInfo`s; see
-  // `getCreatorProfile`. Revoked keys linger in storage but are omitted here.
-  listShareKeyRecords(): ShareKeyRecord[] {
-    return [...this.storage.shareKeys.list()].filter(record => !record.revoked);
+  // Generate a random 128-bit key, returning it along with the hash it is stored under. The caller
+  // decides whether that hash keys a link or an alias.
+  async #mintKey(): Promise<{ key: string; hash: string }> {
+    let rawBytes = new Uint8Array(16);
+    crypto.getRandomValues(rawBytes);
+    let key = rawBytes.toHex();
+    return { key, hash: await hashShareKey(key) };
   }
 
-  // Resolve the display profile for a share key's creator using only locally-available data
+  // Active (non-revoked) share links. The Overseer maps each `createdBy` profile.id to a display
+  // profile (which may require RPC) to produce `ShareLinkInfo`s; see `getCreatorProfile`.
+  listShareLinkRecords(): ShareLinkRecord[] {
+    return [...this.#listLinks()].filter(link => !link.revoked);
+  }
+
+  // Resolve the display profile for a share link's creator using only locally-available data
   // (the collaborator table). Returns undefined if the creator is neither a current collaborator
   // nor matched here (e.g. the owner), in which case the Overseer resolves it via RPC. The final
   // fallback (a bare profile from the id) is also the Overseer's responsibility.
@@ -381,61 +462,46 @@ export class SharingManager {
     return this.storage.collaborators.get(createdBy)?.profile;
   }
 
-  updateShareKey(caller: SharingCaller, keyId: string, note?: string): void {
-    let keyRecord = this.storage.shareKeys.get(keyId);
-    if (!keyRecord) {
-      throw new Error("Share key not found.");
-    }
+  updateShareLink(caller: SharingCaller, linkId: string, note?: string): void {
+    let link = this.#requireLink(linkId);
+    this.#requireLinkManager(caller, link, "edit");
 
-    // Permission check: owner can edit any key; collaborators can only edit keys they created.
-    if (!caller.isOwner && keyRecord.createdBy !== caller.profileId) {
-      throw new Error("You can only edit share keys that you created.");
-    }
-
-    keyRecord.note = note === undefined ? undefined : note.slice(0, 500);
-    this.storage.shareKeys.put(keyRecord);
+    link.note = note === undefined ? undefined : note.slice(0, 500);
+    this.storage.shareKeys.put(link);
   }
 
-  previewRevokeShareKey(caller: SharingCaller, keyId: string): AffectedCollaborator[] {
-    let keyRecord = this.storage.shareKeys.get(keyId);
-    if (!keyRecord) return [];
-
-    // Permission check: owner can revoke any key; collaborators can only revoke
-    // keys they themselves created.
-    if (!caller.isOwner && keyRecord.createdBy !== caller.profileId) {
-      throw new Error("You can only revoke share keys that you created.");
-    }
+  previewRevokeShareLink(caller: SharingCaller, linkId: string): AffectedCollaborator[] {
+    let link = asLink(this.storage.shareKeys.get(linkId));
+    if (!link) return [];
+    this.#requireLinkManager(caller, link, "revoke");
+    if (link.revoked) return [];
 
     let baseline = this.computeEffectiveRoles();
-    let modified = this.computeEffectiveRoles({ revokedKeyId: keyId });
+    let modified = this.computeEffectiveRoles({ revokedLinkId: linkId });
     return this.#computeAffected(baseline, modified);
   }
 
-  // Revoke a share key by soft-revoking it (setting the `revoked` flag) rather than deleting it.
-  // This is the lazy counterpart to removeCollaborator: the key record and every `shareKey` edge
-  // referencing it stay intact (no dangling references), but the key contributes nothing to the
-  // permission graph and can no longer be redeemed. Users who relied solely on it become
-  // unreachable and are denied at open() time.
+  // Revoke a share link by soft-revoking it (setting the `revoked` flag) rather than deleting it.
+  // This is the lazy counterpart to removeCollaborator: the link record and every `shareKey` edge
+  // referencing it stay intact (no dangling references), but the link contributes nothing to the
+  // permission graph and its keys can no longer be redeemed. Its copies are deleted outright,
+  // since no edge ever names an alias. Users who relied solely on it become unreachable and
+  // are denied at open() time.
   //
   // `keepUsers` is optional re-root sugar, identical to removeCollaborator. Returns the
   // collaborators whose access actually changed (removed or downgraded), excluding kept users.
-  revokeShareKey(
-      caller: SharingCaller, keyId: string, keepUsers: string[]): AffectedCollaborator[] {
-    let keyRecord = this.storage.shareKeys.get(keyId);
-    if (!keyRecord) {
-      throw new Error("Share key not found.");
-    }
-
-    // Permission check: owner can revoke any key; collaborators can only revoke
-    // keys they themselves created.
-    if (!caller.isOwner && keyRecord.createdBy !== caller.profileId) {
-      throw new Error("You can only revoke share keys that you created.");
-    }
+  revokeShareLink(
+      caller: SharingCaller, linkId: string, keepUsers: string[]): AffectedCollaborator[] {
+    let link = this.#requireLink(linkId);
+    this.#requireLinkManager(caller, link, "revoke");
 
     let baseline = this.computeEffectiveRoles();
 
-    keyRecord.revoked = true;
-    this.storage.shareKeys.put(keyRecord);
+    link.revoked = true;
+    this.storage.shareKeys.put(link);
+
+    // Revoking makes the copies useless, and nothing references them, so delete them.
+    this.storage.shareKeys.byAlias.delete(link.id);
 
     this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
 
@@ -457,24 +523,24 @@ export class SharingManager {
   // Optional modifications model a hypothetical change, used by the preview methods:
   //   - `removedUser`: a profileId treated as removed (excluded from the graph entirely).
   //   - `removedEdge`: a single user edge (target ← sharer) treated as removed.
-  //   - `revokedKeyId`: a key treated as revoked (its edges contribute nothing).
+  //   - `revokedLinkId`: a link treated as revoked (its edges contribute nothing).
   computeEffectiveRoles(opts: {
     removedUser?: string | null;
     removedEdge?: { target: string; sharer: string } | null;
-    revokedKeyId?: string | null;
+    revokedLinkId?: string | null;
   } = {}): Map<string, CollaboratorRole> {
     let removedUser = opts.removedUser ?? null;
     let removedEdge = opts.removedEdge ?? null;
-    let revokedKeyId = opts.revokedKeyId ?? null;
+    let revokedLinkId = opts.revokedLinkId ?? null;
 
-    // Map keyId → {creator, role}, excluding revoked keys (the persisted `revoked` flag, and the
-    // hypothetical `revokedKeyId` used by preview).
-    let keyInfo = new Map<string, { creator: string; role: CollaboratorRole }>();
-    for (let keyRecord of this.storage.shareKeys.list()) {
-      if (keyRecord.id === revokedKeyId || keyRecord.revoked) continue;
-      keyInfo.set(keyRecord.id, {
-        creator: keyRecord.createdBy,
-        role: keyRecord.role ?? "build",
+    // Map linkId → {creator, role}, excluding revoked links (the persisted `revoked` flag, and the
+    // hypothetical `revokedLinkId` used by preview).
+    let linkInfo = new Map<string, { creator: string; role: CollaboratorRole }>();
+    for (let link of this.#listLinks()) {
+      if (link.id === revokedLinkId || link.revoked) continue;
+      linkInfo.set(link.id, {
+        creator: link.createdBy,
+        role: link.role ?? "build",
       });
     }
 
@@ -502,8 +568,8 @@ export class SharingManager {
         for (let edge of record.addedBy) {
           let granted: CollaboratorRole | undefined;
           if (edge.type === "shareKey") {
-            let info = keyInfo.get(edge.keyId);
-            if (!info) continue;  // key revoked or no longer exists
+            let info = linkInfo.get(edge.keyId);
+            if (!info) continue;  // link revoked or no longer exists
             let creatorRole = sharerRole(info.creator);
             if (!creatorRole) continue;
             granted = minRole(info.role, creatorRole);
@@ -567,7 +633,7 @@ export class SharingManager {
     return result;
   }
 
-  // Optional re-root sugar for removeCollaborator/revokeShareKey. Must be called *after* the
+  // Optional re-root sugar for removeCollaborator/revokeShareLink. Must be called *after* the
   // edge/key has already been severed in storage. `baseline` is the effective-role map from before
   // the severance. For each kept user who would otherwise lose access or be downgraded, append a
   // fresh `user` edge from the caller at their prior role (bounded by what the caller can grant),

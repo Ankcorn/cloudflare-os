@@ -35,9 +35,11 @@ There are two ways to grant someone collaborator access:
 
 **Direct add.** The owner or an existing collaborator enters a username (email address) in the Share modal. The system looks up the corresponding user account; if it exists, a collaborator record is created. The target user does not receive an in-product notification -- the sharer is expected to send them a link or tell them out of band.
 
-**Share link.** Any collaborator (or the owner) can create a share link, which encodes a secret key in the URL as a `?share=<key>` query parameter. Anyone who opens this link is automatically added as a collaborator. The share link is one-shot in the sense that the raw key is shown to the creator only once (it is never stored server-side). However, the same link can be reused by multiple people, or the same person multiple times, until it is revoked.
+**Share link.** Any collaborator (or the owner) can create a share link, which encodes a secret key in the URL as a `#share=<key>` fragment. Anyone who opens this link is automatically added as a collaborator. A link is a durable handle that owns one or more keys: creating it mints its first key, and "copying" the link later mints another key for the same link. The raw key is shown to the creator only once at mint time and is never stored server-side, so re-copying can't reproduce an old key -- it mints a new one. Any of a link's keys can be redeemed by multiple people, or the same person multiple times, until the link is revoked, which invalidates every key minted for it.
 
 Share key security: the server generates a random 128-bit key and stores only its HMAC-SHA-256 hash (using a fixed domain-separation constant, `SHARE_KEY_HMAC_KEY`). When a user redeems a share link, the client sends the raw key to the server, which computes the hash and looks it up. This means the server cannot reconstruct share links from its stored data, and a database leak does not expose valid share keys.
+
+Storage shape: a link is its first key. The `shareKeys` table holds one row per key: the row for the first key carries the link's metadata and is keyed by that key's hash, which serves as the link id. Each later copy stores only an `alias` pointing back at that id.
 
 Share key redemption and gadget opening happen atomically in a single RPC call (`openGadget(id, shareKey)`), which allows subsequent calls to be pipelined on the returned `Overseer` stub without waiting for a separate redemption step.
 
@@ -58,21 +60,21 @@ The sharing system tracks *how* each collaborator gained access, forming a direc
 Each collaborator has one or more **permission edges** explaining how they got access. There are two edge types:
 
 - **User edge**: records that a specific sharer (identified by `profile.id`) directly added this collaborator. Includes a timestamp, the granted role, and an optional note.
-- **Share key edge**: records that this collaborator redeemed a specific share key (identified by `keyId`, the HMAC hash). Includes a timestamp and the granted role (snapshotted from the key's role at redemption).
+- **Share-link edge**: records that this collaborator redeemed a key for a specific share link (identified by `keyId`, the id of the link's first key). Includes a timestamp; the granted role is taken from the link.
 
 A collaborator can accumulate multiple edges -- for example, if they were added directly by Alice and also redeemed a share link created by Bob. The collaborator retains access as long as they have at least one valid edge.
 
-(Edges and share keys created before roles were introduced have no `role` field; they are treated as `build` for backwards compatibility.)
+(Edges and share links created before roles were introduced have no `role` field; they are treated as `build` for backwards compatibility.)
 
 ### Effective role
 
-A collaborator's **effective role** is the maximum role reachable from the owner through their valid edges. Each edge grants `min(edge role, sharer's effective role)`: the owner is the implicit root at `build`, a user edge's sharer is the owner or another collaborator, and a share key edge's "sharer" is the key's creator. A collaborator's effective role is the maximum granted role across all their valid edges. Effective role is computed live (it is never denormalized into storage), so it is always consistent with the current graph -- which also means a session's access is recomputed from scratch at each `open()`.
+A collaborator's **effective role** is the maximum role reachable from the owner through their valid edges. Each edge grants `min(edge role, sharer's effective role)`: the owner is the implicit root at `build`, a user edge's sharer is the owner or another collaborator, and a share-link edge's "sharer" is the link's creator. A collaborator's effective role is the maximum granted role across all their valid edges. Effective role is computed live (it is never denormalized into storage), so it is always consistent with the current graph -- which also means a session's access is recomputed from scratch at each `open()`.
 
-### Share keys in the graph
+### Share links in the graph
 
-Share keys are first-class nodes in the permission graph, connected to their creator. A share key is "supported" by its creator: if the creator loses access, the share key is transitively revoked, which in turn removes anyone who gained access solely through that key.
+Share links are first-class nodes in the permission graph, connected to their creator. A share link is "supported" by its creator: if the creator loses access, the link is transitively revoked, which in turn removes anyone who gained access solely through it.
 
-Concretely, revoking a share key or removing its creator triggers the same transitive revocation algorithm described below, treating all edges referencing that key as invalid.
+Concretely, revoking a share link or removing its creator triggers the same transitive revocation algorithm described below, treating all edges referencing that link as invalid. A link may have several keys, but they all resolve to the same link node, so redeeming any of them yields one edge.
 
 ### The owner as root
 
@@ -83,15 +85,15 @@ The owner is the implicit root of the permission graph. The owner is never store
 Access is determined by **reachability from the owner**, recomputed live at every `open()` (see "Authorization model" below). Revocation exploits this: rather than eagerly cascading and deleting records, the system only **severs the edges that grant the removed party access** and lets reachability do the rest.
 
 - **Removing a collaborator** deletes the edges that grant *them* access. The owner severs *all* incoming edges to the target; a non-owner severs only their own `user` edge. The target's record is retained even if it becomes empty, and crucially the edges where the target is the *sharer* of access to others are left untouched.
-- **Revoking a share key** sets the key's `revoked` flag instead of deleting it. A revoked key contributes nothing to the permission graph and can no longer be redeemed, but its record and all `shareKey` edges referencing it stay intact (no dangling references).
+- **Revoking a share link** sets the link's `revoked` flag instead of deleting it. A revoked link contributes nothing to the permission graph and none of its keys can be redeemed, but the link record and all edges referencing it stay intact (no dangling references). The link's copies are deleted outright, since no edge ever references an alias.
 
 Nothing cascades. A dependent who loses their only path to the owner (e.g. Carol, reachable only via the removed Bob) simply becomes unreachable -- they are denied at `open()` time, not pruned from storage. This is the example from the introduction: removing Bob makes Carol unreachable automatically, with no separate cleanup step.
 
 ### Restoring access (undo)
 
-Because the graph is never destructively pruned, revocation is reversible. If you accidentally remove someone who had in turn shared with five other people, you can **undo** simply by re-adding them: their record and their five outgoing grants were never deleted, so re-adding an edge from the owner restores their reachability and, transitively, all five downstream collaborators. (Share-key revocation is likewise non-destructive via the `revoked` flag, though there is no UI to un-revoke a key yet -- see Future work.)
+Because the graph is never destructively pruned, revocation is reversible. If you accidentally remove someone who had in turn shared with five other people, you can **undo** simply by re-adding them: their record and their five outgoing grants were never deleted, so re-adding an edge from the owner restores their reachability and, transitively, all five downstream collaborators. (Share-link revocation is likewise non-destructive via the `revoked` flag, though there is no UI to un-revoke a link yet -- see Future work.)
 
-This does mean removed collaborators and revoked keys accumulate in storage. Listing RPCs (`listCollaborators`, `listShareKeys`) return only currently-active entries, so removed users disappear from the UI; a future GC could reclaim long-dead records.
+This does mean removed collaborators and revoked links accumulate in storage. Listing RPCs (`listCollaborators`, `listShareLinks`) return only currently-active entries, so removed users disappear from the UI; a future GC could reclaim long-dead records.
 
 ### Effective-role algorithm
 
@@ -100,15 +102,15 @@ The core is a **fixed-point role-propagation computation** implemented in `Shari
 Inputs (all optional; used to model a hypothetical change in preview):
 - `removedUser` -- a profile ID to treat as removed (excluded from the graph).
 - `removedEdge` -- a single user edge (`{target, sharer}`) to treat as removed. Used to preview a non-owner removing only their own edge.
-- `revokedKeyId` -- a share key ID to treat as revoked.
+- `revokedLinkId` -- a share link ID to treat as revoked.
 - `overrides` -- profile IDs pinned to at least a given role regardless of their edges.
 
 The algorithm:
 
 1. **Build the candidate set.** Load all collaborators except the (hypothetically) removed user.
-2. **Collect share key metadata.** Build a map from key ID to `{creator, role}`, skipping keys that are `revoked` (or the hypothetical `revokedKeyId`).
+2. **Collect share-link metadata.** Build a map from link ID to `{creator, role}`, skipping links that are `revoked` (or the hypothetical `revokedLinkId`).
 3. **Initialize** the role map with any `overrides`.
-4. **Iterate to fixed point.** Repeatedly scan all collaborators. For each edge, compute the role it grants -- `min(edge role, sharer's effective role)`, where the sharer (or share key creator) is the owner (always `build`) or another collaborator's current effective role -- and raise the collaborator's role to the maximum across their valid edges. Raising one collaborator's role may unlock or raise others on the next pass.
+4. **Iterate to fixed point.** Repeatedly scan all collaborators. For each edge, compute the role it grants -- `min(edge role, sharer's effective role)`, where the sharer (or share link creator) is the owner (always `build`) or another collaborator's current effective role -- and raise the collaborator's role to the maximum across their valid edges. Raising one collaborator's role may unlock or raise others on the next pass.
 5. **Converge.** Roles only ever increase, so the loop terminates when a full pass changes nothing.
 6. **Return the role map.** Collaborators absent from the map have no access; collaborators present with a lower role than before have been downgraded.
 
@@ -116,14 +118,14 @@ This handles arbitrary graph shapes: diamonds (a user reachable via two independ
 
 ### Removals and downgrades
 
-Because edges carry roles, severing an upstream edge or revoking a key may either remove a user (they lose all access) or merely **downgrade** them (they keep access via another path, but at a lower role). `removeCollaborator`/`revokeShareKey` return the affected set by diffing the effective-role map captured before the change against the map recomputed after: each entry is an `AffectedCollaborator` carrying `oldRole` and `newRole` (with `newRole === null` meaning full removal).
+Because edges carry roles, severing an upstream edge or revoking a link may either remove a user (they lose all access) or merely **downgrade** them (they keep access via another path, but at a lower role). `removeCollaborator`/`revokeShareLink` return the affected set by diffing the effective-role map captured before the change against the map recomputed after: each entry is an `AffectedCollaborator` carrying `oldRole` and `newRole` (with `newRole === null` meaning full removal).
 
 ### Preview and confirm
 
 Revocation is a two-phase process in the UI:
 
-1. **Preview.** Before changing anything, the frontend calls `previewRemoveCollaborator()` or `previewRevokeShareKey()`, which runs the effective-role computation with the corresponding hypothetical input and returns the `AffectedCollaborator`s whose access would change. If non-empty, the UI can warn the user (e.g. "removing Bob will also cut off Carol").
-2. **Confirm.** The frontend calls `removeCollaborator(profileId, keepUsers)` or `revokeShareKey(keyId, keepUsers)`. Both perform the lazy edge-severance described above and return the actually-affected set.
+1. **Preview.** Before changing anything, the frontend calls `previewRemoveCollaborator()` or `previewRevokeShareLink()`, which runs the effective-role computation with the corresponding hypothetical input and returns the `AffectedCollaborator`s whose access would change. If non-empty, the UI can warn the user (e.g. "removing Bob will also cut off Carol").
+2. **Confirm.** The frontend calls `removeCollaborator(profileId, keepUsers)` or `revokeShareLink(linkId, keepUsers)`. Both perform the lazy edge-severance described above and return the actually-affected set.
 
 ### keepUsers (optional re-rooting)
 
@@ -150,7 +152,7 @@ Because the role is recomputed from the graph on every `open()`, the live comput
 
 ### Terminating live sessions on revocation
 
-Authorization is only checked at `open()`, so a session that is *already* open is not re-checked per message. Without intervention, a collaborator who was just removed or downgraded could keep using their live session until something else disconnected them. To close this gap, `removeCollaborator`/`revokeShareKey` proactively restart the gadget's Overseer DO via `ctx.abort()` whenever the change actually removed or downgraded someone (i.e. the returned `AffectedCollaborator[]` is non-empty; pure no-op removals don't restart). Aborting forcibly disconnects every client; each reconnects and re-runs `open()`, which re-evaluates the now-changed permission graph -- denying removed users (who get the generic `Not Found`, surfaced by the client as its generic load-failure page) and handing downgraded users their reduced capability (the editor swaps to the `use` view automatically based on `metadata.role`). Since removals are rare (and DOs restart unpredictably anyway, so reconnects are already cheap), the disruption is acceptable.
+Authorization is only checked at `open()`, so a session that is *already* open is not re-checked per message. Without intervention, a collaborator who was just removed or downgraded could keep using their live session until something else disconnected them. To close this gap, `removeCollaborator`/`revokeShareLink` proactively restart the gadget's Overseer DO via `ctx.abort()` whenever the change actually removed or downgraded someone (i.e. the returned `AffectedCollaborator[]` is non-empty; pure no-op removals don't restart). Aborting forcibly disconnects every client; each reconnects and re-runs `open()`, which re-evaluates the now-changed permission graph -- denying removed users (who get the generic `Not Found`, surfaced by the client as its generic load-failure page) and handing downgraded users their reduced capability (the editor swaps to the `use` view automatically based on `metadata.role`). Since removals are rare (and DOs restart unpredictably anyway, so reconnects are already cheap), the disruption is acceptable.
 
 Two precautions surround the abort (`OverseerImpl.scheduleRevocationRestart`): the severed edge is flushed with `ctx.storage.sync()` first (because `ctx.abort()` does not respect the output gate, a restart could otherwise come back with the change lost), and the abort is delayed ~100ms so the triggering RPC's response reaches the caller -- typically the owner, who is also connected -- before their own connection drops. The disconnect reaches the browser through the existing `notifyClosed` plumbing: when the Overseer DO aborts, the per-session `notifyClosed` stub is disposed without being called, which `AuthenticatedApiImpl` treats as a lost connection and reacts to by killing the browser WebSocket, forcing a reconnect.
 
@@ -161,7 +163,7 @@ Note this is only needed for removals/downgrades. Granting or raising access nev
 - **More permission levels.** Beyond `build` and `use`, planned levels include: chat-only (can create chats but not merge to mainline) and read-only.
 - **Resharing of `use` access.** Allow `use` collaborators to grant `use` access to others. The permission graph already supports this; it only requires adding the relevant sharing methods to the `use` allowlist.
 - **Binding-aware access control.** Prohibit adding collaborators when the gadget holds binding permissions that the collaborator lacks, and conversely prohibit adding sensitive bindings when existing collaborators lack the required permissions.
-- **Share key expiration and usage limits.** Including single-use keys.
-- **Un-revoking share keys.** Revocation is non-destructive (the `revoked` flag), but there is no UI or RPC to list revoked keys or clear the flag, so key revocation is currently one-way in practice.
-- **Garbage-collecting dead records.** Removed collaborators and revoked keys accumulate in storage under the lazy model; a background sweep could reclaim entries that have been unreachable for a long time.
+- **Share link expiration and usage limits.** Including single-use links.
+- **Un-revoking share links.** Revocation is non-destructive (the `revoked` flag), but there is no UI or RPC to list revoked links or clear the flag, so link revocation is currently one-way in practice.
+- **Garbage-collecting dead records.** Removed collaborators and revoked links accumulate in storage under the lazy model; a background sweep could reclaim entries that have been unreachable for a long time.
 - **Notifications.** Currently there are no in-product notifications for access grants or revocations.

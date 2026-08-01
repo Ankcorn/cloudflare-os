@@ -352,8 +352,8 @@ Persisting the observation record itself is unchanged; we only gate it.
 ### Step 6 — Overseer: remove observers on sharing changes
 
 When sharing changes, configured observers who lose access must be torn down. In the overseer
-methods wrapping `SharingManager` mutations (`removeCollaborator`, `revokeShareKey`, and role
-downgrades — see `OverseerClientInterface` sharing methods and `sharing.ts:309`/`:422`):
+methods wrapping `SharingManager` mutations (`removeCollaborator`, `revokeShareLink`, and role
+downgrades — see the matching methods on `OverseerClientInterface` and `SharingManager`):
 
 - After a mutation, use the returned `AffectedCollaborator[]` to find users who **lost access**.
   For each who is now unreachable, if they have an observer record: best-effort
