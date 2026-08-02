@@ -964,7 +964,13 @@ export function ConnectorsPage() {
               actionLabel={!search && deployUrl ? 'Add gatekeepers' : undefined}
               onAction={
                 !search && deployUrl
-                  ? () => window.open(deployUrl, '_blank', 'noopener,noreferrer')
+                  ? () => {
+                      // Deep-link straight into the wizard's gatekeeper picker (deployUrl
+                      // already carries ?instance=…).
+                      const url = new URL(deployUrl)
+                      url.searchParams.set('flow', 'gatekeepers')
+                      window.open(url.toString(), '_blank', 'noopener,noreferrer')
+                    }
                   : undefined
               }
             />

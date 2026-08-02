@@ -659,7 +659,13 @@ export default function OnboardingWizard({
                         Add gatekeepers from the deploy wizard to make services available here.
                       </p>
                       <button
-                        onClick={() => window.open(deployUrl, '_blank', 'noopener,noreferrer')}
+                        onClick={() => {
+                          // Deep-link straight into the wizard's gatekeeper picker (deployUrl
+                          // already carries ?instance=…).
+                          const url = new URL(deployUrl)
+                          url.searchParams.set('flow', 'gatekeepers')
+                          window.open(url.toString(), '_blank', 'noopener,noreferrer')
+                        }}
                         className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-kumo-subtle border border-dashed border-kumo-line rounded-xl hover:border-kumo-fill hover:text-kumo-default hover:bg-kumo-tint transition-colors"
                       >
                         <Plus size={14} weight="bold" />
