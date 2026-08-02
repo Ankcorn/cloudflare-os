@@ -956,6 +956,10 @@
         {
           "name": "LOADER",
           "type": "worker_loader"
+        },
+        {
+          "name": "WORKERS_AI",
+          "type": "ai"
         }
       ],
       "compatibilityDate": "2026-02-02",

@@ -107,6 +107,10 @@ test("worker entries carry the deploy contract", () => {
   assert.deepEqual(
       backend.bindings.find((b) => b.name === "LOADER"),
       { type: "worker_loader", name: "LOADER" });
+  // The Workers AI binding always ships (models + webFetch toMarkdown depend on it).
+  assert.deepEqual(
+      backend.bindings.find((b) => b.name === "WORKERS_AI"),
+      { type: "ai", name: "WORKERS_AI" });
   assert.equal(backend.gatekeeperBindingExpansion.entrypoint, "GatekeeperVendor");
   assert.equal(backend.vars.PUBLIC_BASE_URL, "$PUBLIC_BASE_URL");
   // Full ordered migration history, verbatim from wrangler.jsonc.

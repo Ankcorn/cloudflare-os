@@ -159,6 +159,10 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
   let gatekeeperBindingExpansion;
   if (kind === "backend") {
     vars.PUBLIC_BASE_URL = "$PUBLIC_BASE_URL";
+    // Every deployed backend gets the Workers AI binding (hardcoded like PUBLIC_BASE_URL, not
+    // read from wrangler.jsonc): Workers AI models and webFetch's toMarkdown depend on it, and
+    // it costs nothing when unused. No placeholders — the deploy renderer passes it through.
+    bindings.push({ type: "ai", name: "WORKERS_AI" });
     // Installed gatekeepers are called through GATEKEEPER_* service bindings with the
     // GatekeeperVendor entrypoint (same shape run-dev-server.js generates for dev).
     gatekeeperBindingExpansion = {
