@@ -11,7 +11,7 @@ import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-bi
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
-import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { buildGatekeeperVendorMap, GatekeeperVendorEntry, resolveVendorMap } from "./auth/auth-vendors.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -47,6 +47,12 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+
+// View of a vendor stub received as an RPC call parameter, exposing the runtime stub-management
+// methods that Service/Fetcher's declared type omits. Such stubs are auto-disposed when the method
+// returns, so holding one past return (e.g. for a subscription's lifetime) requires dup(), and the
+// duplicate must be disposed when done.
+type VendorParamStub = Service<GatekeeperVendor> & { dup(): VendorParamStub } & Disposable;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -235,6 +241,12 @@ async function checkGatekeeperVendorFilter(
 // Durable Object that stores information about a user.
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
+  // Every bound gatekeeper, keyed by vendor id, snapshotted from the constructor env. A DO's env
+  // is frozen per instance, so this snapshot goes stale between a worker deploy that adds/removes
+  // gatekeepers and this DO's eventual restart. User-facing entry points therefore accept fresh
+  // vendors from the calling connection's env (see #vendorMap) and only fall back to this
+  // snapshot. It stays in place for overseer-driven internal callers, which have no fresh env to
+  // pass — their staleness is bounded by DO restart plus the overseer's own vendor-list cache.
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
 
@@ -893,7 +905,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
+  // `freshVendors` is supplied fresh from the calling connection's env; the constructor snapshot
+  // goes stale between worker deploy and DO restart (see the `vendors` field doc and
+  // resolveVendorMap).
+  async listGatekeeperVendors(
+      filter: GatekeeperVendorFilter = {}, freshVendors?: GatekeeperVendorEntry[])
       : Promise<GatekeeperVendorInfo[]> {
     let options = {
       userId: this.storage.profile.get().id
@@ -906,7 +922,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let promises: Promise<GatekeeperVendorInfo | null>[] = [];
 
-    for (let [id, vendor] of this.vendors) {
+    for (let [id, vendor] of resolveVendorMap(this.vendors, freshVendors)) {
       if (disabledGatekeeperSet.has(id)) {
         continue;  // Whole gatekeeper disabled by admin.
       }
@@ -940,8 +956,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (await Promise.all(promises)).filter(value => value !== null);
   }
 
-  async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
-    let vendor = this.vendors.get(vendorId);
+  // `freshVendor` is the vendor's binding looked up fresh from the calling connection's env (null
+  // when not bound there); the constructor snapshot is only the fallback, so an account can be
+  // connected on a gatekeeper added after this DO started (see #vendorMap).
+  async connectAccount(vendorId: string, resourceUrlPatterns?: string[],
+      freshVendor?: Service<GatekeeperVendor> | null): Promise<{url: string}> {
+    let vendor = freshVendor ?? this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
     }
@@ -999,9 +1019,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // Resolve every bound vendor that auto-provisions an account (VendorDescription.autoProvisionsAccount),
   // describing them in parallel and dropping any whose describe() fails. Shared discovery step for both
   // listing and auto-provisioning ambient gatekeepers; callers apply their own admin-mode filter.
-  async #ambientVendors():
+  async #ambientVendors(freshVendors?: GatekeeperVendorEntry[]):
       Promise<Array<{vendorId: string, vendor: Service<GatekeeperVendor>, description: VendorDescription}>> {
-    let described = await Promise.all([...this.vendors].map(async ([vendorId, vendor]) => {
+    let described = await Promise.all([...resolveVendorMap(this.vendors, freshVendors)].map(async ([vendorId, vendor]) => {
       try {
         let description = await vendor.describe();
         return description.autoProvisionsAccount ? {vendorId, vendor, description} : null;
@@ -1018,9 +1038,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // The ambient gatekeepers the user can opt into now: mode "optional" and not yet added. Backs the
   // Connectors "Available" section. ("enabled" ones are already provisioned; "disabled" ones aren't
   // offered.)
-  async listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
+  // `freshVendors`: see listGatekeeperVendors.
+  async listAddableGatekeepers(freshVendors?: GatekeeperVendorEntry[]): Promise<GatekeeperVendorInfo[]> {
     let config = await readAdminConfig(this.env);
-    return (await this.#ambientVendors())
+    return (await this.#ambientVendors(freshVendors))
         .filter(({vendorId}) =>
             ambientGatekeeperMode(config, vendorId) === "optional" && !this.#hasAccountForVendor(vendorId))
         // Same shape as listGatekeeperVendors; ambient gatekeepers expose no resources.
@@ -1033,18 +1054,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // Opt into an ambient gatekeeper on demand: mint its connected account for this user (no OAuth).
   // Only when the vendor's mode isn't "disabled" and the user has no account yet. Idempotent.
-  provisionAmbientAccount(vendorId: string): Promise<void> {
+  // `freshVendor`: see connectAccount.
+  provisionAmbientAccount(vendorId: string, freshVendor?: Service<GatekeeperVendor> | null)
+      : Promise<void> {
     vendorId = vendorId.toLowerCase();
     let inFlight = this.#provisionPromises.get(vendorId);
     if (inFlight) return inFlight;
-    let promise = this.#provisionAmbientAccount(vendorId)
+    let promise = this.#provisionAmbientAccount(vendorId, freshVendor)
         .finally(() => { this.#provisionPromises.delete(vendorId); });
     this.#provisionPromises.set(vendorId, promise);
     return promise;
   }
 
-  async #provisionAmbientAccount(vendorId: string): Promise<void> {
-    let vendor = this.vendors.get(vendorId);
+  async #provisionAmbientAccount(vendorId: string, freshVendor?: Service<GatekeeperVendor> | null)
+      : Promise<void> {
+    let vendor = freshVendor ?? this.vendors.get(vendorId);
     if (!vendor) throw new Error("No such service: " + vendorId);
 
     if (ambientGatekeeperMode(await readAdminConfig(this.env), vendorId) === "disabled") {
@@ -1090,12 +1114,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // (VendorDescription.autoProvisionsAccount) and is permitted by the provisioning policy. Idempotent
   // and best-effort: a single failing vendor never blocks the others. Creates at most one account per
   // vendor. Deduped via #ensureAccountsPromise (above); callers reach it through listProvidedAccounts.
-  #ensureAutoProvisionedAccounts(): Promise<void> {
+  #ensureAutoProvisionedAccounts(freshVendors?: GatekeeperVendorEntry[]): Promise<void> {
     return (this.#ensureAccountsPromise ??=
-      this.#provisionMissingAccounts().finally(() => { this.#ensureAccountsPromise = undefined; }));
+      this.#provisionMissingAccounts(freshVendors)
+          .finally(() => { this.#ensureAccountsPromise = undefined; }));
   }
 
-  async #provisionMissingAccounts(): Promise<void> {
+  async #provisionMissingAccounts(freshVendors?: GatekeeperVendorEntry[]): Promise<void> {
     // Which vendors already have an auto-provisioned account?
     let provisioned = new Set<string>();
     for (let rec of this.#connectedAccountRecords()) {
@@ -1103,7 +1128,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     let config = await readAdminConfig(this.env);
-    for (let {vendorId, vendor} of await this.#ambientVendors()) {
+    for (let {vendorId, vendor} of await this.#ambientVendors(freshVendors)) {
       if (provisioned.has(vendorId)) continue;
       // Only "enabled" (forced) vendors are auto-provisioned for everyone. "optional" vendors are
       // added on demand by the user (provisionAmbientAccount); "disabled" ones never.
@@ -1124,8 +1149,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // callers (gadget open, app nav) provision and read the accounts back in a single round trip to this
   // DO. Callers filter on `description.singleton` (ambient capsules / catalog) or
   // `description.providesUi` (management-UI listing).
-  async listProvidedAccounts(): Promise<ProvidedAccountInfo[]> {
-    await this.#ensureAutoProvisionedAccounts();
+  // `freshVendors`: see listGatekeeperVendors.
+  async listProvidedAccounts(freshVendors?: GatekeeperVendorEntry[]): Promise<ProvidedAccountInfo[]> {
+    await this.#ensureAutoProvisionedAccounts(freshVendors);
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
@@ -1165,13 +1191,28 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.ensureResources(resourceUrlPatterns);
   }
 
+  // `freshVendors`: see listGatekeeperVendors. Unlike the other methods, the vendor map is held
+  // for the subscription's lifetime, and call-parameter stubs are auto-disposed at method return —
+  // so each passed stub is dup()ed here and disposed again on unsubscribe. Using the fresh set also
+  // means an account connected on a vendor added after this DO started is surfaced rather than
+  // silently dropped by the snapshot lookup in notifyAdd.
   async subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
+      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter,
+      freshVendors?: GatekeeperVendorEntry[])
       : Promise<RpcStub<{}>> {
-    if (filter?.includeForcedAutoProvisionedAccounts) await this.#ensureAutoProvisionedAccounts();
+    if (filter?.includeForcedAutoProvisionedAccounts) {
+      await this.#ensureAutoProvisionedAccounts(freshVendors);
+    }
 
     let connectedAccounts = this.storage.connectedAccounts;
-    let vendors = this.vendors;
+    // Duplicates of the passed vendor stubs, so they survive past this method's return (see the
+    // doc comment above); disposed in unsubscribe().
+    let dupedFreshVendors = freshVendors?.map(
+        ({vendorId, vendor}) => ({vendorId, vendor: (vendor as VendorParamStub).dup()}));
+    let vendors = dupedFreshVendors
+        ? new Map<string, Service<GatekeeperVendor>>(
+            dupedFreshVendors.map(({vendorId, vendor}) => [vendorId, vendor]))
+        : this.vendors;
 
     subscriber = subscriber.dup();  // keep stub after return
 
@@ -1268,6 +1309,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let unsubscribe = () => {
       connectedAccounts.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
+      dupedFreshVendors?.forEach(({vendor}) => vendor[Symbol.dispose]());
     };
 
     // #connectedAccountRecords() skips any record that fails to load, so a single stale account

@@ -8,7 +8,7 @@ import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from './admin-config.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
-import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
+import { buildGatekeeperVendorMap, GatekeeperVendorEntry, resolveVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
@@ -42,7 +42,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   private storage: AdminSettingsStorage;
   private users: DurableObjectNamespace<UserDurableObject>;
   // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
-  // resource listing needs no user context.
+  // resource listing needs no user context. Snapshotted from the constructor env, which is frozen
+  // per DO instance — so it goes stale between a deploy that adds/removes gatekeepers and this
+  // DO's restart. Callers pass a fresh vendor set from their own env (see #vendorMap); this is
+  // only the fallback.
   private vendors: Map<string, Service<GatekeeperVendor>>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -172,7 +175,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // getSupportedResources(). Most gatekeepers ignore it, but RBAC-gated ones (e.g. the internal GTM
   // Data gatekeeper) only reveal their resources to users with the right permission — so without it
   // they'd be hidden from the admin Gatekeepers tab.
-  async getSettings(adminUserId: string): Promise<AdminSettingsView> {
+  // `freshVendors` throughout: the gatekeeper set computed from the calling connection's env (see
+  // the `vendors` field doc). The passed stubs are call parameters, auto-disposed at method
+  // return, so they're only used within-call.
+  async getSettings(adminUserId: string, freshVendors?: GatekeeperVendorEntry[])
+      : Promise<AdminSettingsView> {
     // Fill in any fields missing from a config persisted before they were added (e.g.
     // ambientGatekeeperModes), so reads are robust without requiring a prior write.
     let config = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
@@ -183,7 +190,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       announcement: config.announcement,
       banner: config.banner,
       accentColor: config.accentColor,
-      resourceVendors: await this.#listResourceConfig(config, adminUserId),
+      resourceVendors: await this.#listResourceConfig(config, adminUserId, freshVendors),
     };
   }
 
@@ -201,10 +208,17 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // auto-provisioning ("ambient") gatekeeper stores its three-state mode in ambientGatekeeperModes
   // (default stored as absence); an ordinary gatekeeper stores a binary enabled/disabled in
   // disabledGatekeepers and rejects the ambient-only 'optional'.
-  async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
+  async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode,
+      freshVendors?: GatekeeperVendorEntry[]): Promise<void> {
     vendorId = vendorId.toLowerCase();
-    let vendor = this.vendors.get(vendorId);
-    let autoProvisions = !!vendor && (await vendor.describe()).autoProvisionsAccount === true;
+    let vendor = resolveVendorMap(this.vendors, freshVendors).get(vendorId)
+        ?? this.vendors.get(vendorId);
+    if (!vendor) {
+      // Without a binding we can't classify the gatekeeper, and an unknown vendor would otherwise
+      // be silently stored as an ordinary (non-ambient) one.
+      throw new Error(`No such gatekeeper: ${vendorId}`);
+    }
+    let autoProvisions = (await vendor.describe()).autoProvisionsAccount === true;
     if (autoProvisions) {
       let modes = { ...this.storage.adminConfig.get().ambientGatekeeperModes };
       if (mode === DEFAULT_AMBIENT_GATEKEEPER_MODE) delete modes[vendorId]; else modes[vendorId] = mode;
@@ -223,11 +237,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Unlike the user-facing listGatekeeperVendors, this does NOT hide disabled resources (so admins
   // can re-enable them). `adminUserId` is forwarded to getSupportedResources() so RBAC-gated
   // gatekeepers still surface for an admin who has access to them.
-  async #listResourceConfig(config: AdminConfig, adminUserId: string): Promise<AdminResourceVendor[]> {
+  async #listResourceConfig(config: AdminConfig, adminUserId: string,
+      freshVendors?: GatekeeperVendorEntry[]): Promise<AdminResourceVendor[]> {
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
     let promises: Promise<AdminResourceVendor | null>[] = [];
-    for (let [id, vendor] of this.vendors) {
+    for (let [id, vendor] of resolveVendorMap(this.vendors, freshVendors)) {
       promises.push((async () => {
         try {
           let [description, supportedResources] = await Promise.all([
@@ -291,12 +306,15 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 export class AdminApiImpl extends RpcTarget implements AdminApi {
   // `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
   // resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
-  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+  // `vendors` is the gatekeeper set computed from the calling connection's env, forwarded to the
+  // AdminSettings DO on each call so it sees gatekeepers added after its constructor snapshot.
+  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string,
+      private vendors: GatekeeperVendorEntry[]) {
     super();
   }
 
   getSettings(): Promise<AdminSettingsView> {
-    return this.admin.getSettings(this.adminUserId);
+    return this.admin.getSettings(this.adminUserId, this.vendors);
   }
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {
@@ -325,7 +343,7 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
     if (!isAmbientGatekeeperMode(mode)) {
       throw new Error(`Invalid gatekeeper mode: ${mode}`);
     }
-    return this.admin.setGatekeeperMode(vendorId, mode);
+    return this.admin.setGatekeeperMode(vendorId, mode, this.vendors);
   }
 
   async setAnnouncement(text: string): Promise<void> {

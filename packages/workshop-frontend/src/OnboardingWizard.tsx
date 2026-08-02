@@ -32,6 +32,7 @@ import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import { invalidateAvatarCache } from './useAvatar'
 import { useTheme } from './ThemeContext'
 import { useServerConfig } from './ServerConfigContext'
+import { forceReconnect, probeGatekeeperVendorIds } from './main'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -139,51 +140,78 @@ export default function OnboardingWizard({
     fetchModels()
   }, [fetchModels])
 
+  // url → vendor id lookup (from listGatekeeperVendors) and the URLs of connected accounts (from
+  // the subscription). Kept in refs so the vendor fetch (which can re-run on retries and
+  // background refreshes) and the subscription can update the derived connectedVendorIds
+  // independently, instead of guessing vendor IDs from display names.
+  const urlToVendorIdRef = useRef(new Map<string, string>())
+  const connectedUrlsRef = useRef(new Set<string>())
+  // Ids from the most recent listGatekeeperVendors result, *including* unavailable entries — a
+  // vendor whose worker hasn't answered describe() yet still exists in this connection's env, and
+  // treating it as absent would make maybeRefreshVendors reconnect in a loop. Null until the first
+  // fetch completes.
+  const lastFetchedVendorIdsRef = useRef<Set<string> | null>(null)
+  // Guards a fetch started on a previous connection from clobbering state after a reconnect.
+  const currentApiRef = useRef(authenticatedApi)
+  currentApiRef.current = authenticatedApi
+
+  const refreshConnectedIds = useCallback(() => {
+    const ids = new Set<string>()
+    for (const url of connectedUrlsRef.current) {
+      const vid = urlToVendorIdRef.current.get(url)
+      if (vid) ids.add(vid)
+    }
+    setConnectedVendorIds(ids)
+  }, [])
+
+  // Fetch the vendor list over the current connection and apply it. Background refetches never
+  // flash the loading spinner — only the initial load clears vendorsLoading.
+  const fetchVendors = useCallback(async (opts?: { initial?: boolean }) => {
+    try {
+      const vendorList = await authenticatedApi.listGatekeeperVendors()
+      if (currentApiRef.current !== authenticatedApi) return null
+      lastFetchedVendorIdsRef.current = new Set(vendorList.map((v) => v.id))
+      const urlToVendorId = new Map<string, string>()
+      for (const v of vendorList) {
+        urlToVendorId.set(v.description.url, v.id)
+      }
+      urlToVendorIdRef.current = urlToVendorId
+      setVendors(
+        vendorList.map((v) => ({
+          id: v.id,
+          description: v.description,
+          logoKey: VENDOR_LOGO_MAP[v.id] ?? v.id.toLowerCase(),
+        })),
+      )
+      // Resolve any accounts that arrived before this vendor list.
+      refreshConnectedIds()
+      return vendorList
+    } catch (err) {
+      console.error('Failed to load vendors:', err)
+      return null
+    } finally {
+      if (opts?.initial && currentApiRef.current === authenticatedApi) setVendorsLoading(false)
+    }
+  }, [authenticatedApi, refreshConnectedIds])
+
   // Load vendors and subscribe to connected accounts.
-  // We use a url→vendorId lookup map (built from listGatekeeperVendors) so the
-  // subscriber can resolve vendor IDs reliably instead of guessing from display names.
   useEffect(() => {
     let cancelled = false
-    const connectedUrls = new Set<string>()
+    connectedUrlsRef.current = new Set()
     const accountIdToUrl = new Map<number, string>()
 
-    // Lookup populated by listGatekeeperVendors, used by the subscriber.
-    const urlToVendorId = new Map<string, string>()
-    // Pending accounts that arrived before the vendor list loaded.
-    const pendingUrls: string[] = []
-
-    const refreshConnectedIds = () => {
-      const ids = new Set<string>()
-      for (const url of connectedUrls) {
-        const vid = urlToVendorId.get(url)
-        if (vid) ids.add(vid)
-      }
-      if (!cancelled) setConnectedVendorIds(ids)
-    }
-
-    authenticatedApi
-      .listGatekeeperVendors()
-      .then((vendorList) => {
-        if (cancelled) return
-        for (const v of vendorList) {
-          urlToVendorId.set(v.description.url, v.id)
+    // A vendor can report unavailable right after its gatekeeper was installed, while its worker
+    // is still cold (the binding exists on this connection; only describe() failed). Retry a
+    // couple of times so it fills in without any reconnect.
+    const retryTimers: number[] = []
+    fetchVendors({ initial: true }).then((vendorList) => {
+      if (cancelled || !vendorList) return
+      if (vendorList.some((v) => v.unavailable)) {
+        for (const delay of [5_000, 15_000]) {
+          retryTimers.push(window.setTimeout(() => void fetchVendors(), delay))
         }
-        setVendors(
-          vendorList.map((v) => ({
-            id: v.id,
-            description: v.description,
-            logoKey: VENDOR_LOGO_MAP[v.id] ?? v.id.toLowerCase(),
-          })),
-        )
-        // Resolve any accounts that arrived before the vendor list.
-        if (pendingUrls.length > 0) refreshConnectedIds()
-      })
-      .catch((err) => {
-        console.error('Failed to load vendors:', err)
-      })
-      .finally(() => {
-        if (!cancelled) setVendorsLoading(false)
-      })
+      }
+    })
 
     class AccountsSubscriber extends RpcTarget implements ConnectedAccountsSubscriber {
       add(
@@ -197,19 +225,16 @@ export default function OnboardingWizard({
         if (cancelled) return
         const url = vendor.url
         accountIdToUrl.set(id, url)
-        connectedUrls.add(url)
-        if (urlToVendorId.size > 0) {
-          refreshConnectedIds()
-        } else {
-          pendingUrls.push(url)
-        }
+        connectedUrlsRef.current.add(url)
+        refreshConnectedIds()
       }
       remove(id: number) {
+        if (cancelled) return
         const url = accountIdToUrl.get(id)
         if (url) {
           accountIdToUrl.delete(id)
           const stillHas = Array.from(accountIdToUrl.values()).includes(url)
-          if (!stillHas) connectedUrls.delete(url)
+          if (!stillHas) connectedUrlsRef.current.delete(url)
           refreshConnectedIds()
         }
       }
@@ -234,9 +259,56 @@ export default function OnboardingWizard({
 
     return () => {
       cancelled = true
+      retryTimers.forEach((t) => window.clearTimeout(t))
       subscriptionStub?.[Symbol.dispose]()
     }
-  }, [authenticatedApi])
+  }, [authenticatedApi, fetchVendors, refreshConnectedIds])
+
+  // When something suggests the deployment's gatekeeper set may have changed (tab refocus after a
+  // visit to the deploy wizard, or the empty-state poll below), probe over a temporary fresh
+  // connection and force a full reconnect if the vendor set differs from what this connection last
+  // saw. The reconnect moves the vendor list, the accounts subscription, and the connect flow to
+  // the new env together — the new gatekeeper is immediately connectable, not just visible.
+  const probeInFlightRef = useRef(false)
+  const maybeRefreshVendors = useCallback(async () => {
+    if (probeInFlightRef.current) return
+    probeInFlightRef.current = true
+    try {
+      const probed = await probeGatekeeperVendorIds()
+      const last = lastFetchedVendorIdsRef.current
+      if (!probed || !last) return
+      const changed = probed.size !== last.size || [...probed].some((id) => !last.has(id))
+      if (changed) forceReconnect()
+    } finally {
+      probeInFlightRef.current = false
+    }
+  }, [])
+
+  // The deploy wizard opens in a separate tab; when the user comes back after installing a
+  // gatekeeper there, check for it right away.
+  useEffect(() => {
+    if (!deployUrl) return
+    const onFocus = () => void maybeRefreshVendors()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [deployUrl, maybeRefreshVendors])
+
+  // While the connections step is showing its "Add gatekeepers" empty state, the user may be
+  // installing one in the wizard tab without ever blurring this one (side-by-side windows). Poll
+  // briefly, then stop — blur/refocus still covers anything after the cap. The wizard never
+  // unmounts between steps, so gate on the connections step being the visible one.
+  const showingAddGatekeepersCta =
+    !!deployUrl && step === 2 && !vendorsLoading && vendors.length === 0
+
+  useEffect(() => {
+    if (!showingAddGatekeepersCta) return
+    const interval = window.setInterval(() => void maybeRefreshVendors(), 5_000)
+    const cap = window.setTimeout(() => window.clearInterval(interval), 120_000)
+    return () => {
+      window.clearInterval(interval)
+      window.clearTimeout(cap)
+    }
+  }, [showingAddGatekeepersCta, maybeRefreshVendors])
 
   // ── avatar handlers ───────────────────────────────────────────────────────────
 

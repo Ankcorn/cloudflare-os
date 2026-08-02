@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import {
   MagnifyingGlass,
@@ -24,6 +24,7 @@ import {
 import { ConnectedAccountsSubscriber, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useServerConfig } from '../ServerConfigContext'
+import { forceReconnect, probeGatekeeperVendorIds } from '../main'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -438,7 +439,9 @@ type ModalTarget =
   | { kind: 'manage'; accountId: number }
   | null
 
-function ConnectorsPage() {
+// Exported for tests (which render it directly). Note the export also opts this component out of
+// the router plugin's automatic code splitting.
+export function ConnectorsPage() {
   useDocumentTitle('Gatekeepers')
 
   const { authenticatedApi } = useAuthenticatedApi()
@@ -475,6 +478,56 @@ function ConnectorsPage() {
 
   const subscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null)
 
+  // Ids from the most recent listGatekeeperVendors result, *including* unavailable entries — a
+  // vendor whose worker hasn't answered describe() yet still exists in this connection's env, and
+  // treating it as absent would make maybeRefreshVendors reconnect in a loop. Null until the first
+  // fetch completes.
+  const lastFetchedVendorIdsRef = useRef<Set<string> | null>(null)
+  // Vendor ids already covered by an "unavailable" warning toast, so retries and background
+  // refetches don't repeat it. An id is cleared once its vendor recovers.
+  const warnedUnavailableRef = useRef<Set<string>>(new Set())
+  // Guards a fetch started on a previous connection from clobbering state after a reconnect.
+  const currentApiRef = useRef(authenticatedApi)
+  currentApiRef.current = authenticatedApi
+
+  // Fetch the vendor list over the current connection and apply it. Background refetches never
+  // flash the loading state or flip the error panel — only the initial load does.
+  const fetchVendors = useCallback(async (opts?: { initial?: boolean }) => {
+    try {
+      const vendorList = await authenticatedApi.listGatekeeperVendors()
+      if (currentApiRef.current !== authenticatedApi) return null
+      lastFetchedVendorIdsRef.current = new Set(vendorList.map((v) => v.id))
+      for (const v of vendorList) {
+        if (!v.unavailable) warnedUnavailableRef.current.delete(v.id)
+      }
+      const newlyUnavailable = vendorList.filter(
+        (v) => v.unavailable && !warnedUnavailableRef.current.has(v.id),
+      )
+      if (newlyUnavailable.length > 0) {
+        newlyUnavailable.forEach((v) => warnedUnavailableRef.current.add(v.id))
+        toasts.add({
+          title: `Some services are temporarily unavailable: ${newlyUnavailable.map((v) => v.id).join(', ')}`,
+          variant: 'warning',
+        })
+      }
+      setVendors(
+        vendorList
+          .filter((v) => !v.unavailable)
+          .map((v) => ({
+            id: v.id,
+            description: v.description,
+            supportedResources: v.supportedResources,
+          })),
+      )
+      setVendorsLoaded(true)
+      return vendorList
+    } catch (err) {
+      console.error('Failed to load available services:', err)
+      if (opts?.initial && currentApiRef.current === authenticatedApi) setLoadError(true)
+      return null
+    }
+  }, [authenticatedApi, toasts])
+
   useEffect(() => {
     let cancelled = false
     const accountMap = new Map<number, AccountEntry>()
@@ -491,32 +544,18 @@ function ConnectorsPage() {
         console.error('Failed to load addable gatekeepers:', err)
       })
 
-    authenticatedApi
-      .listGatekeeperVendors()
-      .then((vendorList) => {
-        if (cancelled) return
-        const unavailable = vendorList.filter((v) => v.unavailable)
-        if (unavailable.length > 0) {
-          toasts.add({
-            title: `Some services are temporarily unavailable: ${unavailable.map((v) => v.id).join(', ')}`,
-            variant: 'warning',
-          })
+    // A vendor can report unavailable right after its gatekeeper was installed, while its worker
+    // is still cold (the binding exists on this connection; only describe() failed). Retry a
+    // couple of times so it fills in without any reconnect.
+    const retryTimers: number[] = []
+    fetchVendors({ initial: true }).then((vendorList) => {
+      if (cancelled || !vendorList) return
+      if (vendorList.some((v) => v.unavailable)) {
+        for (const delay of [5_000, 15_000]) {
+          retryTimers.push(window.setTimeout(() => void fetchVendors(), delay))
         }
-        setVendors(
-          vendorList
-            .filter((v) => !v.unavailable)
-            .map((v) => ({
-              id: v.id,
-              description: v.description,
-              supportedResources: v.supportedResources,
-            })),
-        )
-        setVendorsLoaded(true)
-      })
-      .catch((err) => {
-        console.error('Failed to load available services:', err)
-        if (!cancelled) setLoadError(true)
-      })
+      }
+    })
 
     class AccountsSubscriber
       extends RpcTarget
@@ -568,10 +607,62 @@ function ConnectorsPage() {
 
     return () => {
       cancelled = true
+      retryTimers.forEach((t) => window.clearTimeout(t))
       subscriptionRef.current?.[Symbol.dispose]()
       subscriptionRef.current = null
     }
-  }, [authenticatedApi])
+  }, [authenticatedApi, fetchVendors])
+
+  // When something suggests the deployment's gatekeeper set may have changed (tab refocus after a
+  // visit to the deploy wizard, or the empty-state poll below), probe over a temporary fresh
+  // connection and force a full reconnect if the vendor set differs from what this connection last
+  // saw. The reconnect moves the lists, the accounts subscription, and the connect flow to the new
+  // env together — the new gatekeeper is immediately connectable, not just visible.
+  const probeInFlightRef = useRef(false)
+  const maybeRefreshVendors = useCallback(async () => {
+    if (probeInFlightRef.current) return
+    probeInFlightRef.current = true
+    try {
+      const probed = await probeGatekeeperVendorIds()
+      const last = lastFetchedVendorIdsRef.current
+      if (!probed || !last) return
+      const changed = probed.size !== last.size || [...probed].some((id) => !last.has(id))
+      if (changed) forceReconnect()
+    } finally {
+      probeInFlightRef.current = false
+    }
+  }, [])
+
+  // The deploy wizard opens in a separate tab; when the user comes back after installing a
+  // gatekeeper there, check for it right away.
+  useEffect(() => {
+    if (!deployUrl) return
+    const onFocus = () => void maybeRefreshVendors()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [deployUrl, maybeRefreshVendors])
+
+  // While the empty state's "Add gatekeepers" CTA is showing, the user may be installing one in
+  // the wizard tab without ever blurring this one (side-by-side windows). Poll briefly, then stop
+  // — blur/refocus still covers anything after the cap.
+  const showingAddGatekeepersCta =
+    !!deployUrl &&
+    !loadError &&
+    vendorsLoaded &&
+    accountsLoaded &&
+    vendors.length === 0 &&
+    addable.length === 0 &&
+    accounts.length === 0
+
+  useEffect(() => {
+    if (!showingAddGatekeepersCta) return
+    const interval = window.setInterval(() => void maybeRefreshVendors(), 5_000)
+    const cap = window.setTimeout(() => window.clearInterval(interval), 120_000)
+    return () => {
+      window.clearInterval(interval)
+      window.clearTimeout(cap)
+    }
+  }, [showingAddGatekeepersCta, maybeRefreshVendors])
 
   const handleOpenConnect = (vendorId: string) => {
     setModalTarget({ kind: 'connect', vendorId })

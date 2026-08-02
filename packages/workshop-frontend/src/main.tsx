@@ -66,11 +66,25 @@ function getBackendHost(): string {
   return window.location.hostname === 'localhost' ? 'localhost:8787' : window.location.host;
 }
 
+function getWsApiUrl(): string {
+  const apiHost = getBackendHost();
+  return (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
+}
+
 function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
-  const apiHost = getBackendHost();
-  const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
-  return newWebSocketRpcSession<PublicApi>(wsUrl);
+  return newWebSocketRpcSession<PublicApi>(getWsApiUrl());
+}
+
+// Start a connection and register the reconnect-on-broken handler. The handler is a no-op when the
+// stub has already been superseded (e.g. by forceReconnect() disposing it), so only the current
+// connection ever drives reconnects.
+function connectAndWatch(): RpcStub<PublicApi> {
+  const stub = startConnection();
+  stub.onRpcBroken((error: any) => {
+    if (stub === currentStub) handleBroken(error);
+  });
+  return stub;
 }
 
 async function handleBroken(error: any) {
@@ -90,8 +104,7 @@ async function handleBroken(error: any) {
     backoff = 1000;
   }
 
-  currentStub = startConnection();
-  currentStub.onRpcBroken(handleBroken);
+  currentStub = connectAndWatch();
 
   // Don't clear isConnectionLost here — the new connection hasn't proven
   // it works yet. It gets cleared by markConnectionRestored() once the
@@ -112,10 +125,45 @@ export function markConnectionRestored() {
   for (let cb of notifyCurrentStubUpdated) { cb(); }
 }
 
+// Tear down the current connection and reconnect immediately, skipping the broken-connection
+// backoff. The replacement stub has a new identity, so every effect keyed on it (auth, lists,
+// subscriptions) re-establishes over the new connection — which reaches a worker with the current
+// env. Used when the client detects the deployment's gatekeeper set changed underneath the current
+// connection (see probeGatekeeperVendorIds); it moves the whole app to the new env in one coherent
+// refresh rather than leaving, say, a fresh vendor list paired with a connectAccount that still
+// rides the old env.
+export function forceReconnect() {
+  const oldStub = currentStub;
+  currentStub = connectAndWatch();
+  oldStub[Symbol.dispose]();
+  for (let cb of notifyCurrentStubUpdated) { cb(); }
+}
+
+// Best-effort probe of the deployment's current gatekeeper vendor ids over a temporary, fresh
+// connection. A new WebSocket reaches a worker with the current env, so it sees gatekeepers added
+// by a deploy even while the long-lived connection (and the warm user DO behind it) still ride the
+// old env. Includes `unavailable` vendors, since they exist in the new env even if their worker
+// hasn't answered describe() yet. Returns null (caller skips) when there's no password-auth token
+// in localStorage (e.g. CF Access mode) or on any error.
+export async function probeGatekeeperVendorIds(): Promise<Set<string> | null> {
+  const token = localStorage.getItem('authToken');
+  if (!token) return null;
+  let probeStub: RpcStub<PublicApi> | undefined;
+  try {
+    probeStub = newWebSocketRpcSession<PublicApi>(getWsApiUrl());
+    const api = await probeStub.authenticate(token);
+    const vendors = await api.listGatekeeperVendors();
+    return new Set(vendors.map((v) => v.id));
+  } catch {
+    return null;
+  } finally {
+    probeStub?.[Symbol.dispose]();
+  }
+}
+
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
-let currentStub = startConnection();
-currentStub.onRpcBroken(handleBroken);
+let currentStub = connectAndWatch();
 
 const router = createRouter()
 applyStoredThemeMode()

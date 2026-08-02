@@ -6,7 +6,7 @@ import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { checkAdminSetup, getAdminUsernames } from "./auth/setup-token.js";
-import { getAuthVendorBinding } from "./auth/auth-vendors.js";
+import { getAuthVendorBinding, getGatekeeperVendorBinding, gatekeeperVendorEntries } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
@@ -252,12 +252,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.user.listGadgets();
   }
 
+  // The gatekeeper-facing methods below pass the vendor set (or single binding) computed from this
+  // connection's env into the user DO. The DO's own constructor snapshot goes stale between a
+  // worker deploy that adds a gatekeeper and the DO's eventual restart, while each new WebSocket
+  // connection gets the current env — supplying the vendors fresh per call makes a newly-installed
+  // gatekeeper usable as soon as the client reconnects, independent of DO-restart timing.
+
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]> {
-    return this.user.listGatekeeperVendors(filter);
+    return this.user.listGatekeeperVendors(filter, gatekeeperVendorEntries(this.env));
   }
 
   connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
-    return this.user.connectAccount(vendorId, resourceUrlPatterns);
+    return this.user.connectAccount(
+        vendorId, resourceUrlPatterns, getGatekeeperVendorBinding(this.env, vendorId));
   }
 
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
@@ -265,17 +272,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
-    return this.user.listAddableGatekeepers();
+    return this.user.listAddableGatekeepers(gatekeeperVendorEntries(this.env));
   }
 
   provisionAmbientAccount(vendorId: string): Promise<void> {
-    return this.user.provisionAmbientAccount(vendorId);
+    return this.user.provisionAmbientAccount(
+        vendorId, getGatekeeperVendorBinding(this.env, vendorId));
   }
 
   subscribeConnectedAccounts(
       subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
       : Promise<RpcStub<{}>> {
-    return this.user.subscribeConnectedAccounts(subscriber, filter);
+    return this.user.subscribeConnectedAccounts(
+        subscriber, filter, gatekeeperVendorEntries(this.env));
   }
 
   disconnectAccount(accountId: number): Promise<void> {
@@ -502,7 +511,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async listGatekeeperApps(): Promise<GatekeeperAppInfo[]> {
     // listProvidedAccounts provisions auto-provisioned accounts first (idempotent), so their apps
     // appear in the nav even before the user opens a gadget — in a single round trip.
-    let accounts = await this.user.listProvidedAccounts();
+    let accounts = await this.user.listProvidedAccounts(gatekeeperVendorEntries(this.env));
     return accounts
         .filter(account => account.description.providesUi)
         .map(account => ({
@@ -515,7 +524,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null> {
     // Self-sufficient: listProvidedAccounts provisions auto-provisioned accounts first (idempotent),
     // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
-    let accounts = await this.user.listProvidedAccounts();
+    let accounts = await this.user.listProvidedAccounts(gatekeeperVendorEntries(this.env));
     let app = accounts.find(account => account.vendorId === id && account.description.providesUi);
     if (!app) return null;
     // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
@@ -535,7 +544,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let adminUserId = this.user.id.name!;
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+    return new AdminApiImpl(
+        this.adminSettings.getByName(""), adminUserId, gatekeeperVendorEntries(this.env));
   }
 }
 
