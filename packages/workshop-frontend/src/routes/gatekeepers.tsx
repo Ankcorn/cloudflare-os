@@ -489,6 +489,10 @@ export function ConnectorsPage() {
   // Guards a fetch started on a previous connection from clobbering state after a reconnect.
   const currentApiRef = useRef(authenticatedApi)
   currentApiRef.current = authenticatedApi
+  // Kumo's toast manager hook returns a fresh object every render; going through a ref keeps it
+  // out of fetchVendors's identity, which the load effect below is keyed on.
+  const toastsRef = useRef(toasts)
+  toastsRef.current = toasts
 
   // Fetch the vendor list over the current connection and apply it. Background refetches never
   // flash the loading state or flip the error panel — only the initial load does.
@@ -505,7 +509,7 @@ export function ConnectorsPage() {
       )
       if (newlyUnavailable.length > 0) {
         newlyUnavailable.forEach((v) => warnedUnavailableRef.current.add(v.id))
-        toasts.add({
+        toastsRef.current.add({
           title: `Some services are temporarily unavailable: ${newlyUnavailable.map((v) => v.id).join(', ')}`,
           variant: 'warning',
         })
@@ -526,7 +530,7 @@ export function ConnectorsPage() {
       if (opts?.initial && currentApiRef.current === authenticatedApi) setLoadError(true)
       return null
     }
-  }, [authenticatedApi, toasts])
+  }, [authenticatedApi])
 
   useEffect(() => {
     let cancelled = false

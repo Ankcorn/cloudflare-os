@@ -22,7 +22,9 @@ vi.mock('../ServerConfigContext', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   useServerConfig: vi.fn<typeof useServerConfig>(),
 }))
-vi.mock('@cloudflare/kumo', () => ({ useKumoToastManager: () => toastManager }))
+// The real kumo hook returns a fresh object every render — mirror that, so anything keyed on the
+// manager's identity misbehaves here the same way it would in production.
+vi.mock('@cloudflare/kumo', () => ({ useKumoToastManager: () => ({ ...toastManager }) }))
 vi.mock('../components/ConnectConnectorModal', () => ({ default: () => null }))
 vi.mock('../components/ViewToggle', () => ({ default: () => null }))
 vi.mock('../components/EmptyState', () => ({
@@ -94,6 +96,21 @@ describe('ConnectorsPage vendor freshness', () => {
     act(() => root?.unmount())
     container?.remove()
     vi.useRealTimers()
+  })
+
+  it('loads and subscribes exactly once per connection, even across re-renders', async () => {
+    const api = makeApi(async () => [vendorInfo('google')])
+    await render(api, 'https://deploy.test')
+
+    // Extra render passes (each giving the component a fresh toast-manager identity, like any
+    // state update in production) must not re-trigger the load effect.
+    await act(async () => root!.render(<ConnectorsPage />))
+    await act(async () => root!.render(<ConnectorsPage />))
+
+    expect(api.listGatekeeperVendors).toHaveBeenCalledTimes(1)
+    expect(api.subscribeConnectedAccounts).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).not.toContain('Loading gatekeepers')
+    expect(container!.textContent).toContain('google')
   })
 
   it('probes on focus and reconnects only when the vendor set changed', async () => {
