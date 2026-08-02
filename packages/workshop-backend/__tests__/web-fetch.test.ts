@@ -5,13 +5,14 @@ import {
   formatWebFetchResult,
   type WebFetchEnv,
 } from "../src/web-fetch.js";
+import { AiGatewayConfig } from "../src/ai-gateway.js";
 
 // A minimal stand-in for the Workers AI binding's toMarkdown method. The real signature
 // accepts a single document or an array of documents; we only use the single-document form
 // in webFetch, so the stub mirrors only that branch.
 type ToMarkdownStub = ReturnType<typeof vi.fn>;
 
-function makeEnv(toMarkdown?: ToMarkdownStub): WebFetchEnv {
+function makeEnv(toMarkdown?: ToMarkdownStub, gateway: AiGatewayConfig | null = null): WebFetchEnv {
   const stub =
     toMarkdown ??
     vi.fn(async (doc: { name: string; blob: Blob }) => ({
@@ -27,7 +28,7 @@ function makeEnv(toMarkdown?: ToMarkdownStub): WebFetchEnv {
   // provide what webFetch actually touches.
   return {
     ai: { toMarkdown: stub } as unknown as Ai,
-    gateway: null,
+    gateway,
   };
 }
 
@@ -102,9 +103,56 @@ describe("webFetch document conversion", () => {
     expect(toMarkdown).toHaveBeenCalledTimes(1);
     const [doc, options] = toMarkdown.mock.calls[0];
     expect(doc.blob.type).toBe("text/html");
+    expect(options.gateway).toBeUndefined();
     expect(options.conversionOptions.html.hostname).toBe("https://example.com");
     expect(options.conversionOptions.html.images.convert).toBe(false);
     expect(result.body).toBe("# Title\n\nBody");
+  });
+
+  it("passes a same-account AI gateway to toMarkdown", async () => {
+    mockResponse("<h1>Title</h1>", "text/html");
+
+    const toMarkdown = vi.fn(async (doc: { name: string; blob: Blob }) => ({
+      id: "x",
+      name: doc.name,
+      mimeType: doc.blob.type,
+      format: "markdown" as const,
+      tokens: 1,
+      data: "# Title",
+    }));
+    const gateway = new AiGatewayConfig({
+      CF_AI_GATEWAY: "workers-ai-gateway",
+    } as Cloudflare.Env);
+
+    await webFetch(makeEnv(toMarkdown, gateway), { url: "https://example.com/page" });
+
+    expect(toMarkdown.mock.calls[0][1].gateway).toEqual({
+      id: "workers-ai-gateway",
+      metadata: { tool: "webFetch", automated: true },
+    });
+  });
+
+  it("does not pass a gateway to toMarkdown when direct Workers AI is configured", async () => {
+    mockResponse("<h1>Title</h1>", "text/html");
+
+    const toMarkdown = vi.fn(async (doc: { name: string; blob: Blob }) => ({
+      id: "x",
+      name: doc.name,
+      mimeType: doc.blob.type,
+      format: "markdown" as const,
+      tokens: 1,
+      data: "# Title",
+    }));
+    const gateway = new AiGatewayConfig({
+      CF_AI_GATEWAY: "platform-gateway",
+      CF_AI_GATEWAY_ACCOUNT_ID: "gateway-account-id",
+      CF_AI_GATEWAY_API_TOKEN: "gateway-token",
+      CF_AI_GATEWAY_WAI_DIRECT: "true",
+    } as Cloudflare.Env);
+
+    await webFetch(makeEnv(toMarkdown, gateway), { url: "https://example.com/page" });
+
+    expect(toMarkdown.mock.calls[0][1].gateway).toBeUndefined();
   });
 
   it("hands PDF responses to env.AI.toMarkdown", async () => {

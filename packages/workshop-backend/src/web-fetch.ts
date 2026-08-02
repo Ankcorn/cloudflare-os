@@ -171,21 +171,14 @@ const TO_MARKDOWN_MIME_TYPES = new Set([
   "application/vnd.apple.numbers",                                           // .numbers
 ]);
 
-// Build the gateway options object that pairs `toMarkdown()` calls with the project's
-// AI Gateway, mirroring how the LLM path in `ai-models.ts` does it. Returns undefined when
-// AI Gateway mode isn't enabled, in which case `toMarkdown` runs against Workers AI
-// directly.
+// `toMarkdown()` uses the Workers AI binding, so only apply the same-account Workers AI gateway
+// resolved by AiGatewayConfig. A cross-account platform gateway cannot be used by this binding.
 function buildGatewayOptions(
   gateway: AiGatewayConfig | null,
 ): GatewayOptions | undefined {
   if (!gateway) return undefined;
-  // We use the Workers-AI-specific gateway (CF_AI_GATEWAY_WAI) when set, falling back to
-  // the general gateway. `toMarkdown` invokes Workers AI models under the hood for any
-  // paid sub-tasks (e.g. embedded image summarization), so it's the right destination.
-  return {
-    id: gateway.workersAiGateway,
-    metadata: { tool: "webFetch", automated: true },
-  };
+  if (!gateway.workersAiGateway) return undefined;
+  return { id: gateway.workersAiGateway, metadata: { tool: "webFetch", automated: true } };
 }
 
 // Attempt to convert a document to Markdown using the Workers AI binding. Returns the

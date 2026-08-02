@@ -13,7 +13,7 @@ import { ApprovalQueue, Gatekeeper, ResourceDescription } from '@gadgets/worksho
 import { LanguageModelBinding } from "./ai-model-binding";
 import AI_MODEL_BINDING_TYPES from "./ai-model-binding.txt";
 import { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
-import { AiGatewayConfig, getAiGatewayConfig } from "./ai-gateway.js";
+import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { AiGateway, createAiGateway } from 'ai-gateway-provider';
 import { createUnified } from "ai-gateway-provider/providers/unified";
 
@@ -34,33 +34,79 @@ const UNIFIED_BILLING_PROVIDER_PATH: Record<string, string> = {
   cloudflare: "workers-ai",
 };
 
-type GatewayMetadata = Record<string, string | number | bigint | boolean | null>;
+// Gadgets-owned attribution schema attached to AI Gateway requests.
+type GatewayMetadata = {
+  // Stable Gadgets user identifier for attribution.
+  user: string;
+  // Gadgets execution context, present when the call is associated with a gadget operation.
+  source?: GatewayMetadataContext["source"];
+  gadgetId?: string;
+  chatId?: number;
+  // Distinguishes gadget-initiated model calls from interactive user calls.
+  automated?: true;
+};
 
-function buildMetadata(initiator: AiChatAuthorInfo): GatewayMetadata {
+type GatewayMetadataContext = {
+  source: "chat" | "thread-title" | "gadget-title" | "model-binding";
+  gadgetId?: string;
+  chatId?: number;
+};
+
+type ModelRoutingOptions = {
+  sessionAffinity?: string;
+  userGateway?: UserGatewayRouting;
+  metadata?: GatewayMetadataContext;
+};
+
+type ModelWithLogRoute = {
+  model: LanguageModel;
+  aiGatewayLogRoute?: AiGatewayLogRoute;
+};
+
+function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
   const metadata: GatewayMetadata = { user: initiator.id };
+  if (context) {
+    metadata.source = context.source;
+    if (context.gadgetId) metadata.gadgetId = context.gadgetId;
+    if (context.chatId !== undefined) metadata.chatId = context.chatId;
+  }
   if (initiator.type === "gadget") metadata.automated = true;
   return metadata;
 }
 
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
-                         sessionAffinity?: string,
-                         userGateway?: UserGatewayRouting): LanguageModel {
+                         options: ModelRoutingOptions = {}): LanguageModel {
+  return getModelWithLogRoute(env, config, initiator, options).model;
+}
+
+/** Resolve a model and the matching route for retrieving its AI Gateway log. */
+export function getModelWithLogRoute(env: Cloudflare.Env, config: AiModelConfig,
+                                    initiator: AiChatAuthorInfo,
+                                    options: ModelRoutingOptions = {}): ModelWithLogRoute {
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the AI Gateway unified-billing endpoint. Honored regardless of
   // whether a platform AI Gateway is configured, so connected users are always billed correctly.
-  if (userGateway) {
-    return getModelViaUserGateway(config, buildMetadata(initiator), userGateway);
+  if (options.userGateway) {
+    return {
+      model: getModelViaUserGateway(
+          config, buildMetadata(initiator, options.metadata), options.userGateway),
+      aiGatewayLogRoute: {
+        gateway: "default",
+        accountId: options.userGateway.accountId,
+        apiToken: options.userGateway.apiKey,
+      },
+    };
   }
 
   // Otherwise: when a platform AI Gateway is configured, route through it (platform-funded free
   // tier). The config's apiToken/apiUrl are ignored in that mode.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
-    return getModelViaGateway(env, gwConfig, config, initiator, sessionAffinity);
+    return getModelViaGateway(env, gwConfig, config, initiator, options);
   }
 
-  return getModelDirect(env, config, sessionAffinity);
+  return { model: getModelDirect(env, config, options.sessionAffinity) };
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -114,23 +160,29 @@ function getModelViaGateway(
   gwConfig: AiGatewayConfig,
   config: AiModelConfig,
   initiator: AiChatAuthorInfo,
-  sessionAffinity?: string,
-): LanguageModel {
-  const metadata = buildMetadata(initiator);
+  options: ModelRoutingOptions,
+): ModelWithLogRoute {
+  const metadata = buildMetadata(initiator, options.metadata);
 
   if (config.provider === "cloudflare") {
-    return wrapLanguageModel({
-      model: createWorkersAI({
-        binding: env.WORKERS_AI,
-        gateway: { id: gwConfig.workersAiGateway, metadata },
-      })(config.model as any, { sessionAffinity }),
-      middleware: captureAiGatewayLogId(env),
-    });
+    const model = createWorkersAI({
+      binding: env.WORKERS_AI,
+      ...(gwConfig.workersAiGateway && { gateway: { id: gwConfig.workersAiGateway, metadata } }),
+    })(config.model as any, { sessionAffinity: options.sessionAffinity });
+    if (!gwConfig.workersAiGateway) return { model };
+    return {
+      model: wrapLanguageModel({
+        model,
+        middleware: captureAiGatewayLogId(env),
+      }),
+      aiGatewayLogRoute: { gateway: gwConfig.workersAiGateway },
+    };
   }
 
   let gatewayWrapper: AiGateway;
+  let aiGatewayLogRoute: AiGatewayLogRoute;
 
-  if (gwConfig.accountId) {
+  if (gwConfig.accountId && gwConfig.apiToken) {
     // Cross-account AI Gateway request, use token from env vars.
     gatewayWrapper = createAiGateway({
       accountId: gwConfig.accountId,
@@ -138,6 +190,11 @@ function getModelViaGateway(
       apiKey: gwConfig.apiToken,
       options: { metadata },
     });
+    aiGatewayLogRoute = {
+      gateway: gwConfig.gateway,
+      accountId: gwConfig.accountId,
+      apiToken: gwConfig.apiToken,
+    };
   } else {
     // We can just use our binding.
     gatewayWrapper = createAiGateway({
@@ -147,21 +204,27 @@ function getModelViaGateway(
       binding: env.WORKERS_AI.gateway(gwConfig.gateway, {beta: false}),
       options: { metadata },
     });
+    aiGatewayLogRoute = { gateway: gwConfig.gateway };
   }
 
+  let model: LanguageModel;
   switch (config.provider) {
     case "anthropic":
-      return gatewayWrapper(aigCreateAnthropic()(config.model));
+      model = gatewayWrapper(aigCreateAnthropic()(config.model));
+      break;
     case "google":
-      return gatewayWrapper(aigCreateGoogleGenerativeAI()(config.model));
+      model = gatewayWrapper(aigCreateGoogleGenerativeAI()(config.model));
+      break;
     case "openai":
-      return gatewayWrapper(aigCreateOpenAI()(config.model));
+      model = gatewayWrapper(aigCreateOpenAI()(config.model));
+      break;
     default:
       throw new Error(
         `Provider "${config.provider}" is not supported through AI Gateway. ` +
         `Configured providers: ${[...gwConfig.providers].join(", ")}`
       );
   }
+  return { model, aiGatewayLogRoute };
 }
 
 function getModelDirect(env: Cloudflare.Env, config: AiModelConfig,
@@ -205,6 +268,7 @@ export type LanguageModelGatekeeperProps = {
   displayName: string,
   config: AiModelConfig,
   initiator: AiChatAuthorInfo,
+  metadata?: GatewayMetadataContext,
 };
 
 export class LanguageModelGatekeeper
@@ -237,7 +301,9 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator);
+    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
+      metadata: this.ctx.props.metadata,
+    });
     return new LanguageModelBindingImpl(model);
   }
 

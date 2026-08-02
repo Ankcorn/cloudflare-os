@@ -9,14 +9,14 @@ declare global {
       // Deployment-wide admin usernames.
       ADMINS?: string[];
 
-      // AI Gateway mode: when CF_AI_GATEWAY is set, all model requests are routed through
-      // Cloudflare AI Gateway with server-managed keys. Users don't need to provide their own
-      // API keys.
+      // AI Gateway mode: when CF_AI_GATEWAY is set, supported non-Workers providers are routed
+      // through Cloudflare AI Gateway with server-managed keys. Users don't need their own keys.
       CF_AI_GATEWAY?: string;            // Gateway name (enables gateway mode)
       CF_AI_GATEWAY_PROVIDERS?: string;   // Comma-separated list: "anthropic,openai,google,cloudflare"
-      CF_AI_GATEWAY_ACCOUNT_ID?: string;  // Cloudflare account ID (for constructing gateway URLs)
-      CF_AI_GATEWAY_API_TOKEN?: string;   // Cloudflare API token (used for non-Cloudflare providers)
-      CF_AI_GATEWAY_WAI?: string;         // Alternate gateway name for Workers AI (optional)
+      CF_AI_GATEWAY_ACCOUNT_ID?: string;  // Gateway owner account ID for cross-account routing
+      CF_AI_GATEWAY_API_TOKEN?: string;   // Run + Read token for cross-account routing and costs
+      CF_AI_GATEWAY_WAI?: string;         // Optional same-account Workers AI gateway override
+      CF_AI_GATEWAY_WAI_DIRECT?: string;  // "true" to bypass a named Gateway for Workers AI
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
@@ -75,4 +75,3 @@ declare global {
     }
   }
 }
-

@@ -13,8 +13,11 @@ turn, the overseer calls `checkUsageAndBalance`:
 - **Connected, balance ≥ `$2`** → allowed, routed through the user's own account so usage bills
   their Cloudflare credits — even while free-tier allowance remains. The platform is never charged
   for funded users, and their daily free-tier counter is left untouched.
-- **Otherwise, within the free tier** → allowed, served via the platform's configured AI Gateway.
-  This includes connected users whose balance is below `$2` (incl. $0).
+- **Otherwise, within the free tier** → allowed. Non-Workers providers are served via the
+  platform's configured AI Gateway. The Workers AI binding remains account-local and uses the
+  same Gateway ID unless `CF_AI_GATEWAY_WAI_DIRECT=true` keeps it direct or `CF_AI_GATEWAY_WAI`
+  selects another same-account Gateway. This includes connected users whose balance is below `$2`
+  (incl. $0).
 - **Free tier exhausted, no Cloudflare account connected** → blocked, with a prompt to connect.
 - **Free tier exhausted, connected but balance below `$2`** → blocked, with a prompt to add credits.
 
@@ -49,11 +52,25 @@ CLOUDFLARE_OAUTH_CLIENT_ID=...
 CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 
 # Platform AI Gateway used for the free tier (see existing AI Gateway docs):
-CF_AI_GATEWAY=...
-CF_AI_GATEWAY_API_TOKEN=...
-CF_AI_GATEWAY_ACCOUNT_ID=...
+CF_AI_GATEWAY=your-gateway
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
+
+# Required only when the Gateway belongs to another Cloudflare account:
+CF_AI_GATEWAY_ACCOUNT_ID=...
+CF_AI_GATEWAY_API_TOKEN=...
+
+# When CF_AI_GATEWAY belongs to another account, keep Workers AI on its direct binding:
+CF_AI_GATEWAY_WAI_DIRECT=true
 ```
+
+For a same-account Gateway, the `WORKERS_AI` binding routes deployment-managed non-Workers
+providers without an account ID or API token, and Workers AI uses the same Gateway by default.
+Cross-account routing requires both additional values and an API token with AI Gateway Run and Read
+permissions. Read access lets Gadgets retrieve each log's cost for user-visible accounting. Workers
+AI binding authority does not cross accounts. For backwards compatibility it uses
+`CF_AI_GATEWAY` as a same-account Gateway ID by default; when that ID names only a cross-account
+Gateway, set `CF_AI_GATEWAY_WAI_DIRECT=true` to use the direct binding or `CF_AI_GATEWAY_WAI` to
+select another same-account Gateway.
 
 The Cloudflare dashboard OAuth endpoints and scopes are **hardcoded** in the Cloudflare gatekeeper
 (`packages/gatekeeper-cloudflare/src/oauth.ts`):

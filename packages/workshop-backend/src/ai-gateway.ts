@@ -9,16 +9,26 @@ const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 export class AiGatewayConfig {
   readonly gateway: string;
-  readonly workersAiGateway: string;
+  readonly workersAiGateway?: string;
   readonly accountId?: string;
   readonly apiToken?: string;
   readonly providers: Set<string>;
 
   constructor(env: Cloudflare.Env) {
     this.gateway = env.CF_AI_GATEWAY!;
-    this.workersAiGateway = env.CF_AI_GATEWAY_WAI || this.gateway;
     this.accountId = env.CF_AI_GATEWAY_ACCOUNT_ID;
     this.apiToken = env.CF_AI_GATEWAY_API_TOKEN;
+    if (!!this.accountId !== !!this.apiToken) {
+      throw new Error(
+          "CF_AI_GATEWAY_ACCOUNT_ID and CF_AI_GATEWAY_API_TOKEN must be configured together.");
+    }
+    if (env.CF_AI_GATEWAY_WAI_DIRECT === "true" && env.CF_AI_GATEWAY_WAI) {
+      throw new Error(
+          "CF_AI_GATEWAY_WAI and CF_AI_GATEWAY_WAI_DIRECT cannot be configured together.");
+    }
+    this.workersAiGateway = env.CF_AI_GATEWAY_WAI_DIRECT === "true"
+      ? undefined
+      : env.CF_AI_GATEWAY_WAI || this.gateway;
     this.providers = new Set(
       (env.CF_AI_GATEWAY_PROVIDERS || "").split(",").map(s => s.trim()).filter(s => s !== "")
     );
@@ -82,4 +92,76 @@ export class AiGatewayConfig {
 export function getAiGatewayConfig(env: Cloudflare.Env): AiGatewayConfig | null {
   if (!env.CF_AI_GATEWAY) return null;
   return new AiGatewayConfig(env);
+}
+
+/** Identifies the Gateway and credentials needed to retrieve an inference log. */
+export type AiGatewayLogRoute =
+  | { gateway: string }
+  | { gateway: string; accountId: string; apiToken: string };
+
+/** Indicates a transient AI Gateway log lookup failure that should be retried. */
+export class AiGatewayLogRetryableError extends Error {}
+
+function validateLogCost(cost: unknown): number {
+  if (cost === undefined || cost === null) {
+    throw new AiGatewayLogRetryableError("AI Gateway log cost is not available yet.");
+  }
+  if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) {
+    throw new Error("AI Gateway log response contained an invalid cost.");
+  }
+  return cost;
+}
+
+/** Retrieve the cost recorded for an AI Gateway log. */
+export async function getAiGatewayLogCost(
+    env: Cloudflare.Env, route: AiGatewayLogRoute, logId: string): Promise<number> {
+  if (!("accountId" in route)) {
+    let log: AiGatewayLog;
+    try {
+      log = await env.WORKERS_AI.gateway(route.gateway).getLog(logId);
+    } catch (error) {
+      throw new AiGatewayLogRetryableError("AI Gateway binding log request failed.", {
+        cause: error,
+      });
+    }
+    return validateLogCost(log.cost);
+  }
+
+  let url = "https://api.cloudflare.com/client/v4/accounts/" +
+      `${encodeURIComponent(route.accountId)}/ai-gateway/gateways/` +
+      `${encodeURIComponent(route.gateway)}/logs/${encodeURIComponent(logId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Authorization: `Bearer ${route.apiToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    throw new AiGatewayLogRetryableError("AI Gateway log request failed.", { cause: error });
+  }
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 408 || response.status === 429 ||
+        response.status >= 500) {
+      throw new AiGatewayLogRetryableError(
+          `AI Gateway log request failed with status ${response.status}.`);
+    }
+    throw new Error(`AI Gateway log request failed with status ${response.status}.`);
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (error) {
+    throw new AiGatewayLogRetryableError("AI Gateway log response could not be read.", {
+      cause: error,
+    });
+  }
+  if (typeof body !== "object" || body === null || !("success" in body) ||
+      body.success !== true || !("result" in body) ||
+      typeof body.result !== "object" || body.result === null) {
+    throw new Error("AI Gateway log response was malformed.");
+  }
+
+  let cost = "cost" in body.result ? body.result.cost : undefined;
+  return validateLogCost(cost);
 }
