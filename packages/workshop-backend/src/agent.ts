@@ -9,6 +9,7 @@ import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
+import type { AiGatewayLogRoute } from "./ai-gateway";
 import {
   buildCompactionState, buildSummaryPrompt, COMPACTION_SYSTEM_PROMPT, estimateProjectionTokens,
   findCompactionBoundary, findProtectedFromSequence, getModelTokenLimits, isCompactionTurn,
@@ -230,7 +231,7 @@ export interface AgentHooks {
   consumeCapturedActions(chatId: number)
       : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined;
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
-      totalTokens?: number, aiGatewayLogId?: string): void;
+      totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute): void;
   emitChatStreamEvent(chatId: number, event: AiChatStreamEvent): void;
 
   // Record an observation in the Overseer audit log on behalf of a built-in agent tool
@@ -936,8 +937,10 @@ export async function runAgent(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     callbackInitiated: boolean,
-    compaction: CompactionContext): Promise<CompactionCheckpoint | undefined> {
+    compaction: CompactionContext,
+    aiGatewayLogRoute?: AiGatewayLogRoute): Promise<CompactionCheckpoint | undefined> {
   let checkpoint = compaction.checkpoint;
+
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
   // to other chats are excluded -- they belong to those chats' proposed changes). This is the
   // enumeration source of truth for which Y.Doc roots hold gadget files (roots of gadgets
@@ -2863,7 +2866,7 @@ export async function runAgent(
       }
 
       hooks.addChatMessages(chatId, author, msgs,
-          usage.totalTokens, response.headers?.["cf-aig-log-id"]);
+          usage.totalTokens, response.headers?.["cf-aig-log-id"], aiGatewayLogRoute);
 
       currentStreamingToolCallId = undefined;
       executeCodeStreamManager.clear();

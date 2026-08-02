@@ -9,8 +9,18 @@ import {
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
 import { generateText, RetryError, APICallError } from "ai";
-import { LanguageModelGatekeeperProps, getModel, UserGatewayRouting } from "./ai-models";
-import { getAiGatewayConfig } from "./ai-gateway";
+import {
+  LanguageModelGatekeeperProps,
+  getModel,
+  getModelWithLogRoute,
+  UserGatewayRouting,
+} from "./ai-models";
+import {
+  AiGatewayLogRetryableError,
+  getAiGatewayConfig,
+  getAiGatewayLogCost,
+  type AiGatewayLogRoute,
+} from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type CompactionCheckpoint } from "./agent";
 import { readAdminConfig } from "./admin-config";
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
@@ -3660,7 +3670,12 @@ class OverseerImpl implements AgentHooks {
       }
 
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
-      let chosenModel = getModel(this.env, aiModel.config, initiator, sessionAffinity, byokRouting);
+      let { model: chosenModel, aiGatewayLogRoute } = getModelWithLogRoute(
+          this.env, aiModel.config, initiator, {
+            sessionAffinity,
+            userGateway: byokRouting,
+            metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
+          });
 
       let controller = liveChat.cancelController;
       controller.signal.throwIfAborted();
@@ -3679,7 +3694,7 @@ class OverseerImpl implements AgentHooks {
               checkpoint,
               modelConfig: aiModel.config,
               measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
-            });
+            }, aiGatewayLogRoute);
         if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
         // `/compact` is done once it has compacted. An automatic compaction returned before
         // prompting the model, so rerun the turn now that the history is shorter. Each compaction
@@ -4892,7 +4907,9 @@ class OverseerImpl implements AgentHooks {
                             modelConfig: AiModelConfig,
                             initiator: AiChatAuthorInfo): Promise<void> {
     try {
-      let model = getModel(this.env, modelConfig, initiator);
+      let model = getModel(this.env, modelConfig, initiator, {
+        metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
+      });
 
       let result = await generateText({
         model,
@@ -4948,7 +4965,9 @@ class OverseerImpl implements AgentHooks {
         }
       }
 
-      let model = getModel(this.env, modelConfig, initiator);
+      let model = getModel(this.env, modelConfig, initiator, {
+        metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
+      });
 
       let gadgetTitle = await generateText({
         model,
@@ -4976,7 +4995,8 @@ class OverseerImpl implements AgentHooks {
   }
 
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
-        totalTokens?: number, aiGatewayLogId?: string): void {
+        totalTokens?: number, aiGatewayLogId?: string,
+        aiGatewayLogRoute?: AiGatewayLogRoute): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -5031,9 +5051,10 @@ class OverseerImpl implements AgentHooks {
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
 
-    if (aiGatewayLogId) {
-      // Fetch the AI gateway log to account for costs.
-      this.#getCostFromAiGateway(chatId, aiGatewayLogId);
+    if (aiGatewayLogId && aiGatewayLogRoute) {
+      // Best-effort UI accounting only. The log ID is not persisted, so a DO restart can lose
+      // this update. Do not use this total as a billing source of truth.
+      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId);
     }
   }
 
@@ -5041,29 +5062,21 @@ class OverseerImpl implements AgentHooks {
   //
   // TODO: Get AI gateway to add cost data to response headers -- it's dumb that we need a
   //   separate request!
-  async #getCostFromAiGateway(chatId: number, aiGatewayLogId: string) {
+  async #getCostFromAiGateway(
+      chatId: number, route: AiGatewayLogRoute, aiGatewayLogId: string) {
     try {
-      if (this.env.CF_AI_GATEWAY_ACCOUNT_ID) {
-        // TODO: Support fetching AI gateway log from cross-account AI gateway, or maybe just stop
-        //   supporting cross-account gateways.
-        return;
+      let cost: number | undefined;
+      for (let attempt = 0; attempt < 4; ++attempt) {
+        try {
+          cost = await getAiGatewayLogCost(this.env, route, aiGatewayLogId);
+          break;
+        } catch (err) {
+          if (!(err instanceof AiGatewayLogRetryableError) || attempt === 3) throw err;
+          await scheduler.wait(1000 * 2 ** attempt);
+        }
       }
 
-      if (!this.env.WORKERS_AI || !this.env.CF_AI_GATEWAY) {
-        // We lack the binding or we aren't configured with a gateway... can't fetch.
-        return;
-      }
-
-      let log: AiGatewayLog | undefined;
-      try {
-        log = await this.env.WORKERS_AI.gateway(this.env.CF_AI_GATEWAY!).getLog(aiGatewayLogId);
-      } catch (err) {
-        // AI gateway sometimes cannot find the log right away, wait and try again.
-        await scheduler.wait(1000);
-        log = await this.env.WORKERS_AI.gateway(this.env.CF_AI_GATEWAY!).getLog(aiGatewayLogId);
-      }
-
-      if (!log.cost) {
+      if (!cost) {
         // Either cost is not available or it was zero; nothing to update in this case.
         return;
       }
@@ -5074,14 +5087,14 @@ class OverseerImpl implements AgentHooks {
         return;
       }
 
-      meta.totalCost = (meta.totalCost ?? 0) + log.cost;
+      meta.totalCost = (meta.totalCost ?? 0) + cost;
 
       // Even though this is not really activity, we need to update lastActive for the subscription
       // machinery to work correctly.
       meta.lastActive = this.getChatTimestamp();
 
       this.storage.chatMeta.put(meta);
-      this.storage.totalCost.put(this.storage.totalCost.get() + log.cost);
+      this.storage.totalCost.put(this.storage.totalCost.get() + cost);
     } catch (err) {
       // This is an async operation without any caller waiting so there's not much we can do with
       // this error.
@@ -7062,6 +7075,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         id: chatMeta.profile.id,
         name: this.impl.storage.title.get(),
       },
+      metadata: { source: "model-binding", gadgetId: this.impl.ctx.id.toString() },
     }
 
     let creationSpec: GatekeeperCreationSpec = {

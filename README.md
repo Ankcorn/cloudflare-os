@@ -90,9 +90,29 @@ CLOUDFLARE_OAUTH_CLIENT_ID=...
 CLOUDFLARE_OAUTH_CLIENT_SECRET=...
 
 # Platform AI Gateway used for the free tier:
-CF_AI_GATEWAY=...
+CF_AI_GATEWAY=your-gateway
 CF_AI_GATEWAY_PROVIDERS=anthropic,openai,google
+
+# Required only when the Gateway belongs to another Cloudflare account:
+CF_AI_GATEWAY_ACCOUNT_ID=...
+CF_AI_GATEWAY_API_TOKEN=...
+
+# When CF_AI_GATEWAY belongs to another account, keep Workers AI on its direct binding:
+CF_AI_GATEWAY_WAI_DIRECT=true
 ```
+
+When the Gateway and Worker belong to the same Cloudflare account, the `WORKERS_AI` binding routes
+non-Workers providers without an account ID or API token. Cross-account routing requires both
+`CF_AI_GATEWAY_ACCOUNT_ID` and `CF_AI_GATEWAY_API_TOKEN`; the token needs AI Gateway Run and Read
+permissions so Gadgets can execute models and report their costs. The Workers AI binding always
+operates in the Worker's account; for backwards compatibility it treats `CF_AI_GATEWAY` as a
+same-account Gateway ID. When `CF_AI_GATEWAY` belongs to another account, set
+`CF_AI_GATEWAY_WAI_DIRECT=true` to use the direct binding or set `CF_AI_GATEWAY_WAI` to another
+same-account Gateway.
+
+When using `CF_AI_GATEWAY*` in local development, start the server with
+`pnpm run dev-server -- --use-workers-ai-binding` so Workers AI-backed paths such as quick title
+generation and document conversion still have a binding.
 
 Each gatekeeper's OAuth app must be registered with that gatekeeper's redirect URI (replace the host
 with `PUBLIC_BASE_URL`):
