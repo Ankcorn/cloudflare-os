@@ -15,6 +15,7 @@
     "./fetch": "./src/fetch.ts",
     "./facet": "./src/facet.ts",
     "./html": "./src/html.ts",
+    "./http": "./src/http.ts",
     "./log": "./src/log.ts",
     "./oauth": "./src/oauth.ts",
     "./oauth-callback": "./src/oauth-callback.ts",
@@ -26,6 +27,7 @@
     "./sharing-policy": "./src/sharing-policy.ts",
     "./tools": "./src/tools.ts",
     "./types": "./src/types.d.ts",
+    "./user": "./src/user.ts",
     "./util": "./src/util.ts"
   },
   "scripts": {

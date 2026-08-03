@@ -10,7 +10,6 @@ import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   matchesResourceUrlPattern,
-  type AccountDescription,
   type AvatarImage,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -33,7 +32,7 @@ import type { McpLog, McpLogFields } from "@gadgets/mcp-shared/log";
 import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schema-to-ts";
 import { McpAccountBase, type ConnectedServer, type ConnectOutcome }
   from "@gadgets/mcp-shared/account";
-import { generateNonce, NONCE_BYTES } from "@gadgets/mcp-shared/connect-nonce";
+import { generateNonce } from "@gadgets/mcp-shared/connect-nonce";
 import { fetchTools, withClient, type ConnectionAccount } from "@gadgets/mcp-shared/connection";
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
@@ -61,7 +60,12 @@ import {
   INVALID_LINK_HTML,
   SELF_CLOSING_HTML,
 } from "@gadgets/mcp-shared/html";
-import { handleOAuthCallback } from "@gadgets/mcp-shared/oauth-callback";
+import { handleMcpHttpRequest } from "@gadgets/mcp-shared/http";
+import {
+  McpGatekeeperUserBase,
+  mcpGatekeeperUserContext,
+  type McpGatekeeperUserProps,
+} from "@gadgets/mcp-shared/user";
 import {
   portalAuthRequiresReconnect,
   portalResource,
@@ -98,10 +102,6 @@ function getBaseUrl(env: Env): string {
   return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/mcp-portal").replace(/\/+$/, "");
 }
 
-function getBasePath(env: Env): string {
-  return new URL(getBaseUrl(env)).pathname.replace(/\/+$/, "");
-}
-
 async function fetchPortalServers(
   env: Env,
   account: DurableObjectStub<McpAccount>,
@@ -126,36 +126,16 @@ async function fetchPortalServers(
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(req.url);
-    const basePath = getBasePath(env);
-    if (!url.pathname.startsWith(`${basePath}/`) && url.pathname !== basePath) {
-      return new Response("Not Found", { status: 404 });
-    }
-
-    const relPath = url.pathname.slice(basePath.length);
-    const path = relPath.slice(1).split("/");
-
-    // OAuth redirect callback: /oauth?code&state=<doId>:<oauthNonce>
-    if (relPath === "/oauth") {
-      return handleOAuthCallback(url, id => ctx.exports.McpAccount.get(
-        ctx.exports.McpAccount.idFromString(id)), logger);
-    }
-
-    // Connect / reconnect: /<doId>/<initiationNonce>
-    if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
-      const [doId, initiationNonce] = path;
-      let account: DurableObjectStub<McpAccount>;
-      try {
-        account = ctx.exports.McpAccount.get(ctx.exports.McpAccount.idFromString(doId));
-      } catch {
-        return htmlResponse(INVALID_LINK_HTML, 400);
-      }
-
-      if (req.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
-      return continueConnect(account, initiationNonce, env);
-    }
-
-    return new Response("Not Found", { status: 404 });
+    return handleMcpHttpRequest(req, {
+      baseUrl: getBaseUrl(env),
+      accountForId: id => ctx.exports.McpAccount.get(
+        ctx.exports.McpAccount.idFromString(id)),
+      log: logger,
+      connect: async (request, account, initiationNonce) => {
+        if (request.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
+        return continueConnect(account, initiationNonce, env);
+      },
+    });
   },
 };
 
@@ -236,9 +216,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ---------------------------------------------------------------------------
 // Account DO — owns the endpoint choice and every credential for it.
 
-// Props identifying which account DO a `GatekeeperUserImpl` speaks for.
-type GatekeeperUserImplProps = { accountObjectId: string };
-
 // One connected portal, for one user. Nothing outside this object ever sees a credential.
 //
 // The endpoint is a deployment setting rather than user input, so the preissued token is the only
@@ -253,7 +230,7 @@ export class McpAccount extends McpAccountBase<Env> {
   }
 
   protected mintAccount(): Fetcher<GatekeeperUser> {
-    const props: GatekeeperUserImplProps = { accountObjectId: this.ctx.id.toString() };
+    const props: McpGatekeeperUserProps = { accountObjectId: this.ctx.id.toString() };
     return this.ctx.exports.GatekeeperUserImpl({ props });
   }
 
@@ -269,7 +246,7 @@ export class McpAccount extends McpAccountBase<Env> {
 
 @validateRpc()
 export class GatekeeperUserImpl
-  extends WorkerEntrypoint<Env, GatekeeperUserImplProps>
+  extends McpGatekeeperUserBase<Env>
   implements GatekeeperUser {
 
   #account(): DurableObjectStub<McpAccount> {
@@ -277,25 +254,8 @@ export class GatekeeperUserImpl
       this.ctx.exports.McpAccount.idFromString(this.ctx.props.accountObjectId));
   }
 
-  async describe(): Promise<AccountDescription> {
-    const server = await this.#account().getServer();
-    return {
-      displayName: server.serverName,
-      // The endpoint distinguishes two connections to different servers in the accounts list.
-      uniqueName: server.endpoint,
-      avatar: PORTAL_AVATAR,
-    };
-  }
-
-  // MCP servers are never sign-in identity providers: this OAuth flow proves control of an account
-  // on a third-party server, which says nothing verifiable about the user's email.
-  async getAuthenticatedEmail(): Promise<string | null> {
-    return null;
-  }
-
-  // Scopes are negotiated wholesale during the OAuth flow, so there is nothing to expand later.
-  async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
-    return {};
+  protected [mcpGatekeeperUserContext]() {
+    return { account: this.#account(), avatar: PORTAL_AVATAR, baseUrl: getBaseUrl(this.env) };
   }
 
   // The portal as currently configured, not as it was when this account connected. Repointing the
@@ -374,16 +334,6 @@ export class GatekeeperUserImpl
       iframeHtml: MCP_SERVER_CONFIGURATOR_HTML,
       ui: new RpcStub(new McpServerConfiguratorUI(this.env, this.#account())),
     };
-  }
-
-  async revoke(): Promise<void> {
-    await this.#account().revoke();
-  }
-
-  async reconnect(): Promise<{ url: string }> {
-    const initiationNonce = generateNonce();
-    await this.#account().prepareReconnect(initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.accountObjectId}/${initiationNonce}` };
   }
 
   @skipRpcValidation()
