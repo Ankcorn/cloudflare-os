@@ -1,0 +1,35 @@
+packages/gatekeeper-google/src/google.ts
+  s_9657bcdc1ea3da::t_f6ff151a445e92 1415-1416,1445-1446
+packages/workshop-backend/src/overseer.ts
+  s_9657bcdc1ea3da::t_795f39b876803d 274-282,412-417,1190-1241,1523-1532,3919,3921-3923,3949-3981,5036-5040
+packages/workshop-shared/src/api.ts
+  s_9657bcdc1ea3da::t_fa2d79f7428537 711-719
+packages/workshop-shared/src/gatekeeper.ts
+  s_9657bcdc1ea3da::t_e120dffe2e284c 631-641
+packages/workshop-frontend/src/Activity.tsx
+  s_2205b9864417ba::t_9faa3587740f5f 71-86,152-157,201,212,263-271
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "92ebdb11ef63ce33d2f47e8858841dd2f7848795",
+  "prompts": {},
+  "sessions": {
+    "s_2205b9864417ba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e8d4f5b-e234-4f46-bc0e-917160a626f7",
+        "model": "unknown"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    },
+    "s_9657bcdc1ea3da": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45f060db-68d6-4985-90f3-4a43cf31ffb8",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    }
+  }
+}
