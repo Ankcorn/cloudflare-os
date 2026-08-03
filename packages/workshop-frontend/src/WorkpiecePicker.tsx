@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { CaretLeft, CaretRight, Check, Hexagon, PencilSimple, Pulse, X } from '@phosphor-icons/react'
+import { CaretLeft, CaretRight, Check, PencilSimple, Pulse, X } from '@phosphor-icons/react'
+import { FormatGlyph } from './components/format/FormatVisuals'
 import { Tooltip } from '@cloudflare/kumo'
 import type { WorkpieceId, WorkpieceSummary } from '@gadgets/workshop-shared/api'
 import { CountBadge } from './components/CountBadge'
@@ -128,8 +129,11 @@ export default function WorkpiecePicker({
                   }`}
                   aria-current={isSelected ? 'true' : undefined}
                 >
-                  <Hexagon
-                    size={expanded ? 15 : 17}
+                  {/* Drawn as whatever the workpiece is -- a page for a Document, a grid for a
+                      Spreadsheet -- falling back to the generic app glyph. */}
+                  <FormatGlyph
+                    output={gadget.output}
+                    size={expanded ? 'md' : 'lg'}
                     className={`flex-shrink-0 ${isSelected ? 'text-kumo-strong' : 'text-kumo-inactive'}`}
                     weight={isSelected ? 'fill' : 'regular'}
                   />

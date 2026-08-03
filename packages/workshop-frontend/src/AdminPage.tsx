@@ -3,8 +3,9 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
+import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -72,6 +73,9 @@ export default function AdminPage() {
 
   const [activeTab, setActiveTab] = useState('general')
 
+  // Promoted output formats, in menu order (see AdminFormatsPanel).
+  const [formats, setFormats] = useState<AdminFormat[]>([])
+
   const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
 
   // Populate all editor state from a freshly-fetched settings view.
@@ -89,6 +93,7 @@ export default function AdminPage() {
     setBannerColorDraft(view.banner.color)
     setSavedAccent(view.accentColor)
     setAccentDraft(view.accentColor)
+    setFormats(view.formats)
   }
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
@@ -353,9 +358,19 @@ export default function AdminPage() {
         tabs={[
           { value: 'general', label: 'General' },
           { value: 'gatekeepers', label: 'Gatekeepers' },
+          { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
         ]}
       />
+
+      {/* Standard output formats */}
+      {activeTab === 'formats' && admin && (
+        <AdminFormatsPanel
+          admin={admin.api}
+          formats={formats}
+          onChanged={async () => { setFormats((await admin.api.getSettings()).formats) }}
+        />
+      )}
 
       {/* Sign-ups */}
       {activeTab === 'access' && (

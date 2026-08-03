@@ -5,11 +5,13 @@ export type WorkshopObservabilityFields = {
   accountId: number;
   actionId: number | string;
   autoProvisioned: boolean;
+  blueprintId: string;
   callbackInitiated: boolean;
   chatId: number;
   durationMs: number;
   eventName: string;
   executionId: string;
+  failureCount: number;
   gadgetId: string;
   gatekeeperId: number | string;
   modelId: string;

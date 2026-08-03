@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -9,7 +9,7 @@ import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
-import { readAdminConfig } from "./admin-config.js";
+import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -17,7 +17,7 @@ import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
-import { BlueprintKvRecord, buildBlueprintArchiveStream, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
+import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
@@ -26,6 +26,13 @@ import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
+import { createWorkshopLogger } from "./observability";
+
+const logger = createWorkshopLogger("workshop.server");
+
+// Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
+// fetch handler), so later requests skip the call. The DO holds the real answer.
+let formatBlueprintInstallStarted = false;
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
   return {
@@ -231,7 +238,18 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       }
     }
 
-    let result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
+    let result;
+    try {
+      result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
+    } catch (err) {
+      // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
+      // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
+      // they click; others stay frozen at revocation, as a disconnected collaborator gets no pushes.
+      if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
+        await this.user.forgetSharedGadget(id);
+      }
+      throw err;
+    }
     started = true;
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_opened",
@@ -268,6 +286,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     return this.user.listGadgets();
+  }
+
+  listOutputs(): Promise<ListOutputsResult> {
+    return this.user.listOutputs();
+  }
+
+  async listOutputFormats(): Promise<OutputFormatOffer[]> {
+    let offers = await listFormatOffers(this.env, await readAdminConfig(this.env));
+    // Neither the agent's hint nor the binding details are part of what a user is offered here.
+    return offers.map(({agentHint: _agentHint, bindings: _bindings, ...offer}) => offer);
   }
 
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]> {
@@ -311,7 +339,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async dismissSharedGadget(gadgetId: string): Promise<void> {
-    return this.user.dismissSharedGadget(gadgetId);
+    return this.user.forgetSharedGadget(gadgetId);
   }
 
   async listOwnBlueprints(): Promise<BlueprintUserSummary[]> {
@@ -409,7 +437,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // 4. Initialize from blueprint code.
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));
-    await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title);
+    await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
+        deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
+            sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
     // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
     let metadata = await overseerResult.getMetadata();
@@ -766,6 +796,29 @@ export default {
     }
 
     if (url.pathname === "/api") {
+      // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
+      // merely because someone deployed, so the install needs a trigger; hanging it off API
+      // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
+      // and the DO is idempotent.
+      if (!formatBlueprintInstallStarted) {
+        formatBlueprintInstallStarted = true;
+        ctx.waitUntil(ctx.exports.AdminSettings.getByName("").ensureFormatBlueprintsInstalled()
+            .then((complete: boolean) => {
+              // A partial install resolves rather than throwing, and nothing else will call the DO
+              // from here, so clearing this is the whole retry: one bad archive would otherwise
+              // leave the deployment half-provisioned for as long as the isolate lives.
+              if (!complete) formatBlueprintInstallStarted = false;
+            })
+            .catch((err: unknown) => {
+              // Likewise let the next request try again. The DO coalesces concurrent callers, so a
+              // retry costs one comparison once it succeeds.
+              formatBlueprintInstallStarted = false;
+              logger.warn("failed to install bundled format blueprints", {
+                event: "formats.install.trigger.failed", error: err,
+              });
+            }));
+      }
+
       let accessPayload: JWTPayload | undefined;
 
       if (env.CF_ACCESS_AUD) {

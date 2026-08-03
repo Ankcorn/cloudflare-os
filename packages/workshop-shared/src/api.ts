@@ -399,6 +399,23 @@ export interface AuthenticatedApi extends RpcTarget {
   // TODO: Pagination, sort options.
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
 
+  // List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
+  // the user find things they made without remembering which workspace they made them in.
+  //
+  // Served from an index in the user's own account which each workspace pushes to; a workspace
+  // shared with the user contributes its outputs from the first time the user opens it (matching
+  // when it appears in listGadgets()), and stops updating them if their access is revoked.
+  // Provisional gadgets (still awaiting acceptance of a chat's changes) are never included.
+  //
+  // TODO: Pagination, sort options.
+  listOutputs(): Promise<ListOutputsResult>;
+
+  // The deployment's standard output formats, in the order they should be offered -- what fills a
+  // "New Document / New Slides / ..." menu. Empty when the deployment promotes none.
+  //
+  // These are ordinary blueprints an admin has promoted.
+  listOutputFormats(): Promise<OutputFormatOffer[]>;
+
   // List all third-party services that this account can connect to.
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]>;
 
@@ -665,6 +682,43 @@ export type AdminSettingsView = {
   accentColor: string;
   // Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled).
   resourceVendors: AdminResourceVendor[];
+  // The blueprints promoted as standard output formats, in menu order (including disabled ones).
+  formats: AdminFormat[];
+};
+
+// One promoted blueprint, as the admin Formats panel sees it: the deployment's curation plus
+// enough of the blueprint to show what is being curated.
+export type AdminFormat = {
+  blueprintId: string;
+
+  blueprintTitle: string;
+
+  // The blueprint's own description, which is the rest of the catalog entry the agent reads;
+  // `agentHint` is only its last line.
+  blueprintDescription: string;
+
+  // Presentation after the deployment's overrides are applied.
+  output?: BlueprintOutput;
+
+  // What the blueprint itself declares, so the panel can show which fields are overridden.
+  declared?: BlueprintOutput;
+
+  // The deployment's presentation overrides, if any.
+  overrides?: Partial<BlueprintOutput>;
+
+  enabled: boolean;
+
+  // One line telling the agent when to prefer this format.
+  agentHint: string;
+
+  // The promoted blueprint no longer exists (deleted after promotion). Such an entry is skipped
+  // everywhere else; the panel surfaces it so the admin can remove it.
+  missing: boolean;
+
+  // The blueprint ships with the deployment (see format-blueprints/ and the FORMAT_BLUEPRINTS the
+  // build generates from it), so an upgrade can replace its contents. Curation stays the admin's: an upgrade never re-promotes something they
+  // removed, nor resets their overrides.
+  bundled: boolean;
 };
 
 // Capability for managing deployment-wide admin settings, obtained via
@@ -716,7 +770,42 @@ export interface AdminApi {
 
   // Mark or unmark a blueprint as featured on the deployment.
   setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void>;
+
+  // --- Standard output formats ---
+  //
+  // Promotion is what makes a blueprint one of the deployment's standard formats: offered in the
+  // "New ..." menu and listed first for the agent. A blueprint declaring what it produces is
+  // presentation, and never enough on its own.
+
+  // Offer a blueprint as a standard format, appended last in menu order. Throws if the blueprint
+  // doesn't exist. Promoting one that already is leaves its curation and menu position alone, so
+  // that retrying a promotion whose mirror write failed repairs it rather than being refused.
+  promoteFormat(blueprintId: string): Promise<void>;
+
+  // Stop offering a blueprint as a standard format, and forget the deployment's curation of it.
+  // The blueprint itself is untouched.
+  //
+  // Refused for a bundled blueprint (see `AdminFormat.bundled`), which the deployment installed
+  // and will reinstall: `enabled: false` withdraws it without discarding the admin's overrides,
+  // hint and menu position.
+  removeFormat(blueprintId: string): Promise<void>;
+
+  // Update one promoted format. Only the provided fields change. `agentHint: ""` clears the hint;
+  // an `overrides` field set to null reverts that field to the blueprint's own declaration.
+  updateFormat(blueprintId: string, patch: AdminFormatPatch): Promise<void>;
+
+  // Reorder the menu. `blueprintIds` must be a permutation of the currently promoted ids.
+  setFormatOrder(blueprintIds: string[]): Promise<void>;
 }
+
+// A partial edit to one promoted format. Absent fields are left alone.
+export type AdminFormatPatch = {
+  enabled?: boolean;
+  agentHint?: string;
+  // Per-field presentation overrides. A field set to null reverts to the blueprint's declaration;
+  // a field left absent is unchanged.
+  overrides?: {[K in keyof BlueprintOutput]?: BlueprintOutput[K] | null};
+};
 
 // A gatekeeper vendor offered as a sign-in method. The login/signup pages render a "Continue with
 // ..." button per entry, alongside (never replacing) username/password. Built from auth-capable
@@ -921,6 +1010,103 @@ export type GadgetMetadata = {
 export type GadgetMetadataWithTimestamps = GadgetMetadata & {
   created: Date;
   lastActive: Date;
+}
+
+// The icons an output format may be drawn with. A closed set because we want them to look consistent.
+// The glyphs themselves live in the frontend, so only these keys ever cross the wire.
+export const OUTPUT_ICONS = ["fileText", "gridNine", "presentation", "appWindow", "flowArrow",
+    "kanban", "chartBar", "table", "notebook", "listChecks"] as const;
+
+// One of `OUTPUT_ICONS`, naming a glyph the frontend knows how to draw.
+export type OutputIcon = typeof OUTPUT_ICONS[number];
+
+// Whether an unknown value names one of the icons this deployment can draw. Used wherever an icon
+// arrives from outside the kernel: a published blueprint, an admin override, or the browser.
+export function isOutputIcon(value: unknown): value is OutputIcon {
+  return typeof value === "string" && (OUTPUT_ICONS as readonly string[]).includes(value);
+}
+
+// What instantiating a blueprint produces: a Document, a Spreadsheet, a Workflow, etc. Declared
+// by the blueprint's author (see `BlueprintMetadata.output`), inherited by every gadget instantiated
+// from it, and used wherever that gadget is shown in place of generic gadget.
+//
+// Declaring this is presentation only. Any user can publish a blueprint calling itself a
+// Document; that must be harmless. Being offered as one of the deployment's standard formats (in
+// the New menu, or the agent's preferred list) is a separate, admin-curated decision.
+export type BlueprintOutput = {
+  // Stable grouping slug, e.g. "document". Outputs sharing an id are grouped together on the
+  // outputs page.
+  id: string;
+
+  noun: string;
+  plural: string;
+
+  icon: OutputIcon;
+};
+
+// One entry of the "New ..." menu, as returned by `listOutputFormats()`. This names a blueprint the
+// deployment has promoted, instantiated with `newGadgetFromBlueprint(blueprintId, ...)` like any other.
+export type OutputFormatOffer = {
+  blueprintId: string;
+
+  // How to name and draw it: the blueprint's own declaration with any deployment override
+  // applied. Also what the created gadget inherits.
+  output: BlueprintOutput;
+
+  // The blueprint's description.
+  description: string;
+
+  // The blueprint needs bindings wired up before it can run.
+  requiresSetup: boolean;
+};
+
+// The result of `AuthenticatedApi.listOutputs()`.
+export type ListOutputsResult = {
+  // Every output indexed so far.
+  outputs: OutputSummary[];
+
+  // Set while workspaces predating the index are still being swept into it, which happens once per
+  // user after a deployment upgrades. Each call sweeps a bounded number of them, so a caller that
+  // wants the rest calls again until this is false.
+  //
+  // False means stop asking, not that the index is complete. A workspace that couldn't be reached
+  // is passed over rather than retried forever, and a sweep that reached none of them gives up for
+  // now instead of spinning. Either way the gap closes when the workspace is next opened, and the
+  // next call to this method resumes any sweep that was left unfinished.
+  catchingUp: boolean;
+};
+
+// One entry in the user's output index: something a workspace produced that the user can open
+// directly.
+export type OutputSummary = {
+  // The workspace that contains this output (an `openGadget()` id).
+  workspaceId: string;
+
+  // The workpiece within that workspace. `(workspaceId, workpieceId)` uniquely identifies an
+  // output.
+  workpieceId: WorkpieceId;
+
+  // The format this output was built as, if it came from a blueprint declaring one. Absent for a
+  // gadget built from scratch, which displays as a generic app.
+  output?: BlueprintOutput;
+
+  title: string;
+  workspaceTitle: string;
+  created: Date;
+
+  // When the containing workspace was last active. Outputs have no activity timestamp of their
+  // own yet, so all outputs of a workspace share this value.
+  lastActive: Date;
+
+  // Set when the containing workspace is owned by someone else (i.e. it was shared with the
+  // caller).
+  owner?: AiChatAuthorInfo;
+
+  // The caller's role, cached on their last open and refreshed when a revocation downgrades them,
+  // so a listing can offer only the actions it permits; the workspace still authorizes each one
+  // when attempted. Absent for the caller's own workspaces, and for a shared one whose last open
+  // predates this field.
+  role?: CollaboratorRole;
 }
 
 // Describes the client-side UI code for a Gadget. Such code is intended to run inside an iframe
@@ -1287,8 +1473,12 @@ export interface Overseer extends RpcTarget {
   // `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
   // (useful when using chat to talk between humans).
   //
+  // `formats` records where the message names one of the deployment's standard output formats, so
+  // the transcript can draw it as a chip. Display only -- what the agent reads is the noun, which
+  // is already in the text.
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
-          capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number>;
+          capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
+          formats?: MessageFormatRef[]): Promise<number>;
 
   // Send a message to the chat from this client. Sending a message causes the LLM to start
   // running if it isn't already.
@@ -1300,7 +1490,8 @@ export interface Overseer extends RpcTarget {
   // (useful when using chat to talk between humans).
   //
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
-                  capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void>;
+                  capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
+                  formats?: MessageFormatRef[]): Promise<void>;
 
   // Upload an attachment for use in a future chat message. This way by the time the user wants to
   // send the message, likely uploading is complete. `modelId` determines whether the
@@ -1556,6 +1747,10 @@ export type AiChatMessageBody = {
   // The message may contain "capsules", which are embedded capabilities that reference external
   // resources. See `CapsuleSpecifier` for more.
   capsules?: CapsuleSpecifier[];
+
+  // Standard output formats the message names, e.g. "create a Doc for homework and Slides for the
+  // presentation". See `MessageFormatRef`.
+  formats?: MessageFormatRef[];
 
   // If the AI produces any thinking/reasoning text, this is it. This should be hidden by default
   // but the user should have the option to expand it.
@@ -1942,6 +2137,23 @@ export type AiToolCall = {
 // - Includes inline audit logs from the action.
 // - Actions can be approved or rejected inline.
 
+// A standard output format named inline in a chat message, recorded so the message can be redrawn
+// the way it was composed. Display only: the agent reads the noun as ordinary text and resolves it
+// against the deployment's live catalog, so no blueprint id is carried here.
+//
+// Shaped like `CapsuleSpecifier`, but carries no authority: naming a format grants nothing, so
+// there is no workpiece behind it.
+export type MessageFormatRef = {
+  // Position and length of the format's name within the message text. Exists so we can render as
+  // format with icon in chat UI.
+  position: number;
+  length: number;
+
+  // Denormalized so an old message still displays after the format is renamed or un-promoted.
+  noun: string;
+  icon: OutputIcon;
+};
+
 // Capsules are resource references that are embedded inline in a chat message. The name comes
 // from the fact that they are represented as a pill-shaped inline element, and that they represent
 // a capability (in the capability-based security sense).
@@ -1999,9 +2211,13 @@ export type SlashCommandId = {
 export type SlashCommandRequest = {
   id: SlashCommandId;
 
-  // Unparsed natural-language arguments following the command. The provider may consume or
-  // transform these into an agent-visible message.
+  // Unparsed natural-language arguments surrounding the command, with the command itself removed.
+  // The provider may consume or transform these into an agent-visible message.
   args: string;
+
+  // Index in `args` where the user typed the command, so a transcript can show it where they put it
+  // rather than implying it led the line. Display only.
+  commandPosition?: number;
 };
 
 // One slash command as shown in the Workshop picker.
@@ -2074,6 +2290,12 @@ export type AiChatStreamEvent = {
   type: "toolCallTarget";
   toolCallId: string;
   file: { workpieceId: WorkpieceId, filename: string };
+} | {
+  // Streaming createGadget output format, used by the UI before the finalized tool call arrives.
+  // Has the deployment's overrides applied, so it matches what the gadget is stamped with.
+  type: "toolCallOutputFormat";
+  toolCallId: string;
+  output: BlueprintOutput;
 } | {
   type: "toolOutputDelta";
   toolCallId: string;
@@ -2154,6 +2376,10 @@ export type WorkpieceSummary = {
 
   // Display title. (For a gadget, its user-renamable title.)
   title: string;
+
+  // The format this workpiece was built as, inherited from the blueprint it was instantiated
+  // from. Absent means a generic app. The UI names and draws the workpiece from this.
+  output?: BlueprintOutput;
 
   // The name of the Y.Doc root map that holds this workpiece's files, if it owns files (see
   // Overseer.subscribeToCode). For most gadgets this is the decimal workpiece ID; the gadget
@@ -2354,6 +2580,10 @@ export type BlueprintMetadata = {
   // If present, a screenshot is stored separately from the metadata. The server uses this
   // to decide when to include a derived screenshotUrl.
   screenshot?: true;
+
+  // What instantiating this blueprint produces. Absent means a generic app. Inherited by gadgets
+  // created from this blueprint, and preserved when such a gadget is republished as a blueprint.
+  output?: BlueprintOutput;
 
   // Key = binding name.
   bindings: Record<string, BlueprintBinding>;

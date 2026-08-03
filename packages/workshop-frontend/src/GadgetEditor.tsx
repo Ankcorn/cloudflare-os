@@ -25,6 +25,7 @@ import {
   ActionLogEntry,
   WorkpieceId,
   WorkpieceSummary,
+  BlueprintOutput,
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
@@ -40,6 +41,8 @@ import WorkpiecePicker, {
   WORKPIECE_RAIL_EXPANDED_WIDTH,
 } from './WorkpiecePicker'
 import ChatInterface, { type StreamingProposedChanges, type ActiveFileTarget } from './ChatInterface'
+import { formatOf } from './components/format/formats'
+import { FormatGlyph } from './components/format/FormatVisuals'
 import ShareModal from './ShareModal'
 import { GadgetPresence } from './components/GadgetPresence'
 import BlueprintModal from './BlueprintModal'
@@ -151,11 +154,15 @@ function formatHeaderCost(cost: number) {
   return `$${cost.toFixed(2)}`
 }
 
-const RIGHT_TABS: { value: RightTab; label: string }[] = [
-  { value: 'app', label: 'Gadget' },
-  { value: 'code', label: 'Code' },
-  { value: 'connections', label: 'Connections' },
-]
+// The first tab is named after what the selected workpiece is ("Document" for a gadget built from
+// a document blueprint), falling back to "App" when it declares no format.
+function rightTabs(output?: BlueprintOutput): { value: RightTab; label: string }[] {
+  return [
+    { value: 'app', label: formatOf(output).noun },
+    { value: 'code', label: 'Code' },
+    { value: 'connections', label: 'Connections' },
+  ]
+}
 
 const ACTIVITY_TABS: { value: ActivityView; label: string }[] = [
   { value: 'review', label: 'Needs review' },
@@ -163,12 +170,16 @@ const ACTIVITY_TABS: { value: ActivityView; label: string }[] = [
   { value: 'history', label: 'History' },
 ]
 
+// Names what the pane is showing. `icon` is for the workspace-level views (Activity); a workpiece
+// passes its `output` instead, so a Doc gets a document glyph rather than the gadget hexagon.
 function PaneLabel({
   icon: LabelIcon,
+  output,
   title,
   badge,
 }: {
-  icon: Icon
+  icon?: Icon
+  output?: BlueprintOutput
   title: string
   badge?: string
 }) {
@@ -177,13 +188,104 @@ function PaneLabel({
       title={title}
       className="inline-flex w-full min-w-0 max-w-[180px] items-center gap-1.5 overflow-hidden rounded-lg bg-kumo-tint px-2.5 py-1.5 text-[13px] font-medium tracking-[-0.15px] text-kumo-default"
     >
-      <LabelIcon size={14} weight="bold" className="flex-shrink-0" />
+      {LabelIcon
+        ? <LabelIcon size={14} weight="bold" className="flex-shrink-0" />
+        : <FormatGlyph output={output} size="sm" className="flex-shrink-0" weight="regular" />}
       <span className="truncate">{title}</span>
       {badge !== undefined && (
         <span className="rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] font-medium leading-none text-kumo-subtle">
           {badge}
         </span>
       )}
+    </div>
+  )
+}
+
+// Breathing room left between the open tab and the edge it was scrolled away from, so a tab that
+// only just fits doesn't look clipped.
+const TAB_REVEAL_MARGIN = 8
+
+// The workpiece tabs in the pane header, shown when the workspace holds more than one. The Outputs
+// rail only shows when the pane is closed, so without these an open output gives no sign that the
+// workspace holds others.
+function PaneWorkpieceTabs({
+  gadgets,
+  activeId,
+  onSelect,
+}: {
+  gadgets: WorkpieceSummary[]
+  activeId: WorkpieceId | null
+  onSelect: (id: WorkpieceId) => void
+}) {
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const activeRef = useRef<HTMLButtonElement>(null)
+
+  // Whatever is open must be fully readable; the rest may sit off-scroll. Once per selection
+  // change isn't enough, because the layout keeps moving afterwards: the pane animates its width,
+  // and a new output's title arrives after its tab first renders. So re-run on the next frame and
+  // on every resize of the strip.
+  //
+  // Scrolls the strip by hand rather than with scrollIntoView, which is free to scroll every
+  // scrollable ancestor, including the page.
+  useEffect(() => {
+    const scroller = scrollerRef.current
+    if (!scroller) return
+
+    const reveal = () => {
+      const active = activeRef.current
+      if (!active) return
+      const tab = active.getBoundingClientRect()
+      const view = scroller.getBoundingClientRect()
+      if (tab.right > view.right) {
+        scroller.scrollLeft += tab.right - view.right + TAB_REVEAL_MARGIN
+      } else if (tab.left < view.left) {
+        scroller.scrollLeft -= view.left - tab.left + TAB_REVEAL_MARGIN
+      }
+    }
+
+    reveal()
+    const frame = requestAnimationFrame(reveal)
+    // Catches the pane's width animation, which changes the strip's size for ~200ms after this runs.
+    const observer = new ResizeObserver(reveal)
+    observer.observe(scroller)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [activeId, gadgets])
+
+  return (
+    <div
+      ref={scrollerRef}
+      className="hide-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+    >
+      {gadgets.map(gadget => {
+        const active = gadget.id === activeId
+        return (
+          <button
+            key={gadget.id}
+            ref={active ? activeRef : undefined}
+            type="button"
+            onClick={() => onSelect(gadget.id)}
+            title={gadget.title}
+            aria-current={active ? 'page' : undefined}
+            // The open one gets room for its whole name; the others yield first.
+            className={`inline-flex flex-shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium tracking-[-0.15px] transition-colors duration-150 ${
+              active
+                ? 'max-w-[240px] bg-kumo-tint text-kumo-default'
+                : 'max-w-[150px] text-kumo-subtle hover:bg-kumo-tint/50 hover:text-kumo-default'
+            }`}
+          >
+            <FormatGlyph output={gadget.output} size="sm" className="flex-shrink-0" weight="regular" />
+            <span className="truncate">{gadget.title}</span>
+            {gadget.chatId !== undefined && (
+              <span className="flex-shrink-0 rounded-full bg-kumo-fill px-1.5 py-0.5 text-[10px] font-medium leading-none text-kumo-subtle">
+                Draft
+              </span>
+            )}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -517,6 +619,27 @@ export default function GadgetEditor() {
       .toSorted((a, b) => a.id - b.id)
   }, [workpieces])
 
+  // The format a workpiece was built as, for surfaces that only know an id (the chat's "created
+  // app" cards, the tool-call rows). Read from the live workpiece list, so it stays correct as the
+  // workspace changes.
+  //
+  // Keyed on the formats, not on the workpiece list: this feeds buildChatDisplayEntries(), which
+  // rebuilds the whole transcript when its inputs change, while `workpieces` is replaced by every
+  // unrelated update.
+  const workpieceOutputsRef = useRef(new Map<WorkpieceId, BlueprintOutput>())
+  const outputSignature = useMemo(() => {
+    const outputs = new Map<WorkpieceId, BlueprintOutput>()
+    for (const workpiece of workpieces.values()) {
+      if (workpiece.output) outputs.set(workpiece.id, workpiece.output)
+    }
+    workpieceOutputsRef.current = outputs
+    return JSON.stringify([...outputs])
+  }, [workpieces])
+  const outputOfWorkpiece = useCallback(
+    (workpieceId: WorkpieceId) => workpieceOutputsRef.current.get(workpieceId),
+    [outputSignature],
+  )
+
   const visibleGadgets = useMemo(() => {
     return allGadgets.filter(w =>
       w.chatId === undefined || w.chatId === effectiveSelectedChatId)
@@ -697,6 +820,21 @@ export default function GadgetEditor() {
     }
   }, [id])
 
+  // Arriving with ?w= (from the Outputs page, say) has to show that workpiece, not whichever view
+  // this workspace was last left on -- selectedGadgetId already honours the parameter, but the
+  // stored view is what decides whether the pane shows an app at all.
+  //
+  // Honoured once per workpiece so it doesn't reopen the pane when the user closes it while the
+  // parameter is still in the URL.
+  const openedWorkpieceParamRef = useRef<WorkpieceId | null>(null)
+  useEffect(() => {
+    if (!workpiecesReady || urlWorkpieceId === null) return
+    if (openedWorkpieceParamRef.current === urlWorkpieceId) return
+    if (!visibleGadgets.some(g => g.id === urlWorkpieceId)) return
+    openedWorkpieceParamRef.current = urlWorkpieceId
+    setWorkspaceVisibility('open', urlWorkpieceId)
+  }, [workpiecesReady, urlWorkpieceId, visibleGadgets, setWorkspaceVisibility])
+
   const openActivity = useCallback((initialView: ActivityView) => {
     setWorkspaceTransitionEnabled(true)
     setActivityClosing(false)
@@ -821,6 +959,7 @@ export default function GadgetEditor() {
     setHasAnyProposedChanges(false)
     setSelectedChatHasProposedChanges(false)
     setWorkspaceView(getStoredWorkspaceView(id))
+    openedWorkpieceParamRef.current = null
     activityReturnViewRef.current = null
     setActivityClosing(false)
     setWorkspaceTransitionEnabled(false)
@@ -1341,6 +1480,7 @@ export default function GadgetEditor() {
                   onHasAnyCodeChange={setHasAnyProposedChanges}
                   onSelectedChatHasProposedChangesChange={setSelectedChatHasProposedChanges}
                   onOpenGadget={handleSelectWorkpiece}
+                  outputOfWorkpiece={outputOfWorkpiece}
                 />
               </div>
 
@@ -1388,9 +1528,15 @@ export default function GadgetEditor() {
             <div className="flex min-w-0 flex-1 items-center overflow-hidden">
               {paneShowsActivity ? (
                 <PaneLabel icon={Pulse} title="Activity" />
+              ) : visibleGadgets.length > 1 ? (
+                <PaneWorkpieceTabs
+                  gadgets={visibleGadgets}
+                  activeId={selectedGadgetId}
+                  onSelect={handleSelectWorkpiece}
+                />
               ) : selectedGadgetSummary && (
                 <PaneLabel
-                  icon={Hexagon}
+                  output={selectedGadgetSummary.output}
                   title={selectedGadgetSummary.title}
                   badge={selectedGadgetSummary.chatId !== undefined ? 'Draft' : undefined}
                 />
@@ -1409,7 +1555,7 @@ export default function GadgetEditor() {
                       onClick={() => setActivityView(tab.value)}
                     />
                   ))
-                  : RIGHT_TABS.map(tab => (
+                  : rightTabs(selectedGadgetSummary?.output).map(tab => (
                     <PaneTab
                       key={tab.value}
                       active={activeTab === tab.value}
@@ -1424,7 +1570,7 @@ export default function GadgetEditor() {
                   aria-label="Enter full screen"
                   title={activeTab === 'app' && !previewMode
                     ? 'Full screen'
-                    : 'Full screen is available in Gadget view'}
+                    : `Full screen is available in ${formatOf(selectedGadgetSummary?.output).noun} view`}
                   onClick={enterGadgetFullscreen}
                   disabled={activeTab !== 'app' || previewMode}
                 >

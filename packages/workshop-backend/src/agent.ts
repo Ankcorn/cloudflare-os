@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
 import { AgentCatalog, ObservationDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { createWorkshopLogger } from "./observability";
@@ -155,6 +155,8 @@ export type AgentGadgetInfo = {
   // (or created from a blueprint) have one.
   isDefault: boolean;
   bindings: {name: string, title: string, target: WorkpieceId}[];
+  // What instantiating this gadget's blueprint produces, when it came from one that declares it.
+  output?: BlueprintOutput;
 };
 
 // Resolves a `describeBinding` tool argument (a name in the chat's env) to its human-readable
@@ -206,8 +208,9 @@ export interface AgentHooks {
   // the given chat: it becomes permanent only when the user accepts the chat's changes through
   // the "changes" message that records the creation (see GadgetRecord.pending in overseer.ts).
   // Throws if the binding name is invalid or already claimed by another gadget (including one
-  // still pending in another chat). Returns the id and the (trimmed) title as created.
-  createGadget(title: string, bindingName: string, chatId: number)
+  // still pending in another chat). Returns the id and the (trimmed) title as created. `output`
+  // is the format declared by the blueprint being instantiated, if any (see fetchBlueprint).
+  createGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput)
       : {id: WorkpieceId, title: string};
 
   // Describe a workpiece (a gadget or a gatekeeper) reachable as `envName` in the chat's env,
@@ -307,11 +310,18 @@ export interface AgentHooks {
   // scan directly.
   listAvailableBlueprints(initiator: AiChatAuthorInfo): Promise<string>;
 
+  // A short standing note naming the deployment's standard output formats, or "" if it has none.
+  // Carried in the system prompt rather than left to `listBlueprints`, because a request phrased as
+  // "make me a doc" may not prompt an agent to go looking for blueprints at all.
+  describeStandardFormats(): Promise<string>;
+
   // Fetch a blueprint's decoded files, plus formatted notes describing the copied files and the
   // bindings the blueprint's code expects the agent to wire up. Used by the createGadget tool to
-  // instantiate the blueprint as a new gadget. Throws an agent-readable error if the blueprint
+  // instantiate the blueprint as a new gadget, along with the output format the blueprint declares
+  // (if any), which the created gadget inherits. Throws an agent-readable error if the blueprint
   // doesn't exist.
-  fetchBlueprint(blueprintId: string): Promise<{files: Record<string, string>, notes: string}>;
+  fetchBlueprint(blueprintId: string)
+      : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}>;
 }
 
 // =======================================================================================
@@ -327,6 +337,8 @@ You are working within a "workspace". A workspace contains any number of Gadgets
 A new workspace contains no Gadgets: use the \`createGadget\` tool to create one before writing any code. Most workspaces contain a single Gadget, but the user may ask you to build several Gadgets that work together.
 
 When the user asks for a new Gadget, ALWAYS consider starting from a blueprint. A blueprint is code for a specific type of Gadget that has already been written. The \`listBlueprints\` tool returns a list of available blueprints. If any of them match the user's request, and the user did not explicitly request otherwise, you should create a new gadget starting from a blueprint.
+
+Note that users rarely ask for "a Gadget" in those words. They ask for a thing: a doc, a deck, a tracker, a tool that does X. Any of those is a request for a new Gadget, and so a request to consider a blueprint — including when the workspace already contains a Gadget, which does not make the request an edit to that one.
 
 Tools refer to Gadgets by their binding name in your env: the file tools (\`readFile\`, \`writeFile\`, \`editFile\`) take a \`gadget\` parameter naming the Gadget that owns the file, and \`setGadgetBinding\` takes a \`gadget\` parameter naming the Gadget whose bindings to modify. Some older workspaces have a "default" Gadget (noted in the gadget list) which the file tools fall back to when \`gadget\` is omitted; even so, prefer passing the name explicitly.
 
@@ -2013,6 +2025,19 @@ export async function runAgent(
               `As of the start of this session, this gadget contained the following files:`,
               ...files.map(f => `* ${f}`));
         }
+        if (info.output) {
+          // When people are using common platform formats/outputs, most times people just want to use
+          // them, not to edit them. Especially non-technical folks. We tell the agent to wait to be
+          // explicitly asked.
+          lines.push(
+              `This gadget is a ${info.output.noun}: a finished application whose content is data ` +
+              `in its own storage, not text in its code. To read or change what it contains, call ` +
+              `its RPC methods from \`executeCode\`` +
+              (envName !== undefined ? ` (\`env.${envName}\`)` : ``) +
+              `; read its README.md or server.js to learn the methods it offers for this. Do NOT ` +
+              `edit its code to change its content. Edit the code only if the user asks to change ` +
+              `how the ${info.output.noun} itself works (its editor, layout, or features).`);
+        }
         if (info.bindings.length == 0) {
           lines.push(`This gadget has no bindings.`);
         } else {
@@ -2031,6 +2056,10 @@ export async function runAgent(
       });
       systemPromptWorkspace = `# This workspace's gadgets\n\n${sections.join("\n\n")}`;
     }
+
+    // Named in the prompt because the request that should trigger them ("make me a doc") may
+    // not look trigger the agent to browse blueprints.
+    let standardFormats = await hooks.describeStandardFormats();
 
     // Build connectable-vendors section. We only list vendor names here; the agent fetches a
     // vendor's resource URL patterns on demand via listConnectableResources.
@@ -2057,7 +2086,8 @@ export async function runAgent(
       instanceInstructions
           ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
           : SYSTEM_PROMPT,
-      `${systemPromptWorkspace}${systemPromptConnections}` +
+      (standardFormats ? `${standardFormats}\n\n` : "") +
+          `${systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
     ];
   }
@@ -2461,7 +2491,14 @@ export async function runAgent(
           // resumed turn re-adopts the creation from the log tail -- see replayedCreations) or
           // it wasn't (the registry row is reaped as an orphan -- see reconcilePendingGadgets --
           // and the resumed turn just creates a fresh gadget).
-          let created = hooks.createGadget(title, bindingName, chatId);
+
+          // Let the transcript name the format while the call runs, as writes do with their target
+          // file.
+          if (blueprint?.output) {
+            emitStreamEvent({type: "toolCallOutputFormat", toolCallId, output: blueprint.output});
+          }
+
+          let created = hooks.createGadget(title, bindingName, chatId, blueprint?.output);
           pendingCreatedGadgets.push({gadgetId: created.id, title: created.title, bindingName});
           chatBindings.set(bindingName, {type: "workpiece", id: created.id});
 

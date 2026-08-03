@@ -124,6 +124,10 @@ interface GadgetUIProps {
   onIframeEscape?: () => void
 }
 
+// How long to wait for a UI bundle before offering a retry instead of a spinner. Not a latency
+// budget: the point at which we conclude the reply is never coming.
+const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
+
 export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -132,6 +136,10 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
   const [isInvalidated, setIsInvalidated] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
+  // Identifies the newest bundle load, so an older one can't write state after being superseded.
+  const loadGenerationRef = useRef(0)
+  // Bumped by the retry button to ask for a fresh load.
+  const [retryNonce, setRetryNonce] = useState(0)
   const handshakeGenerationRef = useRef(0)
   // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
   const gadgetStubRef = useRef<any>(null)
@@ -148,6 +156,9 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
     setError(null)
     setSandboxedHtml(null)
     setHasLoaded(false)
+    // `loading` too, or the component keeps claiming to load on behalf of an abandoned load.
+    setLoading(false)
+    setIsInvalidated(false)
   }, [gadget])
 
   // Effect to handle reloadTrigger changes (code changes)
@@ -176,7 +187,21 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
       return
     }
 
-    let cancelled = false
+    // Superseded loads are ignored by generation rather than by a per-run `cancelled` flag: a run
+    // cancelled mid-call would skip its own `setLoading(false)`, leaving the spinner up with
+    // nothing to clear it. Comparing generations means the newest run always owns the flag.
+    const generation = ++loadGenerationRef.current
+    const isCurrent = () => loadGenerationRef.current === generation
+
+    // A dropped RPC never settles -- e.g. the stub was disposed under us by a reconnect -- and there
+    // is nothing to catch. Rather than spin indefinitely, stop owning the load and offer a retry: the
+    // call is idempotent, and a button is a far better answer than a spinner that never resolves.
+    const giveUp = setTimeout(() => {
+      if (!isCurrent()) return
+      loadGenerationRef.current++      // so a late reply can no longer write state
+      setLoading(false)
+      setError('Timed out loading this view.')
+    }, UI_BUNDLE_LOAD_TIMEOUT_MS)
 
     const loadUiBundle = async () => {
       try {
@@ -184,7 +209,7 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
         setError(null)
 
         const bundle = await gadget.getUiBundle(chatId)
-        if (cancelled) return
+        if (!isCurrent()) return
         if (bundle) {
           const html = createSandboxedHtml(bundle.jsCode)
           setSandboxedHtml(html)
@@ -194,19 +219,26 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
         setHasLoaded(true)
         setIsInvalidated(false)
       } catch (err) {
-        if (cancelled) return
+        if (!isCurrent()) return
         console.error('Failed to load UI bundle:', err)
         setError('Failed to load UI bundle')
       } finally {
-        if (!cancelled) setLoading(false)
+        if (isCurrent()) setLoading(false)
+        clearTimeout(giveUp)
       }
     }
 
     loadUiBundle()
-    return () => { cancelled = true }
+    return () => {
+      clearTimeout(giveUp)
+      // Dependencies can change without starting a replacement load (most importantly when the
+      // view becomes hidden). Revoke this run explicitly so its late reply cannot populate state
+      // for a different gadget, chat, or visibility lifecycle.
+      if (isCurrent()) loadGenerationRef.current++
+    }
   // LSP reports an error here, but tsc does not.
   // The LSP error is due to bugs that need to be fixed in Cap'n Web.
-  }, [gadget, isVisible, hasLoaded, isInvalidated, chatId])
+  }, [gadget, isVisible, hasLoaded, isInvalidated, chatId, retryNonce])
 
   // Effect to handle iframe RPC handshake
   useEffect(() => {
@@ -325,6 +357,18 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
           variant="error"
           title="Error"
           description={error}
+          action={
+            <Banner.Action
+              onClick={() => {
+                setError(null)
+                setHasLoaded(false)
+                setIsInvalidated(false)
+                setRetryNonce(n => n + 1)
+              }}
+            >
+              Try again
+            </Banner.Action>
+          }
         />
       </div>
     )

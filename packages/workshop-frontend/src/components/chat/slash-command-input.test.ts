@@ -82,12 +82,38 @@ describe("slash command composer input", () => {
   });
 
   it("strips a selected command token from the provider arguments", () => {
-    expect(stripSlashCommandToken("Please use /deploy for staging", {start: 11, length: 7}))
+    expect(stripSlashCommandToken("Please use /deploy for staging", {start: 11, length: 7}).args)
       .toBe("Please use for staging");
-    expect(stripSlashCommandToken("/deploy staging", {start: 0, length: 7})).toBe("staging");
-    expect(stripSlashCommandToken("/deploy ", {start: 0, length: 7})).toBe("");
-    expect(stripSlashCommandToken("ship it with /deploy", {start: 13, length: 7}))
+    expect(stripSlashCommandToken("/deploy staging", {start: 0, length: 7}).args).toBe("staging");
+    expect(stripSlashCommandToken("/deploy ", {start: 0, length: 7}).args).toBe("");
+    expect(stripSlashCommandToken("ship it with /deploy", {start: 13, length: 7}).args)
       .toBe("ship it with");
+  });
+
+  // The transcript shows the command back where the user typed it, so the seam has to survive the
+  // same whitespace collapsing and trimming that produced the arguments.
+  it("reports where in the arguments the command was", () => {
+    // Mid-sentence: the seam sits between the words the command was between.
+    let mid = stripSlashCommandToken("Please use /deploy for staging", {start: 11, length: 7});
+    expect(mid.args.slice(0, mid.commandPosition)).toBe("Please use ");
+    expect(mid.commandPosition).toBe(11);
+
+    // Leading: position 0, which is where a command with no recorded position renders anyway.
+    expect(stripSlashCommandToken("/deploy staging", {start: 0, length: 7}).commandPosition).toBe(0);
+
+    // Trailing: the trim removes the space the command left behind, so the seam has to be clamped
+    // back onto the end of the string rather than pointing past it.
+    let trailing = stripSlashCommandToken("ship it with /deploy", {start: 13, length: 7});
+    expect(trailing.commandPosition).toBe(trailing.args.length);
+
+    // Leading whitespace is trimmed away, so the seam moves left with the text.
+    let padded = stripSlashCommandToken("   hi /deploy there", {start: 6, length: 7});
+    expect(padded.args).toBe("hi there");
+    expect(padded.args.slice(0, padded.commandPosition)).toBe("hi ");
+
+    // Nothing but the command: no text to place it in.
+    expect(stripSlashCommandToken("/deploy ", {start: 0, length: 7}))
+      .toEqual({args: "", commandPosition: 0});
   });
 
   it("matches provider names without regard to case", () => {

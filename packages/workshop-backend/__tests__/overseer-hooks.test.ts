@@ -113,7 +113,9 @@ async function makeTargetOverseer(gadgetId?: number) {
     impl: {
       ownerId: "user-id",
       ensureAmbientCapsules: async () => {},
+      markOutputsDirty: () => {},
       joinPresence: () => () => {},
+      joinOutputsFanout: () => () => {},
       users: {
         idFromString: (id: string) => id,
         get: () => ({

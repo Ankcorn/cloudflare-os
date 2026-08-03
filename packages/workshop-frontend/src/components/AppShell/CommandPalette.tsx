@@ -6,8 +6,11 @@ import {
   Plus,
   SquaresFour,
 } from '@phosphor-icons/react'
+import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../../AuthContext'
-import type { GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
+import type { GadgetMetadataWithTimestamps, OutputFormatOffer } from '@gadgets/workshop-shared/api'
+import { FormatGlyph } from '../format/FormatVisuals'
+import { createFromFormat } from '../format/useOutputFormats'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -23,7 +26,11 @@ type Command = {
 }
 
 type BlueprintEntry = { id: string; title: string; recency: number }
-type PaletteData = { gadgets: GadgetMetadataWithTimestamps[]; blueprints: BlueprintEntry[] }
+type PaletteData = {
+  gadgets: GadgetMetadataWithTimestamps[]
+  blueprints: BlueprintEntry[]
+  formats: OutputFormatOffer[]
+}
 
 // Module-level cache shared across opens for the lifetime of the page. The palette serves this
 // instantly on open and only refetches when it's older than the TTL (stale-while-revalidate), so
@@ -135,6 +142,7 @@ export default function CommandPalette({
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
+  const toasts = useKumoToastManager()
 
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -143,6 +151,9 @@ export default function CommandPalette({
   )
   const [blueprints, setBlueprints] = useState<BlueprintEntry[]>(
     () => paletteCache?.data.blueprints ?? [],
+  )
+  const [formats, setFormats] = useState<OutputFormatOffer[]>(
+    () => paletteCache?.data.formats ?? [],
   )
 
   const inputRef = useRef<HTMLInputElement>(null)
@@ -161,6 +172,7 @@ export default function CommandPalette({
     if (paletteCache) {
       setGadgets(paletteCache.data.gadgets)
       setBlueprints(paletteCache.data.blueprints)
+      setFormats(paletteCache.data.formats)
     }
 
     let cancelled = false
@@ -170,13 +182,19 @@ export default function CommandPalette({
         authenticatedApi.listGadgets(),
         authenticatedApi.listOwnBlueprints(),
         authenticatedApi.listLibraryBlueprints(),
+        authenticatedApi.listOutputFormats(),
       ])
-        .then(([gadgetList, own, library]) => {
-          const data: PaletteData = { gadgets: gadgetList, blueprints: mergeBlueprints(own, library) }
+        .then(([gadgetList, own, library, formatList]) => {
+          const data: PaletteData = {
+            gadgets: gadgetList,
+            blueprints: mergeBlueprints(own, library),
+            formats: formatList,
+          }
           paletteCache = { data, fetchedAt: Date.now() }
           if (cancelled) return
           setGadgets(data.gadgets)
           setBlueprints(data.blueprints)
+          setFormats(data.formats)
         })
         .catch((err) => console.error('Command palette: failed to load items', err))
     }
@@ -194,9 +212,26 @@ export default function CommandPalette({
     [onClose],
   )
 
+  // Picking a format here behaves as it does anywhere else; see createFromFormat.
+  const createFormat = useCallback(
+    (format: OutputFormatOffer) =>
+      createFromFormat(authenticatedApi, navigate, toasts, format).catch(() => {}),
+    [authenticatedApi, navigate, toasts],
+  )
+
   const { groups, flat } = useMemo(() => {
     const needle = query.trim()
     const searching = needle.length > 0
+
+    // One entry per standard format. "New workspace" remains the first action because it is the
+    // general starting point; the format shortcuts follow it in the admin's configured order.
+    const formatCommands: Command[] = formats.map((format) => ({
+      id: `format-${format.blueprintId}`,
+      label: `New ${format.output.noun}`,
+      hint: 'Format',
+      icon: <FormatGlyph output={format.output} size="md" />,
+      run: () => { void createFormat(format) },
+    }))
 
     const nav: Command[] = [
       {
@@ -205,6 +240,7 @@ export default function CommandPalette({
         icon: <Plus size={15} weight="bold" />,
         run: () => navigate({ to: '/' }),
       },
+      ...formatCommands,
       {
         id: 'nav-workspaces',
         label: 'Workspaces',
@@ -266,7 +302,7 @@ export default function CommandPalette({
     const groups = built.filter((g) => g.items.length > 0)
     const flat = groups.flatMap((g) => g.items)
     return { groups, flat }
-  }, [query, gadgets, blueprints, navigate])
+  }, [query, gadgets, blueprints, formats, navigate, createFormat])
 
   // Keep the active index in range as the result set changes.
   useEffect(() => {

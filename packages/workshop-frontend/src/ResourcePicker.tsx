@@ -53,6 +53,9 @@ export interface ResourcePickerProps {
   // row at a time, so a floating caller should stay hidden rather than resize under the pointer.
   onReadyChange?: (ready: boolean) => void
   compact?: boolean
+  // Room the caller has measured for the list. Applied on top of the built-in cap, never instead of
+  // it: a caller with plenty of space should still get a modestly sized panel.
+  maxHeight?: number
   style?: React.CSSProperties
   activeIndex?: number
   onItems?: (items: SelectableItem[]) => void
@@ -82,8 +85,8 @@ function missingResourceGrants(account: AccountDescription, resource: SupportedR
 }
 
 export default function ResourcePicker({
-  authenticatedApi, searchText, onSelectAccount, onRefine, onReadyChange, compact, style,
-  activeIndex, onItems, activateRef,
+  authenticatedApi, searchText, onSelectAccount, onRefine, onReadyChange, compact,
+  maxHeight: maxHeightOverride, style, activeIndex, onItems, activateRef,
 }: ResourcePickerProps) {
   const toasts = useKumoToastManager()
 
@@ -462,7 +465,11 @@ export default function ResourcePicker({
 
   // --- Render ---
 
-  const maxHeight = compact ? 300 : 400
+  // Two independent bounds, and the panel obeys whichever is tighter. The constant keeps it a
+  // reasonable size even with room to spare; the caller's measurement keeps it inside the window,
+  // since a constant is only ever a guess about how much room is above the composer -- on Home the
+  // composer sits mid-page, and the panel grows upward.
+  const maxHeight = Math.min(maxHeightOverride ?? Infinity, compact ? 220 : 400)
 
   return (
     <div style={style}>
@@ -492,10 +499,20 @@ export default function ResourcePicker({
                   }}
                   className={`${PICKER_ROW} ${i > 0 ? 'border-t border-kumo-line' : ''} ${isActive ? PICKER_ROW_ACTIVE : ''}`}
                 >
-                  <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default">
+                  {/* The name is what the row is for, so it gets the space it needs first, up to
+                    * 70% of the row; the pattern is a hint and yields. Reversing this (a pattern
+                    * that never shrinks) left names as "Slac…" and "Google Ca…". Both can now
+                    * truncate, so both carry their full text as a tooltip. */}
+                  <span
+                    title={resource.title}
+                    className="max-w-[70%] flex-none truncate text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-default"
+                  >
                     {resource.title}
                   </span>
-                  <span className="flex-shrink-0 font-mono text-[11.5px] leading-4 text-kumo-inactive">
+                  <span
+                    title={resource.urlPattern}
+                    className="min-w-0 flex-1 truncate text-right font-mono text-[11.5px] leading-4 text-kumo-inactive"
+                  >
                     {resource.urlPattern.replace(/^https?:\/\//, '')}
                   </span>
                   {isActive && <TabHint />}

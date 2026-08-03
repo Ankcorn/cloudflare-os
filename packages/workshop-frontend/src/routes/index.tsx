@@ -11,6 +11,7 @@ import {
   AiChatAuthorInfo,
   CapsuleSpecifier,
   ChatAttachmentHandle,
+  MessageFormatRef,
   SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
 import {
@@ -101,18 +102,20 @@ export function HomePageContent({ prompt }: HomeSearch) {
       modelId: string | null,
       capsules?: CapsuleSpecifier[],
       attachments?: ChatAttachmentHandle[],
+      formats?: MessageFormatRef[],
     ) => {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
-        const [, {id}] = await Promise.all([
-          overseer.newChat(message, modelId, capsules, attachments),
+        const [chat, {id}] = await Promise.all([
+          overseer.newChat(message, modelId, capsules, attachments, formats),
           overseer.getMetadata(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
-        navigate({ to: "/gadget/$id", params: { id } });
+        // Open the conversation we just started.
+        navigate({ to: "/gadget/$id", params: { id }, search: { chat } });
       } catch (err) {
         console.error("Failed to create gadget:", err);
         // A retry reuses the provisional gadget while the draft contains gadget-scoped references.
@@ -179,6 +182,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
           selectedModel={selectedModel}
           onModelChange={handleModelChange}
           newChat
+          offerFormats
           autoFocus
           minRows={3}
           seedText={seed.text}

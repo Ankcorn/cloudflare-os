@@ -4,7 +4,7 @@
 // content byte length), followed by UTF-8 JSON metadata and the gzip-compressed Yjs snapshot.
 // See docs/blueprints.md for the full format description.
 
-import { BlueprintMetadata, BlueprintPublicInfo } from '@gadgets/workshop-shared/api';
+import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, isOutputIcon } from '@gadgets/workshop-shared/api';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
@@ -23,7 +23,10 @@ const textDecoder = new TextDecoder();
 
 export type BlueprintKvRecord = {
   metadata: BlueprintMetadata;
-  ownerId: string;
+  // The User DO that published or uploaded this blueprint, and which owns the authoritative
+  // "featured" bit for it. Undefined for a blueprint the deployment installed itself, which
+  // has no owning user.
+  ownerId?: string;
   gadgetId?: string;  // undefined = uploaded, not published from a gadget on this instance
 };
 
@@ -35,6 +38,31 @@ export function reviveBlueprintMetadata(metadata: BlueprintMetadata): BlueprintM
   metadata.created = new Date(metadata.created);
   metadata.lastUpdated = new Date(metadata.lastUpdated);
   return metadata;
+}
+
+// Longest accepted output slug/noun. Display strings shown in tabs and chips, so this keeps the
+// UI intact rather than being a safety limit.
+const MAX_OUTPUT_STRING_LENGTH = 40;
+
+function outputString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_OUTPUT_STRING_LENGTH) return undefined;
+  return trimmed;
+}
+
+// Accept a blueprint's declared output format only if it is completely well-formed, otherwise
+// treat the blueprint as declaring nothing (a generic app). Blueprint metadata arrives from
+// uploaded archives, so an unknown icon key or an overlong noun must degrade rather than reach
+// the UI.
+export function sanitizeBlueprintOutput(output: unknown): BlueprintOutput | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  let {id, noun, plural, icon} = output as Partial<BlueprintOutput>;
+  let cleanId = outputString(id);
+  let cleanNoun = outputString(noun);
+  let cleanPlural = outputString(plural);
+  if (!cleanId || !cleanNoun || !cleanPlural || !isOutputIcon(icon)) return undefined;
+  return {id: cleanId, noun: cleanNoun, plural: cleanPlural, icon};
 }
 
 export function parseBlueprintKvRecord(raw: string): BlueprintKvRecord {
@@ -55,7 +83,9 @@ export function serializeFeaturedBlueprints(featured: BlueprintPublicInfo[]): st
   return JSON.stringify(featured);
 }
 
-type BlueprintKvEnv = Pick<Cloudflare.Env, 'BLUEPRINTS'>;
+// The env a blueprint KV read needs. Narrowed to the one binding so helpers that only read
+// blueprints can be called from anywhere holding it, without passing a whole env around.
+export type BlueprintKvEnv = Pick<Cloudflare.Env, 'BLUEPRINTS'>;
 
 export async function readBlueprintKvRecord(
   env: BlueprintKvEnv,

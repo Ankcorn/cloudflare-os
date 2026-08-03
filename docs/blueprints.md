@@ -7,10 +7,10 @@ This is analogous to a template: the blueprint author publishes a reusable gadge
 ## Key Properties
 
 - A single gadget can have **multiple blueprints**, potentially at different code versions (e.g. a "stable" and a "latest" blueprint of the same gadget).
-- Each blueprint has a **128-bit random hex ID**, generated server-side.
-- Blueprints are shared via link: `https://<host>/blueprint/<hex-id>`.
+- Each blueprint has a **128-bit random hex ID**, generated server-side. Blueprints bundled with a deployment are the exception: they carry stable, readable IDs (see [Output Formats and Bundled Blueprints](#output-formats-and-bundled-blueprints)).
+- Blueprints are shared via link: `https://<host>/blueprint/<blueprint-id>` (for example, a random hex ID or a bundled ID such as `format.document`).
 - Anyone with the link can **view** the blueprint's metadata (title, description, author, required bindings) without authenticating. **Creating a gadget** from a blueprint requires authentication.
-- A blueprint is always owned by the gadget's owner, regardless of which collaborator creates it.
+- A blueprint is always owned by the gadget's owner, regardless of which collaborator creates it. Bundled blueprints have no owning user at all.
 - The blueprint author can **update** a blueprint to reflect newer code, incrementing its version number. Old code versions are retained in storage to avoid race conditions during concurrent instantiation.
 - Blueprints can be exported to a `.gadget` file and imported into a different Workshop instance.
 
@@ -114,6 +114,20 @@ Featured blueprint state is split across two stores:
 - The authoritative `featured` bit lives in the owning user's `blueprints` record inside their User DO.
 - The `AdminSettings` durable object is a singleton (`getByName("")`) that mirrors the current public metadata for featured blueprints and writes a KV snapshot consumed by `AuthenticatedApi.listFeaturedBlueprints()`.
 
+## Output Formats and Bundled Blueprints
+
+A **format** is an ordinary blueprint the deployment has promoted, so that "New Doc" or "New Slides" appears in the composer's `+` menu and in the list the agent is told to prefer. Promotion is admin curation (`AdminConfig.formats`, managed in the admin **Formats** panel); nothing about the blueprint itself changes.
+
+What a blueprint may declare is `BlueprintMetadata.output`: a grouping `id`, a `noun` and `plural` ("Doc"/"Docs"), and an `icon` from the closed `OUTPUT_ICONS` set. A gadget instantiated from the blueprint inherits it, and that is what the workspace tab, chat cards and the Outputs page draw. Declaring it is presentation only and grants nothing -- any user can publish a blueprint calling itself a Document. Being *offered* as one of the deployment's standard formats is the separate, admin-curated decision. An admin can override any of these fields (`FormatCuration.overrides`), and the override is applied on every instantiation path, so a rename reaches gadgets the agent builds as well as ones made from the menu.
+
+A deployment can also ship blueprints as data. `packages/workshop-backend/format-blueprints/` holds a `<name>.gadget` archive plus a `<name>.json` sidecar for each, and `scripts/build-format-blueprints.mjs` bundles that directory (overridable with `FORMAT_BLUEPRINTS_DIR`, so a fork can ship its own set) into a generated module. These differ from published blueprints in three ways:
+
+- Their IDs are **stable and readable** (`format.document`, not a random hex ID), because both installation and promotion are keyed on them. Renaming one after deploy orphans the old entry rather than moving it.
+- They have **no owning User DO**. `AdminSettings` writes them straight into the featured mirror, because there is no publishing user whose `featured` bit could be authoritative.
+- Their `output` lives in the sidecar rather than the archive, so the deployment's presentation has a single source of truth.
+
+The first `/api` request a deployment serves installs any whose manifest fingerprint has changed. The fingerprint covers its title, description, author, revision, and output presentation; `revision` represents changes to the archive bytes. Each bundled blueprint is promoted only once ever -- an upgrade never undoes an admin's later removal or overrides.
+
 ## Creating and Managing Blueprints
 
 Blueprints are managed through the **Blueprint** button in the gadget editor header. The UI allows:
@@ -152,7 +166,7 @@ The new gadget is independent from the blueprint source: it has its own storage,
 
 The AI agent can also instantiate a blueprint as an *additional* gadget within an existing workspace:
 
-- The `listBlueprints` tool lists the blueprints available to the workspace owner (their own published blueprints, their library, and the deployment's featured set) as formatted text; there is no search index, so the model scans the list itself.
+- The `listBlueprints` tool lists the blueprints available to the workspace owner (the deployment's standard formats, listed first and marked as preferred, then their own published blueprints, their library, and the deployment's featured set) as formatted text; there is no search index, so the model scans the list itself.
 - Passing a `blueprintId` to the `createGadget` tool creates the new gadget from the blueprint's code instead of empty. The gadget is provisional to the chat like any agent-created gadget, and the blueprint's files are copied into the chat's proposed changes (recorded in the same `changes` message as the creation), so accepting or reverting the chat's changes covers the files and the creation together.
 - Bindings are not auto-assigned on this path: the tool result describes the bindings the blueprint expects, and the agent wires them up itself under the same names (via `setGadgetBinding`, requesting connections as needed), or asks the user to add AI-model / agent-spawner bindings from the Connections panel.
 

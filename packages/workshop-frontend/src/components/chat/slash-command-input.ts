@@ -47,11 +47,22 @@ export function slashCommandTokenKey(input: string, cursorPosition: number): str
 }
 
 // Removes the command token from the text sent as the command's arguments.
-export function stripSlashCommandToken(input: string, token: ComposerRange): string {
+export function stripSlashCommandToken(input: string, token: ComposerRange)
+    : { args: string; commandPosition: number } {
   let before = input.slice(0, token.start);
   let after = input.slice(token.start + token.length);
   if (/\s$/.test(before) && /^\s/.test(after)) after = after.slice(1);
-  return (before + after).trim();
+  let joined = before + after;
+
+  // Where the command was, in the string that remains -- what the transcript needs to show it back
+  // in place. Measured after the leading trim, and clamped because a trailing trim can leave the
+  // seam past the end (a command typed last).
+  let leadingTrim = joined.length - joined.trimStart().length;
+  let args = joined.trim();
+  return {
+    args,
+    commandPosition: Math.min(Math.max(before.length - leadingTrim, 0), args.length),
+  };
 }
 
 // Entries whose name exactly equals the parsed token.

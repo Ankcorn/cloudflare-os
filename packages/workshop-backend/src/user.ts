@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -14,6 +14,10 @@ import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./a
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 
 const logger = createWorkshopLogger("workshop.user");
+
+// How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
+// listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
+const OUTPUTS_BACKFILL_PAGE = 16;
 
 type ConnectedAccountRecord = {
   id: number;
@@ -101,6 +105,24 @@ function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
   return g.lastActive !== undefined;
 }
 
+// One output of a workspace, as pushed into a user's output index by the Overseer that owns it
+// (see `syncWorkspaceOutputs()`). Carries only what the workspace itself knows: its title,
+// activity time and ownership are joined in from the `gadgets` collection on read, so they can't
+// go stale here.
+export type WorkspaceOutputEntry = {
+  workpieceId: WorkpieceId;
+  title: string;
+  created: Date;
+
+  // The format the gadget was built as, if it was instantiated from a blueprint declaring one.
+  output?: BlueprintOutput;
+};
+
+type OutputRecord = WorkspaceOutputEntry & {
+  // The workspace containing this output (an Overseer DO id).
+  workspaceId: string;
+};
+
 // AI Gateway billing state for the optional top-up flow: which Cloudflare account to bill and a
 // cached credit balance. The OAuth tokens themselves live in the connected Cloudflare *gatekeeper*
 // account (vendorId "cloudflare"); billing reads a usable token from there via getUsableAccessToken.
@@ -147,6 +169,16 @@ function makeUserStorage(storage: DurableObjectStorage) {
       libraryBlueprints: collection<LibraryBlueprintRecord>()({
         primaryKey: "id",
       }),
+      // Outputs of every workspace in `gadgets`, mirrored here by each workspace's Overseer so the
+      // Outputs page is one cheap read of the user's own DO. Entries are meaningful only while the
+      // corresponding `gadgets` record exists; `syncWorkspaceOutputs()` and the `gadgets` deletion
+      // paths keep the two in step.
+      outputs: collection<OutputRecord>()({
+        primaryKey: record => `${record.workspaceId}:${record.workpieceId}`,
+        nonUniqueIndexes: {
+          byWorkspace(record: OutputRecord) { return record.workspaceId; },
+        },
+      }),
     },
     singletons: {
       // AI Gateway billing state (selected account + cached balance) for the optional top-up flow;
@@ -162,6 +194,15 @@ function makeUserStorage(storage: DurableObjectStorage) {
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
       onboardingCompleted: false,
+
+      // Set once the user's pre-existing workspaces have been asked to populate the outputs index
+      // (see #backfillOutputs()). Workspaces created since push on their own.
+      outputsBackfilled: false,
+
+      // How far that catch-up has got: the last workspace id examined. The sweep runs a page at a
+      // time and resumes here on the next visit.
+      outputsBackfillCursor: "",
+
       nextAccountId: 0,
       pinnedBlueprints: <string[]>[],
 
@@ -402,8 +443,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // Called by the overseer every time a collaborator opens a shared gadget.
   // Creates the record on first open; updates lastActive on subsequent opens.
+  //
+  // `role` is cached so listings built from this DO can offer the actions it permits without
+  // reopening the workspace to ask. Presentation only: every operation is still authorized by the
+  // Overseer when attempted.
   async recordSharedGadgetOpen(
-      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo
+      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo, role?: CollaboratorRole
   ): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (record && !record.owner) {
@@ -415,6 +460,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       record.lastActive = now;
       record.title = title;
       record.owner = ownerProfile;
+      record.role = role;
       this.storage.gadgets.put(record);
     } else {
       // First time opening this shared gadget.
@@ -422,17 +468,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         id: gadgetId,
         title,
         owner: ownerProfile,
+        role,
         created: now,
         lastActive: now,
       });
     }
   }
 
-  // Removes a shared gadget from the user's home page listing. Does not revoke access.
-  async dismissSharedGadget(gadgetId: string): Promise<void> {
+  // Updates the presentation-only role cached for a shared workspace listing. Authorization still
+  // comes from the Overseer's live sharing graph; this only keeps the listing's available actions
+  // accurate after a collaborator is downgraded.
+  async updateSharedGadgetRole(gadgetId: string, role: CollaboratorRole): Promise<void> {
+    let record = this.storage.gadgets.get(gadgetId);
+    if (!record?.owner) return;
+    record.role = role;
+    this.storage.gadgets.put(record);
+  }
+
+  // Forgets a gadget shared with this user: drops it from their workspace listing and its outputs
+  // from their Outputs index. Called both when the user dismisses it and when their access is
+  // revoked (Overseer.refreshAffectedCollaboratorListings()); it grants and revokes nothing.
+  async forgetSharedGadget(gadgetId: string): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (record && record.owner) {
       this.storage.gadgets.delete(gadgetId);
+      this.storage.outputs.byWorkspace.delete(gadgetId);
     }
   }
 
@@ -701,6 +761,106 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async deleteGadget(id: string): Promise<void> {
     this.storage.gadgets.delete(id);
+    this.storage.outputs.byWorkspace.delete(id);
+  }
+
+  // Replace the set of outputs recorded for one workspace. Called by that workspace's Overseer
+  // whenever its gadget registry changes and whenever it is opened.
+  //
+  // A workspace the user no longer tracks (deleted, or a shared one they dismissed) has its
+  // entries dropped.
+  syncWorkspaceOutputs(workspaceId: string, entries: WorkspaceOutputEntry[]): void {
+    this.storage.outputs.byWorkspace.delete(workspaceId);
+    if (!this.storage.gadgets.get(workspaceId)) return;
+    for (let entry of entries) {
+      this.storage.outputs.put({...entry, workspaceId});
+    }
+  }
+
+  async listOutputs(): Promise<ListOutputsResult> {
+    let catchingUp = await this.#backfillOutputs();
+    return {outputs: this.#readOutputs(), catchingUp};
+  }
+
+  // Ask the user's pre-existing workspaces to populate the outputs index, once. Workspaces push as
+  // they change and when opened, so only those predating the index need this.
+  //
+  // Sweeps one bounded page and reports whether more remains, rather than sweeping everything: a
+  // first Outputs load must not wait on every workspace the user has ever created. The caller
+  // drains the rest, so the list fills in while the page is open.
+  async #backfillOutputs(): Promise<boolean> {
+    if (this.storage.outputsBackfilled.get()) return false;
+
+    let startAfter = this.storage.outputsBackfillCursor.get() || undefined;
+    let cursor = startAfter ?? "";
+    let targets: string[] = [];
+    let examined = 0;
+    for (let gadget of this.storage.gadgets.list({startAfter, limit: OUTPUTS_BACKFILL_PAGE})) {
+      ++examined;
+      cursor = gadget.id;
+      // A shared workspace is mirrored on open, not swept; a half-created one has nothing yet.
+      if (!gadget.owner && isFullyCreated(gadget)) targets.push(gadget.id);
+    }
+    let done = examined < OUTPUTS_BACKFILL_PAGE;
+
+    let ownerId = this.ctx.id.toString();
+    let overseers = this.ctx.exports.OverseerDurableObject;
+    let results = await Promise.allSettled(targets.map(id =>
+        overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
+
+    let failureCount = 0;
+    let firstError: unknown;
+    for (let [index, result] of results.entries()) {
+      if (result.status === "fulfilled") {
+        if (result.value) this.syncWorkspaceOutputs(targets[index], result.value);
+      } else {
+        if (failureCount === 0) firstError = result.reason;
+        ++failureCount;
+      }
+    }
+
+    if (failureCount > 0) {
+      logger.warn("failed to backfill outputs for some workspaces", {
+        event: "outputs.backfill.partial",
+        failureCount,
+        error: firstError,
+      });
+    }
+
+    // Advance past workspaces that failed, rather than retrying them. The index is self-healing,
+    // so one missed here reappears the moment it is touched, whereas holding the cursor lets a
+    // single unwakeable workspace stall the sweep forever.
+    if (done) {
+      this.storage.outputsBackfilled.put(true);
+    } else {
+      this.storage.outputsBackfillCursor.put(cursor);
+    }
+
+    // A page where everything failed looks systemic, so stop draining and let the next visit pick
+    // up from the next page: draining on would be a burst of doomed calls during an outage.
+    if (failureCount > 0 && failureCount === targets.length) return false;
+    return !done;
+  }
+
+  #readOutputs(): OutputSummary[] {
+    let result: OutputSummary[] = [];
+    for (let output of this.storage.outputs.list()) {
+      let workspace = this.storage.gadgets.get(output.workspaceId);
+      if (!workspace || !isFullyCreated(workspace)) continue;
+      result.push({
+        workspaceId: output.workspaceId,
+        workpieceId: output.workpieceId,
+        ...(output.output ? {output: output.output} : {}),
+        title: output.title,
+        workspaceTitle: workspace.title,
+        created: output.created,
+        lastActive: workspace.lastActive,
+        ...(workspace.owner ? {owner: workspace.owner} : {}),
+        ...(workspace.role ? {role: workspace.role} : {}),
+      });
+    }
+    result.sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime());
+    return result;
   }
 
   // --- Blueprint methods (called by Overseer during propagation) ---
