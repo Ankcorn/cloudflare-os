@@ -400,7 +400,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 }
 
-// A trivial verifier with no methods. The Cloudflare gatekeeper provides no resources, so no
-// observer verification is ever performed against it. See GatekeeperUserImpl.getVerifier.
+// The Cloudflare gatekeeper provides no resources, so no observer verification is performed.
 @validateRpc()
-export class CloudflareVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class CloudflareVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}

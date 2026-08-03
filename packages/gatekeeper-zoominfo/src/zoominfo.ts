@@ -588,9 +588,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 }
 
-// A trivial verifier with no methods, since ZoomInfoGatekeeperImpl refuses all non-owner observers.
+// A trivial verifier since ZoomInfoGatekeeperImpl refuses all non-owner observers.
 @validateRpc()
-export class ZoomInfoVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class ZoomInfoVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Resource configurator — whole-account has no inputs; just reports the canonical URL.

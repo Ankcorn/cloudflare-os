@@ -313,7 +313,9 @@ export class GatekeeperUserImpl
 // Required by the `GatekeeperUser` contract but never interrogated, since `addObserver` refuses
 // everyone. Carries no props for the same reason.
 @validateRpc()
-export class McpVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class McpVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Resource configurator

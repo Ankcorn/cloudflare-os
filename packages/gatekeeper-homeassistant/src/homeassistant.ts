@@ -698,10 +698,11 @@ export class HomeAssistantUserImpl
   }
 }
 
-// A trivial verifier with no methods, since Home Assistant's observer strategy is "low-stakes" (no
-// information-flow tracking). See HomeAssistantGatekeeperImpl.addObserver.
+// A trivial verifier since Home Assistant's observer strategy is low-stakes.
 @validateRpc()
-export class HomeAssistantVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class HomeAssistantVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Configurator UI for the whole-instance resource.

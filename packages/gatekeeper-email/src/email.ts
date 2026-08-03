@@ -467,10 +467,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 }
 
-// A trivial verifier with no methods, since the email gatekeeper's observer strategy is
-// "low-stakes" (no information-flow tracking). See EmailGatekeeperImpl.addObserver.
+// A trivial verifier since the email gatekeeper's observer strategy is low-stakes.
 @validateRpc()
-export class EmailVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class EmailVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
 
 // =======================================================================================
 

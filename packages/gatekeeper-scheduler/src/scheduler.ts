@@ -385,7 +385,10 @@ export class ScheduleAccount
 @validateRpc()
 export class ScheduleVerifier
   extends WorkerEntrypoint<Cloudflare.Env>
-  implements GatekeeperUserVerifier {}
+  implements GatekeeperUserVerifier
+{
+  verify(): void {}
+}
 
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
