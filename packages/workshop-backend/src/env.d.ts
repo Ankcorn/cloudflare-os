@@ -16,8 +16,9 @@ declare global {
       SETUP_TOKEN?: string;
 
       // URL of the deploy wizard that created this instance. Exposed to the client via
-      // ServerConfig.deployUrl to drive "Add gatekeepers" calls-to-action. Absent on self-hosted
-      // deployments.
+      // ServerConfig.deployUrl to drive "Add gatekeepers" calls-to-action. Its presence also marks
+      // a deploy-flow instance, gating the seeding of default Workers AI models for new users (see
+      // default-models.ts). Absent on self-hosted deployments.
       DEPLOY_URL?: string;
 
       // AI Gateway mode: when CF_AI_GATEWAY is set, all model requests are routed through
