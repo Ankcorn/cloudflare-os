@@ -12,7 +12,7 @@ interface __BaseEnv_Env {
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
-		mainModule: typeof import("./src/gateway");
+		mainModule: typeof import("./src/portal");
 		durableNamespaces: "McpAccount" | "McpGatekeeperImpl";
 	}
 	interface Env extends __BaseEnv_Env {}

@@ -35,7 +35,9 @@ does so through a named hook (`staticToken`, `mintAccount`), not a private copy.
 | `session` | The Gadget-facing capability, and the one path every tool call takes |
 | `sharing-policy` | The owner-only sharing rule |
 | `html` | The connect-flow pages, so both connectors look like one product |
+| `http` | Base-path, OAuth callback, and connect-link routing shared by both Workers |
 | `log` | The field vocabulary both connectors log against |
+| `user` | The common account description, revocation, and reconnect lifecycle |
 | `util` | Hex encoding, host extraction, binding-name slugs; no policy |
 | `types.d.ts` | Base types prepended to every generated per-server `.d.ts` |
 
