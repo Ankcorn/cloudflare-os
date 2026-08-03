@@ -3745,7 +3745,7 @@ interface ChatInterfaceProps {
   onStreamingProposedChangesChange?: (
     updates: StreamingProposedChanges | undefined,
   ) => void;
-  onStreamingActiveFileChange?: (file: ActiveFileTarget | null | undefined) => void;
+  onStreamingActiveFileChange?: (chatId: number, file: ActiveFileTarget | null | undefined) => void;
   pendingConsoleLogCount: number;
   consoleLogPreview: string;
   consoleLogSeverity: "error" | "warn" | "info";
@@ -4436,15 +4436,14 @@ function ChatInterface({
   // Notify parent when agent active state changes
   const onAgentActiveChangeRef = useRef(onAgentActiveChange);
   onAgentActiveChangeRef.current = onAgentActiveChange;
-  const prevIsAgentActiveRef = useRef(isAgentActive);
+  const previousAgentStateRef = useRef({chatId: selectedChatId, active: isAgentActive});
   useEffect(() => {
-    if (
-      selectedChatId !== null &&
-      isAgentActive !== prevIsAgentActiveRef.current
-    ) {
-      prevIsAgentActiveRef.current = isAgentActive;
+    let previous = previousAgentStateRef.current;
+    if (selectedChatId !== null &&
+        (selectedChatId !== previous.chatId || isAgentActive !== previous.active)) {
       onAgentActiveChangeRef.current?.(selectedChatId, isAgentActive);
     }
+    previousAgentStateRef.current = {chatId: selectedChatId, active: isAgentActive};
   }, [isAgentActive, selectedChatId]);
 
   // Loads the page before the oldest message on screen. Held in a ref because the scroll handler is
@@ -4592,9 +4591,13 @@ function ChatInterface({
     onDraftProposedChangesChange?.(currentDraftChangesState);
   }, [currentDraftChangesState, onDraftProposedChangesChange]);
 
+  const onStreamingActiveFileChangeRef = useRef(onStreamingActiveFileChange);
+  onStreamingActiveFileChangeRef.current = onStreamingActiveFileChange;
   useEffect(() => {
-    onStreamingActiveFileChange?.(currentStreamingActiveFile);
-  }, [currentStreamingActiveFile, onStreamingActiveFileChange]);
+    if (selectedChatId !== null) {
+      onStreamingActiveFileChangeRef.current?.(selectedChatId, currentStreamingActiveFile);
+    }
+  }, [currentStreamingActiveFile, selectedChatId]);
 
   // Proper class implementation of AiChatSubscriber
   // This is necessary so the server receives a single stub for the object,
@@ -4820,6 +4823,11 @@ function ChatInterface({
         }
         case "setActiveFile":
           provisional.activeEditingFile = event.file ?? null;
+          // Also tell the editor straight away. The effect above only runs on re-render, which is
+          // too late for the tab to follow the very first file of a turn.
+          if (chatId === selectedChatIdRef.current) {
+            onStreamingActiveFileChangeRef.current?.(chatId, event.file ?? null);
+          }
           break;
         case "toolCallTarget": {
           // Surfaces the file name during streaming for writes and edits so the frontend can update.

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { DownloadSimple } from '@phosphor-icons/react'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
@@ -190,6 +190,17 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
   const [previewFileNames, setPreviewFileNames] = useState<string[]>([])
   const hasUserSwitchedFilesThisTurnRef = useRef(false)
   const wasAgentActiveRef = useRef(isAgentActive)
+  const lastStreamingActiveFileRef = useRef<string | null>(streamingActiveFile ?? null)
+  const selectionChatIdRef = useRef(selectedChatId)
+  useLayoutEffect(() => {
+    if (selectionChatIdRef.current !== selectedChatId ||
+        (!wasAgentActiveRef.current && isAgentActive)) {
+      hasUserSwitchedFilesThisTurnRef.current = false
+      lastStreamingActiveFileRef.current = null
+    }
+    selectionChatIdRef.current = selectedChatId
+    wasAgentActiveRef.current = isAgentActive
+  }, [isAgentActive, selectedChatId])
 
   // Keep a ref to the current overseer so operations always use the latest stub
   const currentOverseerRef = useRef(overseer)
@@ -266,21 +277,16 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
   // manually switched files during this turn.
   useEffect(() => {
     const previewMap = streamingFilesMapRef.current ?? editableFilesMapRef.current
-    if (hasUserSwitchedFilesThisTurnRef.current || !streamingActiveFile) {
+    if (streamingActiveFile) lastStreamingActiveFileRef.current = streamingActiveFile
+    let target = streamingActiveFile ?? lastStreamingActiveFileRef.current
+    if (hasUserSwitchedFilesThisTurnRef.current || !target) {
       return
     }
 
-    if (filesMapRef.current.has(streamingActiveFile) || previewMap?.has(streamingActiveFile)) {
-      setActiveFile(streamingActiveFile)
+    if (filesMapRef.current.has(target) || previewMap?.has(target)) {
+      setActiveFile(target)
     }
-  }, [streamingActiveFile, proposedChanges, streamingProposedChanges?.count, streamingProposedChanges?.updates])
-
-  useEffect(() => {
-    if (wasAgentActiveRef.current !== isAgentActive) {
-      wasAgentActiveRef.current = isAgentActive
-      hasUserSwitchedFilesThisTurnRef.current = false
-    }
-  }, [isAgentActive])
+  }, [isAgentActive, previewFileNames, selectedChatId, streamingActiveFile])
 
   const replaceChangedFiles = useCallback((previewMap: Y.Map<Y.Text> | null) => {
     setChangedFiles(prev => {
@@ -697,7 +703,7 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
 
   // Handle file selection
   const handleFileSelect = (filename: string) => {
-    if (isAgentActive && activeFile !== filename) {
+    if (activeFile !== filename) {
       hasUserSwitchedFilesThisTurnRef.current = true
     }
     setActiveFile(filename)
