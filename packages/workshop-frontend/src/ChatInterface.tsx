@@ -3144,7 +3144,19 @@ interface MessageState {
 
 type ChatDisplayEntry =
   | {
+      // Announces a compaction. Sits at the user's request when one produced it -- carrying who
+      // asked, since the row reads as their action -- and at the cut otherwise.
       type: "compactionBoundary";
+      key: string;
+      boundary: CompactionBoundary;
+      requestedBy?: AiChatAuthorInfo;
+      // How much of the thread the cut spared, counted in rows between it and this announcement.
+      keptRows?: number;
+    }
+  | {
+      // Where the messages the agent still holds verbatim begin, for a boundary announced further
+      // down. Shown only while that summary is open, so the two halves are read together.
+      type: "compactionCut";
       key: string;
       boundary: CompactionBoundary;
     }
@@ -3351,22 +3363,39 @@ function transcriptToolCalls(toolCalls: AiToolCall[]): AiToolCall[] {
 export function buildChatDisplayEntries(
   messages: AiChatMessage[],
   changeStatus: ReadonlyMap<number, "pending" | "merged" | "reverted">,
-  // Loaded compaction boundaries, oldest first. Each is shown where the cut fell rather than above
-  // the thread, so the marker stays put no matter how much history is loaded around it.
+  // Loaded compaction boundaries, oldest first.
   boundaries: readonly CompactionBoundary[] = [],
 ): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
-  let nextBoundary = 0;
 
+  // Where each boundary is announced. A cut is chosen to leave a working tail, so it lands some way
+  // back from where the user typed `/compact` -- announcing it there would drop the acknowledgement
+  // off screen. So a boundary is announced at the request that produced it: the `/compact` between
+  // this cut and the next, since a later request can only produce a later cut. Compaction that ran
+  // on its own has no request to announce at, and is announced at the cut.
+  const requestFor = new Map<number, number>();
+  boundaries.forEach((boundary, index) => {
+    const until = boundaries[index + 1]?.to ?? Infinity;
+    const request = messages.find(msg => msg.sequence >= boundary.to && msg.sequence < until &&
+        msg.type === "slashCommand" && msg.request.id.builtin === true);
+    if (request) requestFor.set(boundary.to, request.sequence);
+  });
+
+  // Where each cut was drawn, so the announcement can say how much of the thread survived it. Rows
+  // rather than records, since rows are what the reader can count against.
+  const rowsAtCut = new Map<number, number>();
+
+  let nextBoundary = 0;
   const maybePushBoundaries = (sequence: number) => {
     while (nextBoundary < boundaries.length && boundaries[nextBoundary].to <= sequence) {
       const boundary = boundaries[nextBoundary++];
-      result.push({
-        type: "compactionBoundary",
-        key: `compacted-${boundary.to}`,
-        boundary,
-      });
+      rowsAtCut.set(boundary.to, result.length);
+      // Announced at a request further down, so all that belongs here is the line showing where the
+      // messages the agent still holds verbatim begin -- revealed only while the summary is open.
+      result.push(requestFor.has(boundary.to)
+        ? {type: "compactionCut", key: `cut-${boundary.to}`, boundary}
+        : {type: "compactionBoundary", key: `compacted-${boundary.to}`, boundary});
     }
   };
 
@@ -3397,9 +3426,23 @@ export function buildChatDisplayEntries(
     maybePushModelChange(msg);
 
     if (msg.type === "slashCommand") {
-      // A built-in command is handled by the Workshop itself: it carries no prompt and gets no
-      // provider reply, so there is no message to show. The compaction boundary marks its result.
+      // A built-in command is handled by the Workshop itself, so it has no prompt to show and gets
+      // no provider reply. What it leaves behind is its boundary, announced here. A request that
+      // compacted nothing has no boundary and so shows nothing, which is what happened.
       if (msg.request.id.builtin === true) {
+        const announced = boundaries.find(({to}) => requestFor.get(to) === msg.sequence);
+        if (announced) {
+          // Everything between the cut and here survived: the tail the agent kept reading verbatim.
+          // The cut's own row does not count towards it.
+          const atCut = rowsAtCut.get(announced.to);
+          result.push({
+            type: "compactionBoundary",
+            key: `compacted-${announced.to}`,
+            boundary: announced,
+            requestedBy: msg.author,
+            keptRows: atCut === undefined ? 0 : result.length - atCut - 1,
+          });
+        }
         i++;
         continue;
       }
@@ -3547,7 +3590,8 @@ const EARLIER_PAGE_PREFETCH_PX = 600;
 
 function isPureWorkRowEntry(entry: ChatDisplayEntry): boolean {
   if (entry.type === "workRun") return true;
-  if (entry.type === "modelChange" || entry.type === "compactionBoundary") return false;
+  if (entry.type === "modelChange" || entry.type === "compactionBoundary" ||
+      entry.type === "compactionCut") return false;
   const m = entry.message;
   return (
     m.type === "action" ||
@@ -6433,8 +6477,73 @@ function ChatInterface({
 
                     {displayEntries.map((entry, entryIndex) => {
                       const entryTopClass = entryTopClasses[entryIndex] ?? "";
+                      if (entry.type === "compactionCut") {
+                        // Only meaningful alongside the summary it belongs to, which is announced
+                        // further down; on its own it would be a line with nothing to explain it.
+                        if (!expandedCompactions.has(entry.boundary.to)) return null;
+                        return (
+                          <div key={entry.key} className={`${entryTopClass} mb-4 max-w-[860px]`}>
+                            <div className="flex items-center gap-3" role="separator">
+                              <span className="h-px flex-1 bg-kumo-line/60" aria-hidden="true" />
+                              <span className="flex-shrink-0 text-[11px] leading-4 font-medium tracking-[0.6px] text-kumo-inactive uppercase">
+                                Kept in full from here
+                              </span>
+                              <span className="h-px flex-1 bg-kumo-line/60" aria-hidden="true" />
+                            </div>
+                          </div>
+                        );
+                      }
+
                       if (entry.type === "compactionBoundary") {
                         const expanded = expandedCompactions.has(entry.boundary.to);
+                        const kept = entry.keptRows;
+                        const summary = (
+                          <div className="themed-surface-inset mt-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3.5">
+                            {kept !== undefined && (
+                              // Says what the agent traded away and what it still has, since the
+                              // marker sits at the request rather than at the cut it describes.
+                              <p className="mb-3 text-[12px] leading-[17px] text-kumo-subtle">
+                                The agent reads this in place of everything earlier in the chat.{" "}
+                                {kept === 0
+                                  ? "Nothing after it was kept."
+                                  : `The ${kept === 1 ? "message" : `${kept} messages`} after the cut ${kept === 1 ? "was" : "were"} kept in full.`}
+                              </p>
+                            )}
+                            <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
+                              <MarkdownMessage message={entry.boundary.summary} />
+                            </div>
+                          </div>
+                        );
+
+                        // Announced at the user's request: an event where they asked, not a rule
+                        // across the thread. The rule belongs at the cut, and appears there when
+                        // this is opened.
+                        if (entry.requestedBy) {
+                          return (
+                            <div key={entry.key} className={`${entryTopClass} max-w-[860px] py-1`}>
+                              <button
+                                type="button"
+                                onClick={() => toggleCompactionSummary(entry.boundary.to)}
+                                aria-expanded={expanded}
+                                className="inline-flex cursor-pointer items-center gap-3 rounded-md px-1.5 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
+                              >
+                                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                  <Brain size={16} />
+                                </span>
+                                <span className="font-medium">
+                                  {entry.requestedBy.name} compacted the context
+                                </span>
+                                <CaretRight
+                                  size={11}
+                                  weight="bold"
+                                  className={`transition-transform duration-150 ease-out ${expanded ? "rotate-90" : ""}`}
+                                />
+                              </button>
+                              {expanded && summary}
+                            </div>
+                          );
+                        }
+
                         return (
                           <div key={entry.key} className={`${entryTopClass} mb-4 max-w-[860px]`}>
                             <div className="flex items-center gap-3" role="separator" aria-label="Context compacted">
@@ -6455,13 +6564,7 @@ function ChatInterface({
                               </button>
                               <span className="h-px flex-1 bg-kumo-line" aria-hidden="true" />
                             </div>
-                            {expanded && (
-                              <div className="themed-surface-inset mt-3 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3.5">
-                                <div className={`min-w-0 text-[13px] leading-[19px] ${styles.markdownContent}`}>
-                                  <MarkdownMessage message={entry.boundary.summary} />
-                                </div>
-                              </div>
-                            )}
+                            {expanded && summary}
                           </div>
                         );
                       }

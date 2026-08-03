@@ -95,63 +95,78 @@ describe("computeMessageStates compaction seeding", () => {
   });
 });
 
-describe("built-in slash commands in the transcript", () => {
-  // `/compact` carries no prompt and gets no provider reply, so a bubble for it would be empty. The
-  // compaction boundary is what shows the user their command took effect.
-  it("shows no entry for a built-in command", () => {
-    const entries = buildChatDisplayEntries([
-      message(1, {type: "slashCommand", request: {id: {builtin: true, commandId: "compact"}, args: ""}}),
-    ], new Map());
-
-    expect(entries).toEqual([]);
-  });
-
-  // A gatekeeper command still shows: it expands to a prompt the user should be able to read.
-  it("still shows a gatekeeper command", () => {
-    const entries = buildChatDisplayEntries([
-      message(1, {type: "slashCommand", request: {id: {gatekeeperId: 2, commandId: "deploy"}, args: "prod"}}),
-    ], new Map());
-
-    expect(entries).toHaveLength(1);
-  });
-});
-
-describe("compaction boundary placement", () => {
+describe("announcing a compaction", () => {
+  const compact = (sequence: number) => message(sequence,
+    {type: "slashCommand", request: {id: {builtin: true, commandId: "compact"}, args: ""}});
   const boundary = (to: number): CompactionBoundary => ({to, summary: `summary ${to}`});
 
-  // The marker belongs where the cut fell, not above the thread: once earlier messages are loaded
-  // around it, a marker pinned to the top would claim they had been summarized away.
-  it("marks the cut between the messages it separates", () => {
+  // The cut leaves a working tail, so it lands back from where the user typed. Announcing it there
+  // would put the acknowledgement out of sight, so it is announced at the request instead.
+  it("announces a requested compaction at the request", () => {
     const entries = buildChatDisplayEntries([
-      message(1, {type: "message", message: "before"}),
-      message(2, {type: "message", message: "before"}),
-      message(3, {type: "message", message: "after"}),
-    ], new Map(), [boundary(3)]);
+      message(1, {type: "message", message: "summarized"}),
+      message(2, {type: "message", message: "kept"}),
+      compact(3),
+    ], new Map(), [boundary(2)]);
 
-    expect(entries.map(entry =>
-      entry.type === "compactionBoundary" ? `|${entry.boundary.to}` : entry.type)).toEqual(
-      ["message", "message", "|3", "message"]);
+    expect(entries.map(entry => entry.type)).toEqual(
+      ["message", "compactionCut", "message", "compactionBoundary"]);
   });
 
-  // A thread compacted more than once shows every cut the loaded history covers.
-  it("marks each loaded boundary", () => {
+  // Nothing asked for it, so there is no request to announce at and the cut speaks for itself.
+  it("announces an unrequested compaction at the cut", () => {
+    const entries = buildChatDisplayEntries([
+      message(1, {type: "message", message: "summarized"}),
+      message(2, {type: "message", message: "kept"}),
+    ], new Map(), [boundary(2)]);
+
+    expect(entries.map(entry => entry.type)).toEqual(
+      ["message", "compactionBoundary", "message"]);
+  });
+
+  // A request that compacted nothing left no boundary, so claiming otherwise would be a lie.
+  it("shows nothing for a request that compacted nothing", () => {
+    expect(buildChatDisplayEntries([compact(1)], new Map())).toEqual([]);
+  });
+
+  // A later request can only produce a later cut, which is what lets each be matched to its own.
+  it("matches each request to the compaction it produced", () => {
     const entries = buildChatDisplayEntries([
       message(1, {type: "message", message: "a"}),
-      message(4, {type: "message", message: "b"}),
-      message(7, {type: "message", message: "c"}),
-    ], new Map(), [boundary(4), boundary(7)]);
+      compact(2),
+      message(3, {type: "message", message: "b"}),
+      compact(4),
+    ], new Map(), [boundary(1), boundary(3)]);
 
     expect(entries.map(entry =>
-      entry.type === "compactionBoundary" ? `|${entry.boundary.to}` : entry.type)).toEqual(
-      ["message", "|4", "message", "|7", "message"]);
+      entry.type === "compactionBoundary" ? `announce-${entry.boundary.to}` : entry.type)).toEqual(
+      ["compactionCut", "message", "announce-1", "compactionCut", "message", "announce-3"]);
   });
 
-  // Nothing older is loaded, so the marker sits at the top -- the case a fresh page hits.
-  it("marks the top when the whole page is post-boundary", () => {
+  // The announcement reports what survived the cut, so the reader can tell how much the agent still
+  // has verbatim without scrolling back to find the line.
+  it("reports how many rows the cut spared", () => {
     const entries = buildChatDisplayEntries([
-      message(5, {type: "message", message: "tail"}),
-    ], new Map(), [boundary(5)]);
+      message(1, {type: "message", message: "summarized"}),
+      message(2, {type: "message", message: "kept"}),
+      message(3, {type: "message", message: "kept"}),
+      compact(4),
+    ], new Map(), [boundary(2)]);
 
-    expect(entries[0].type).toBe("compactionBoundary");
+    const announcement = entries.find(entry => entry.type === "compactionBoundary");
+    expect(announcement).toMatchObject({keptRows: 2});
+  });
+
+  // Compaction that ran on its own is not swept up by a later request.
+  it("leaves an unrequested compaction at its cut when a request follows", () => {
+    const entries = buildChatDisplayEntries([
+      message(1, {type: "message", message: "a"}),
+      message(3, {type: "message", message: "b"}),
+      compact(4),
+    ], new Map(), [boundary(1), boundary(3)]);
+
+    expect(entries.map(entry =>
+      entry.type === "compactionBoundary" ? `announce-${entry.boundary.to}` : entry.type)).toEqual(
+      ["announce-1", "message", "compactionCut", "message", "announce-3"]);
   });
 });
