@@ -1,0 +1,105 @@
+.github/workflows/publish-release.yml
+  s_26c0be70719a03::t_b8ed5f0d60ddf4 1-59
+.gitlab-ci.yml
+  s_26c0be70719a03::t_0f7fb03feb0588 7,52-115
+package.json
+  s_26c0be70719a03::t_d995898cffc911 18
+packages/gatekeeper-github/deploy-inputs.json
+  s_26c0be70719a03::t_0484853591e19e 1-20
+packages/gatekeeper-google/deploy-inputs.json
+  s_26c0be70719a03::t_da487b36889ffd 1-21
+packages/gatekeeper-notion/deploy-inputs.json
+  s_26c0be70719a03::t_011a34eb8854db 1-20
+packages/gatekeeper-slack/deploy-inputs.json
+  s_26c0be70719a03::t_505d4569a9f2b5 1-20
+pnpm-lock.yaml
+  s_26c0be70719a03::t_a2767e4262bd3b 20-22,2522-2524,5867-5868
+scripts/release-hash.test.js
+  s_26c0be70719a03::t_0a7b2639cadebf 1-91
+scripts/release-manifest.test.js
+  s_26c0be70719a03::t_522a9b8d517963 1-193
+scripts/release-promote.test.js
+  s_26c0be70719a03::t_69848359e307b7 1-33
+scripts/release/build-release.mjs
+  s_26c0be70719a03::t_6e0c47409197e2 1-150
+scripts/release/hash-lib.mjs
+  s_26c0be70719a03::t_e95708f77df12c 1-114
+scripts/release/manifest-lib.mjs
+  s_26c0be70719a03::t_3f6cdab6e95393 1-261
+scripts/release/promote-release.mjs
+  s_26c0be70719a03::t_fb9074f6267956 1-149
+scripts/release/upload-release.mjs
+  s_26c0be70719a03::t_7ea31e5bc9302f 1-110
+scripts/testdata/fixture-assets/access/assets/app.js
+  s_26c0be70719a03::t_2a6fffe3db7646 1
+scripts/testdata/fixture-assets/access/assets/shared.css
+  s_26c0be70719a03::t_80c41b1844e8b2 1
+scripts/testdata/fixture-assets/access/index.html
+  s_26c0be70719a03::t_4384a177730171 1
+scripts/testdata/fixture-assets/password/assets/app.js
+  s_26c0be70719a03::t_f14f6b662a9319 1
+scripts/testdata/fixture-assets/password/assets/shared.css
+  s_26c0be70719a03::t_2a3a7f7c757902 1
+scripts/testdata/fixture-assets/password/index.html
+  s_26c0be70719a03::t_755bd76b41d2b8 1
+scripts/testdata/fixture-bundles/gatekeeper-cloudflare/cloudflare.js
+  s_26c0be70719a03::t_c08bab468a908b 1
+scripts/testdata/fixture-bundles/gatekeeper-confluence/confluence.js
+  s_26c0be70719a03::t_f6260bc433f9cb 1
+scripts/testdata/fixture-bundles/gatekeeper-context/context.js
+  s_26c0be70719a03::t_34dd6c207b93c5 1
+scripts/testdata/fixture-bundles/gatekeeper-email/email.js
+  s_26c0be70719a03::t_c6388500af6c8e 1
+scripts/testdata/fixture-bundles/gatekeeper-github/github.js
+  s_26c0be70719a03::t_dcbb390b2f05de 1
+scripts/testdata/fixture-bundles/gatekeeper-google/README.md
+  s_26c0be70719a03::t_89f78f093d7f8c 1
+scripts/testdata/fixture-bundles/gatekeeper-google/abc123-types.txt
+  s_26c0be70719a03::t_4c774f208f2752 1
+scripts/testdata/fixture-bundles/gatekeeper-google/google.js
+  s_26c0be70719a03::t_fde6e5696d60f5 1
+scripts/testdata/fixture-bundles/gatekeeper-google/google.js.map
+  s_26c0be70719a03::t_0e95a06a03def9 1
+scripts/testdata/fixture-bundles/gatekeeper-homeassistant/homeassistant.js
+  s_26c0be70719a03::t_89d26631901ae4 1
+scripts/testdata/fixture-bundles/gatekeeper-linear/linear.js
+  s_26c0be70719a03::t_1fe3bec43d7f32 1
+scripts/testdata/fixture-bundles/gatekeeper-mcp-portal/mcp-portal.js
+  s_26c0be70719a03::t_c727c9cbdbcad3 1
+scripts/testdata/fixture-bundles/gatekeeper-mcp/mcp.js
+  s_26c0be70719a03::t_7396d9fc937372 1
+scripts/testdata/fixture-bundles/gatekeeper-notion/notion.js
+  s_26c0be70719a03::t_7d7a64e5078533 1
+scripts/testdata/fixture-bundles/gatekeeper-scheduler/scheduler.js
+  s_26c0be70719a03::t_67b11001307436 1
+scripts/testdata/fixture-bundles/gatekeeper-slack/slack.js
+  s_26c0be70719a03::t_a37a1f5f840b62 1
+scripts/testdata/fixture-bundles/gatekeeper-spotify/spotify.js
+  s_26c0be70719a03::t_e6432603ae1d88 1
+scripts/testdata/fixture-bundles/gatekeeper-supabase/supabase.js
+  s_26c0be70719a03::t_988dfaff630b01 1
+scripts/testdata/fixture-bundles/gatekeeper-zoominfo/zoominfo.js
+  s_26c0be70719a03::t_2d6cd8e936b23d 1
+scripts/testdata/fixture-bundles/router/index.js
+  s_26c0be70719a03::t_c34237fb2a8d61 1
+scripts/testdata/fixture-bundles/workshop-backend/server.js
+  s_26c0be70719a03::t_19632a776dff90 1
+scripts/testdata/golden-manifest.json
+  s_26c0be70719a03::t_c0297ac1b661f0 1-1204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d5675eac89515931cf71262af2468abef14c9160",
+  "prompts": {},
+  "sessions": {
+    "s_26c0be70719a03": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "efb0fb21-f21d-4d25-99e3-8bef537b83e0",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Maximo Guk <maximo@cloudflare.com>"
+    }
+  }
+}
