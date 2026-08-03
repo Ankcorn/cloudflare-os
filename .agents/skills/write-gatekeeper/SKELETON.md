@@ -289,8 +289,8 @@ export class MyUserImpl extends WorkerEntrypoint<Env, MyUserImplProps>
 
 // ---------------------------------------------------------------------------
 // Verifier — answers "can this observer access X?" against the OBSERVER's own credentials.
-// Remove the non-standard method (and make it a strategy-D no-op verifier) if any collaborator may
-// observe; keep/extend it for strategy B (single-unit ACL) or C (data-set tracking). See SKILL.md.
+// For strategy D, replace this with a no-op public method; an empty WorkerEntrypoint is not registered
+// in ctx.exports. Keep/extend it for strategy B (single-unit ACL) or C (data-set tracking). See SKILL.md.
 
 type MyVerifierProps = {
   userObjectId: string;

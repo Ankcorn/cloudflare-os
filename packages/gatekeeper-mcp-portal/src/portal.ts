@@ -350,7 +350,10 @@ export class GatekeeperUserImpl
 @validateRpc()
 export class McpPortalVerifier
   extends WorkerEntrypoint<Env>
-  implements GatekeeperUserVerifier {}
+  implements GatekeeperUserVerifier
+{
+  verify(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Resource configurator

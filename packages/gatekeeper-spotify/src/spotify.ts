@@ -740,10 +740,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 // ---------------------------------------------------------------------------
 // Verifier
 //
-// A trivial verifier with no methods, since Spotify's observer strategy is "low-stakes" (no
-// information-flow tracking). See SpotifyGatekeeperImpl.addObserver.
+// A trivial verifier since Spotify's observer strategy is low-stakes.
 @validateRpc()
-export class SpotifyVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {}
+export class SpotifyVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
+  verify(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Action model, caching, and simulation (gatekeeper responsibilities 4-6).
