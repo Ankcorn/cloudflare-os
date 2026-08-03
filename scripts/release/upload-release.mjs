@@ -7,9 +7,13 @@
 // releases/<id>/manifest.json is what marks a release complete, so a crashed upload never
 // leaves a manifest pointing at missing blobs.
 //
+// With --candidate the manifest lands under candidates/<id>/manifest.json instead — invisible
+// to the deploy service (which scans only releases/) until promote-release.mjs copies it over
+// after the e2e gate passes. Blob handling is identical either way.
+//
 // Env: R2_ENDPOINT (https://<account>.r2.cloudflarestorage.com), R2_BUCKET,
 //      R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
-// Usage: node scripts/release/upload-release.mjs --release <dir>
+// Usage: node scripts/release/upload-release.mjs --release <dir> [--candidate]
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -25,9 +29,10 @@ function requireEnv(name) {
 }
 
 function parseArgs(argv) {
-  const args = { release: undefined };
+  const args = { release: undefined, candidate: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--release") args.release = resolve(argv[++i]);
+    else if (argv[i] === "--candidate") args.candidate = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
   }
   if (!args.release) throw new Error("--release <dir> is required");
@@ -87,7 +92,8 @@ async function main() {
   await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, worker));
   console.log(`blobs: ${uploaded} uploaded, ${skipped} already present`);
 
-  const manifestKey = `releases/${manifest.releaseId}/manifest.json`;
+  const manifestKey =
+    `${args.candidate ? "candidates" : "releases"}/${manifest.releaseId}/manifest.json`;
   const put = await client.fetch(keyUrl(manifestKey), {
     method: "PUT",
     body: readFileSync(join(args.release, "manifest.json")),
@@ -96,7 +102,9 @@ async function main() {
   if (!put.ok) {
     throw new Error(`PUT ${manifestKey}: ${put.status} ${await put.text()}`);
   }
-  console.log(`release complete: ${manifestKey}`);
+  console.log(args.candidate
+    ? `candidate uploaded (not yet visible to the deploy service): ${manifestKey}`
+    : `release complete: ${manifestKey}`);
 }
 
 await main();
