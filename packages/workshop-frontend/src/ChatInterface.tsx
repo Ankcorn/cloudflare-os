@@ -15,6 +15,7 @@ import {
 import { reportIssue } from './errorReporting'
 import {
   DropdownMenu,
+  Popover,
   Tooltip,
   useKumoToastManager,
 } from "@cloudflare/kumo";
@@ -202,9 +203,9 @@ type DraftChatState = {
 type ChatListScope = "direct" | "agents" | "all";
 
 const CHAT_LIST_SCOPE_LABELS: Record<ChatListScope, string> = {
-  all: "All conversations",
-  direct: "Direct conversations",
-  agents: "Agent runs",
+  all: "All",
+  direct: "Started by people",
+  agents: "Started by agents",
 };
 
 const SHOW_THINKING_TRACES_KEY = "showThinkingTraces";
@@ -3271,6 +3272,74 @@ function getSavedEditsDiscardLabel(
   return base + describeCreatedGadgetDeletion(createdGadgetTitles);
 }
 
+function DiscardPendingChangesPopover({
+  open,
+  disabled,
+  isDiscarding,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  disabled: boolean;
+  isDiscarding: boolean;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <Popover.Trigger
+        render={
+          <button
+            type="button"
+            disabled={disabled}
+            className="inline-flex h-[30px] cursor-pointer items-center justify-center rounded-md border border-kumo-fill bg-kumo-base px-2.5 text-[12px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default transition-colors enabled:hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Discard…
+          </button>
+        }
+      />
+      <Popover.Content
+        align="center"
+        side="top"
+        sideOffset={8}
+        positionMethod="fixed"
+        className="themed-floating-shadow !z-[1100] !w-[min(300px,calc(100vw-24px))] !min-w-0 overflow-hidden rounded-xl border border-kumo-line bg-kumo-base !p-0 !outline-none [&>:first-child]:hidden"
+      >
+        <div className="px-3.5 pb-2.5 pt-3">
+          <Popover.Title className="text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+            Discard all pending changes?
+          </Popover.Title>
+          <p className="mt-0.5 text-[11.5px] leading-4 tracking-[-0.15px] text-kumo-subtle">
+            Return to the last accepted version. Any gadgets created by these changes will be
+            permanently deleted. Pending changes can&apos;t be restored.
+          </p>
+          <p className="mt-2 border-t border-kumo-line pt-2 text-[11px] leading-[15px] tracking-[-0.1px] text-kumo-inactive">
+            Use the <ArrowUUpLeft size={12} className="mx-0.5 inline-block align-[-2px]" aria-hidden="true" /><span className="sr-only">undo arrow</span> under any agent response to discard from that turn onward.
+          </p>
+        </div>
+        <div className="flex items-center justify-end gap-0.5 border-t border-kumo-line px-2 py-1.5">
+          <button
+            type="button"
+            disabled={isDiscarding}
+            onClick={() => onOpenChange(false)}
+            className="flex h-6 cursor-pointer items-center rounded-md px-2 text-[12px] font-medium tracking-[-0.15px] text-kumo-inactive transition-colors enabled:hover:bg-kumo-tint enabled:hover:text-kumo-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={disabled || isDiscarding}
+            onClick={onConfirm}
+            className="flex h-6 cursor-pointer items-center rounded-md px-2 text-[12px] font-medium tracking-[-0.15px] text-kumo-default transition-colors enabled:hover:bg-kumo-tint enabled:hover:text-kumo-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {isDiscarding ? "Discarding..." : "Discard changes"}
+          </button>
+        </div>
+      </Popover.Content>
+    </Popover>
+  );
+}
+
 // Collapse adjacent work rows; fold trailing work into the preceding assistant
 // message so one turn reads as one tool/resource run.
 function transcriptToolCalls(toolCalls: AiToolCall[]): AiToolCall[] {
@@ -3872,6 +3941,12 @@ function ChatInterface({
     title: string;
   } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [discardChangesTarget, setDiscardChangesTarget] = useState<{
+    chatId: number;
+  } | null>(null);
+  const [discardingChangesChatIds, setDiscardingChangesChatIds] = useState(
+    () => new Set<number>(),
+  );
 
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
@@ -4373,11 +4448,14 @@ function ChatInterface({
     scrollMessagesToBottom,
   ]);
 
-  // Always scroll to bottom when switching chats
+  // Always scroll to bottom and close transient chat UI when switching chats.
   useLayoutEffect(() => {
     isScrolledToBottomRef.current = true;
     scrollMessagesToBottom();
   }, [selectedChatId, scrollMessagesToBottom]);
+  useEffect(() => {
+    setDiscardChangesTarget(null);
+  }, [selectedChatId]);
 
   // Initialize title input when selecting a chat
   useEffect(() => {
@@ -5104,6 +5182,36 @@ function ChatInterface({
     }
   };
 
+  const handleDiscardPendingChanges = async () => {
+    if (!discardChangesTarget) return;
+
+    const target = discardChangesTarget;
+    setDiscardingChangesChatIds((chatIds) => new Set(chatIds).add(target.chatId));
+    try {
+      // Rewind durable checkpoints first. If discarding the live editor draft then fails, the user
+      // still retains those edits rather than losing both layers after a partial operation.
+      await overseer.revertChanges(target.chatId, 0);
+      if ((draftRef.current.get(target.chatId)?.entries.length ?? 0) > 0) {
+        await overseer.discardChatDraftChanges(target.chatId);
+        draftRef.current.delete(target.chatId);
+        forceUpdate();
+      }
+      setDiscardChangesTarget((current) =>
+        current?.chatId === target.chatId ? null : current,
+      );
+      toasts.add({ title: "Pending changes discarded", variant: "success" });
+    } catch (err) {
+      console.error("Failed to discard pending changes:", err);
+      toasts.add({ title: "Failed to discard pending changes", variant: "error" });
+    } finally {
+      setDiscardingChangesChatIds((chatIds) => {
+        const next = new Set(chatIds);
+        next.delete(target.chatId);
+        return next;
+      });
+    }
+  };
+
   const applyActionLogUpdateToCachedMessages = (record: ActionLogEntry): boolean => {
     let changed = false;
     const locations = cacheRef.current.actionMessages.get(record.id);
@@ -5390,22 +5498,6 @@ function ChatInterface({
     },
     [currentMessages, messageStates],
   );
-
-  // Titles of gadgets created by this chat's still-pending changes. Used by the accept banner to
-  // note that accepting keeps the new gadgets.
-  const pendingCreatedGadgetTitles = useMemo(() => {
-    const titles: string[] = [];
-    for (const m of currentMessages) {
-      if (
-        m.type === "changes" &&
-        m.createdGadgets &&
-        (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
-      ) {
-        titles.push(...m.createdGadgets.map((g) => g.title));
-      }
-    }
-    return titles;
-  }, [currentMessages, messageStates]);
 
   // Track the last visible agent message in each completed turn. This keeps hover actions like
   // copy/timestamp on the final response instead of repeating them for every streamed step.
@@ -6009,14 +6101,14 @@ function ChatInterface({
               // the all-empty case is handled by the outer chatList.length check.
               <div className="py-8 text-center">
                 <p className="text-[13px] leading-[18px] text-kumo-inactive">
-                  No {chatListScope === "agents" ? "agent runs" : "direct conversations"} yet
+                  No conversations started by {chatListScope === "agents" ? "agents" : "people"} yet
                 </p>
                 <button
                   type="button"
                   onClick={() => setChatListScope("all")}
                   className="mt-2 cursor-pointer rounded-md px-2 py-1 text-[12px] leading-4 font-medium text-kumo-subtle transition-colors duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none"
                 >
-                  Show all conversations
+                  Show all
                 </button>
               </div>
             ) : (
@@ -6080,7 +6172,7 @@ function ChatInterface({
                           <Tooltip content="This conversation has pending changes" asChild>
                             <span className="inline-flex flex-shrink-0 cursor-pointer items-center gap-1 text-[11px] leading-4 font-medium text-kumo-warning">
                               <span className="h-1.5 w-1.5 rounded-full bg-kumo-warning" />
-                              Pending
+                              Pending changes
                             </span>
                           </Tooltip>
                         ) : null}
@@ -6727,7 +6819,7 @@ function ChatInterface({
                                       {msg.author.name}{" "}
                                       {isMerge
                                         ? "accepted changes"
-                                        : "restored an earlier draft"}
+                                        : "discarded changes"}
                                     </span>
                                   </span>
                                 </Tooltip>
@@ -7076,11 +7168,13 @@ function ChatInterface({
                     draftUpdateBanner={(() => {
                       if (!currentChatMetadata?.hasProposedChanges) return null;
 
-                      // Merge through the newest still-proposed batch, but never below the cut the
+                      // Accept through the newest still-proposed batch, but never below the cut the
                       // server seeds the compacted prefix at. That prefix is accepted as a unit, so
                       // addressing anything under it drains nothing -- which is reachable both when
                       // it only created gadgets (no Yjs bytes, hence no entry here) and when paging
-                      // backward leaves the newest loaded batch below the boundary.
+                      // backward leaves the newest loaded batch below the boundary. Discard-all uses
+                      // sequence zero because compacted batches retain their original, earlier
+                      // sequences; the synthetic prefix sequence is only meaningful when merging.
                       const { activeChanges } = messageStates;
                       const cuts = [
                         ...(activeChanges.length > 0
@@ -7090,37 +7184,42 @@ function ChatInterface({
                       ];
                       if (cuts.length === 0) return null;
                       const mergeThrough = Math.max(...cuts);
+                      const isDiscardingChanges = discardingChangesChatIds.has(
+                        currentChatMetadata.id,
+                      );
+                      const changesActionsDisabled = isAgentActive || isDiscardingChanges;
                       return (
-                        <div className="themed-surface-inset relative flex items-center gap-3 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
+                        <div className="themed-surface-inset relative flex items-center gap-2 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
-                          <span className="min-w-0 flex-1 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                            {pendingCreatedGadgetTitles.length > 0
-                              ? `Accept changes to keep ${
-                                  pendingCreatedGadgetTitles.length === 1
-                                    ? `the new gadget “${pendingCreatedGadgetTitles[0]}”`
-                                    : "the new gadgets"
-                                } and save the edits.`
-                              : "Accept changes to save them to the gadget."}
+                          <span className="min-w-0 flex-1 truncate text-[12px] font-medium leading-4 tracking-[-0.2px] text-kumo-default">
+                            Pending changes
                           </span>
-                          <Tooltip content={isAgentActive ? "Wait for the agent to finish before accepting changes." : "Accept the current draft update and save it to your gadget."} asChild>
+                          <DiscardPendingChangesPopover
+                            open={discardChangesTarget?.chatId === currentChatMetadata.id}
+                            disabled={changesActionsDisabled}
+                            isDiscarding={isDiscardingChanges}
+                            onOpenChange={(open) => {
+                              if (isDiscardingChanges) return;
+                              setDiscardChangesTarget(open ? {
+                                chatId: currentChatMetadata.id,
+                              } : null);
+                            }}
+                            onConfirm={handleDiscardPendingChanges}
+                          />
+                          <Tooltip content={isAgentActive
+                            ? "Wait for the agent to finish before accepting changes."
+                            : isDiscardingChanges
+                              ? "Wait for pending changes to finish discarding."
+                              : "Keep this draft and make it the gadget's current version."} asChild>
                             <WorkshopButton
-                              disabled={isAgentActive}
+                              disabled={changesActionsDisabled}
                               onClick={() =>
                                 handleMergeChanges(mergeThrough, { includeDraft: true })
                               }
                               tone="primary"
-                              className="!h-7 !cursor-pointer gap-1 text-[12px]"
+                              className="!h-7 !cursor-pointer !rounded-md !border-transparent !shadow-none gap-1 text-[12px]"
                             >
-                              <svg
-                                width="10"
-                                height="10"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2.5"
-                              >
-                                <polyline points="20 6 9 17 4 12" />
-                              </svg>
+                              <Check size={11} weight="bold" />
                               Accept changes
                             </WorkshopButton>
                           </Tooltip>
