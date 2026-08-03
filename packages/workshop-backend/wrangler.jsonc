@@ -23,6 +23,7 @@
   // tradeoff for dev.
   "compatibility_flags": [
     "allow_irrevocable_stub_storage",
+    "enhanced_error_serialization",
     "nodejs_als",
     "global_fetch_strictly_public"
   ],
