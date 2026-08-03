@@ -1,5 +1,12 @@
 import { Temporal } from "temporal-polyfill/implementation";
-import type { CalendarRule, OneShotTime, ScheduleOptions, Weekday } from "./types.js";
+import type {
+  CalendarRule,
+  NormalizedScheduleOccurrences,
+  OneShotTime,
+  RecurringScheduleOptions,
+  ScheduleOptions,
+  Weekday,
+} from "./types.js";
 import { WEEKDAY_TOKENS, type CalendarScheduleRule, type ScheduleSpec } from "./schedule-types.js";
 
 /** Minimum supported elapsed interval. */
@@ -33,6 +40,34 @@ export function normalizeScheduleOptions(options: ScheduleOptions): ScheduleOpti
       MAX_SCHEDULE_DESCRIPTION_LENGTH,
     ),
   };
+}
+
+/** Validates presentation metadata and an optional finite recurrence bound. */
+export function normalizeRecurringScheduleOptions(
+  options: RecurringScheduleOptions,
+  spec: ScheduleSpec,
+  registeredAt: number,
+): ScheduleOptions & { occurrences?: NormalizedScheduleOccurrences } {
+  const normalized = normalizeScheduleOptions(options);
+  const bound = options.occurrences;
+  if (bound === undefined) return normalized;
+  if (!bound || typeof bound !== "object") {
+    throw new TypeError("Schedule occurrences must specify count or until.");
+  }
+  if ("count" in bound && "until" in bound) {
+    throw new TypeError("Schedule occurrences must specify count or until, not both.");
+  }
+  if ("count" in bound) {
+    assertSafePositiveInteger(bound.count, "Schedule occurrence count");
+    return { ...normalized, occurrences: { count: bound.count } };
+  }
+  // An object carrying neither key lands here, where normalizeOneShot rejects the missing time.
+  const { fireAt } = normalizeOneShot(bound.until, registeredAt);
+  const first = nextFireAfter(spec, registeredAt);
+  if (first === undefined || first > fireAt) {
+    throw new RangeError("Schedule occurrence cutoff precedes the first occurrence.");
+  }
+  return { ...normalized, occurrences: { until: fireAt } };
 }
 
 /** Creates a canonical elapsed-time schedule anchored at registration. */
@@ -96,7 +131,10 @@ export function normalizeCalendarRule(rule: CalendarRule, registeredAtMs: number
 }
 
 /** Creates a canonical absolute one-shot schedule. */
-export function normalizeOneShot(when: OneShotTime | number, now: number): ScheduleSpec {
+export function normalizeOneShot(
+  when: OneShotTime | number,
+  now: number,
+): Extract<ScheduleSpec, { kind: "once" }> {
   assertTimestamp(now);
   if (typeof when === "number") {
     const spec: ScheduleSpec = { kind: "once", fireAt: when, timeZone: "UTC" };

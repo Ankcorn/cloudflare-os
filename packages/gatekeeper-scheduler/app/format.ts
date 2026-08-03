@@ -53,6 +53,20 @@ export function formatCadence(cadence: ScheduleCadence, locale = "en-US"): strin
   return `${prefix} on ${days} at ${time}`;
 }
 
+/** Describes a finite recurrence bound and, for a counted bound, progress toward it. */
+export function formatOccurrences(
+  schedule: ManagementSchedule,
+  locale = "en-US",
+): string | undefined {
+  const bound = schedule.occurrences;
+  if (!bound) return undefined;
+  if ("count" in bound) {
+    const noun = bound.count === 1 ? "occurrence" : "occurrences";
+    return `${schedule.occurrenceCount ?? 0} of ${bound.count} ${noun}`;
+  }
+  return `until ${formatAbsolute(bound.until, scheduleTimeZone(schedule), locale)}`;
+}
+
 export function formatTiming(
   schedule: ManagementSchedule,
   now = Date.now(),
@@ -63,7 +77,7 @@ export function formatTiming(
   const absolute = formatAbsolute(timestamp, scheduleTimeZone(schedule), locale);
   if (schedule.status === "active") {
     return {
-      relative: `Next run ${formatRelative(timestamp - now, locale)}`,
+      relative: `Next run ${formatRelative(timestamp - now, locale)}${schedule.retrying ? " (retry)" : ""}`,
       absolute,
     };
   }
@@ -81,13 +95,17 @@ export function formatTiming(
     return {
       relative: `Completed ${formatRelative(schedule.completedAt - now, locale)}`,
       absolute,
-      diagnostic: "This one-time task completed.",
+      diagnostic: schedule.occurrences
+        ? "This recurring task used its last scheduled occurrence."
+        : "This one-time task completed.",
     };
   }
   return {
     relative: `Expired ${formatRelative(schedule.expiredAt - now, locale)}`,
     absolute,
-    diagnostic: "This one-time task passed without delivery.",
+    diagnostic: schedule.cadence.kind === "once"
+      ? "This one-time task passed without delivery."
+      : "This recurring task's cutoff passed before its first occurrence.",
   };
 }
 

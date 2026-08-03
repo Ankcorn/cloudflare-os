@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CaretLeft, CaretRight, Check, PencilSimple, Pulse, X } from '@phosphor-icons/react'
+import { CaretLeft, CaretRight, Check, Lightning, PencilSimple, Pulse, X } from '@phosphor-icons/react'
 import { FormatGlyph } from './components/format/FormatVisuals'
 import { Tooltip } from '@cloudflare/kumo'
 import type { WorkpieceId, WorkpieceSummary } from '@gadgets/workshop-shared/api'
@@ -16,6 +16,8 @@ interface WorkpiecePickerProps {
   // The gadget the agent is currently streaming edits into, if any. Shown as an activity dot when
   // it isn't the selected one (e.g. because the user pinned their selection mid-turn).
   agentEditingId?: WorkpieceId | null
+  // Gadgets with at least one enabled hook, i.e. whose code can be woken by an external event.
+  hookedGadgetIds: ReadonlySet<WorkpieceId>
   expanded: boolean
   onExpandedChange: (expanded: boolean) => void
   onSelect: (id: WorkpieceId) => void
@@ -28,6 +30,7 @@ export default function WorkpiecePicker({
   gadgets,
   selectedId,
   agentEditingId,
+  hookedGadgetIds,
   expanded,
   onExpandedChange,
   onSelect,
@@ -75,6 +78,7 @@ export default function WorkpiecePicker({
           const isSelected = gadget.id === selectedId
           const isPending = gadget.chatId !== undefined
           const isAgentEditing = agentEditingId === gadget.id && !isSelected
+          const hasHook = hookedGadgetIds.has(gadget.id)
 
           if (expanded && editing?.id === gadget.id) {
             return (
@@ -120,7 +124,7 @@ export default function WorkpiecePicker({
                   : 'text-kumo-default hover:bg-kumo-tint'
               }`}
             >
-              <Tooltip content={expanded ? gadget.title : `${gadget.title}${isPending ? ' (Draft)' : ''}`} asChild>
+              <Tooltip content={`${gadget.title}${!expanded && isPending ? ' (Draft)' : ''}${hasHook ? ' · Hooks enabled' : ''}`} asChild>
                 <button
                   type="button"
                   onClick={() => onSelect(gadget.id)}
@@ -151,6 +155,17 @@ export default function WorkpiecePicker({
                     ) : (
                       <span className="absolute bottom-1 right-1 h-1.5 w-1.5 rounded-full border border-kumo-base bg-kumo-brand" />
                     )
+                  )}
+                  {hasHook && (
+                    <span
+                      role="img"
+                      aria-label="Hooks enabled"
+                      className={expanded
+                        ? 'flex-shrink-0 text-kumo-inactive'
+                        : 'absolute bottom-0.5 left-0.5 rounded-full border border-kumo-base bg-kumo-base text-kumo-inactive'}
+                    >
+                      <Lightning size={expanded ? 14 : 10} weight="fill" />
+                    </span>
                   )}
                 </button>
               </Tooltip>

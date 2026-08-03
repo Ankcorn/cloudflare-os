@@ -1,4 +1,5 @@
 import type { ScheduleSpec } from "./schedule-types.js";
+import type { NormalizedScheduleOccurrences } from "./types.js";
 import { initialNextFire, nextFireAfter } from "./scheduler-core.js";
 
 /** Maximum callback attempts for one logical run. */
@@ -13,22 +14,28 @@ export type ScheduleRegistration = {
   workspaceId: string;
   scheduleId: string;
   spec: ScheduleSpec;
+  occurrences?: NormalizedScheduleOccurrences;
+};
+
+type ScheduleProgress = ScheduleRegistration & {
+  /** Logical occurrences started so far. Set only when `occurrences` bounds the recurrence. */
+  occurrenceCount?: number;
 };
 
 /** An enabled schedule waiting for its next occurrence. */
-export type ActiveSchedule = ScheduleRegistration & {
+export type ActiveSchedule = ScheduleProgress & {
   status: "active";
   nextFire: number;
 };
 
 /** A one-shot whose firing instant passed without delivery. */
-export type ExpiredSchedule = ScheduleRegistration & {
+export type ExpiredSchedule = ScheduleProgress & {
   status: "expired";
   expiredAt: number;
 };
 
 /** A logical run currently crossing an external delivery boundary. */
-export type PendingSchedule = ScheduleRegistration & {
+export type PendingSchedule = ScheduleProgress & {
   status: "pending";
   stage: "admission" | "delivery";
   runId: string;
@@ -39,7 +46,7 @@ export type PendingSchedule = ScheduleRegistration & {
 };
 
 /** A logical run waiting for its next callback attempt. */
-export type RetryingSchedule = ScheduleRegistration & {
+export type RetryingSchedule = ScheduleProgress & {
   status: "retrying";
   runId: string;
   scheduledTime: number;
@@ -49,7 +56,7 @@ export type RetryingSchedule = ScheduleRegistration & {
 };
 
 /** A logical run that exhausted its callback attempt budget. */
-export type DeadSchedule = ScheduleRegistration & {
+export type DeadSchedule = ScheduleProgress & {
   status: "dead";
   runId: string;
   attempts: number;
@@ -57,10 +64,9 @@ export type DeadSchedule = ScheduleRegistration & {
   failureCode: "authorization_failed" | "callback_failed";
 };
 
-/** A one-shot whose callback completed successfully. */
-export type CompletedSchedule = ScheduleRegistration & {
+/** A one-shot that was delivered, or a bounded recurrence that used its last occurrence. */
+export type CompletedSchedule = ScheduleProgress & {
   status: "completed";
-  runId: string;
   completedAt: number;
 };
 
@@ -75,9 +81,14 @@ export type EnabledSchedule =
 
 /** Creates enabled state without replaying occurrences at or before `now`. */
 export function createSchedule(registration: ScheduleRegistration, now: number): EnabledSchedule {
-  const common = copyRegistration(registration);
+  const common: ScheduleProgress = {
+    ...copyProgress(registration),
+    occurrenceCount: registration.occurrences ? 0 : undefined,
+  };
   const nextFire = initialNextFire(registration.spec, now);
-  return nextFire === undefined
+  // A bound that already passed leaves no slot to deliver, so this never ran: expired, not
+  // completed. Reachable because enabling happens well after registration validated the bound.
+  return nextFire === undefined || !withinLimit(common, nextFire)
     ? { ...common, status: "expired", expiredAt: now }
     : { ...common, status: "active", nextFire };
 }
@@ -93,19 +104,20 @@ export function beginDueRun(
     if (schedule.nextFire > now) return schedule;
     if (!runId) throw new TypeError("A run ID is required.");
     return {
-      ...schedule,
+      ...copyProgress(schedule),
       status: "pending",
       stage: "admission",
       runId,
       scheduledTime: schedule.nextFire,
       attempts: 0,
+      occurrenceCount: schedule.occurrences ? (schedule.occurrenceCount ?? 0) + 1 : undefined,
       leaseExpiresAt,
       nextFire: undefined,
     };
   }
   if (schedule.status !== "retrying" || schedule.nextAttempt > now) return schedule;
   return {
-    ...copyRegistration(schedule),
+    ...copyProgress(schedule),
     status: "pending",
     stage: "admission",
     runId: schedule.runId,
@@ -129,7 +141,7 @@ export function admitRun(
     stage: "delivery",
     attempts: schedule.attempts + 1,
     leaseExpiresAt,
-    nextFire: recurringNextFire(schedule.spec, now),
+    nextFire: recurringNextFire(schedule, now),
   };
 }
 
@@ -140,17 +152,14 @@ export function rejectRun(
   rejectedAt: number,
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "admission")) return schedule;
-  return schedule.spec.kind === "once"
-    ? {
-        ...copyRegistration(schedule),
-        status: "expired",
-        expiredAt: rejectedAt,
-      }
-    : {
-        ...copyRegistration(schedule),
-        status: "active",
-        nextFire: nextFireAfter(schedule.spec, rejectedAt)!,
-      };
+  const common = copyProgress(schedule);
+  if (schedule.spec.kind === "once") {
+    return { ...common, status: "expired", expiredAt: rejectedAt };
+  }
+  const nextFire = recurringNextFire(schedule, rejectedAt);
+  return nextFire === undefined
+    ? { ...common, status: "completed", completedAt: rejectedAt }
+    : { ...common, status: "active", nextFire };
 }
 
 /** Schedules a callback retry or marks an exhausted logical run dead. */
@@ -163,7 +172,7 @@ export function failRun(
   if (!isPending(schedule, runId, "delivery")) return schedule;
   if (schedule.attempts >= MAX_ATTEMPTS) {
     return {
-      ...copyRegistration(schedule),
+      ...copyProgress(schedule),
       status: "dead",
       runId,
       attempts: schedule.attempts,
@@ -172,13 +181,13 @@ export function failRun(
     };
   }
   return {
-    ...copyRegistration(schedule),
+    ...copyProgress(schedule),
     status: "retrying",
     runId,
     scheduledTime: schedule.scheduledTime,
     attempts: schedule.attempts,
     nextAttempt: checkedAdd(failedAt, retryDelay(schedule.attempts)),
-    nextFire: recurringNextFire(schedule.spec, failedAt),
+    nextFire: recurringNextFire(schedule, failedAt),
   };
 }
 
@@ -189,18 +198,11 @@ export function completeRun(
   completedAt: number,
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "delivery")) return schedule;
-  return schedule.spec.kind === "once"
-    ? {
-        ...copyRegistration(schedule),
-        status: "completed",
-        runId,
-        completedAt,
-      }
-    : {
-        ...copyRegistration(schedule),
-        status: "active",
-        nextFire: nextFireAfter(schedule.spec, completedAt)!,
-      };
+  const common = copyProgress(schedule);
+  const nextFire = recurringNextFire(schedule, completedAt);
+  return nextFire === undefined
+    ? { ...common, status: "completed", completedAt }
+    : { ...common, status: "active", nextFire };
 }
 
 /** Returns exponential callback retry delay for an already-consumed attempt. */
@@ -223,16 +225,24 @@ function isPending(
   );
 }
 
-function recurringNextFire(spec: ScheduleSpec, now: number): number | undefined {
-  return spec.kind === "once" ? undefined : nextFireAfter(spec, now);
+function recurringNextFire(schedule: ScheduleProgress, now: number): number | undefined {
+  if (schedule.spec.kind === "once") return undefined;
+  const nextFire = nextFireAfter(schedule.spec, now);
+  return nextFire !== undefined && withinLimit(schedule, nextFire) ? nextFire : undefined;
 }
 
-function copyRegistration(registration: ScheduleRegistration): ScheduleRegistration {
-  return {
-    workspaceId: registration.workspaceId,
-    scheduleId: registration.scheduleId,
-    spec: registration.spec,
-  };
+function copyProgress(
+  { workspaceId, scheduleId, spec, occurrences, occurrenceCount }: ScheduleProgress,
+): ScheduleProgress {
+  return { workspaceId, scheduleId, spec, occurrences, occurrenceCount };
+}
+
+function withinLimit(schedule: ScheduleProgress, nextFire: number): boolean {
+  const limit = schedule.occurrences;
+  if (!limit) return true;
+  return "count" in limit
+    ? (schedule.occurrenceCount ?? 0) < limit.count
+    : nextFire <= limit.until;
 }
 
 function checkedAdd(left: number, right: number): number {

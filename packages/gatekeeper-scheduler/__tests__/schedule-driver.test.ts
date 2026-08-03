@@ -275,6 +275,7 @@ describe("ScheduleDriver", () => {
       workspaceId: "workspace-a",
       scheduleId: "schedule-a",
       spec: { kind: "interval" as const, everyMs: 60_000, anchorMs: activationTime },
+      occurrences: { count: 2 },
       title: "Initial title",
       description: "Test capability replacement.",
       gadgetId,
@@ -289,6 +290,8 @@ describe("ScheduleDriver", () => {
         title: "Initial title",
         description: "Test capability replacement.",
         cadence: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
+        occurrences: { count: 2 },
+        occurrenceCount: 0,
         status: "active",
         nextFire: activationTime + 60_000,
       },
@@ -486,6 +489,13 @@ describe("ScheduleDriver", () => {
     });
     if (stored?.state.status !== "retrying") throw new Error("Expected retrying state");
     expect(stored.state.nextAttempt).toBeGreaterThan(Date.now());
+    expect(await driver.listWorkspace("workspace-a")).toEqual([
+      expect.objectContaining({
+        status: "active",
+        nextFire: stored.state.nextAttempt,
+        retrying: true,
+      }),
+    ]);
     expect(reportIssue).not.toHaveBeenCalled();
   });
 
@@ -521,7 +531,7 @@ describe("ScheduleDriver", () => {
     await runDurableObjectAlarm(driver);
 
     expect((await driver.getSchedule("workspace-a", "one-shot"))?.state).toEqual(
-      expect.objectContaining({ status: "completed", runId }),
+      expect.objectContaining({ status: "completed" }),
     );
     expect((await testEnv.TEST_HOOKS.read()).events).toEqual([
       "start",
@@ -1117,6 +1127,56 @@ describe("ScheduleDriver", () => {
     });
     expect(workspaceError).toContain("workspace");
     expect(reportIssue).not.toHaveBeenCalled();
+  });
+
+  it("releases the delivery capability once a schedule reaches a terminal state", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("terminal-capabilities");
+    const activationTime = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a",
+      scheduleId: "one-shot",
+      spec: { kind: "once", fireAt: activationTime + 60_000, timeZone: "UTC" },
+      title: "Terminal task",
+      description: "Releases its capability when it completes.",
+      gadgetId,
+    }, activationTime);
+
+    const capsKey = "caps:workspace-a:one-shot";
+    const before = await runInDurableObject(driver, (_i, state) => state.storage.kv.get(capsKey));
+    expect(before).toBeDefined();
+
+    await makeActiveScheduleDue(driver, "workspace-a", "one-shot");
+    await runDurableObjectAlarm(driver);
+
+    expect((await driver.getSchedule("workspace-a", "one-shot"))?.state.status).toBe("completed");
+    // The schedule can never fire again, so its stored capability must not outlive it.
+    const after = await runInDurableObject(driver, (_i, state) => state.storage.kv.get(capsKey));
+    expect(after).toBeUndefined();
+  });
+
+  it("stores no delivery capability for a schedule that is terminal at enablement", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("born-terminal-capabilities");
+    const activationTime = Date.now();
+    await enableSchedule(
+      driver,
+      {
+        workspaceId: "workspace-a",
+        scheduleId: "lapsed",
+        spec: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
+        // The cutoff precedes the first occurrence, so this recurrence is born expired.
+        occurrences: { until: activationTime - 1 },
+        title: "Lapsed task",
+        description: "Its bound passed before it could run.",
+        gadgetId,
+      },
+      activationTime,
+    );
+
+    expect((await driver.getSchedule("workspace-a", "lapsed"))?.state.status).toBe("expired");
+    const stored = await runInDurableObject(driver, (_i, state) =>
+      state.storage.kv.get("caps:workspace-a:lapsed"),
+    );
+    expect(stored).toBeUndefined();
   });
 
   it("permanently fences mutations and cleans revoked storage in bounded alarm passes", async () => {

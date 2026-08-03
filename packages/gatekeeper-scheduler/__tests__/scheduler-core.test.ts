@@ -4,10 +4,12 @@ import {
   normalizeCalendarRule,
   normalizeInterval,
   normalizeOneShot,
+  normalizeRecurringScheduleOptions,
   normalizeScheduleOptions,
   nextFireAfter,
 } from "../src/scheduler-core.js";
 import type { ScheduleSpec } from "../src/schedule-types.js";
+import type { RecurringScheduleOptions } from "../src/types.js";
 
 const ms = (iso: string) => Date.parse(iso);
 const MAX_DATE_MS = 8_640_000_000_000_000;
@@ -17,6 +19,56 @@ describe("schedule input validation", () => {
     expect(
       normalizeScheduleOptions({ title: "  Daily brief  ", description: "  Send it  " }),
     ).toEqual({ title: "Daily brief", description: "Send it" });
+  });
+
+  it("normalizes recurring occurrence limits", () => {
+    const options = { title: "Brief", description: "Send it" };
+
+    expect(
+      normalizeRecurringScheduleOptions(
+        { ...options, occurrences: { count: 3 } },
+        normalizeInterval(3_600_000, 0),
+        0,
+      ),
+    ).toEqual({ ...options, occurrences: { count: 3 } });
+
+    const registeredAt = ms("2026-08-02T00:00:00Z");
+    expect(
+      normalizeRecurringScheduleOptions(
+        {
+          ...options,
+          occurrences: {
+            until: { timeZone: "America/New_York", year: 2026, month: 8, day: 3, hour: 9, minute: 0 },
+          },
+        },
+        normalizeCalendarRule(
+          { timeZone: "America/New_York", freq: "daily", hour: 8, minute: 0 },
+          registeredAt,
+        ),
+        registeredAt,
+      ),
+    ).toEqual({ ...options, occurrences: { until: ms("2026-08-03T13:00:00Z") } });
+  });
+
+  it("rejects invalid recurring occurrence limits", () => {
+    const options = { title: "Brief", description: "Send it" };
+    const hourly = normalizeInterval(3_600_000, 0);
+    const bound = (occurrences: unknown) =>
+      normalizeRecurringScheduleOptions(
+        { ...options, occurrences } as RecurringScheduleOptions,
+        hourly,
+        0,
+      );
+
+    for (const count of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => bound({ count })).toThrow("positive safe integer");
+    }
+    for (const shape of [{}, [], 5, "x", null, { until: undefined }]) {
+      expect(() => bound(shape)).toThrow(TypeError);
+    }
+    expect(() => bound({ count: 3, until: 1_000 })).toThrow("not both");
+    // A cutoff before the first occurrence would enable a schedule that can never run.
+    expect(() => bound({ until: 1_000 })).toThrow("precedes the first occurrence");
   });
 
   it.each(["line\nbreak", "null\0byte", "delete\u007fbyte", "control\u0085byte"])(

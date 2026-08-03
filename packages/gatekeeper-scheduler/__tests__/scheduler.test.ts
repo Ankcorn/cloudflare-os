@@ -87,6 +87,84 @@ describe("ScheduleSessionImpl", () => {
     expect(enable).not.toHaveBeenCalled();
   });
 
+  it("passes a normalized occurrence limit to the hook controller", async () => {
+    const controllerFactory = vi.fn(() => ({}));
+    const session = new ScheduleSessionImpl({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      approvalQueue: { bindHook: vi.fn(async () => {}) } as unknown as RpcStub<ApprovalQueue>,
+      controllerFactory,
+      driver: { listWorkspace: vi.fn(async () => []) },
+      now: () => 1_000,
+      randomId: () => "schedule-a",
+    });
+
+    await session.every(60_000, callback, {
+      title: "Heartbeat",
+      description: "Run the heartbeat callback.",
+      occurrences: { count: 2 },
+    });
+
+    expect(controllerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ occurrences: { count: 2 } }),
+    );
+  });
+
+  it("resolves a calendar recurrence's until bound against its first occurrence", async () => {
+    const controllerFactory = vi.fn(() => ({}));
+    const registeredAt = Date.UTC(2026, 7, 2);
+    const session = new ScheduleSessionImpl({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      approvalQueue: { bindHook: vi.fn(async () => {}) } as unknown as RpcStub<ApprovalQueue>,
+      controllerFactory,
+      driver: { listWorkspace: vi.fn(async () => []) },
+      now: () => registeredAt,
+      randomId: () => "schedule-a",
+    });
+    const rule = { timeZone: "America/New_York", freq: "daily", hour: 9, minute: 0 } as const;
+    const options = { title: "Brief", description: "Send the brief." };
+
+    await session.calendarAt(rule, callback, {
+      ...options,
+      occurrences: { until: Date.UTC(2026, 7, 10) },
+    });
+    expect(controllerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ occurrences: { until: Date.UTC(2026, 7, 10) } }),
+    );
+
+    // A cutoff before the first 9am occurrence would enable a schedule that can never run.
+    await expect(
+      session.calendarAt(rule, callback, {
+        ...options,
+        occurrences: { until: registeredAt + 60_000 },
+      }),
+    ).rejects.toThrow("precedes the first occurrence");
+  });
+
+  it("rejects occurrence limits for one-shot schedules", async () => {
+    const bindHook = vi.fn(async () => {});
+    const controllerFactory = vi.fn(() => ({}));
+    const session = new ScheduleSessionImpl({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      approvalQueue: { bindHook } as unknown as RpcStub<ApprovalQueue>,
+      controllerFactory,
+      driver: { listWorkspace: vi.fn(async () => []) },
+      now: () => 1_000,
+    });
+
+    await expect(
+      session.runAt(2_000, callback, {
+        title: "Once",
+        description: "Run once.",
+        occurrences: { count: 2 },
+      } as never),
+    ).rejects.toThrow("recurring");
+    expect(controllerFactory).not.toHaveBeenCalled();
+    expect(bindHook).not.toHaveBeenCalled();
+  });
+
   it("authorizes workspace-scoped listing before returning schedules", async () => {
     const authorizeObservation = vi.fn(async () => {});
     const driver = {

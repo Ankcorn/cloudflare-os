@@ -38,6 +38,7 @@ const scheduleId = await SCHEDULER.calendarAt(
   {
     title: "Daily brief",
     description: "Prepare the morning calendar and inbox brief.",
+    occurrences: { count: 10 },
   },
 );
 ```
@@ -49,6 +50,26 @@ Use the three registration methods according to the user's intent:
   timezone. It supports hourly, daily, and weekly rules.
 - `runAt(when, callback, options)` runs once at an absolute epoch-millisecond timestamp or an
   explicit timezone-aware wall-clock time.
+
+Recurring `every()` and `calendarAt()` calls may stop after a finite bound. Give one or the other,
+never both; `runAt()` accepts neither.
+
+- `occurrences: { count: 10 }` allows ten logical scheduled occurrences.
+- `occurrences: { until: { timeZone, year, month, day, hour, minute } }` allows occurrences through
+  that instant, inclusively. An absolute epoch-millisecond `until` is also accepted. Registration
+  rejects a cutoff that precedes the schedule's first occurrence.
+
+The count bounds *due slots*, not successful runs. A slot consumes one count as soon as it becomes
+due and takes a `runId`, even if admission or callback delivery then fails; admission failures skip
+the slot without retrying it. Retries reuse the same `runId` and do not consume another count.
+Missed occurrences remain skipped and do not count.
+
+A bound is checked against live state, so a schedule that reaches it reports `completed`. A schedule
+whose cutoff already passed by the time its hook is enabled reports `expired` instead: it never got
+a slot. A schedule whose callback exhausts its eight attempts reports `dead` and stops there,
+whether or not the bound was reached — a `count: 10` schedule that dies on its third occurrence
+never reaches the fourth. Disabling a hook drops its driver state, so re-enabling the same schedule
+restarts the count — treat `count` as a bound per enablement, not a lifetime guarantee.
 
 `list()` returns active and terminal schedules for enabled hooks in the current workspace only. It
 does not expose schedules from other workspaces in the account.
