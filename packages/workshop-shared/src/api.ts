@@ -248,6 +248,40 @@ export interface ObserverConfigCallback extends RpcTarget {
   configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
 }
 
+/** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
+export const OPEN_GADGET_ERROR_CODES = {
+  workspaceNotFound: "WORKSPACE_NOT_FOUND",
+  workspaceAccessDenied: "WORKSPACE_ACCESS_DENIED",
+} as const;
+
+/** An expected failure code from `AuthenticatedApi.openGadget()`. */
+export type OpenGadgetErrorCode =
+    typeof OPEN_GADGET_ERROR_CODES[keyof typeof OPEN_GADGET_ERROR_CODES];
+
+const OPEN_GADGET_ERROR_MESSAGES: Record<OpenGadgetErrorCode, string> = {
+  [OPEN_GADGET_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
+  [OPEN_GADGET_ERROR_CODES.workspaceAccessDenied]: "You don't have access to this workspace.",
+};
+
+/** Creates an expected `openGadget()` error with a machine-readable code. */
+export function createOpenGadgetError(
+    code: OpenGadgetErrorCode): Error & { code: OpenGadgetErrorCode } {
+  return Object.assign(new Error(OPEN_GADGET_ERROR_MESSAGES[code]), { code });
+}
+
+/** Reads the machine-readable code from an expected `openGadget()` error. */
+export function getOpenGadgetErrorCode(error: unknown): OpenGadgetErrorCode | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+
+  const candidate = "code" in error ? error.code : undefined;
+  return isOpenGadgetErrorCode(candidate) ? candidate : undefined;
+}
+
+function isOpenGadgetErrorCode(value: unknown): value is OpenGadgetErrorCode {
+  return value === OPEN_GADGET_ERROR_CODES.workspaceNotFound ||
+      value === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied;
+}
+
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
   // Get profile info for the user who is logged in.
@@ -334,7 +368,8 @@ export interface AuthenticatedApi extends RpcTarget {
   // allows share-key redemption and gadget opening in a single round trip, and further calls
   // can be pipelined on the returned Overseer.
   //
-  // To allow for pipelining, this throws an exception if the gadget doesn't exist.
+  // To allow for pipelining, this throws an exception if the gadget doesn't exist. Expected
+  // missing and authorization failures carry a code from `OPEN_GADGET_ERROR_CODES`.
   //
   // `configureObservers` is invoked only when the opening user is a non-owner who must choose
   // connected accounts for one or more gatekeeper bindings before they can observe the gadget (see

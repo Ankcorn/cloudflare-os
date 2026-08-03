@@ -225,12 +225,11 @@ type ObserverAccountChoice = {
 
 ### Step 3 — Overseer: observer configuration & re-verification at `open()`
 
-Hook into `open()` (`overseer.ts:2714`) in the non-owner branch, after `effectiveRole` is
-confirmed (`overseer.ts:2798-2800`) and before constructing the client interface
-(`overseer.ts:2816`). Keep the existing `prohibitAllSharing` short-circuit (`overseer.ts:2770`)
-ahead of this — lockdown still wins. The `NeedsConnections` signal is produced only *after* a
-valid role is confirmed, so it never reveals a Gadget's existence to an unauthorized user (which
-would break the "Not Found" stance at `overseer.ts:2793-2799`).
+Hook into `open()` in the non-owner branch, after `effectiveRole` is confirmed and before
+constructing the client interface. Keep the existing `prohibitAllSharing` short-circuit ahead of
+this -- lockdown still wins. The `NeedsConnections` signal is produced only *after* a valid role is
+confirmed, so it never reveals a workspace's gatekeeper or resource metadata to an unauthorized
+user.
 
 Add a private helper on `OverseerImpl`, roughly:
 

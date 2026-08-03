@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -5980,15 +5980,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         let owner = this.impl.users.get(this.impl.users.idFromString(userId));
         let meta = await owner.getGadget(this.ctx.id.toString());
         if (!meta) {
-          throw new Error("Not Found");
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
         }
         if (meta.owner) {
           // The user's DO contains a record indicating that this gadget was shared to them by
           // some other owner. This gadget may have existed in the past, and then was deleted,
           // which does not proactively clean up share recipient's references. We need to treat
-          // this as "Not Found" otherwise we'll inadvertently create a new gadget with this ID
-          // belonging to a different user than the original!
-          throw new Error("Not Found");
+          // this as missing otherwise we'll inadvertently create a new gadget with this ID
+          // belonging to a different user than the original.
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
         }
 
         // Owner says we exist, so let's initialize ourselves.
@@ -6032,9 +6032,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       if (this.impl.storage.prohibitAllSharing.get()) {
         // `prohibitAllSharing` can only have been set when the gadget had no shares (see
         // `authorizeObservation`), and no new shares can be created while it's set, so any
-        // non-owner reaching here is necessarily unauthorized. Throw "Not Found" rather than a
-        // descriptive error so we don't acknowledge the gadget's existence to them (see below).
-        throw new Error("Not Found");
+        // non-owner reaching here is necessarily unauthorized.
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
       }
 
       let sharing = await this.impl.getSharingManager();
@@ -6052,13 +6051,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // Check authorization. Compute the caller's effective role from the permission graph; this
       // both authorizes the session and determines which capability we hand back.
       //
-      // An unauthorized caller (no effective role -- never had access, or was removed) is rejected
-      // with the same "Not Found" error as a gadget that genuinely doesn't exist, so that we never
-      // acknowledge the existence of a gadget to someone not allowed to see it. A removed
-      // collaborator who reconnects after their session is force-restarted lands here and sees the
-      // generic load-failure page, indistinguishable from a deleted/nonexistent gadget.
+      // An unauthorized caller (no effective role -- never had access, or was removed) gets a
+      // distinct denial without workspace metadata. A removed collaborator who reconnects after
+      // their session is force-restarted lands here and sees the terminal access-denied page.
       let effectiveRole = sharing.getEffectiveRole(profileId);
-      if (!effectiveRole) throw new Error("Not Found");
+      if (!effectiveRole) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
       role = effectiveRole;
 
       // Ambient reconciliation may attach Gatekeepers after open() starts. Finish it before taking
@@ -6067,8 +6066,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
       // Verify the caller may observe everything this Gadget has read through its in-scope
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
-      // role is confirmed, so it never reveals the Gadget's existence to an unauthorized user. The
-      // prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
+      // role is confirmed, so it never reveals gatekeeper or resource metadata to an unauthorized
+      // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
       await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
