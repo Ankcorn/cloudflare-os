@@ -31,14 +31,16 @@ import {
   normalizeCalendarRule,
   normalizeInterval,
   normalizeOneShot,
-  normalizeScheduleOptions,
+  normalizeRecurringScheduleOptions,
 } from "./scheduler-core.js";
 import { ScheduleDriver } from "./schedule-driver.js";
 import type { ScheduleSpec } from "./schedule-types.js";
 import type { ManagementListOptions, ManagementSchedulePage } from "./management.js";
 import type {
   CalendarRule,
+  NormalizedScheduleOccurrences,
   OneShotTime,
+  RecurringScheduleOptions,
   ScheduleOptions,
   ScheduleSession,
   ScheduleSummary,
@@ -66,6 +68,7 @@ export type ScheduleControllerProps = {
   spec: ScheduleSpec;
   title: string;
   description: string;
+  occurrences?: NormalizedScheduleOccurrences;
 };
 
 type SessionDriver = Pick<ScheduleDriver, "listWorkspace">;
@@ -109,20 +112,22 @@ export class ScheduleSessionImpl extends RpcTarget implements ScheduleSession {
   every(
     everyMs: number,
     callback: NativeRpcStub<ScheduleHookTarget>,
-    options: ScheduleOptions,
+    options: RecurringScheduleOptions,
   ): Promise<string> {
     const registeredAt = this.#now();
-    return this.#register(normalizeInterval(everyMs, registeredAt), callback, options);
+    return this.#register(normalizeInterval(everyMs, registeredAt), callback, options, registeredAt);
   }
 
   /** Registers a timezone-aware calendar recurrence. */
   calendarAt(
     rule: CalendarRule,
     callback: NativeRpcStub<ScheduleHookTarget>,
-    options: ScheduleOptions,
+    options: RecurringScheduleOptions,
   ): Promise<string> {
     const registeredAt = this.#now();
-    return this.#register(normalizeCalendarRule(rule, registeredAt), callback, options);
+    return this.#register(
+      normalizeCalendarRule(rule, registeredAt), callback, options, registeredAt,
+    );
   }
 
   /** Registers a numeric or timezone-aware one-shot schedule. */
@@ -132,7 +137,7 @@ export class ScheduleSessionImpl extends RpcTarget implements ScheduleSession {
     options: ScheduleOptions,
   ): Promise<string> {
     const registeredAt = this.#now();
-    return this.#register(normalizeOneShot(when, registeredAt), callback, options);
+    return this.#register(normalizeOneShot(when, registeredAt), callback, options, registeredAt);
   }
 
   /** Lists this workspace's enabled schedules after observation authorization. */
@@ -152,9 +157,13 @@ export class ScheduleSessionImpl extends RpcTarget implements ScheduleSession {
   async #register(
     spec: ScheduleSpec,
     callback: NativeRpcStub<ScheduleHookTarget>,
-    options: ScheduleOptions,
+    options: RecurringScheduleOptions,
+    registeredAt: number,
   ): Promise<string> {
-    const normalized = normalizeScheduleOptions(options);
+    if (spec.kind === "once" && options?.occurrences !== undefined) {
+      throw new TypeError("Occurrence limits apply only to recurring schedules.");
+    }
+    const normalized = normalizeRecurringScheduleOptions(options, spec, registeredAt);
     const scheduleId = this.#randomId();
     const controller = this.#controllerFactory({
       accountId: this.#accountId,
@@ -167,7 +176,8 @@ export class ScheduleSessionImpl extends RpcTarget implements ScheduleSession {
       // @ts-expect-error Workers currently widens the controller's hook type across bindHook RPC.
       controller,
       callback,
-      normalized,
+      // bindHook takes only the display metadata; the bound itself stays in the controller.
+      { title: normalized.title, description: normalized.description },
     );
     return scheduleId;
   }

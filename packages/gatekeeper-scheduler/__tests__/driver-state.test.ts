@@ -129,7 +129,6 @@ describe("schedule state", () => {
     expect(completeRun(oneShotRun, "one-shot-run", 132_000)).toEqual({
       ...oneShot,
       status: "completed",
-      runId: "one-shot-run",
       completedAt: 132_000,
     });
   });
@@ -160,6 +159,94 @@ describe("schedule state", () => {
     const retrying = failRun(admitted, "run-1", "callback_failed", 72_000);
 
     expect(beginDueRun(retrying, 10_000, "run-2", 15_000)).toBe(retrying);
+  });
+
+  it("counts logical occurrences once across retries and stops at the count", () => {
+    const bounded: ScheduleRegistration = { ...recurring, occurrences: { count: 2 } };
+    const first = beginDueRun(createSchedule(bounded, 0), 60_000, "run-1", 360_000);
+    expect(first).toMatchObject({ status: "pending", occurrenceCount: 1 });
+
+    const admitted = admitRun(first, "run-1", 60_000, 360_000);
+    const retrying = failRun(admitted, "run-1", "callback_failed", 60_000);
+    expect(retrying.status).toBe("retrying");
+    const retry = beginDueRun(
+      retrying,
+      retrying.status === "retrying" ? retrying.nextAttempt : NaN,
+      "ignored",
+      500_000,
+    );
+    expect(retry).toMatchObject({ status: "pending", runId: "run-1", occurrenceCount: 1 });
+
+    const readmitted = admitRun(retry, "run-1", 80_000, 500_000);
+    const active = completeRun(readmitted, "run-1", 90_000);
+    const second = beginDueRun(active, 120_000, "run-2", 420_000);
+    expect(second).toMatchObject({ status: "pending", occurrenceCount: 2 });
+    expect(rejectRun(second, "run-2", 130_000)).toMatchObject({
+      status: "completed",
+      occurrenceCount: 2,
+      completedAt: 130_000,
+    });
+  });
+
+  it("fires a count of one exactly once, then completes on delivery", () => {
+    const once: ScheduleRegistration = { ...recurring, occurrences: { count: 1 } };
+    const run = beginDueRun(createSchedule(once, 0), 60_000, "run-1", 360_000);
+    expect(run).toMatchObject({ status: "pending", occurrenceCount: 1 });
+
+    const completed = completeRun(admitRun(run, "run-1", 60_000, 360_000), "run-1", 90_000);
+    expect(completed).toMatchObject({ status: "completed", occurrenceCount: 1 });
+    // Terminal: a later due instant must not revive it.
+    expect(beginDueRun(completed, 120_000, "run-2", 420_000)).toBe(completed);
+  });
+
+  it("reports dead, not completed, when retries exhaust on a bounded schedule", () => {
+    const bounded: ScheduleRegistration = { ...recurring, occurrences: { count: 1 } };
+    let state = createSchedule(bounded, 0);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      state = beginDueRun(state, alarmTime(state), "run-1", 10_000 + attempt);
+      state = admitRun(state, "run-1", attempt * 10, 20_000 + attempt);
+      state = failRun(state, "run-1", "callback_failed", attempt * 100);
+    }
+    // The bound is fully spent, but exhausted retries win: dead, not completed.
+    expect(state).toMatchObject({ status: "dead", occurrenceCount: 1, attempts: MAX_ATTEMPTS });
+  });
+
+  it("expires a bound that already passed rather than reporting a completed run", () => {
+    const stale: ScheduleRegistration = { ...recurring, occurrences: { until: 30_000 } };
+
+    // Enabling happens long after registration validated the cutoff, so this is reachable.
+    expect(createSchedule(stale, 0)).toEqual({
+      ...stale,
+      occurrenceCount: 0,
+      status: "expired",
+      expiredAt: 0,
+    });
+  });
+
+  it("includes an occurrence exactly at the until cutoff", () => {
+    const bounded: ScheduleRegistration = {
+      ...recurring,
+      occurrences: { until: 120_000 },
+    };
+    const first = admitRun(
+      beginDueRun(createSchedule(bounded, 0), 60_000, "run-1", 360_000),
+      "run-1",
+      60_000,
+      360_000,
+    );
+    const active = completeRun(first, "run-1", 90_000);
+    expect(active).toMatchObject({ status: "active", nextFire: 120_000 });
+
+    const second = admitRun(
+      beginDueRun(active, 120_000, "run-2", 420_000),
+      "run-2",
+      120_000,
+      420_000,
+    );
+    expect(completeRun(second, "run-2", 130_000)).toMatchObject({
+      status: "completed",
+      occurrenceCount: 2,
+    });
   });
 
   it("fences continuations by exact pending run ID and stage", () => {

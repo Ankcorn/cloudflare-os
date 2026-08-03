@@ -76,6 +76,9 @@ type PreparedRun = {
   scheduledTime: number;
 };
 
+type PendingState = Extract<EnabledSchedule, { status: "pending" }>;
+type PendingStage = PendingState["stage"];
+
 export class ScheduleDriver extends DurableObject {
   async enable(
     activation: ScheduleActivation,
@@ -106,10 +109,9 @@ export class ScheduleDriver extends DurableObject {
         this.#requireLiveMetadata(true);
         const key = scheduleKey(activation.workspaceId, activation.scheduleId);
         const existing = this.#readSchedule(key);
+        let state: EnabledSchedule;
         if (existing) {
-          replaced = this.ctx.storage.kv.get<StoredCapabilities>(
-            capabilitiesKey(activation.workspaceId, activation.scheduleId),
-          );
+          state = existing.state;
           this.ctx.storage.kv.put(key, {
             ...existing,
             title: activation.title,
@@ -118,7 +120,7 @@ export class ScheduleDriver extends DurableObject {
           });
         } else {
           this.#assertScheduleQuota(activation.workspaceId);
-          const state = createSchedule(activation, now);
+          state = createSchedule(activation, now);
           this.ctx.storage.kv.put<StoredSchedule>(key, {
             version: 1,
             state,
@@ -127,10 +129,15 @@ export class ScheduleDriver extends DurableObject {
             ...(activation.gadgetId !== undefined ? { gadgetId: activation.gadgetId } : {}),
           });
         }
-        this.ctx.storage.kv.put<StoredCapabilities>(
-          capabilitiesKey(activation.workspaceId, activation.scheduleId),
-          { initiator },
-        );
+        // A schedule already terminal here — a lapsed bound, or a repeated enable of a finished
+        // row — can never fire, so it must not hold a delivery capability until disable.
+        replaced = this.#takeCapabilities(state);
+        if (!isTerminal(state)) {
+          this.ctx.storage.kv.put<StoredCapabilities>(
+            capabilitiesKey(activation.workspaceId, activation.scheduleId),
+            { initiator },
+          );
+        }
       });
     } finally {
       disposeCapabilities(replaced);
@@ -335,6 +342,37 @@ export class ScheduleDriver extends DurableObject {
     }
   }
 
+  /**
+   * Applies a transition to the fenced pending run, then persists it. Releases the delivery
+   * capability once the schedule reaches a state it can never fire from, after the commit.
+   */
+  #settle(
+    prepared: PreparedRun,
+    stage: PendingStage | undefined,
+    transition: (state: PendingState) => EnabledSchedule,
+  ): void {
+    let orphaned: StoredCapabilities | undefined;
+    this.ctx.storage.transactionSync(() => {
+      if (this.#requireMetadata().revoked) return;
+      const key = scheduleKey(prepared.workspaceId, prepared.scheduleId);
+      const stored = this.#readSchedule(key);
+      if (!matchesPending(stored, prepared)) return;
+      if (stage !== undefined && stored.state.stage !== stage) return;
+      const state = transition(stored.state);
+      this.ctx.storage.kv.put<StoredSchedule>(key, { ...stored, state });
+      if (isTerminal(state)) orphaned = this.#takeCapabilities(state);
+    });
+    disposeCapabilities(orphaned);
+  }
+
+  /** Removes a schedule's stored capability row, handing the stub back to the caller to dispose. */
+  #takeCapabilities(state: EnabledSchedule): StoredCapabilities | undefined {
+    const key = capabilitiesKey(state.workspaceId, state.scheduleId);
+    const stored = this.ctx.storage.kv.get<StoredCapabilities>(key);
+    if (stored) this.ctx.storage.kv.delete(key);
+    return stored;
+  }
+
   async #deliver(key: string): Promise<boolean> {
     const prepared = this.#prepareRun(key, Date.now());
     if (!prepared) return false;
@@ -485,14 +523,7 @@ export class ScheduleDriver extends DurableObject {
   }
 
   #rejectPending(prepared: PreparedRun, rejectedAt: number): void {
-    this.ctx.storage.transactionSync(() => {
-      if (this.#requireMetadata().revoked) return;
-      const key = scheduleKey(prepared.workspaceId, prepared.scheduleId);
-      const stored = this.#readSchedule(key);
-      if (!matchesPending(stored, prepared)) return;
-      const state = rejectRun(stored.state, prepared.runId, rejectedAt);
-      this.ctx.storage.kv.put<StoredSchedule>(key, { ...stored, state });
-    });
+    this.#settle(prepared, undefined, (state) => rejectRun(state, prepared.runId, rejectedAt));
   }
 
   #failPending(
@@ -500,25 +531,13 @@ export class ScheduleDriver extends DurableObject {
     failureCode: "authorization_failed" | "callback_failed",
     failedAt: number,
   ): void {
-    this.ctx.storage.transactionSync(() => {
-      if (this.#requireMetadata().revoked) return;
-      const key = scheduleKey(prepared.workspaceId, prepared.scheduleId);
-      const stored = this.#readSchedule(key);
-      if (!matchesPending(stored, prepared) || stored.state.stage !== "delivery") return;
-      const state = failRun(stored.state, prepared.runId, failureCode, failedAt);
-      this.ctx.storage.kv.put<StoredSchedule>(key, { ...stored, state });
-    });
+    this.#settle(prepared, "delivery", (state) =>
+      failRun(state, prepared.runId, failureCode, failedAt));
   }
 
   #completePending(prepared: PreparedRun, completedAt: number): void {
-    this.ctx.storage.transactionSync(() => {
-      if (this.#requireMetadata().revoked) return;
-      const key = scheduleKey(prepared.workspaceId, prepared.scheduleId);
-      const stored = this.#readSchedule(key);
-      if (!matchesPending(stored, prepared) || stored.state.stage !== "delivery") return;
-      const state = completeRun(stored.state, prepared.runId, completedAt);
-      this.ctx.storage.kv.put<StoredSchedule>(key, { ...stored, state });
-    });
+    this.#settle(prepared, "delivery", (state) =>
+      completeRun(state, prepared.runId, completedAt));
   }
 
   #isPendingDelivery(prepared: PreparedRun): boolean {
@@ -631,6 +650,11 @@ function isDue(schedule: StoredSchedule, now: number): boolean {
   return false;
 }
 
+/** True once a schedule can never fire again, so its stored capability is dead weight. */
+function isTerminal(state: EnabledSchedule): boolean {
+  return state.status === "completed" || state.status === "expired" || state.status === "dead";
+}
+
 function alarmTarget(schedule: StoredSchedule): number | undefined {
   const state = schedule.state;
   if (state.status === "active") return state.nextFire;
@@ -649,6 +673,8 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     title: schedule.title,
     description: schedule.description,
     cadence: toScheduleCadence(schedule.state.spec),
+    occurrences: schedule.state.occurrences,
+    occurrenceCount: schedule.state.occurrences ? schedule.state.occurrenceCount ?? 0 : undefined,
   };
   const state = schedule.state;
   switch (state.status) {
@@ -657,7 +683,7 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     case "pending":
       return { ...common, status: "active", nextFire: state.nextFire ?? state.scheduledTime };
     case "retrying":
-      return { ...common, status: "active", nextFire: state.nextFire };
+      return { ...common, status: "active", nextFire: state.nextAttempt, retrying: true };
     case "dead":
       return {
         ...common,

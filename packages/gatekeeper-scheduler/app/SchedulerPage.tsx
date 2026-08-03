@@ -13,7 +13,7 @@ import type {
   ManagementSchedulePage,
 } from "../src/management-types";
 import type { ScheduleStatus } from "../src/types";
-import { formatCadence, formatTiming } from "./format";
+import { formatCadence, formatOccurrences, formatTiming } from "./format";
 
 export const CREATE_SCHEDULE_PROMPT =
   "Help me create a scheduled task. Ask me what it should do, which workspace and resources it should use, when it should run, and which timezone to use. Then set up the schedule.";
@@ -372,7 +372,8 @@ function ScheduleRow({
               {schedule.title}
             </span>
             <span className="block truncate text-xs text-kumo-subtle">
-              {formatCadence(schedule.cadence)} · {target}
+              {[formatCadence(schedule.cadence), formatOccurrences(schedule), target]
+                .filter(Boolean).join(" · ")}
               {/* Narrow screens drop the timing column, so carry the relative time here instead. */}
               <span className="sm:hidden"> · {timing.relative}</span>
             </span>

@@ -13,6 +13,10 @@
 // - `runAt()` runs once, using either an absolute UTC epoch-millisecond timestamp or an explicit
 //   timezone-aware wall-clock value.
 //
+// Recurring registrations may set `occurrences` to a total count or an inclusive final time. The
+// bound counts due slots, not successful runs: a slot is consumed once it becomes due and takes a
+// `runId`, even if delivery then fails. Retries reuse that `runId` and do not consume another.
+//
 // Recurring schedules skip missed occurrences instead of replaying them. Callback failures may be
 // retried with the same `runId`, so callback work should be idempotent.
 
@@ -92,6 +96,32 @@ export interface ScheduleOptions {
   description: string;
 }
 
+/**
+ * A finite bound accepted when registering a recurring schedule. Give `count` or `until`, never
+ * both. A schedule that uses up its bound reports `completed`; one whose callback retries are
+ * exhausted reports `dead` instead, whether or not the bound was reached.
+ */
+export type ScheduleOccurrences =
+  | {
+      /** Total logical scheduled occurrences. Retries do not increase this count. */
+      count: number;
+    }
+  | {
+      /** Inclusive final scheduled instant, expressed like a `runAt()` time. */
+      until: OneShotTime | number;
+    };
+
+/** A validated recurrence bound returned by `list()`; `until` resolves to epoch milliseconds. */
+export type NormalizedScheduleOccurrences =
+  | { count: number }
+  | { until: number };
+
+/** Registration metadata for an elapsed or calendar recurrence. */
+export interface RecurringScheduleOptions extends ScheduleOptions {
+  /** Optional finite bound. Counted occurrences are due logical runs, including failed delivery. */
+  occurrences?: ScheduleOccurrences;
+}
+
 /** Canonical interval cadence returned by `list()`. */
 export type IntervalCadence = {
   /** Cadence discriminator. */
@@ -151,8 +181,8 @@ export type ScheduleCadence = IntervalCadence | CalendarCadence | OneShotCadence
 
 /**
  * Current state of an enabled schedule: recurring or pending work is `active`; exhausted callback
- * retries are `dead`; a delivered one-shot is `completed`; and a one-shot that passes without
- * delivery is `expired`.
+ * retries are `dead`; a delivered one-shot or a recurrence that used its bound is `completed`; and
+ * a schedule whose firing window passed without delivery is `expired`.
  */
 export type ScheduleStatus = "active" | "dead" | "completed" | "expired";
 
@@ -166,12 +196,18 @@ export type ScheduleSummary = {
   description: string;
   /** Canonical recurrence/one-shot definition. */
   cadence: ScheduleCadence;
+  /** Finite recurrence bound, when configured. */
+  occurrences?: NormalizedScheduleOccurrences;
+  /** Due slots started so far; present for a bounded recurrence. */
+  occurrenceCount?: number;
 } & (
   | {
       /** The schedule can still run or retry. */
       status: "active";
-      /** Next planned occurrence, when one is currently known. */
+      /** Next planned occurrence or retry, when one is currently known. */
       nextFire?: number;
+      /** Set when `nextFire` is a retry of a failed attempt, not a new occurrence. */
+      retrying?: true;
     }
   | {
       /** Callback delivery exhausted its retry budget. */
@@ -182,13 +218,13 @@ export type ScheduleSummary = {
       failureCode: "authorization_failed" | "callback_failed";
     }
   | {
-      /** A one-shot callback was delivered successfully. */
+      /** A one-shot completed or a bounded recurrence reached its limit. */
       status: "completed";
       /** Completion time. */
       completedAt: number;
     }
   | {
-      /** A one-shot passed without callback delivery. */
+      /** A one-shot, or a recurrence whose bound passed before it could run, never delivered. */
       status: "expired";
       /** Expiration time. */
       expiredAt: number;
@@ -235,7 +271,8 @@ export interface ScheduledTaskHook {
  * `this.ctx.restore()` inside a Gadget method invoked through an `env` Gadget binding; that facet
  * stub does not carry the required restore context. The parameters passed to `ctx.restore()` must
  * be serializable; the system passes them to `[restore]()` both immediately and when restoring the
- * callback later.
+ * callback later. The restored `RpcTarget` is a separate object and does not inherit the Gadget's
+ * `ctx`; pass any required dependencies, such as `this.ctx.storage`, to it from `[restore]()`.
  *
  * Use the Scheduler binding shown in the agent environment directly; it does not need to be saved as
  * a Gadget binding. Registration returns a stable schedule ID immediately, but the schedule remains
@@ -252,11 +289,15 @@ export interface ScheduledTaskHook {
  * import { DurableObject, RpcTarget, restore } from "cloudflare:workers";
  * export class Gadget extends DurableObject {
  *   async [restore](params) {
- *     if (params.type === "dailyBrief") return new DailyBrief();
+ *     if (params.type === "dailyBrief") return new DailyBrief(this.ctx.storage);
  *     throw new TypeError(`Unknown restore type: ${params.type}`);
  *   }
  * }
  * class DailyBrief extends RpcTarget {
+ *   constructor(storage) {
+ *     super();
+ *     this.storage = storage;
+ *   }
  *   async onSchedule(firing) { /* ... *\/ }
  * }
  *
@@ -282,7 +323,7 @@ export interface ScheduleSession {
   every(
     everyMs: number,
     callback: RpcStub<ScheduledTaskHook>,
-    options: ScheduleOptions,
+    options: RecurringScheduleOptions,
   ): Promise<string>;
 
   /**
@@ -296,7 +337,7 @@ export interface ScheduleSession {
   calendarAt(
     rule: CalendarRule,
     callback: RpcStub<ScheduledTaskHook>,
-    options: ScheduleOptions,
+    options: RecurringScheduleOptions,
   ): Promise<string>;
 
   /**
