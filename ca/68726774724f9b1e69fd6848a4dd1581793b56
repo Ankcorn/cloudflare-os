@@ -6,6 +6,7 @@ packages/integration-tests/__tests__/observer-reverification.test.ts
   s_a676e8860d1ca3::t_7d2b47b88b89b6 168
 packages/workshop-backend/src/overseer.ts
   s_a676e8860d1ca3::t_f3b664a98046ed 298-306,5899-5902,6025,8544-8548,8906-8907
+  s_a676e8860d1ca3::t_407a05ee0b8943 3
 ---
 {
   "schema_version": "authorship/3.0.0",
