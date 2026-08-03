@@ -122,6 +122,8 @@ describe("webFetch document conversion", () => {
     }));
     const gateway = new AiGatewayConfig({
       CF_AI_GATEWAY: "workers-ai-gateway",
+      CF_AI_GATEWAY_ACCOUNT_ID: "gateway-account-id",
+      CF_AI_GATEWAY_API_TOKEN: "gateway-token",
     } as Cloudflare.Env);
 
     await webFetch(makeEnv(toMarkdown, gateway), { url: "https://example.com/page" });

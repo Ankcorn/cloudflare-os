@@ -1,8 +1,9 @@
 import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
   from "@gadgets/workshop-shared/api";
-import type {ModelMessage} from "ai";
+import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import * as Y from "yjs";
 import type {ChatBindingEntry, CompactionCheckpoint} from "./agent";
+import {zeroUsage} from "./ai-invoke";
 
 // Context compaction keeps long chats within the model's limit. It summarizes the messages before a
 // boundary and stores their replay state in a checkpoint. Canonical history keeps every message, so
@@ -127,7 +128,7 @@ export function findProtectedFromSequence(messages: AiChatMessage[]): number | u
 
 // One model message in the prompt, tagged with where it came from in the chat log.
 export type CompactionProjectionMessage = {
-  message: ModelMessage;
+  message: Message;
 
   // The durable chat sequence that produced this message. System messages and an earlier summary
   // have no source sequence.
@@ -139,12 +140,12 @@ export type CompactionProjectionMessage = {
   canCut?: boolean;
 };
 
-function projectionMessageWeight(message: ModelMessage): number {
+function projectionMessageWeight(message: Message): number {
   // Use serialized length to divide the measured prompt size between messages. Replace attachment
-  // bytes because JSON expands each byte into an object entry. Use a short marker because the model's
+  // data (base64 image payloads ride ImageContent.data) with a short marker because the model's
   // attachment cost depends on the content it processes, not the byte count.
-  return JSON.stringify(message, (_key, value) =>
-    value instanceof Uint8Array ? "[binary]" : value).length;
+  return JSON.stringify(message, (key, value) =>
+    key === "data" && typeof value === "string" && value.length > 64 ? "[binary]" : value).length;
 }
 
 // Estimate tokens for messages not included in provider usage, or when usage data is unavailable.
@@ -153,14 +154,22 @@ export function estimateProjectionTokens(projection: CompactionProjectionMessage
     total + projectionMessageWeight(message), 0) / 4);
 }
 
-function flattenModelMessage(message: ModelMessage): string {
+function flattenModelMessage(message: Message): string {
+  if (message.role === "toolResult") {
+    let text = message.content.map(part =>
+        part.type === "text" ? part.text : `[image ${part.mimeType}]`)
+        .filter(part => part).join("\n");
+    // Keep the error flag visible: without it the summarizer could describe a failed
+    // operation as having succeeded.
+    return `[${message.toolName} ${message.isError ? "error" : "result"} ${text}]`;
+  }
   if (typeof message.content === "string") return message.content;
   return message.content.map(part => {
     switch (part.type) {
-      case "text": case "reasoning": return part.text;
-      case "tool-call": return `[${part.toolName} ${JSON.stringify(part.input)}]`;
-      case "tool-result": return `[${part.toolName} result ${JSON.stringify(part.output)}]`;
-      case "file": return `[file ${part.mediaType}]`;
+      case "text": return part.text;
+      case "thinking": return part.redacted ? "" : part.thinking;
+      case "toolCall": return `[${part.name} ${JSON.stringify(part.arguments)}]`;
+      case "image": return `[image ${part.mimeType}]`;
       default: return "";
     }
   }).filter(text => text).join("\n");
@@ -169,14 +178,16 @@ function flattenModelMessage(message: ModelMessage): string {
 // Renders the compacted prefix as the summarizer's prompt. The summarizer declares no tools, and
 // providers reject requests that carry tool-call blocks without declaring tools, so every message
 // becomes plain text and consecutive same-role messages merge. Attachments are reduced to a marker
-// or dropped: the summary describes the conversation, not its media.
+// or dropped: the summary describes the conversation, not its media. `model` fills the provenance
+// bookkeeping fields pi requires on assistant messages.
 export function buildSummaryPrompt(
-    projection: CompactionProjectionMessage[], compactedTo: number): ModelMessage[] {
+    projection: CompactionProjectionMessage[], compactedTo: number,
+    model: Model<Api>): Message[] {
   let turns: {role: "user" | "assistant", text: string}[] = [];
-  // Skip the coding-agent system messages: the summarizer uses its own prompt. An earlier summary
-  // arrives as a `user` message with no sequence, so it is kept and the new summary supersedes it.
+  // An earlier summary arrives as a `user` message with no sequence, so it is kept and the new
+  // summary supersedes it. (The coding-agent system prompt is not in the projection at all; the
+  // summarizer uses its own.)
   for (let {message, sequence} of projection) {
-    if (message.role === "system") continue;
     if (sequence !== undefined && sequence >= compactedTo) continue;
     let text = flattenModelMessage(message);
     if (!text) continue;
@@ -185,9 +196,19 @@ export function buildSummaryPrompt(
     if (last?.role === role) last.text += `\n${text}`;
     else turns.push({role, text});
   }
+  let timestamp = Date.now();
   return turns.map(turn => turn.role === "assistant"
-      ? {role: "assistant", content: turn.text}
-      : {role: "user", content: turn.text});
+      ? {
+          role: "assistant",
+          content: [{type: "text", text: turn.text}],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: zeroUsage(),
+          stopReason: "stop",
+          timestamp,
+        }
+      : {role: "user", content: turn.text, timestamp});
 }
 
 // Choose the first sequence to retain, or undefined if the boundary cannot advance. `contextTokens`

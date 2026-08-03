@@ -1,5 +1,6 @@
 import { isTextLikeAttachmentMimeType } from "@gadgets/workshop-shared/api";
 import type { AiModelConfig, AiModelProvider, ChatAttachmentUpload } from "@gadgets/workshop-shared/api";
+import { PDF_MIME_TYPE } from "./chat-attachment-pdf";
 
 // Bounds attachment storage and the bytes replayed into model requests.
 const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
@@ -14,18 +15,27 @@ const IMAGE_SIGNATURES = new Map<string, readonly (number | null)[]>([
   ]],
 ]);
 
+// Magic-number prefixes checked at upload. Like the image signatures, the PDF one ("%PDF-")
+// only stops mislabeled uploads at the door; nothing here parses the content.
+const CONTENT_SIGNATURES = new Map<string, readonly (number | null)[]>([
+  ...IMAGE_SIGNATURES,
+  [PDF_MIME_TYPE, [0x25, 0x50, 0x44, 0x46, 0x2D]],
+]);
+
 const isTextOrImageMime = (mimeType: string) =>
   isTextLikeAttachmentMimeType(mimeType) || IMAGE_SIGNATURES.has(mimeType);
 
-// Based on installed AI SDK adapter source, not a per-model capability matrix.
-// Each rule describes file parts the adapter can encode before a model request is sent.
+const isTextImageOrPdfMime = (mimeType: string) =>
+  isTextOrImageMime(mimeType) || mimeType === PDF_MIME_TYPE;
+
+// pi-ai encodes only text and image content parts, so text + images are universal. PDFs ride an
+// image part and are bridged to a provider's native document input where one exists: Gemini takes
+// application/pdf inline data as-is, and Anthropic/OpenAI payloads are rewritten in flight (see
+// chat-attachment-pdf.ts). Workers AI and Ollama chat endpoints have no document input at all.
 const ATTACHMENT_SUPPORT_BY_PROVIDER = {
-  // @ai-sdk/anthropic and @ai-sdk/openai accept PDFs as raw file parts.
-  anthropic: (mimeType: string) => isTextOrImageMime(mimeType) || mimeType === "application/pdf",
-  openai: (mimeType: string) => isTextOrImageMime(mimeType) || mimeType === "application/pdf",
-  // @ai-sdk/google forwards arbitrary raw MIME types to Gemini.
-  google: () => true,
-  // workers-ai-provider and ollama-ai-provider-v2 accept only image file parts.
+  anthropic: isTextImageOrPdfMime,
+  openai: isTextImageOrPdfMime,
+  google: isTextImageOrPdfMime,
   cloudflare: isTextOrImageMime,
   ollama: isTextOrImageMime,
 } satisfies Record<AiModelProvider, (mimeType: string) => boolean>;
@@ -70,11 +80,11 @@ export function validateChatAttachmentUpload(
   attachment.mimeType = sanitizeChatAttachmentMimeType(attachment.mimeType);
   assertChatAttachmentSupportedByProvider(provider, attachment.mimeType, attachment.content.byteLength);
 
-  let signature = IMAGE_SIGNATURES.get(attachment.mimeType);
+  let signature = CONTENT_SIGNATURES.get(attachment.mimeType);
   if (signature) {
     for (let [index, expected] of signature.entries()) {
       if (expected !== null && attachment.content[index] !== expected) {
-        throw new Error("Chat image content does not match its MIME type.");
+        throw new Error("Chat attachment content does not match its MIME type.");
       }
     }
   }

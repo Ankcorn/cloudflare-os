@@ -6,6 +6,7 @@ import {
   getModelTokenLimits, isCompactionTurn, protectRetainedReverts, shouldCompactChat, startsAgentTurn,
 } from "../src/agent-compaction";
 import * as Y from "yjs";
+import type {Api, AssistantMessage, Message, Model} from "@earendil-works/pi-ai";
 import type {ChatBindingEntry} from "../src/agent";
 
 const user: AiChatAuthorInfo = {type: "user", id: "user", name: "User"};
@@ -37,15 +38,47 @@ function message(sequence: number, author: AiChatAuthorInfo, text: string): AiCh
   return record(sequence, author, {type: "message", message: text});
 }
 
+// Provenance fields for synthesized pi assistant messages (only api/provider/id are read).
+const testModel = {
+  id: "test-model", api: "anthropic-messages", provider: "anthropic",
+} as Model<Api>;
+
+function assistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    role: "assistant",
+    content,
+    api: testModel.api,
+    provider: testModel.provider,
+    model: testModel.id,
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0},
+    },
+    stopReason: "stop",
+    timestamp: 0,
+  };
+}
+
 function projection(messages: AiChatMessage[]) {
   return messages.flatMap(entry => entry.type === "message" ? [{
-    message: {
-      role: entry.author.type === "agent" ? "assistant" as const : "user" as const,
-      content: entry.message,
-    },
+    message: entry.author.type === "agent"
+        ? assistantMessage([{type: "text", text: entry.message}])
+        : {role: "user" as const, content: entry.message, timestamp: 0},
     sequence: entry.sequence,
     canCut: true,
   }] : []);
+}
+
+// Reduces a summary-prompt message to its role + flattened text, hiding the pi bookkeeping
+// fields (usage, timestamps, ...) that don't matter to these tests.
+function promptText(message: Message): {role: string, text: string} {
+  if (message.role === "assistant") {
+    return {
+      role: "assistant",
+      text: message.content.map(block => block.type === "text" ? block.text : "").join(""),
+    };
+  }
+  return {role: message.role, text: `${message.content}`};
 }
 
 const initialBindings: [string, ChatBindingEntry][] = [
@@ -372,26 +405,21 @@ describe("summary prompt", () => {
   // The summarizer declares no tools, and providers reject tool blocks in that case.
   it("flattens to text, merges adjacent roles, and stops at the boundary", () => {
     let prompt = buildSummaryPrompt([
-      {message: {role: "system", content: "coding agent"}},
-      {message: {role: "system", content: "workspace"}},
-      {message: {role: "user", content: "earlier summary"}},
-      {message: {role: "user", content: "compacted"}, sequence: 3, startsTurn: true},
+      {message: {role: "user", content: "earlier summary", timestamp: 0}},
+      {message: {role: "user", content: "compacted", timestamp: 0}, sequence: 3},
       {
-        message: {
-          role: "assistant",
-          content: [
-            {type: "text", text: "working"},
-            {type: "tool-call", toolCallId: "c1", toolName: "readFile", input: {a: 1}},
-          ],
-        },
+        message: assistantMessage([
+          {type: "text", text: "working"},
+          {type: "toolCall", id: "c1", name: "readFile", arguments: {a: 1}},
+        ]),
         sequence: 4,
       },
-      {message: {role: "user", content: "retained"}, sequence: 6, startsTurn: true},
-    ], 6);
+      {message: {role: "user", content: "retained", timestamp: 0}, sequence: 6},
+    ], 6, testModel);
 
-    expect(prompt).toEqual([
-      {role: "user", content: "earlier summary\ncompacted"},
-      {role: "assistant", content: "working\n[readFile {\"a\":1}]"},
+    expect(prompt.map(promptText)).toEqual([
+      {role: "user", text: "earlier summary\ncompacted"},
+      {role: "assistant", text: "working\n[readFile {\"a\":1}]"},
     ]);
   });
 });
@@ -420,10 +448,10 @@ describe("boundary arithmetic", () => {
     ];
 
     // The message at the boundary belongs to the retained tail, not the summary.
-    let prompt = buildSummaryPrompt(projection(messages), 2);
-    expect(prompt).toEqual([
-      {role: "user", content: "first"},
-      {role: "assistant", content: "reply"},
+    let prompt = buildSummaryPrompt(projection(messages), 2, testModel);
+    expect(prompt.map(promptText)).toEqual([
+      {role: "user", text: "first"},
+      {role: "assistant", text: "reply"},
     ]);
   });
 });

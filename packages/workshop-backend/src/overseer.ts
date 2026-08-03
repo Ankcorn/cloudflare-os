@@ -8,13 +8,12 @@ import {
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import * as Y from "yjs";
-import { generateText, RetryError, APICallError } from "ai";
 import {
   LanguageModelGatekeeperProps,
   getModel,
-  getModelWithLogRoute,
   UserGatewayRouting,
 } from "./ai-models";
+import { AgentTurnError, completeText } from "./ai-invoke";
 import {
   AiGatewayLogRetryableError,
   getAiGatewayConfig,
@@ -564,7 +563,7 @@ const CHAT_DRAFT_COMPACT_THRESHOLD = 128;
 const AGENT_RESPONSE_DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 // Safely convert an unknown thrown value to a human-readable string.
-// Plain objects (e.g. from AI SDK stream error parts) would otherwise render as "[object Object]".
+// Plain objects would otherwise render as "[object Object]".
 function stringifyError(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
@@ -3670,7 +3669,7 @@ class OverseerImpl implements AgentHooks {
       }
 
       let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
-      let { model: chosenModel, aiGatewayLogRoute } = getModelWithLogRoute(
+      let chosenModel = getModel(
           this.env, aiModel.config, initiator, {
             sessionAffinity,
             userGateway: byokRouting,
@@ -3694,7 +3693,7 @@ class OverseerImpl implements AgentHooks {
               checkpoint,
               modelConfig: aiModel.config,
               measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
-            }, aiGatewayLogRoute);
+            });
         if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
         // `/compact` is done once it has compacted. An automatic compaction returned before
         // prompting the model, so rerun the turn now that the history is shorter. Each compaction
@@ -3754,20 +3753,16 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
     } catch (err: unknown) {
-      // Extract the APICallError if present — either thrown directly
-      // (non-retryable) or wrapped in RetryError (retryable, exhausted).
-      // Only log specific fields — the full error includes the entire
-      // prompt which exceeds the 256KB Workers log limit.
-      let apiError =
-        APICallError.isInstance(err) ? err :
-        RetryError.isInstance(err) && APICallError.isInstance(err.lastError) ? err.lastError :
-        null;
+      // A failed model request surfaces as AgentTurnError (pi reports provider failures as data;
+      // runAgent converts them back to a throw), carrying the failing request's HTTP status when
+      // one was observed.
+      let apiError = err instanceof AgentTurnError ? err : null;
 
       // Report unexpected failures for triage. Skip expected provider 4xx (auth,
       // rate limit, quota/billing), which are ordinary control flow, not incidents.
       const apiStatus = apiError?.statusCode;
       if (apiStatus === undefined || apiStatus >= 500) {
-        reportIssue("overseer.run-agent", apiError ?? err, {
+        reportIssue("overseer.run-agent", err, {
           attributes: obsContext.get(),
           http: apiStatus === undefined
             ? undefined
@@ -3775,16 +3770,12 @@ class OverseerImpl implements AgentHooks {
         });
       }
 
-      let errorMessage: string;
+      let errorMessage = stringifyError(err);
       if (apiError) {
-        let { statusCode, responseBody } = apiError;
-        let summary = stringifyError(err);
         turnLogger.error("runAgent failed", {
-          event: "agent.run.failed", statusCode, error: err,
+          event: "agent.run.failed", statusCode: apiError.statusCode, error: err,
         });
-        errorMessage = `${summary} — ${responseBody ?? statusCode}`;
       } else {
-        errorMessage = stringifyError(err);
         turnLogger.error("runAgent failed", {
           event: "agent.run.failed", error: err,
         });
@@ -4235,9 +4226,8 @@ class OverseerImpl implements AgentHooks {
       quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
     try {
       let model = getModel(this.env, quick.config, quick.initiator);
-      let result = await generateText({
-        model,
-        abortSignal: AbortSignal.timeout(10_000),
+      let result = await completeText(model, {
+        signal: AbortSignal.timeout(10_000),
         prompt:
             `Choose a short, meaningful JavaScript identifier in ALL_CAPS_WITH_UNDERSCORES ` +
             `style (like an environment variable name) to serve as the binding name for the ` +
@@ -4251,7 +4241,7 @@ class OverseerImpl implements AgentHooks {
             `\n========== resource description below this line ==========\n` +
             subject,
       });
-      let name = result.text.trim();
+      let name = result.trim();
       validateBindingName(name);
       if (takenNames.has(name)) return undefined;
       return name;
@@ -4911,8 +4901,7 @@ class OverseerImpl implements AgentHooks {
         metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 
-      let result = await generateText({
-        model,
+      let result = await completeText(model, {
         // TODO: Is there a better way to convince the LLM just to summarize and not to follow
         //   instructions in the user message? I tried putting the paragraph in the system
         //   prompt and putting the initial message into `prompt` and also into `messages` and
@@ -4932,16 +4921,16 @@ class OverseerImpl implements AgentHooks {
       }
 
       meta.lastActive = this.getChatTimestamp();
-      meta.title = result.text;
+      meta.title = result;
       this.storage.chatMeta.put(meta);
 
       // Also rename the gadget if this is the first chat. Since the gadget likely doesn't have
       // any code yet, the user still sees it as just a chat, and therefore it makes sense to
       // apply the same title as the chat itself.
       if (chatId === 0 && this.storage.title.get() === "Untitled Gadget" && this.ownerId) {
-        this.storage.title.put(result.text);
+        this.storage.title.put(result);
         let owner = this.users.get(this.users.idFromString(this.ownerId));
-        await owner.updateTitle(this.ctx.id.toString(), result.text);
+        await owner.updateTitle(this.ctx.id.toString(), result);
       }
 
       // TODO: Should we track costs for title generation? It's pretty negligible.
@@ -4969,8 +4958,7 @@ class OverseerImpl implements AgentHooks {
         metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
       });
 
-      let gadgetTitle = await generateText({
-        model,
+      let gadgetTitle = await completeText(model, {
         prompt: "Below is the log of a chat session that led to a coding agent writing " +
                 "code for a small application. Based on the conversation, please generate " +
                 "a short name (2-5 words) for the app or tool the user is trying to build. " +
@@ -4980,7 +4968,7 @@ class OverseerImpl implements AgentHooks {
                 "========== chat log below this line ==========\n" +
                 `${parts.join("\n")}`,
       });
-      let title = gadgetTitle.text.trim();
+      let title = gadgetTitle.trim();
       if (title && this.ownerId) {
         this.storage.title.put(title);
         let owner = this.users.get(this.users.idFromString(this.ownerId));
@@ -4996,7 +4984,7 @@ class OverseerImpl implements AgentHooks {
 
   addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
         totalTokens?: number, aiGatewayLogId?: string,
-        aiGatewayLogRoute?: AiGatewayLogRoute): void {
+        aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
       // Chat thread deleted?
@@ -5054,18 +5042,43 @@ class OverseerImpl implements AgentHooks {
     if (aiGatewayLogId && aiGatewayLogRoute) {
       // Best-effort UI accounting only. The log ID is not persisted, so a DO restart can lose
       // this update. Do not use this total as a billing source of truth.
-      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId);
+      void this.#getCostFromAiGateway(chatId, aiGatewayLogRoute, aiGatewayLogId, estimatedCost);
+    } else if (estimatedCost) {
+      // No AI Gateway log to consult (direct provider access, or a gateway response that didn't
+      // surface a log id): fall back to the caller's catalog-priced estimate.
+      this.#addChatCost(chatId, estimatedCost);
     }
   }
 
+  // Adds an inference cost (in dollars) to a chat's running total and the workspace-wide total.
+  #addChatCost(chatId: number, cost: number) {
+    let meta = this.storage.chatMeta.get(chatId);
+    if (!meta) {
+      // Chat thread deleted?
+      return;
+    }
+
+    meta.totalCost = (meta.totalCost ?? 0) + cost;
+
+    // Even though this is not really activity, we need to update lastActive for the subscription
+    // machinery to work correctly.
+    meta.lastActive = this.getChatTimestamp();
+
+    this.storage.chatMeta.put(meta);
+    this.storage.totalCost.put(this.storage.totalCost.get() + cost);
+  }
+
   // Fetches an AI Gateway log entry and adds the cost to the given chat ID's cost indicator.
+  // If the gateway can't produce a (positive) cost -- fetch failure, or the gateway doesn't
+  // price this model -- falls back to `estimatedCost` (the caller's catalog-priced estimate)
+  // so the indicator degrades to an estimate rather than silently omitting the turn.
   //
   // TODO: Get AI gateway to add cost data to response headers -- it's dumb that we need a
   //   separate request!
-  async #getCostFromAiGateway(
-      chatId: number, route: AiGatewayLogRoute, aiGatewayLogId: string) {
+  async #getCostFromAiGateway(chatId: number, route: AiGatewayLogRoute, aiGatewayLogId: string,
+                              estimatedCost?: number) {
+    let cost: number | undefined;
     try {
-      let cost: number | undefined;
       for (let attempt = 0; attempt < 4; ++attempt) {
         try {
           cost = await getAiGatewayLogCost(this.env, route, aiGatewayLogId);
@@ -5075,34 +5088,19 @@ class OverseerImpl implements AgentHooks {
           await scheduler.wait(1000 * 2 ** attempt);
         }
       }
-
-      if (!cost) {
-        // Either cost is not available or it was zero; nothing to update in this case.
-        return;
-      }
-
-      let meta = this.storage.chatMeta.get(chatId);
-      if (!meta) {
-        // Chat thread deleted?
-        return;
-      }
-
-      meta.totalCost = (meta.totalCost ?? 0) + cost;
-
-      // Even though this is not really activity, we need to update lastActive for the subscription
-      // machinery to work correctly.
-      meta.lastActive = this.getChatTimestamp();
-
-      this.storage.chatMeta.put(meta);
-      this.storage.totalCost.put(this.storage.totalCost.get() + cost);
     } catch (err) {
       // This is an async operation without any caller waiting so there's not much we can do with
-      // this error.
+      // this error beyond falling back to the estimate below.
       // TODO: If we ever use this for billing we'll want to make it more reliable, perhaps by
       //   storing unfetched log IDs in storage and retrying fetches.
       this.logger.warn("failed to fetch AI Gateway cost log", {
         event: "ai.gateway.cost.log.fetch.failed", error: err,
       });
+    }
+
+    cost ||= estimatedCost;
+    if (cost) {
+      this.#addChatCost(chatId, cost);
     }
   }
 

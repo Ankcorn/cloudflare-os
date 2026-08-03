@@ -82,6 +82,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [displayName, setDisplayName] = useState('')
   const [uniqueId, setUniqueId] = useState('')
   const [apiToken, setApiToken] = useState('')
+  const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
 
   // Validation errors
@@ -104,6 +105,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setDisplayName('')
       setUniqueId('')
       setApiToken('')
+      setAccountId('')
       setApiUrl('')
       setErrors({})
       setAdvancedOpen(false)
@@ -120,15 +122,14 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setModelId('')
       setDisplayName('')
       setUniqueId('')
-      setApiToken('')
-      setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434/api' : '')
     } else {
       setModelId(sel.modelId)
       setDisplayName(sel.displayName)
       setUniqueId(sel.modelId)
-      setApiToken('')
-      setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434/api' : '')
     }
+    setApiToken('')
+    setAccountId('')
+    setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
   }
 
   const validate = (): boolean => {
@@ -148,8 +149,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     const isCloudflare = selection?.provider === 'cloudflare'
     const showCredentials = !gatewayMode
 
-    if (showCredentials && selection && !isCloudflare && !isOllama && !apiToken.trim()) {
+    if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
+    }
+
+    if (showCredentials && isCloudflare && !accountId.trim()) {
+      newErrors.accountId = 'Please enter your Cloudflare account ID'
     }
 
     if (showCredentials && isOllama && !apiUrl.trim()) {
@@ -178,7 +183,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       const config: AiModelConfig = {
         provider: selection!.provider,
         model: finalModelId,
-        apiToken: gatewayMode ? '' : (apiToken || ''),
+        apiToken: gatewayMode ? '' : apiToken.trim(),
+        ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
         ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
       }
 
@@ -283,14 +289,29 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             </>
           )}
 
+          {/* Cloudflare account ID (the Workers AI REST endpoint is account-scoped) */}
+          {showCredentials && isCloudflare && (
+            <Input
+              label="Cloudflare Account ID"
+              placeholder="e.g., 0123456789abcdef0123456789abcdef"
+              description="The Cloudflare account to bill for Workers AI usage"
+              value={accountId}
+              onChange={(e) => { setAccountId(e.target.value); setErrors(prev => ({ ...prev, accountId: '' })) }}
+              error={errors.accountId}
+              variant={errors.accountId ? 'error' : 'default'}
+            />
+          )}
+
           {/* API Token */}
-          {showCredentials && selection && !isCloudflare && (
+          {showCredentials && selection && (
             <SensitiveInput
               label="API Token"
-              placeholder={isOllama ? '(optional)' : 'sk-...'}
+              placeholder={isOllama ? '(optional)' : isCloudflare ? 'Cloudflare API token' : 'sk-...'}
               description={
                 isOllama
                   ? 'Optional for local Ollama access'
+                  : isCloudflare
+                  ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
                   : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
               }
               value={apiToken}
@@ -304,7 +325,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           {showCredentials && isOllama && (
             <Input
               label="API URL"
-              placeholder="http://localhost:11434/api"
+              placeholder="http://localhost:11434"
               description="URL of your Ollama server"
               value={apiUrl}
               onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
