@@ -51,11 +51,14 @@ function gitCommit() {
 }
 
 function defaultReleaseId(commit) {
-  // CI: monotonic run number + short SHA. Local: clearly-labeled dev release.
+  // CI: run number + short SHA. Local: timestamped dev release, unique per build so every
+  // upload stays immutable in R2. Ids are human labels only — "latest" is decided by the
+  // deploy service from upload time, and the commit is in the manifest's `commit` field.
+  // Kept short: worker version tags (`gd:<id>:<fp8>`) have a hard 25-char cap downstream.
   if (process.env.GITHUB_RUN_NUMBER) {
     return `r${process.env.GITHUB_RUN_NUMBER.padStart(6, "0")}-${commit.slice(0, 7)}`;
   }
-  return `dev-${commit.slice(0, 7)}`;
+  return `dev-${Math.floor(Date.now() / 1000).toString(36)}`;
 }
 
 function pinnedWranglerVersion() {
