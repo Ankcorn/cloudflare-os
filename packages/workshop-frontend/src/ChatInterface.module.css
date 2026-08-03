@@ -167,6 +167,14 @@
 .capsuleMention {
   color: var(--color-kumo-brand);
 }
+/* A format's icon is an inline SVG rather than an <img>, so it takes currentColor and needs only to
+ * be nudged onto the text baseline. Spacing matches the capsule logo so the two read alike. */
+.capsuleMention .formatMentionIcon {
+  display: inline-block;
+  margin-right: 0.3em;
+  vertical-align: -0.15em;
+}
+
 /* Two classes to outrank `.markdownContent img`, which would otherwise reset the height. Height-only
  * sizing keeps non-square logos in aspect. */
 .capsuleMention .capsuleMentionLogo {

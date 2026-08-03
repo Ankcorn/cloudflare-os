@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -21,12 +21,12 @@ import {
   type AiGatewayLogRoute,
 } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type CompactionCheckpoint } from "./agent";
-import { readAdminConfig } from "./admin-config";
+import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
-import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive";
+import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
 import { WebFetchEnv } from "./web-fetch";
-import { UserDurableObject, UserAiModelRecord, type UserChatContext } from "./user";
+import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/backend-utils/error-reporting";
@@ -227,6 +227,11 @@ type GadgetRecord = {
   id: WorkpieceId;
   title: string;
   created: Date;
+
+  // The output format this gadget was built as, copied from the blueprint it was instantiated
+  // from (see BlueprintMetadata.output). Absent for a gadget built from scratch, which displays as
+  // a generic app. Purely descriptive: it names and draws the gadget, and confers nothing.
+  output?: BlueprintOutput;
 
   // Name of the gadget to use in the workspace's default binding list for new chats. That is, when
   // a new (normal, non-spawner) chat is started, this gadget will be available in its `env` under
@@ -904,6 +909,62 @@ const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
 
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
+// Most format tokens one message may carry. Only formats picked from the composer menu become
+// refs, so this bounds a client-supplied array rather than anything a person can type. Dropping
+// the excess costs chips, not text.
+const MAX_MESSAGE_FORMAT_REFS = 32;
+
+// How many affected collaborator listings to refresh at once after a sharing change.
+const LISTING_REFRESH_BATCH = 16;
+
+// Longest noun accepted on a format reference. Denormalized display data.
+const MAX_FORMAT_REF_NOUN = 128;
+
+// Keeps `commandPosition` only if it's a real index into `args`. Anything else becomes undefined,
+// and the command renders at the front. Display-only, so a bad value isn't worth an error.
+export function sanitizeCommandPosition(request: SlashCommandRequest): number | undefined {
+  let position = request.commandPosition;
+  if (position === undefined) return undefined;
+  if (!Number.isInteger(position) || position <= 0 || position > request.args.length) {
+    return undefined;
+  }
+  return position;
+}
+
+// Drops format refs the message text doesn't back up. They're display-only and come from the
+// browser, so a bad one costs a chip, not the message. But a chip *replaces* the text it covers,
+// so a ref must cover exactly the noun it names -- or it could hide what the user really wrote.
+export function sanitizeMessageFormatRefs(
+    refs: MessageFormatRef[] | undefined, message: string | undefined)
+    : MessageFormatRef[] | undefined {
+  if (!refs?.length || message === undefined) return undefined;
+
+  let accepted: MessageFormatRef[] = [];
+  for (let ref of refs) {
+    if (accepted.length >= MAX_MESSAGE_FORMAT_REFS) break;
+    if (!Number.isInteger(ref.position) || !Number.isInteger(ref.length)) continue;
+    if (ref.position < 0 || ref.length <= 0) continue;
+    if (ref.position + ref.length > message.length) continue;
+    if (typeof ref.noun !== "string" || ref.noun.length > MAX_FORMAT_REF_NOUN) continue;
+    if (!isOutputIcon(ref.icon)) continue;
+    if (message.slice(ref.position, ref.position + ref.length) !== ref.noun) continue;
+    // Overlapping spans have no meaning and would let a renderer paint the same text twice.
+    if (accepted.some(other => ref.position < other.position + other.length
+                            && other.position < ref.position + ref.length)) {
+      continue;
+    }
+    accepted.push({
+      position: ref.position,
+      length: ref.length,
+      noun: ref.noun,
+      icon: ref.icon,
+    });
+  }
+
+  if (accepted.length === 0) return undefined;
+  return accepted.toSorted((a, b) => a.position - b.position);
+}
+
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
@@ -1226,6 +1287,16 @@ class OverseerImpl implements AgentHooks {
         (record, resolvedBy, autoApproved) =>
             this.applyPendingAction(record, resolvedBy, autoApproved));
 
+    // Mirror every gadget-registry change into the owner's outputs index. Subscribing here makes
+    // the registry the single chokepoint, so creation, acceptance, renaming, reverting and
+    // deletion all propagate without each call site remembering to. (Workspace deletion is handled
+    // by UserDurableObject.deleteGadget(), which drops the whole workspace's entries.)
+    this.storage.gadgets.subscribe({
+      add: () => this.markOutputsDirty(),
+      update: () => this.markOutputsDirty(),
+      remove: () => this.markOutputsDirty(),
+    });
+
     // Resume any agent turns that were left running by a previous instance of this DO (i.e. were
     // interrupted by a server restart).
     for (let record of Array.from(this.storage.activeAgents.list())) {
@@ -1440,8 +1511,10 @@ class OverseerImpl implements AgentHooks {
   // whose records are real and so reserve their name from creation. If `chatId` is given, the
   // gadget is provisional to that chat (see GadgetRecord.pending); the caller is responsible for
   // getting its creation recorded in the chat log so the pending record gets sequence-stamped
-  // (see addChatMessages()).
-  createGadget(title: string, bindingName: string, chatId?: number): GadgetRecord {
+  // (see addChatMessages()). `output` is the format declared by the blueprint being instantiated,
+  // if any.
+  createGadget(title: string, bindingName: string, chatId?: number,
+               output?: BlueprintOutput): GadgetRecord {
     title = title.trim();
     if (!title) {
       throw new Error("A gadget requires a non-empty title.");
@@ -1465,6 +1538,9 @@ class OverseerImpl implements AgentHooks {
       bindingName,
       bindings: {},
     };
+    if (output) {
+      record.output = output;
+    }
     if (chatId !== undefined) {
       record.pending = {chatId};
     }
@@ -1749,6 +1825,9 @@ class OverseerImpl implements AgentHooks {
         title: record.title,
         filesRoot: this.gadgetRootName(record.id),
       };
+      if (record.output) {
+        summary.output = record.output;
+      }
       if (record.pending) {
         summary.chatId = record.pending.chatId;
       }
@@ -2911,6 +2990,130 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // --- Outputs index -------------------------------------------------------------------
+  //
+  // Each non-provisional gadget here is an "output". The `gadgets` registry is authoritative, but
+  // the Outputs page lists across all of a user's workspaces, so the registry is mirrored into an
+  // index in each interested user's DO (see UserDurableObject.syncWorkspaceOutputs()).
+
+  // Whether a flush is already queued. Registry mutations arrive in synchronous bursts (a chat's
+  // changes may create and stamp several gadgets), so pushes coalesce onto a single flush.
+  #outputsFlushScheduled = false;
+
+  // User DO ids whose outputs index this workspace is keeping live, one token per open session.
+  //
+  // In memory, not persisted, which is what makes fanning out to collaborators safe: revoking
+  // access aborts the DO (see scheduleRevocationRestart()), so this is destroyed with the sessions
+  // it describes and can only be rebuilt by an open() that re-checks the permission graph.
+  #connectedIndexes = new Map<string, Set<object>>();
+
+  // Keep `userId`'s outputs index up to date for the duration of one session. Returns a function
+  // that ends it, like joinPresence().
+  joinOutputsFanout(userId: string): () => void {
+    let token = {};
+    let sessions = this.#connectedIndexes.get(userId);
+    if (sessions) {
+      sessions.add(token);
+    } else {
+      this.#connectedIndexes.set(userId, new Set([token]));
+    }
+
+    let left = false;
+    return () => {
+      if (left) return;
+      left = true;
+      let remaining = this.#connectedIndexes.get(userId);
+      if (!remaining) return;
+      remaining.delete(token);
+      if (remaining.size === 0) this.#connectedIndexes.delete(userId);
+    };
+  }
+
+  // This workspace's outputs, as pushed to a user's index. Provisional gadgets are excluded: they
+  // are proposals inside a chat, not things the user has made yet.
+  //
+  // Whole-snapshot rather than a delta, so that a user's index can be brought into line with this
+  // workspace in one call from anywhere, without either side reconciling per workpiece.
+  outputsSnapshot(): WorkspaceOutputEntry[] {
+    let entries: WorkspaceOutputEntry[] = [];
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.pending) continue;
+      entries.push({
+        workpieceId: gadget.id,
+        title: gadget.title,
+        created: gadget.created,
+        ...(gadget.output ? {output: gadget.output} : {}),
+      });
+    }
+    return entries;
+  }
+
+  // Push the current snapshot into one user's index. Best-effort: the index is a denormalized
+  // view, so a failed push costs a stale Outputs page until the next change or open, never
+  // correctness.
+  // Returns whether the index actually took it. Failures are logged rather than thrown -- an index
+  // is a convenience view and the workspace itself is unaffected -- but callers that remember what
+  // they have sent need to know the difference.
+  async syncOutputsTo(user: DurableObjectStub<UserDurableObject>,
+                      snapshot = this.outputsSnapshot()): Promise<boolean> {
+    try {
+      await user.syncWorkspaceOutputs(this.ctx.id.toString(), snapshot);
+      return true;
+    } catch (err) {
+      this.logger.warn("failed to sync workspace outputs to user DO", {
+        event: "workspace.outputs.sync.failed", gadgetId: this.ctx.id.toString(), error: err,
+      });
+      return false;
+    }
+  }
+
+  // Note that the gadget registry changed, scheduling a push to every index that should be live.
+  markOutputsDirty(): void {
+    if (this.#outputsFlushScheduled || !this.ownerId) return;
+    this.#outputsFlushScheduled = true;
+    scheduler.wait(0).then(() => {
+      // Cleared before the push, so a change made while it is in flight schedules another.
+      this.#outputsFlushScheduled = false;
+      return this.#syncOutputsToWatchers();
+    }).catch(err => {
+      this.logger.warn("failed to flush workspace outputs", {
+        event: "workspace.outputs.flush.failed", gadgetId: this.ctx.id.toString(), error: err,
+      });
+    });
+  }
+
+  // Push the current snapshot to the owner's index and to every collaborator with a session open.
+  // The owner is included whether or not they are connected, since a workspace goes on producing
+  // while its owner is away; a disconnected collaborator is caught up by the sync in open().
+  async #syncOutputsToWatchers(): Promise<void> {
+    let ownerId = this.ownerId;
+    if (!ownerId) return;
+
+    // Built once and shared, rather than once per recipient: the registry is the same for all of
+    // them, and rebuilding it per viewer is what made a push cost outputs times viewers.
+    let snapshot = this.outputsSnapshot();
+
+    // The registry notifies on every gadget update, but this carries only titles and presentation,
+    // so code commits, binding edits and activity stamps all produce a snapshot nobody's index
+    // would change on. Skipping those is most of the traffic. Safe to compare against what this
+    // instance last sent because a newly connected watcher is synced by open() before it joins the
+    // fan-out, and a cold DO has nothing recorded and so always pushes.
+    let encoded = JSON.stringify(snapshot);
+    if (encoded === this.#lastOutputsPushed) return;
+
+    let userIds = new Set([ownerId, ...this.#connectedIndexes.keys()]);
+    let delivered = await Promise.all([...userIds].map(
+        userId => this.syncOutputsTo(this.users.get(this.users.idFromString(userId)), snapshot)));
+
+    // Recorded only once every index has it, so that a recipient this failed for is included in
+    // the next flush instead of being remembered as up to date. If nothing changes again, their
+    // open() corrects it.
+    if (delivered.every(ok => ok)) this.#lastOutputsPushed = encoded;
+  }
+
+  // The snapshot every watcher last acknowledged, to suppress pushes that would change nothing.
+  #lastOutputsPushed?: string;
+
   // Increment the code version and restart the affected gadgets so they reload. If
   // `affectedGadgetIds` is omitted, conservatively restarts every gadget (e.g. for code commits,
   // which are whole-doc updates that may span gadget roots); binding changes pass the one gadget
@@ -3076,12 +3279,16 @@ class OverseerImpl implements AgentHooks {
         if (message.id.commandId !== "compact") throw new Error("Unknown built-in slash command.");
         return {slashCommand: message};
       }
-      let record = this.storage.gatekeepers.get(message.id.gatekeeperId);
+      // Held separately because reassigning `message` below widens `id` back to the union.
+      let {gatekeeperId} = message.id;
+      let record = this.storage.gatekeepers.get(gatekeeperId);
       if (!record?.hasSlashCommands) throw new Error("Slash command provider is not available.");
+      // Display-only, and from the browser, so a bad value is dropped rather than refused.
+      message = {...message, commandPosition: sanitizeCommandPosition(message)};
       using authorizer = new NativeRpcStub<ObservationAuthorizer>(
-          new SlashCommandAuthorizerImpl(this, message.id.gatekeeperId, {from: "user"}));
+          new SlashCommandAuthorizerImpl(this, gatekeeperId, {from: "user"}));
       let result = await invokeSlashCommand(
-          this.getGatekeeperFacet(message.id.gatekeeperId), message, authorizer);
+          this.getGatekeeperFacet(gatekeeperId), message, authorizer);
       if (result.message === undefined) {
         return {slashCommand: message, skillName: result.skillName};
       }
@@ -3120,8 +3327,13 @@ class OverseerImpl implements AgentHooks {
   #commitPreparedChatMessage(
       chatId: number, timestamp: Date, author: AiChatAuthorInfo,
       prepared: PreparedChatMessage, capsules: CapsuleSpecifier[] | undefined,
-      attachments: ChatAttachmentRef[] | undefined): number | undefined {
+      attachments: ChatAttachmentRef[] | undefined,
+      formats: MessageFormatRef[] | undefined): number | undefined {
     this.#validateCapsules(chatId, capsules);
+    // Format references describe the text the user wrote, which for a slash command is its
+    // arguments, what the transcript shows, not the message the provider expanded them into.
+    formats = sanitizeMessageFormatRefs(
+        formats, prepared.slashCommand ? prepared.slashCommand.args : prepared.message);
     if (prepared.slashCommand) {
       let slashCommandSequence = this.nextChatSequence(chatId);
       this.storage.chats.put({
@@ -3146,6 +3358,7 @@ class OverseerImpl implements AgentHooks {
         generatedBySlashCommandSequence: slashCommandSequence,
         capsules,
         attachments,
+        formats,
       });
       return messageSequence;
     }
@@ -3163,6 +3376,7 @@ class OverseerImpl implements AgentHooks {
       message: prepared.message,
       capsules,
       attachments,
+      formats,
     });
     return messageSequence;
   }
@@ -3175,6 +3389,7 @@ class OverseerImpl implements AgentHooks {
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
+    formats?: MessageFormatRef[],
   ): Promise<number> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -3204,7 +3419,7 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put(meta);
 
       let promptSequence = this.#commitPreparedChatMessage(
-          chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments);
+          chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
       if (responseTargetRegistration) {
         if (promptSequence === undefined) {
           throw new Error("External messages require a prompt.");
@@ -3252,6 +3467,7 @@ class OverseerImpl implements AgentHooks {
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
+    formats?: MessageFormatRef[],
   ): Promise<void> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -3280,7 +3496,8 @@ class OverseerImpl implements AgentHooks {
     this.ctx.storage.transactionSync(() => {
       this.storage.chatMeta.put(meta);
       let promptSequence = this.#commitPreparedChatMessage(
-          chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments);
+          chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments,
+          formats);
       if (responseTargetRegistration) {
         if (promptSequence === undefined) {
           throw new Error("External messages require a prompt.");
@@ -4049,6 +4266,7 @@ class OverseerImpl implements AgentHooks {
       title: gadget.title,
       rootName: this.gadgetRootName(gadget.id),
       isDefault: gadget.id === this.defaultGadgetId,
+      output: gadget.output,
       bindings: this.visibleBindings(gadget, forChatId).map(([name, edge]) => ({
         name,
         title: this.storage.gatekeepers.get(edge.target)?.resourceTitle || "(title unavailable)",
@@ -5408,10 +5626,11 @@ class OverseerImpl implements AgentHooks {
     // "user" turns, the spawning gadget's owner for "gadget" turns (see AiChatAuthorInfo) -- the
     // same resolution executeCodeMode uses for its self-loopback props.
     let userStub = this.users.get(this.users.idFromName(initiator.id));
-    let [own, library, featured] = await Promise.all([
+    let [own, library, featured, formats] = await Promise.all([
       userStub.listBlueprints(),
       userStub.listLibraryBlueprints(),
       listFeaturedBlueprintsFromKv(this.env),
+      this.#listStandardFormats(),
     ]);
 
     // A blueprint can appear in several lists at once (e.g. in the library and featured); the
@@ -5437,6 +5656,13 @@ class OverseerImpl implements AgentHooks {
       sections.push(lines.join("\n"));
     };
 
+    // Standard formats first, and labelled as preferred.
+    for (let format of formats) {
+      let source = `a standard format on this deployment` +
+          (format.agentHint ? ` -- ${format.agentHint}` : ``);
+      add(format.blueprintId, format.output.noun, source, format.description, format.bindings);
+    }
+
     for (let blueprint of own) {
       // BlueprintUserSummary carries no binding metadata; createGadget's output describes the
       // bindings after instantiation.
@@ -5454,15 +5680,53 @@ class OverseerImpl implements AgentHooks {
     if (sections.length === 0) {
       return "No blueprints are available to this user.";
     }
-    return `Blueprints available to instantiate (pass the blueprintId to createGadget):\n\n` +
-        sections.join("\n");
+    let preamble = `Blueprints available to instantiate (pass the blueprintId to createGadget)`;
+    if (formats.length > 0) {
+      preamble += `. The standard formats are listed first: when the user asks for something one ` +
+          `of them produces, instantiate it rather than building an equivalent from scratch`;
+    }
+    return `${preamble}:\n\n` + sections.join("\n");
+  }
+
+  // A short standing note about the deployment's standard formats, for the system prompt. Carried
+  // on every turn because "make me a quick doc" doesn't prompt an agent to call `listBlueprints`.
+  async describeStandardFormats(): Promise<string> {
+    let formats = await this.#listStandardFormats();
+    if (formats.length === 0) return "";
+
+    // No worked examples: the nouns are the deployment's, listed below, and may be plural.
+    return `# Standard output formats\n\n` +
+        `This deployment offers these as ready-made outputs, and users ask for them by name. When ` +
+        `the user asks for something one of them produces, instantiate that blueprint with ` +
+        `\`createGadget\` rather than writing an equivalent from scratch -- including when the ` +
+        `workspace already contains Gadgets, since the user is asking for a new output alongside ` +
+        `them rather than for an existing one to be repurposed. If the Gadget they are talking ` +
+        `about already *is* one of these, work on that one instead: asking to change an existing ` +
+        `output is not a request for a second one.\n\n` +
+        formats.map(format =>
+            `* ${format.output.noun} (plural: ${format.output.plural}) — blueprintId: ` +
+            `${format.blueprintId}` + (format.agentHint ? `; ${format.agentHint}` : ``)).join("\n");
+  }
+
+  // The deployment's standard output formats, as offered to the user (see listFormatOffers) plus
+  // the admin's hint about when to prefer each. Best-effort.
+  async #listStandardFormats(): Promise<FormatOffer[]> {
+    try {
+      return await listFormatOffers(this.env, await readAdminConfig(this.env));
+    } catch (err) {
+      this.logger.warn("failed to list standard formats for the agent", {
+        event: "formats.agent.list.failed", error: err,
+      });
+      return [];
+    }
   }
 
   // Fetch a blueprint's decoded files, plus formatted notes describing what was copied and which
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
-  async fetchBlueprint(blueprintId: string): Promise<{files: Record<string, string>, notes: string}> {
+  async fetchBlueprint(blueprintId: string)
+      : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}> {
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) {
       throw new Error(`No such blueprint: ${blueprintId}. Use listBlueprints to see available ` +
@@ -5483,8 +5747,17 @@ class OverseerImpl implements AgentHooks {
       files[file] = content.toString();
     }
 
+    // Apply the deployment's overrides, so a gadget the agent builds is labelled the same as one
+    // the user makes from the New menu (see newGadgetFromBlueprint, which does the same).
+    let output = deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
+        sanitizeBlueprintOutput(kvRecord.metadata.output));
+
     let lines = [`Created the new gadget from blueprint ` +
         `${JSON.stringify(kvRecord.metadata.title)} (blueprintId ${blueprintId}).`];
+    if (output) {
+      lines.push(`It produces a ${output.noun}; the new gadget is labelled as one throughout the ` +
+          `UI.`);
+    }
 
     let filenames = Object.keys(files);
     lines.push("", filenames.length > 0
@@ -5529,7 +5802,7 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    return {files, notes: lines.join("\n")};
+    return {files, notes: lines.join("\n"), output};
   }
 
   #tailSubscribers: Set<RpcStub<ConsoleLogSubscriber>> = new Set();
@@ -5644,6 +5917,34 @@ class OverseerImpl implements AgentHooks {
       if (!observer) continue;
       this.storage.observers.delete(observer.profileId);
       await this.#removeObserverFromGatekeepers(observer.observerId, gatekeeperIds);
+    }
+  }
+
+  // Reconcile this workspace's cached listing for collaborators whose access changed: remove it
+  // for those who lost access entirely, and refresh the presentation-only role for those who were
+  // downgraded.
+  async refreshAffectedCollaboratorListings(affected: AffectedCollaborator[]): Promise<void> {
+    let gadgetId = this.ctx.id.toString();
+
+    // Fanned out because these are independent DO round-trips: revoking a share link can affect
+    // everyone who joined through it, and one await each would make revocation take as long as the
+    // slowest collaborator times their number. Chunked to cap how many are in flight at once, not
+    // how many are made in total.
+    for (let i = 0; i < affected.length; i += LISTING_REFRESH_BATCH) {
+      let batch = affected.slice(i, i + LISTING_REFRESH_BATCH);
+      let results = await Promise.allSettled(batch.map(entry => {
+        let user = this.users.get(this.users.idFromName(entry.profile.id));
+        return entry.newRole === null
+          ? user.forgetSharedGadget(gadgetId)
+          : user.updateSharedGadgetRole(gadgetId, entry.newRole);
+      }));
+      for (let j = 0; j < results.length; j++) {
+        let result = results[j];
+        if (result.status !== "rejected") continue;
+        this.logger.warn("failed to refresh affected collaborator's workspace listing", {
+          event: "shared.gadget.access.refresh.failed", gadgetId, error: result.reason,
+        });
+      }
     }
   }
 
@@ -5963,6 +6264,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl.storage.version.put(1);
   }
 
+  // This workspace's outputs, for the owner to fold into their index. Every registry change and
+  // every owner open already pushes, so this exists only to catch up workspaces that predate the
+  // index. Null unless the caller really is the owner, so nobody else can read the snapshot.
+  async getOutputsForOwnerBackfill(ownerId: string): Promise<WorkspaceOutputEntry[] | null> {
+    if (this.impl.ownerId !== ownerId) return null;
+    return this.impl.outputsSnapshot();
+  }
+
   // `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
   // by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
   async open(userId: string, profileId: string,
@@ -6023,6 +6332,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         ? owner
         : this.impl.users.get(this.impl.users.idFromString(userId));
 
+    // Refresh the owner's outputs index. Pushes are best-effort, and workspaces predating the
+    // index have never pushed at all, so re-syncing on open is what corrects both.
+    if (isOwner) {
+      this.impl.markOutputsDirty();
+    }
+
     // The caller's effective role. The owner always has "build".
     let role: CollaboratorRole = "build";
 
@@ -6075,23 +6390,28 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       void (async () => {
         try {
           const ownerProfile = await owner.whoami();
-          clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile);
+          await clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile, role);
         } catch (err) {
           this.impl.logger.warn("failed to record shared gadget open", {
             event: "shared.gadget.open.record.failed", gadgetId, error: err,
           });
+          return;
         }
+        // Catch up whatever happened while they were away; changes from here on reach them
+        // through the session fan-out (joinOutputsFanout).
+        await this.impl.syncOutputsTo(clientUser);
       })();
     }
 
     if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
       return new UseOverseerInterface(
-          this.impl, owner, clientUser, profileId, notifyClosed.dup());
+          this.impl, owner, clientUser, profileId, userId, notifyClosed.dup());
     }
 
     return new OverseerClientInterface(
-        this.impl, owner, clientUser, profileId, isOwner, notifyClosed.dup(), ensureCapsules);
+        this.impl, owner, clientUser, profileId, userId, isOwner, notifyClosed.dup(),
+        ensureCapsules);
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -6219,7 +6539,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   // Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
   // AuthenticatedApi.newGadgetFromBlueprint() after creating (and opening) the DO.
-  async initializeFromBlueprint(code: Uint8Array, title: string): Promise<void> {
+  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput)
+      : Promise<void> {
     // Set the title. The default gadget (created just below) inherits it.
     this.impl.storage.title.put(title);
 
@@ -6227,6 +6548,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // recorded as the default gadget (see ensureDefaultGadget).
     this.impl.ensureDefaultGadget();
     let gadgetId = this.impl.resolveGadgetId(undefined);
+
+    // The gadget inherits the blueprint's declared format, so it is named and drawn as a Document
+    // (or whatever it produces) rather than a generic app.
+    if (output) {
+      let record = this.impl.getGadgetRecord(gadgetId);
+      record.output = output;
+      this.impl.storage.gadgets.put(record);
+    }
 
     // Copy the blueprint's files into the gadget's files root. Root names don't transfer via Yjs
     // updates -- the archive always uses the unnamed root "" while the destination gadget may own
@@ -6719,6 +7048,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               private owner: DurableObjectStub<UserDurableObject>,
               private clientUser: DurableObjectStub<UserDurableObject>,
               private clientProfileId: string,
+              clientUserId: string,
               private isOwner: boolean,
               private notifyClosed: NativeRpcStub<() => void>,
               // Ambient capsule reconciliation started during open(); listSlashCommands() waits for
@@ -6727,12 +7057,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     super();
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
+    this.#leaveOutputsFanout = this.impl.joinOutputsFanout(clientUserId);
   }
 
   #leavePresence: () => void;
+  #leaveOutputsFanout: () => void;
 
   [Symbol.dispose]() {
     this.#leavePresence();
+    this.#leaveOutputsFanout();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -7780,17 +8113,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
-                capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<number> {
+                capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
+                formats?: MessageFormatRef[]): Promise<number> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
-    return this.impl.newChat(this.clientUser, userMeta, initialMessage, capsules, attachments);
+    return this.impl.newChat(this.clientUser, userMeta, initialMessage, capsules, attachments,
+                             undefined, undefined, formats);
   }
 
   async sendChatMessage(
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
-      capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[]): Promise<void> {
+      capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
+      formats?: MessageFormatRef[]): Promise<void> {
     let userMeta = await this.clientUser.getChatContext(chosenModelId);
     return this.impl.sendChatMessage(
-        this.clientUser, userMeta, chatId, message, capsules, attachments);
+        this.clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -8233,6 +8569,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
     await this.impl.tearDownLostObservers(affected);
+    // Likewise update or remove their cached workspace listing. Must happen before the restart
+    // below, which destroys this DO.
+    await this.impl.refreshAffectedCollaboratorListings(affected);
     // Only restart if someone actually lost access or was downgraded (kept users are already
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
     // disconnect everyone.
@@ -8252,6 +8591,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
     await this.impl.tearDownLostObservers(affected);
+    // Likewise update or remove their cached workspace listing (see removeCollaborator).
+    await this.impl.refreshAffectedCollaboratorListings(affected);
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     if (affected.length > 0) {
       this.impl.scheduleRevocationRestart();
@@ -8352,16 +8693,20 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
               private owner: DurableObjectStub<UserDurableObject>,
               private clientUser: DurableObjectStub<UserDurableObject>,
               private clientProfileId: string,
+              clientUserId: string,
               private notifyClosed: NativeRpcStub<() => void>) {
     super();
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "use", () => this.clientUser.whoami());
+    this.#leaveOutputsFanout = this.impl.joinOutputsFanout(clientUserId);
   }
 
   #leavePresence: () => void;
+  #leaveOutputsFanout: () => void;
 
   [Symbol.dispose]() {
     this.#leavePresence();
+    this.#leaveOutputsFanout();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -8776,6 +9121,12 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       lastUpdated: now,
       bindings,
     };
+
+    // Republishing preserves the format: a blueprint made from a Document still produces
+    // Documents.
+    if (gadget.output) {
+      metadata.output = gadget.output;
+    }
 
     let record: BlueprintGadgetRecord = {
       id,

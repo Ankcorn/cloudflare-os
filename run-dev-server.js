@@ -19,6 +19,7 @@ import { getWranglerPortFromBackendHost } from "./scripts/dev-server-config.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PACKAGES_DIR = join(ROOT, "packages");
+const WORKSHOP_BACKEND_DIR = join(PACKAGES_DIR, "workshop-backend");
 
 // Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
 // shell environment values take precedence. This file is gitignored and may hold local secrets.
@@ -43,6 +44,14 @@ function loadDevVars() {
 loadDevVars();
 
 const useWorkersAi = process.argv.includes("--use-workers-ai-binding");
+
+// Generate the format blueprint module before Wrangler tries to bundle the backend. The output is
+// gitignored, so it will not exist on a clean checkout.
+execFileSync(
+  process.execPath,
+  [join(WORKSHOP_BACKEND_DIR, "scripts", "build-format-blueprints.mjs")],
+  { stdio: "inherit", cwd: WORKSHOP_BACKEND_DIR },
+);
 
 // ---------------------------------------------------------------------------
 // Discover gatekeeper packages.
@@ -257,8 +266,7 @@ for (const gk of gatekeepers) {
     config.ai = { binding: "WORKERS_AI" };
   }
 
-  const backendDir = join(ROOT, "packages", "workshop-backend");
-  config.build = { ...config.build, cwd: backendDir };
+  config.build = { ...config.build, cwd: WORKSHOP_BACKEND_DIR };
 
   const outPath = join(ROOT, "packages", "workshop-backend", "wrangler.dev.jsonc");
   writeFileSync(outPath, JSON.stringify(config, null, 2) + "\n");

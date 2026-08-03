@@ -8,9 +8,9 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { AmbientGatekeeperMode, BannerConfig, DEFAULT_BANNER_COLOR, isAmbientGatekeeperMode, isBannerColor } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
-import { ADMIN_CONFIG_KEY } from "./blueprint-archive.js";
+import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
 
 export type AdminConfig = {
   // Whether new account signups are allowed (default true). Note: this is an access toggle, not
@@ -35,6 +35,31 @@ export type AdminConfig = {
   // Library). Absent ⇒ the default ("optional", see provisioning-policy.ts). Only meaningful for
   // vendors that declare autoProvisionsAccount.
   ambientGatekeeperModes: Record<string, AmbientGatekeeperMode>;
+
+  // The blueprints offered as this deployment's standard output formats. What a user gets from
+  // "New Slides", and what the agent is told to prefer. Order is menu order.
+  //
+  // Separate from the blueprint's own declaration of what it produces (BlueprintMetadata.output):
+  // any user can publish a blueprint calling itself a Document, but only this list decides what
+  // the deployment offers.
+  formats: FormatCuration[];
+};
+
+// One promoted blueprint. The blueprint itself supplies the noun, plural and icon, so improving
+// the blueprint improves every deployment that hasn't overridden it.
+export type FormatCuration = {
+  blueprintId: string;
+
+  // Offered to users and the agent. Disabling keeps the entry (and its overrides) around, so
+  // re-enabling doesn't lose the admin's edits.
+  enabled: boolean;
+
+  // One line telling the agent when to choose this format, e.g. "prefer for contracts and memos".
+  agentHint?: string;
+
+  // Presentation the deployment substitutes for the blueprint's own, e.g. an org that calls its
+  // decks "Briefings". Absent fields fall back to the blueprint's declaration.
+  overrides?: Partial<BlueprintOutput>;
 };
 
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
@@ -47,7 +72,172 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   disabledResources: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
+  formats: [],
 };
+
+// Longest `agentHint` a promoted format may carry. Every enabled format's hint goes into the
+// system prompt on every turn, so this is a budget rather than a validation limit; a sentence or
+// two is what the panel asks for.
+export const MAX_AGENT_HINT = 400;
+
+// Accept a stored format entry only if it is well-formed.
+function parseFormats(value: unknown): FormatCuration[] {
+  if (!Array.isArray(value)) return [];
+  let formats: FormatCuration[] = [];
+  let seen = new Set<string>();
+  for (let raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    let {blueprintId, enabled, agentHint, overrides} = raw as Partial<FormatCuration>;
+    if (typeof blueprintId !== "string" || !blueprintId) continue;
+    if (seen.has(blueprintId)) continue;
+    seen.add(blueprintId);
+    let entry: FormatCuration = {blueprintId, enabled: enabled !== false};
+    if (typeof agentHint === "string" && agentHint.trim()) {
+      entry.agentHint = agentHint.trim().slice(0, MAX_AGENT_HINT);
+    }
+    let clean = sanitizeOutputOverrides(overrides);
+    if (clean) entry.overrides = clean;
+    formats.push(entry);
+  }
+  return formats;
+}
+
+// `formats` rearranged into the order `blueprintIds` gives. Throws unless that is a permutation of
+// what is promoted, so a stale client can't silently drop a format.
+//
+// Uniqueness is checked separately from length because the lookup Map dedupes: [A, A] against
+// promoted [A, B] passes both a length and a membership test, drops B, and leaves a duplicate that
+// makes every later reorder throw.
+export function reorderFormats(formats: FormatCuration[], blueprintIds: string[])
+    : FormatCuration[] {
+  let byId = new Map(formats.map(f => [f.blueprintId, f]));
+  if (blueprintIds.length !== byId.size || new Set(blueprintIds).size !== blueprintIds.length
+      || blueprintIds.some(id => !byId.has(id))) {
+    throw new Error("Format order must list each promoted format exactly once.");
+  }
+  return blueprintIds.map(id => byId.get(id)!);
+}
+
+// FNV-1a, as eight hex characters. Short because callers concatenate it into a length-budgeted
+// string, and synchronous because they are -- `crypto.subtle.digest()` would make them async.
+// Compared only for equality, so nothing depends on collision resistance.
+export function fingerprint(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+// Stable grouping id for a promoted blueprint that doesn't declare what it produces. An
+// implementation detail of the Outputs filter. Keeps short blueprint ids readable and preserves
+// uniqueness.
+export function defaultOutputFormatId(blueprintId: string): string {
+  if (blueprintId.length <= 40) return blueprintId;
+  return `${blueprintId.slice(0, 31)}-${fingerprint(blueprintId)}`;
+}
+
+// Keep only the well-formed fields of an admin's presentation override, or undefined if none
+// survive.
+export function sanitizeOutputOverrides(overrides: unknown): Partial<BlueprintOutput> | undefined {
+  if (!overrides || typeof overrides !== "object") return undefined;
+  let {id, noun, plural, icon} = overrides as Partial<BlueprintOutput>;
+  let clean: Partial<BlueprintOutput> = {};
+  for (let [key, value] of Object.entries({id, noun, plural})) {
+    if (typeof value === "string" && value.trim() && value.trim().length <= 40) {
+      clean[key as "id" | "noun" | "plural"] = value.trim();
+    }
+  }
+  if (isOutputIcon(icon)) clean.icon = icon;
+  return Object.keys(clean).length > 0 ? clean : undefined;
+}
+
+// The presentation a gadget instantiated from `blueprintId` should inherit: the blueprint's own
+// declaration with this deployment's override applied. Called on every instantiation path, so an
+// admin who renames "Slides" to "Briefing" gets Briefings from then on.
+//
+// Overrides apply even when the format is disabled: disabling stops it being *offered*, but a
+// gadget built from that blueprint still carries the deployment's naming.
+export function deploymentOutputForBlueprint(
+    config: AdminConfig, blueprintId: string, declared: BlueprintOutput | undefined)
+    : BlueprintOutput | undefined {
+  return resolveFormatOutput(declared, config.formats.find(f => f.blueprintId === blueprintId)?.overrides);
+}
+
+// Resolve what a promoted blueprint should be shown as: the blueprint's own declaration with the
+// deployment's overrides applied. Returns undefined when the blueprint declares nothing and the
+// admin overrode nothing meaningful.
+export function resolveFormatOutput(
+    declared: BlueprintOutput | undefined, overrides?: Partial<BlueprintOutput>)
+    : BlueprintOutput | undefined {
+  let merged = {...declared, ...overrides};
+  if (!merged.id || !merged.noun || !merged.plural || !merged.icon) return undefined;
+  return merged as BlueprintOutput;
+}
+
+// --- Reading the promoted set ---
+//
+// Three surfaces offer the deployment's formats -- the user's New menu, the agent's catalog, and
+// the admin panel that curates them.
+
+// One promoted blueprint joined with the blueprint it points at.
+export type PromotedFormat = {
+  entry: FormatCuration;
+
+  // The blueprint's own metadata. Absent when it has been deleted since being promoted; such an
+  // entry is skipped everywhere except the admin panel, which offers to remove it.
+  metadata?: BlueprintMetadata;
+
+  // What the blueprint declares it produces, after validation. Absent if it declares nothing usable.
+  declared?: BlueprintOutput;
+
+  // `declared` with the deployment's overrides applied.
+  output?: BlueprintOutput;
+};
+
+// Join promoted entries with the blueprints they point at, preserving order.
+export async function listPromotedFormats(env: BlueprintKvEnv, formats: FormatCuration[])
+    : Promise<PromotedFormat[]> {
+  let records = await Promise.all(
+      formats.map(entry => readBlueprintKvRecord(env, entry.blueprintId)));
+
+  return formats.map((entry, i) => {
+    let metadata = records[i]?.metadata;
+    let declared = sanitizeBlueprintOutput(metadata?.output);
+    return {entry, metadata, declared, output: resolveFormatOutput(declared, entry.overrides)};
+  });
+}
+
+// A format the deployment is offering, plus the two things only the agent's catalog wants: the
+// admin's note about when to prefer it, and the bindings its blueprint expects to be wired up.
+// listOutputFormats() drops both.
+export type FormatOffer = OutputFormatOffer & {
+  agentHint?: string;
+  bindings: Record<string, BlueprintBinding>;
+};
+
+// The formats this deployment offers, in menu order: promoted, enabled, and resolvable to a
+// complete presentation. A promoted blueprint that has since been deleted, or that names nothing
+// to call itself, is silently skipped.
+export async function listFormatOffers(env: BlueprintKvEnv, config: AdminConfig)
+    : Promise<FormatOffer[]> {
+  let enabled = config.formats.filter(entry => entry.enabled);
+  if (enabled.length === 0) return [];
+
+  let offers: FormatOffer[] = [];
+  for (let {entry, metadata, output} of await listPromotedFormats(env, enabled)) {
+    if (!metadata || !output) continue;
+    offers.push({
+      blueprintId: entry.blueprintId,
+      output,
+      description: metadata.description,
+      requiresSetup: Object.keys(metadata.bindings).length > 0,
+      bindings: metadata.bindings,
+      ...(entry.agentHint ? {agentHint: entry.agentHint} : {}),
+    });
+  }
+  return offers;
+}
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
@@ -83,6 +273,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
       disabledResources,
       disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
       ambientGatekeeperModes,
+      formats: parseFormats(p.formats),
     };
   } catch {
     return { ...DEFAULT_ADMIN_CONFIG };

@@ -159,6 +159,38 @@ describe('GadgetUI RPC recovery', () => {
     expect(container.querySelector('iframe')?.srcdoc).not.toContain('stale')
   })
 
+  it('ignores an old bundle while its replacement is hidden', async () => {
+    const oldBundle = deferred<UiBundle>()
+    const first = fakeGadget('first', 'unused')
+    first.getUiBundle.mockReturnValue(oldBundle.promise)
+    await act(async () => {
+      root.render(<GadgetUI gadget={first.stub} height="100px" />)
+    })
+
+    const replacement = fakeGadget(
+      'replacement',
+      'document.body.textContent = "replacement"',
+    )
+    await act(async () => {
+      root.render(<GadgetUI gadget={replacement.stub} height="100px" isVisible={false} />)
+    })
+    expect(replacement.getUiBundle).not.toHaveBeenCalled()
+
+    await act(async () => {
+      oldBundle.resolve({ jsCode: 'document.body.textContent = "stale"' })
+      await oldBundle.promise
+    })
+
+    await act(async () => {
+      root.render(<GadgetUI gadget={replacement.stub} height="100px" isVisible />)
+    })
+    await vi.waitFor(() => {
+      expect(replacement.getUiBundle).toHaveBeenCalledOnce()
+      expect(container.querySelector('iframe')?.srcdoc).toContain('replacement')
+    })
+    expect(container.querySelector('iframe')?.srcdoc).not.toContain('stale')
+  })
+
   it('disposes a connection that resolves after the gadget client is replaced', async () => {
     const oldConnection = deferred<RpcStub<TestGadget>>()
     const first = fakeGadget(

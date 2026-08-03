@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
     "deploy": "wrangler deploy",
-    "build": "tsc",
-    "types:check": "tsc --noEmit",
+    "build": "node scripts/build-format-blueprints.mjs && tsc",
+    "types:check": "node scripts/build-format-blueprints.mjs && tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "vitest run && vitest run --config vitest.integration.config.ts",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:watch": "vitest"
+    "test": "node scripts/build-format-blueprints.mjs && vitest run && vitest run --config vitest.integration.config.ts",
+    "test:integration": "node scripts/build-format-blueprints.mjs && vitest run --config vitest.integration.config.ts",
+    "test:watch": "node scripts/build-format-blueprints.mjs && vitest",
+    "build:format-blueprints": "node scripts/build-format-blueprints.mjs",
+    "import:format-blueprint": "node --experimental-strip-types --no-warnings scripts/import-format-blueprint.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.83.0",

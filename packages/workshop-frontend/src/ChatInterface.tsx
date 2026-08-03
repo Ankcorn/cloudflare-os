@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useState,
   useEffect,
@@ -77,6 +78,9 @@ import {
   ChatAttachmentHandle,
   ChatAttachmentRef,
   WorkpieceId,
+  BlueprintOutput,
+  MessageFormatRef,
+  OutputFormatOffer,
 } from "@gadgets/workshop-shared/api";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -95,6 +99,11 @@ import CapsuleOverlay, { CAPSULE_OVERLAY_GAP } from "./CapsuleOverlay";
 import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
+import { formatOf, FORMAT_ICONS } from "./components/format/formats";
+import { FormatMiniature } from "./components/format/FormatVisuals";
+import { formatIconDataUrl } from "./components/format/formatIconImage";
+import { locateMessageFormatRefs } from "./components/format/messageFormatRefs";
+import ComposerFormatMenuItems from "./components/format/ComposerFormatMenuItems";
 import { HookToggle } from "./components/HookToggle";
 import { handlePickerKeyDown } from "./pickerNavigation";
 import { normalizeResourceUrl } from "./resourceMatching";
@@ -122,6 +131,10 @@ type CreatedGadgetCardInfo = {
   gadgetId: WorkpieceId;
   title: string;
   isPending: boolean;
+
+  // The output format this gadget was built as, inherited from the blueprint it came from.
+  // Absent for a gadget built from scratch, which reads as a generic app.
+  output?: BlueprintOutput;
 };
 
 function CreatedGadgetChatCard({
@@ -143,21 +156,9 @@ function CreatedGadgetChatCard({
           aria-hidden="true"
         >
           <span className="absolute inset-0 bg-gradient-to-br from-kumo-brand/[0.08] via-transparent to-transparent" />
-          <span className="relative flex h-[52px] w-[62px] flex-col overflow-hidden rounded-md border border-kumo-line bg-kumo-base shadow-sm">
-            <span className="flex h-3 items-center gap-1 border-b border-kumo-line px-1.5">
-              <span className="h-1 w-1 rounded-full bg-kumo-line" />
-              <span className="h-1 w-1 rounded-full bg-kumo-line" />
-              <span className="h-1 w-1 rounded-full bg-kumo-line" />
-            </span>
-            <span className="flex flex-1 gap-1.5 p-1.5">
-              <span className="w-2.5 rounded-sm bg-kumo-tint" />
-              <span className="flex flex-1 flex-col gap-1 pt-0.5">
-                <span className="h-1.5 w-4/5 rounded-full bg-kumo-line" />
-                <span className="h-1.5 w-full rounded-full bg-kumo-line/70" />
-                <span className="h-1.5 w-2/3 rounded-full bg-kumo-line/50" />
-              </span>
-            </span>
-          </span>
+          {/* Drawn from the shared format vocabulary, so this card depicts a Document as a page
+              rather than a generic window the moment formats exist. */}
+          <FormatMiniature output={gadget.output} />
         </span>
         <span className="flex min-w-0 flex-1 items-center gap-2 px-3.5 py-3 pr-10">
           <span className="min-w-0 flex-1">
@@ -170,7 +171,11 @@ function CreatedGadgetChatCard({
                   Draft
                 </span>
               )}
-              <span>{gadget.isPending ? "New app · Click to preview" : "App · Click to open"}</span>
+              <span>
+                {gadget.isPending
+                    ? `New ${formatOf(gadget.output).noun.toLowerCase()} · Click to preview`
+                    : `${formatOf(gadget.output).noun} · Click to open`}
+              </span>
             </span>
           </span>
           <span className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-full text-kumo-inactive transition-all duration-150 group-hover:bg-kumo-tint group-hover:text-kumo-default">
@@ -305,6 +310,14 @@ interface InputCapsule {
 // what it labels.
 const CAPSULE_LOGO_SLOT = "\u2003\u2060\u00a0";
 
+// The format a new workspace will be made from, as a token in the composer's text.
+type FormatToken = ComposerRange & {
+  format: OutputFormatOffer;
+  // Data URL for the format's icon, painted into the token's logo slot. Absent if it couldn't be
+  // rendered, in which case the token carries no slot either.
+  logo?: string;
+};
+
 const cssLogoUrls = new Map<string, string>();
 
 // Vendor logo URLs are server-provided but end up inside a CSS `url()`, so check the scheme and
@@ -415,7 +428,7 @@ type MarkdownAstNode = {
 
 type TokenizedCapsuleMessage = {
   markdown: string;
-  capsulesByToken: Map<string, CapsuleSpecifier>;
+  mentionsByToken: Map<string, Mention>;
 };
 
 function generateCapsuleToken(
@@ -434,35 +447,59 @@ function generateCapsuleToken(
   }
 }
 
+// A span of a message that renders as an object rather than as text. Capsules and formats share
+// one pipeline; they differ only in what they draw and whether they carry authority.
+type Mention =
+  | { kind: "capsule"; capsule: CapsuleSpecifier }
+  | { kind: "format"; format: MessageFormatRef };
+
+function mentionText(mention: Mention): string {
+  return mention.kind === "capsule"
+      ? mention.capsule.description.title
+      : mention.format.noun;
+}
+
 function buildTokenizedCapsuleMessage(
   message: string,
-  capsules: CapsuleSpecifier[],
+  capsules: CapsuleSpecifier[] | undefined,
+  formats: MessageFormatRef[] | undefined,
 ): TokenizedCapsuleMessage {
-  const sorted = [...capsules].toSorted((a, b) => a.position - b.position);
+  const spans = [
+    ...(capsules ?? []).map(capsule =>
+        ({position: capsule.position, length: capsule.length,
+          mention: {kind: "capsule", capsule} as Mention})),
+    ...(formats ?? []).map(format =>
+        ({position: format.position, length: format.length,
+          mention: {kind: "format", format} as Mention})),
+  ].toSorted((a, b) => a.position - b.position);
+
   const usedTokens = new Set<string>();
-  const capsulesByToken = new Map<string, CapsuleSpecifier>();
+  const mentionsByToken = new Map<string, Mention>();
   let markdown = "";
   let pos = 0;
 
-  for (let i = 0; i < sorted.length; i++) {
-    const capsule = sorted[i];
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i];
+    // Spans are validated non-overlapping server-side, but a stored message predates that check and
+    // is replayed verbatim, so skip anything that would rewind the cursor.
+    if (span.position < pos) continue;
     const token = generateCapsuleToken(message, i, usedTokens);
     usedTokens.add(token);
-    capsulesByToken.set(token, capsule);
-    markdown += message.slice(pos, capsule.position);
+    mentionsByToken.set(token, span.mention);
+    markdown += message.slice(pos, span.position);
     markdown += token;
-    pos = capsule.position + capsule.length;
+    pos = span.position + span.length;
   }
 
   markdown += message.slice(pos);
-  return { markdown, capsulesByToken };
+  return { markdown, mentionsByToken };
 }
 
 function splitTextOnCapsuleTokens(
   value: string,
-  capsulesByToken: Map<string, CapsuleSpecifier>,
+  mentionsByToken: Map<string, Mention>,
 ): MarkdownAstNode[] | null {
-  const tokens = [...capsulesByToken.keys()];
+  const tokens = [...mentionsByToken.keys()];
   const parts: MarkdownAstNode[] = [];
   let cursor = 0;
   let foundToken = false;
@@ -497,7 +534,10 @@ function splitTextOnCapsuleTokens(
       children: [
         {
           type: "text",
-          value: capsulesByToken.get(nextToken)?.description.title ?? nextToken,
+          value: (() => {
+            const mention = mentionsByToken.get(nextToken);
+            return mention ? mentionText(mention) : nextToken;
+          })(),
         },
       ],
     });
@@ -521,7 +561,7 @@ function splitTextOnCapsuleTokens(
 
 function replaceCapsuleTokensInTree(
   node: MarkdownAstNode,
-  capsulesByToken: Map<string, CapsuleSpecifier>,
+  mentionsByToken: Map<string, Mention>,
 ) {
   if (!node.children || node.children.length === 0) {
     return;
@@ -532,7 +572,7 @@ function replaceCapsuleTokensInTree(
     if (child.type === "text" && typeof child.value === "string") {
       const replacementNodes = splitTextOnCapsuleTokens(
         child.value,
-        capsulesByToken,
+        mentionsByToken,
       );
       if (replacementNodes) {
         nextChildren.push(...replacementNodes);
@@ -541,7 +581,7 @@ function replaceCapsuleTokensInTree(
     }
 
     if (child.type !== "code" && child.type !== "inlineCode") {
-      replaceCapsuleTokensInTree(child, capsulesByToken);
+      replaceCapsuleTokensInTree(child, mentionsByToken);
     }
     nextChildren.push(child);
   }
@@ -549,10 +589,10 @@ function replaceCapsuleTokensInTree(
   node.children = nextChildren;
 }
 
-function createCapsuleRemarkPlugin(capsulesByToken: Map<string, CapsuleSpecifier>) {
+function createCapsuleRemarkPlugin(mentionsByToken: Map<string, Mention>) {
   return function capsuleRemarkPlugin() {
     return (tree: MarkdownAstNode) => {
-      replaceCapsuleTokensInTree(tree, capsulesByToken);
+      replaceCapsuleTokensInTree(tree, mentionsByToken);
     };
   };
 }
@@ -569,7 +609,24 @@ function formatGadgetBindingTarget(
 }
 
 // Convert raw tool calls into user-facing transcript labels.
-function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
+// What a `createGadget` call produced. Read from the gadget's own stamped output rather than
+// re-derived from the blueprint, so any blueprint declaring a format counts, not just promoted
+// ones. Undefined for a plain gadget, a still-streaming call, or a log predating formats.
+type ToolOutputResolver = (tc: AiToolCall) => BlueprintOutput | undefined;
+
+export function resolveToolCallOutput(
+  tc: AiToolCall,
+  outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined,
+): BlueprintOutput | undefined {
+  if (tc.toolName !== "createGadget") return undefined;
+  const gadgetId = (tc.output as { gadgetId?: unknown } | undefined)?.gadgetId;
+  return typeof gadgetId === "number" ? outputOfWorkpiece(gadgetId) : undefined;
+}
+
+function getToolCallSummary(
+  tc: AiToolCall,
+  outputOf?: ToolOutputResolver,
+): { verb: string; target?: string } {
   switch (tc.toolName) {
     case "readFile":
       return { verb: "Read", target: tc.input.filename };
@@ -594,8 +651,11 @@ function getToolCallSummary(tc: AiToolCall): { verb: string; target?: string } {
     // Obsolete predecessor of `setGadgetBinding`; appears only in old chat logs.
     case "saveCapsuleAsBinding":
       return { verb: "Saved resource", target: tc.input.bindingName };
-    case "createGadget":
-      return { verb: "Created gadget", target: tc.input.title };
+    case "createGadget": {
+
+      const output = outputOf?.(tc);
+      return { verb: `Created ${output?.noun ?? "gadget"}`, target: tc.input.title };
+    }
     case "executeCode": {
       // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
       // input is still streaming in, so guard against undefined.
@@ -715,7 +775,12 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
   return _exhaustive;
 }
 
-function getToolIcon(toolName: AiToolCall["toolName"] | null | undefined): PhosphorIcon {
+// `output` names a format when the call is known to be producing one, so the row can use its icon.
+function getToolIcon(
+  toolName: AiToolCall["toolName"] | null | undefined,
+  output?: BlueprintOutput,
+): PhosphorIcon {
+  if (output) return FORMAT_ICONS[output.icon];
   switch (toolName) {
     case "readFile":
     case "writeFile":
@@ -831,6 +896,10 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
 function buildProvisionalToolSummary(
   calls: ProvisionalToolCallState[],
 ): { label: string; detailLines: string[] } {
+
+  if (calls.length === 1 && calls[0].outputFormat) {
+    return { label: `Creating ${calls[0].outputFormat.noun}`, detailLines: [] };
+  }
   const toolNames = Array.from(
     new Set(calls.map((c) => c.toolName).filter((n): n is AiToolCall["toolName"] => !!n)),
   );
@@ -874,6 +943,7 @@ function buildProvisionalToolSummary(
 function buildToolCallGroups(
   toolCalls: AiToolCall[],
   observations: ObservationChatMessage[] = [],
+  outputOf?: ToolOutputResolver,
 ): ToolCallGroup[] {
   if (toolCalls.length === 0 && observations.length === 0) return [];
 
@@ -888,10 +958,10 @@ function buildToolCallGroups(
   const labelParts: string[] = [];
 
   if (toolCalls.length === 1) {
-    const summary = getToolCallSummary(toolCalls[0]);
+    const summary = getToolCallSummary(toolCalls[0], outputOf);
     labelParts.push(`${summary.verb}${summary.target ? ` ${summary.target}` : ""}`);
   } else if (toolCalls.length > 1 && distinctToolNames.length === 1) {
-    const summary = getToolCallSummary(toolCalls[0]);
+    const summary = getToolCallSummary(toolCalls[0], outputOf);
     labelParts.push(detailLines.length === 1 && summary.target && observations.length === 0
       ? `${summary.verb} ${summary.target}`
       : describeToolCallCount(toolCalls[0].toolName, toolCalls.length));
@@ -916,7 +986,9 @@ function buildToolCallGroups(
     key: firstToolCall
       ? `group-${firstToolCall.toolCallId}`
       : `group-observation-${firstObservation.chatId}-${firstObservation.sequence}`,
-    Icon: firstToolCall ? getToolIcon(firstToolCall.toolName) : MagnifyingGlass,
+    Icon: firstToolCall
+      ? getToolIcon(firstToolCall.toolName, outputOf?.(firstToolCall))
+      : MagnifyingGlass,
     label: labelParts
       .map((part, index) => index === 0 ? part : lowerFirst(part))
       .join(", "),
@@ -931,41 +1003,99 @@ function WorkIcon({ Icon }: { Icon: PhosphorIcon }) {
   return <Icon size={15} className="text-kumo-inactive" />;
 }
 
+// Splices inline nodes into plain text at recorded positions, so a slash command and a format each
+// only have to know where they sit.
+//
+// The plain-text counterpart to the markdown path's token substitution (see
+// buildTokenizedCapsuleMessage): markdown needs tokens because it reflows the text it is given,
+// while text rendered as typed can be cut at the offsets directly.
+function TextWithMentions(
+  { text, mentions }: {
+    text: string;
+    // `length` 0 inserts between characters, for something that was removed from the text.
+    mentions: { key: string; position: number; length: number; node: ReactNode }[];
+  },
+) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const mention of [...mentions].toSorted((a, b) => a.position - b.position)) {
+    // Anything that would rewind the cursor is skipped: overlapping spans have no meaning, and
+    // stored messages predate the validation that now refuses them.
+    if (mention.position < cursor || mention.position > text.length) continue;
+    if (mention.position > cursor) parts.push(text.slice(cursor, mention.position));
+    parts.push(<Fragment key={mention.key}>{mention.node}</Fragment>);
+    cursor = mention.position + mention.length;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
+}
+
+// Renders a user message that invoked a slash command: their words, with the command shown back
+// where they typed it and any formats they named as chips. What the command expanded into is the
+// agent's context, and isn't shown.
 function SlashCommandMention(
-  { name, args, id, getOverseer }: {
+  { name, args, id, commandPosition, formats, getOverseer }: {
     name?: string;
     args: string;
     id: SlashCommandId;
+    commandPosition?: number;
+    formats?: MessageFormatRef[];
     getOverseer: OverseerSource;
   },
 ) {
   const choice = useSlashCommandChoice(getOverseer, name ? id : undefined);
   const mention = name ? <span className="text-kumo-brand">/{name}</span> : null;
+  const command = choice
+    ? (
+      <Tooltip
+        content={
+          <span className="block max-w-xs">
+            {/* No `block` here: it would outrank the `-webkit-box` that line-clamp needs.
+                An explicit leading is required: the clamp reserves a whole number of lines at
+                the *inherited* line height, so without one the reserved box and the rendered
+                lines disagree and the last line is sliced through the middle. Two lines rather
+                than three keeps the whole tooltip inside its own height budget. */}
+            <span className="line-clamp-2 leading-[18px]">{choice.description}</span>
+            {/* Provider, then whatever identifies the command within it: for a skill that is
+                its collection and path. Same line the picker shows. */}
+            <span className="mt-0.5 block truncate text-kumo-subtle">
+              {[choice.providerLabel, choice.resourceLabel].filter(Boolean).join(" · ")}
+            </span>
+          </span>
+        }
+        asChild
+      >
+        {mention}
+      </Tooltip>
+    )
+    : mention;
+
+  if (!name) return <>{args}</>;
+
+  // The command was cut out of `args`, taking one adjoining space with it, so put a space back on
+  // whichever side now runs into a word.
+  const at = Math.min(commandPosition ?? 0, args.length);
+  const spaceBefore = at > 0 && !/\s$/.test(args.slice(0, at));
+  const spaceAfter = at < args.length && !/^\s/.test(args.slice(at));
+
   return (
-    <>
-      {choice
-        ? (
-          <Tooltip
-            content={
-              <span className="block max-w-xs">
-                {/* No `block` here: it would outrank the `-webkit-box` that line-clamp needs. */}
-                <span className="line-clamp-3">{choice.description}</span>
-                {/* Provider, then whatever identifies the command within it: for a skill that is
-                    its collection and path. Same line the picker shows. */}
-                <span className="mt-0.5 block truncate text-kumo-subtle">
-                  {[choice.providerLabel, choice.resourceLabel].filter(Boolean).join(" · ")}
-                </span>
-              </span>
-            }
-            asChild
-          >
-            {mention}
-          </Tooltip>
-        )
-        : mention}
-      {name && args ? " " : ""}
-      {args}
-    </>
+    <TextWithMentions
+      text={args}
+      mentions={[
+        {
+          key: "command",
+          position: at,
+          length: 0,
+          node: <>{spaceBefore ? " " : ""}{command}{spaceAfter ? " " : ""}</>,
+        },
+        ...(formats ?? []).map((format, i) => ({
+          key: `format-${i}`,
+          position: format.position,
+          length: format.length,
+          node: <FormatMention format={format} />,
+        })),
+      ]}
+    />
   );
 }
 
@@ -994,8 +1124,21 @@ function CapsuleMention({ capsule }: { capsule: CapsuleSpecifier }) {
   );
 }
 
+// A format the message named, drawn the way the composer drew it. Shares the capsule's chip
+// styling so a message reads the same as the draft it came from. Not a link: a format names
+// nothing the user can open.
+function FormatMention({ format }: { format: MessageFormatRef }) {
+  const Icon = FORMAT_ICONS[format.icon];
+  return (
+    <span className={styles.capsuleMention}>
+      <Icon size={13} className={styles.formatMentionIcon} />
+      {format.noun}
+    </span>
+  );
+}
+
 function getMarkdownComponents(
-  capsulesByToken?: Map<string, CapsuleSpecifier>,
+  mentionsByToken?: Map<string, Mention>,
 ): Components {
   return {
     table: ({ node: _node, children, ...props }) => (
@@ -1004,11 +1147,13 @@ function getMarkdownComponents(
       </div>
     ),
     a: ({ node: _node, href, children, ...props }) => {
-      if (href?.startsWith(CAPSULE_LINK_PREFIX) && capsulesByToken) {
+      if (href?.startsWith(CAPSULE_LINK_PREFIX) && mentionsByToken) {
         const token = decodeURIComponent(href.slice(CAPSULE_LINK_PREFIX.length));
-        const capsule = capsulesByToken.get(token);
-        if (capsule) {
-          return <CapsuleMention capsule={capsule} />;
+        const mention = mentionsByToken.get(token);
+        if (mention) {
+          return mention.kind === "capsule"
+              ? <CapsuleMention capsule={mention.capsule} />
+              : <FormatMention format={mention.format} />;
         }
       }
 
@@ -1038,23 +1183,27 @@ const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
 // single newline in a user message survives to the DOM as a literal "\n" so the
 // `whitespace-pre-wrap` wrapper at the user-message render site renders it as a hard break.
 export const MarkdownMessage = memo(function MarkdownMessage(
-  { message, capsules }: { message: string; capsules?: CapsuleSpecifier[] },
+  { message, capsules, formats }: {
+    message: string;
+    capsules?: CapsuleSpecifier[];
+    formats?: MessageFormatRef[];
+  },
 ): ReactNode {
   const tokenizedMessage = useMemo(
-    () => capsules && capsules.length > 0
-      ? buildTokenizedCapsuleMessage(message, capsules)
+    () => capsules?.length || formats?.length
+      ? buildTokenizedCapsuleMessage(message, capsules, formats)
       : null,
-    [capsules, message],
+    [capsules, formats, message],
   );
   const components = useMemo(
     () => tokenizedMessage
-      ? getMarkdownComponents(tokenizedMessage.capsulesByToken)
+      ? getMarkdownComponents(tokenizedMessage.mentionsByToken)
       : MARKDOWN_COMPONENTS_NO_CAPSULES,
     [tokenizedMessage],
   );
   const remarkPlugins = useMemo(
     () => tokenizedMessage
-      ? [remarkGfm, createCapsuleRemarkPlugin(tokenizedMessage.capsulesByToken)]
+      ? [remarkGfm, createCapsuleRemarkPlugin(tokenizedMessage.mentionsByToken)]
       : REMARK_PLUGINS_NO_CAPSULES,
     [tokenizedMessage],
   );
@@ -1383,15 +1532,17 @@ const NestedToolCallRow = memo(function NestedToolCallRow({
   toolCall: tc,
   open,
   onToggle,
+  outputOf,
 }: {
   toolCall: AiToolCall;
   open: boolean;
   onToggle: (key: string) => void;
+  outputOf?: ToolOutputResolver;
 }) {
   const key = `call-${tc.toolCallId}`;
-  const summary = getToolCallSummary(tc);
+  const summary = getToolCallSummary(tc, outputOf);
   const label = `${summary.verb}${summary.target ? ` ${summary.target}` : ""}`;
-  const Icon = getToolIcon(tc.toolName);
+  const Icon = getToolIcon(tc.toolName, outputOf?.(tc));
 
   return (
     <div className="group/nested">
@@ -1494,6 +1645,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
   footerCreatedGadgetTitles,
   footerDisabled = false,
   onFooterRevert,
+  outputOf,
 }: {
   group: ToolCallGroup;
   open: boolean;
@@ -1505,6 +1657,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
   footerCreatedGadgetTitles?: string[];
   footerDisabled?: boolean;
   onFooterRevert?: (sequence: number) => void;
+  outputOf?: ToolOutputResolver;
 }) {
   const footerLabel = footerChangeSequence !== undefined
     ? getDiscardLabel(footerIsTrailing, footerCreatedGadgetTitles)
@@ -1560,6 +1713,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
                   toolCall={toolCall}
                   open={expandedKeys.has(key)}
                   onToggle={onToggle}
+                  outputOf={outputOf}
                 />
               );
             })}
@@ -1618,6 +1772,7 @@ export const ChatInput = ({
   onConsumeConsoleLogs = () => "",
   onDiscardConsoleLogs = () => {},
   newChat = false,
+  offerFormats = false,
   autoFocus = false,
   minRows = 2,
   seedText,
@@ -1641,6 +1796,7 @@ export const ChatInput = ({
     modelId: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
+    formats?: MessageFormatRef[],
   ) => Promise<void> | void;
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
@@ -1652,6 +1808,10 @@ export const ChatInput = ({
   onConsumeConsoleLogs?: () => string;
   onDiscardConsoleLogs?: () => void;
   newChat?: boolean;
+  // Whether the composer offers the deployment's standard formats. A chosen format rides along as
+  // an instruction on the message; it does not change which workspace is created. Only meaningful
+  // with `newChat`, since a format names something to build rather than something to say.
+  offerFormats?: boolean;
   autoFocus?: boolean;
   /** Minimum number of textarea rows at rest. Defaults to 2. */
   minRows?: number;
@@ -2001,6 +2161,7 @@ export const ChatInput = ({
     return [
       ...capsulesRef.current.map(({start, length}) => ({start, length})),
       ...(command ? [{start: command.start, length: command.length}] : []),
+      ...formatTokensRef.current.map(({start, length}) => ({start, length})),
     ];
   };
 
@@ -2034,6 +2195,11 @@ export const ChatInput = ({
       .map(capsule => capsule.start >= rangeEnd
         ? {...capsule, start: capsule.start + removal.delta}
         : capsule));
+    setFormatTokens(previous => previous
+      .filter(token => token.start !== range.start)
+      .map(token => token.start >= rangeEnd
+        ? {...token, start: token.start + removal.delta}
+        : token));
     setSelectedSlashCommand(previous => {
       if (!previous || previous.start === range.start) return null;
       return previous.start >= rangeEnd
@@ -2050,7 +2216,8 @@ export const ChatInput = ({
     const mirror = mirrorRef.current?.node;
     // Runs on every pointer move, and `getClientRects()` below forces a layout, so do nothing at
     // all in the common case of a composer with no tokens in it.
-    if (!mirror || (capsulesRef.current.length === 0 && !selectedSlashCommandRef.current)) {
+    if (!mirror || (capsulesRef.current.length === 0 && !selectedSlashCommandRef.current
+        && formatTokensRef.current.length === 0)) {
       return null;
     }
     for (const span of mirror.querySelectorAll<HTMLElement>("[data-token-start]")) {
@@ -2132,11 +2299,51 @@ export const ChatInput = ({
       let messageInput = inputValue;
       let inputCapsules = capsules;
       let slashCommand = selectedSlashCommand?.choice ?? null;
+      // How far a position moves once the format tokens are reduced to their nouns: the invisible
+      // logo slot goes away, so everything after each token shifts left. Used to carry the command
+      // token and the capsules into the rewritten text's coordinates.
+      const formatShiftBefore = (position: number) => {
+        let delta = 0;
+        for (const token of formatTokens) {
+          if (token.start + token.length <= position) {
+            delta += token.format.output.noun.length - token.length;
+          }
+        }
+        return delta;
+      };
+
+      if (formatTokens.length > 0) {
+        // A format token sends the word the user saw: the noun is the request, and the agent's
+        // catalog already lists the deployment's formats by these nouns. Only the logo slot is
+        // removed, since it exists purely so the mirror has somewhere to paint the icon. Applied
+        // back-to-front so earlier offsets stay valid while the text is rewritten.
+        let text = messageInput;
+        for (const token of [...formatTokens].toSorted((a, b) => b.start - a.start)) {
+          text = text.slice(0, token.start) + token.format.output.noun +
+              text.slice(token.start + token.length);
+        }
+        inputCapsules = capsules.map(capsule => {
+          const delta = formatShiftBefore(capsule.start);
+          return delta === 0 ? capsule : {...capsule, start: Math.max(0, capsule.start + delta)};
+        });
+        messageInput = text;
+      }
+      let commandPosition: number | undefined;
       if (selectedSlashCommand) {
-        messageInput = stripSlashCommandToken(inputValue, selectedSlashCommand);
-      } else if (inputValue.startsWith("/") && !inputValue.startsWith("//")) {
+        // Strip the command out of the *rewritten* text, not out of `inputValue`: the format pass
+        // above may already have moved it.
+        let stripped = stripSlashCommandToken(messageInput, {
+          start: selectedSlashCommand.start + formatShiftBefore(selectedSlashCommand.start),
+          length: selectedSlashCommand.length,
+        });
+        messageInput = stripped.args;
+        commandPosition = stripped.commandPosition;
+      } else if (messageInput.startsWith("/") && !messageInput.startsWith("//")) {
         // A leading command that was typed but never resolved: resolve it now or refuse to send.
-        let parsed = parseSlashCommandInput(inputValue, 1);
+        // Parsed from the format-rewritten text so a format named later in the line doesn't smuggle
+        // its logo slot into the arguments. A format token can't precede the command here: one at
+        // position 0 would mean the text no longer starts with "/".
+        let parsed = parseSlashCommandInput(messageInput, 1);
         if (!parsed) {
           toasts.add({ title: "Slash command is invalid", variant: "error" });
           return;
@@ -2155,13 +2362,13 @@ export const ChatInput = ({
         }
         slashCommand = match;
         messageInput = parsed.tail;
-        inputCapsules = capsules.flatMap(capsule =>
+        inputCapsules = inputCapsules.flatMap(capsule =>
           capsule.start >= parsed.tailStart
             ? [{...capsule, start: capsule.start - parsed.tailStart}]
             : []);
-      } else if (inputValue.startsWith("//")) {
-        messageInput = inputValue.slice(1);
-        inputCapsules = capsules.map(capsule => ({
+      } else if (messageInput.startsWith("//")) {
+        messageInput = messageInput.slice(1);
+        inputCapsules = inputCapsules.map(capsule => ({
           ...capsule,
           start: Math.max(0, capsule.start - 1),
         }));
@@ -2171,12 +2378,15 @@ export const ChatInput = ({
         toasts.add({ title: "Slash commands cannot include resources or attachments", variant: "error" });
         return;
       }
-
       let message: string | SlashCommandRequest = messageInput;
       if (slashCommand) {
+        // `args` is already trimmed when it came from stripSlashCommandToken, which is what
+        // `commandPosition` is measured against. The other branches resolve a leading command, so
+        // the position is 0.
         message = {
           id: slashCommand.selection,
           args: messageInput.trim(),
+          ...(commandPosition ? {commandPosition} : {}),
         };
       }
       let capsuleSpecifiers: CapsuleSpecifier[] | undefined;
@@ -2218,15 +2428,23 @@ export const ChatInput = ({
         message = message.trim();
       }
 
+      // Positions are resolved against the text as sent, which for a slash command is its
+      // arguments: the part the transcript renders as the user's words.
+      const formatRefs = locateMessageFormatRefs(
+          typeof message === "string" ? message : message.args,
+          [...formatTokens].toSorted((a, b) => a.start - b.start).map(token => token.format));
+
       await onSend(message, selectedModel,
           capsuleSpecifiers?.length ? capsuleSpecifiers : undefined,
-          readyAttachments.length ? readyAttachments : undefined);
+          readyAttachments.length ? readyAttachments : undefined,
+          formatRefs);
       for (const attachment of attachmentsSnapshot) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
       }
       setInputValue("");
       setCapsules([]);
       setSelectedSlashCommand(null);
+      setFormatTokens([]);
       pendingAttachmentsRef.current = [];
       setPendingAttachments([]);
     } finally {
@@ -2467,8 +2685,25 @@ export const ChatInput = ({
       diffStart < command.start + command.length && oldEnd > command.start;
     if (commandEdited) setSelectedSlashCommand(null);
 
+    // Typing through a token removes that format. Only tokens the edit touched are dropped; the
+    // rest shift.
+    const editedFormats = formatTokensRef.current.filter(token =>
+      diffStart < token.start + token.length && oldEnd > token.start);
+    if (editedFormats.length > 0) {
+      const dropped = new Set(editedFormats.map(token => token.start));
+      setFormatTokens(previous => previous.filter(token => !dropped.has(token.start)));
+    }
+    const survivingFormats = (position: number, delta: number) => {
+      if (delta === 0) return;
+      const dropped = new Set(editedFormats.map(token => token.start));
+      setFormatTokens(previous => previous.flatMap(token => dropped.has(token.start)
+        ? []
+        : [token.start >= position ? {...token, start: token.start + delta} : token]));
+    };
+
     if (capsulesRef.current.length === 0) {
       if (!commandEdited) shiftSelectedSlashCommand(oldEnd, newEnd - oldEnd);
+      survivingFormats(oldEnd, newEnd - oldEnd);
       setInputValue(newValue);
       return;
     }
@@ -2552,6 +2787,7 @@ export const ChatInput = ({
     // Second pass: keep non-broken capsules, adjusting positions.
     const totalShift = editShift + extraShift;
     if (!commandEdited) shiftSelectedSlashCommand(oldEnd, totalShift);
+    survivingFormats(oldEnd, totalShift);
     const surviving: InputCapsule[] = [];
     for (const capsule of capsulesRef.current) {
       const capsuleEnd = capsule.start + capsule.length;
@@ -2642,6 +2878,44 @@ export const ChatInput = ({
     setActiveUrl(null);
   };
 
+  // Formats named in the message are inline tokens like capsules, addressed by the caret as one
+  // unit. There can be several, and where each sits says which part of the request it belongs to,
+  // so they stay in the text rather than becoming a separate field.
+  const [formatTokens, setFormatTokens] = useState<FormatToken[]>([]);
+  const formatTokensRef = useRef(formatTokens);
+  formatTokensRef.current = formatTokens;
+
+  // A format is only context on the message, so it coexists with everything else the composer can
+  // carry, including a slash command ("/writing-review turn this into a Doc").
+  const canChooseFormat = offerFormats;
+
+  // Inserted at the caret, like a capsule, so the noun lands in the sentence that needs it.
+  const chooseFormat = async (format: OutputFormatOffer) => {
+    const logo = await formatIconDataUrl(format.output.icon);
+    const value = inputValueRef.current;
+    // The menu takes focus, but the textarea keeps its last selection; falling back to the end is
+    // right for the case where it was never focused at all.
+    const caret = Math.min(composerTextareaRef.current?.selectionStart ?? value.length, value.length);
+    const at = snapCaretOutOfRanges(caret, currentTokenRanges(), "nearest");
+    const splice = spliceComposerToken(
+        value, at, at, (logo ? CAPSULE_LOGO_SLOT : "") + format.output.noun);
+    setInputValue(splice.value);
+    setCapsules(previous => previous.map(capsule => capsule.start >= at
+      ? {...capsule, start: capsule.start + splice.delta}
+      : capsule));
+    shiftSelectedSlashCommand(at, splice.delta);
+    setFormatTokens(previous => [
+      ...previous.map(token => token.start >= at
+        ? {...token, start: token.start + splice.delta}
+        : token),
+      {format, logo, start: splice.start, length: splice.length},
+    ]);
+    requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+      moveCaret(splice.caret);
+    });
+  };
+
   // What the mirror paints as objects rather than text. Memoized because the composer re-renders for
   // plenty of reasons that leave the text alone (attachments, agent activity, menus).
   const mirrorTokens = useMemo<MirrorToken[]>(() => [
@@ -2659,7 +2933,13 @@ export const ChatInput = ({
       start: selectedSlashCommand.start,
       length: selectedSlashCommand.length,
     }] : []),
-  ], [capsules, inputValue, selectedSlashCommand, vendorBranding]);
+    ...formatTokens.map(({start, length, logo}) => ({
+      kind: "capsule" as const,
+      start,
+      length,
+      logo: inputValue.startsWith(CAPSULE_LOGO_SLOT, start) ? cssLogoUrl(logo) : undefined,
+    })),
+  ], [capsules, formatTokens, inputValue, selectedSlashCommand, vendorBranding]);
 
   // Console log severity is communicated by the dot colour only; the banner
   // chrome stays neutral so a noisy error doesn't paint a red bar above the
@@ -2994,6 +3274,11 @@ export const ChatInput = ({
                 }
               />
               <DropdownMenu.Content collisionPadding={16} className="themed-floating-shadow-lg !z-[1100] !min-w-[170px] rounded-2xl border border-kumo-line/70 bg-kumo-base p-1">
+                {/* The deployment's standard formats. Picking one drops its name into the message at
+                    the caret; the agent is told what to build from it. */}
+                {canChooseFormat && (
+                  <ComposerFormatMenuItems onSelect={(format) => void chooseFormat(format)} />
+                )}
                 {onToggleThinkingTraces && (
                   <DropdownMenu.Item
                     onClick={onToggleThinkingTraces}
@@ -3365,6 +3650,7 @@ export function buildChatDisplayEntries(
   changeStatus: ReadonlyMap<number, "pending" | "merged" | "reverted">,
   // Loaded compaction boundaries, oldest first.
   boundaries: readonly CompactionBoundary[] = [],
+  outputOf?: ToolOutputResolver,
 ): ChatDisplayEntry[] {
   const result: ChatDisplayEntry[] = [];
   let lastAgentAuthorId: string | null = null;
@@ -3515,6 +3801,7 @@ export function buildChatDisplayEntries(
         toolCallGroups: buildToolCallGroups(
           transcriptToolCalls(workParts.toolCalls),
           workParts.observations,
+          outputOf,
         ),
         lastMessageSequence: workParts.lastAgentMessageSequence ?? workParts.lastWorkSequence,
         lastMessageTimestamp: workParts.lastWorkTimestamp,
@@ -3555,6 +3842,7 @@ export function buildChatDisplayEntries(
           toolCallGroups: buildToolCallGroups(
             transcriptToolCalls(workParts.toolCalls),
             workParts.observations,
+            outputOf,
           ),
           lastMessageSequence: workParts.lastAgentMessageSequence ?? msg.sequence,
         });
@@ -3764,6 +4052,10 @@ interface ChatInterfaceProps {
   onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
   constrainChatWidth?: boolean;
   onOpenGadget: (gadgetId: WorkpieceId) => void;
+
+  // The output format a workpiece was built as, so a created-app card can name and draw it as the
+  // Document (or whatever) it is rather than a generic app.
+  outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -3838,6 +4130,9 @@ type ProvisionalToolCallState = {
   toolName: AiToolCall["toolName"] | null;
   // Human-readable target (e.g. filename) once known from the streaming input.
   target?: string;
+  // For createGadget: what it is producing, once the server has resolved the blueprint. Tool inputs
+  // aren't streamed, so this is the only way the row can name a Doc while it is still being made.
+  outputFormat?: BlueprintOutput;
   code: string;
   output: string;
   finished: boolean;
@@ -3941,6 +4236,7 @@ function ChatInterface({
   onSelectedChatHasProposedChangesChange,
   constrainChatWidth,
   onOpenGadget,
+  outputOfWorkpiece,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -4294,13 +4590,21 @@ function ChatInterface({
     ),
     [currentMessages],
   );
+  // A gadget's stamped format, looked up by the id a finished createGadget call reports, so the
+  // transcript can say "Created Doc" with the Doc icon.
+  const resolveToolOutput = useCallback(
+    (tc: AiToolCall) => resolveToolCallOutput(tc, outputOfWorkpiece),
+    [outputOfWorkpiece],
+  );
+
   const displayEntries = useMemo(
     () =>
       // Hide agent checkpoints; surface them as turn-level discard actions. User-saved
       // checkpoints get their own compact row so the discard action is attached to the
       // edit that actually created it.
-      buildChatDisplayEntries(currentMessages, messageStates.changeStatus, currentCompactions),
-    [currentMessages, messageStates, currentCompactions],
+      buildChatDisplayEntries(
+          currentMessages, messageStates.changeStatus, currentCompactions, resolveToolOutput),
+    [currentMessages, messageStates, currentCompactions, resolveToolOutput],
   );
 
   const entryTopClasses = useMemo(() => {
@@ -4829,6 +5133,15 @@ function ChatInterface({
             onStreamingActiveFileChangeRef.current?.(chatId, event.file ?? null);
           }
           break;
+        case "toolCallOutputFormat": {
+          const toolCall = getOrCreateProvisionalToolCall(
+            provisional,
+            event.toolCallId,
+            null,
+          );
+          toolCall.outputFormat = event.output;
+          break;
+        }
         case "toolCallTarget": {
           // Surfaces the file name during streaming for writes and edits so the frontend can update.
           const toolCall = getOrCreateProvisionalToolCall(
@@ -5027,6 +5340,7 @@ function ChatInterface({
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
+    formats?: MessageFormatRef[],
   ) => {
     const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
@@ -5038,7 +5352,7 @@ function ChatInterface({
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments);
+            message, model, capsules, attachments, formats);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -5048,6 +5362,7 @@ function ChatInterface({
           model,
           capsules || undefined,
           attachments || undefined,
+          formats,
         );
       }
     } catch (err) {
@@ -5063,13 +5378,14 @@ function ChatInterface({
     modelId?: string | null,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
+    formats?: MessageFormatRef[],
   ) => {
     const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments);
+          message, model, capsules, attachments, formats);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       console.error("Failed to create new chat:", err);
@@ -5720,13 +6036,14 @@ function ChatInterface({
           gadgetId,
           title,
           isPending: status === "pending",
+          output: outputOfWorkpiece(gadgetId),
         })),
       ];
       attachCreations();
     }
 
     return out;
-  }, [currentMessages, messageStates]);
+  }, [currentMessages, messageStates, outputOfWorkpiece]);
 
   const renderConnectionRequestCard = (
     msg: AiChatMessage & { type: "connectionRequest" },
@@ -6654,6 +6971,7 @@ function ChatInterface({
                           <div key={entry.key} className={`${entryTopClass} min-w-0 w-full max-w-[860px] space-y-2`}>
                             {entry.toolCallGroups.map((group, groupIndex) => (
                               <ToolGroupRow
+                                outputOf={resolveToolOutput}
                                 key={group.key}
                                 group={group}
                                 open={expandedToolCalls.has(group.key)}
@@ -6705,6 +7023,7 @@ function ChatInterface({
                                   name={msg.skillName}
                                   args={msg.request.args}
                                   id={msg.request.id}
+                                  commandPosition={msg.request.commandPosition}
                                   getOverseer={getOverseer}
                                 />
                               </span>
@@ -6742,6 +7061,8 @@ function ChatInterface({
                                       name={entry.slashCommand.skillName}
                                       args={entry.slashCommand.request.args}
                                       id={entry.slashCommand.request.id}
+                                      commandPosition={entry.slashCommand.request.commandPosition}
+                                      formats={msg.formats}
                                       getOverseer={getOverseer}
                                     />
                                   </div>
@@ -6751,6 +7072,7 @@ function ChatInterface({
                                     <MarkdownMessage
                                       message={msg.message}
                                       capsules={msg.capsules}
+                                      formats={msg.formats}
                                     />
                                   </div>
                                 )}
@@ -6805,6 +7127,7 @@ function ChatInterface({
                                   <MarkdownMessage
                                     message={msg.message}
                                     capsules={msg.capsules}
+                                    formats={msg.formats}
                                   />
                                 </div>
                               )}
@@ -6870,6 +7193,7 @@ function ChatInterface({
                               <div className="space-y-1">
                                 {messageToolGroups.map((group, groupIndex) => (
                                   <ToolGroupRow
+                                    outputOf={resolveToolOutput}
                                     key={group.key}
                                     group={group}
                                     open={expandedToolCalls.has(group.key)}
@@ -7192,7 +7516,7 @@ function ChatInterface({
                                     aria-expanded={isExpanded}
                                   >
                                     <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
-                                      <WorkIcon Icon={getToolIcon(first.toolName)} />
+                                      <WorkIcon Icon={getToolIcon(first.toolName, first.outputFormat)} />
                                     </span>
                                     <span className="min-w-0 flex-1">
                                       <span className="flex min-w-0 items-center gap-2 text-[14px] leading-5 tracking-[-0.25px]">

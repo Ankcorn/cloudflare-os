@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon } from '@phosphor-icons/react'
+import { FormatGlyph } from './components/format/FormatVisuals'
 import { RpcStub } from 'capnweb'
 import {
   AuthenticatedApi,
@@ -93,7 +94,10 @@ export default function GadgetUseView({
                     : 'bg-kumo-tint text-kumo-subtle hover:text-kumo-default'
                 }`}
               >
-                <span className="block max-w-[160px] truncate">{g.title}</span>
+                <span className="flex items-center gap-1.5">
+                  <FormatGlyph output={g.output} size="sm" className="flex-shrink-0" weight="regular" />
+                  <span className="block max-w-[160px] truncate">{g.title}</span>
+                </span>
               </button>
             ))}
           </div>

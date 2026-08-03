@@ -791,6 +791,12 @@ html {
 .press:active {
   transform: scale(0.97);
 }
+/* :active applies to ancestors too, so pressing a nested control (e.g. a card's overflow menu)
+   would otherwise animate the whole card as if the card itself had been clicked. Mark such
+   subtrees `press-exempt` to opt them out. */
+.press:has(.press-exempt:active) {
+  transform: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .press {
     transition: none;
