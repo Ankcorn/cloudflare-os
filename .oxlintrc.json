@@ -104,6 +104,34 @@
         "node": true,
         "es2024": true
       }
+    },
+    {
+      // The integration-test toolkit owns the capnweb boundary. A repo that vendors this one as a
+      // submodule installs its own workspace and this repo's separately, so it ends up with two
+      // copies of capnweb, and a stub minted by one copy is unserialisable by the other's session --
+      // an error that only shows up once the installs are split, i.e. in CI. So value imports are
+      // restricted to rpc-client.ts, which wraps stub minting in stubFor().
+      "files": ["packages/integration-tests/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "capnweb",
+                "message": "Mint stubs via stubFor() from rpc-client: a consumer repo can hold two capnweb copies, and a stub from the wrong one fails to serialise. `import type` is fine.",
+                "allowTypeImports": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["packages/integration-tests/src/rpc-client.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
     }
   ]
 }
