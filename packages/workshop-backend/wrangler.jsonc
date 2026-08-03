@@ -24,8 +24,11 @@
   "compatibility_flags": [
     "allow_irrevocable_stub_storage",
     "enhanced_error_serialization",
-    "nodejs_als",
-    "global_fetch_strictly_public"
+    "global_fetch_strictly_public",
+
+    // The pi-ai inference layer wraps the official provider SDKs (@anthropic-ai/sdk, openai,
+    // @google/genai), which need Node compatibility. Otherwise, we'd only need nodejs_als.
+    "nodejs_compat"
   ],
 
   // Gatekeeper service bindings and the Workers AI binding are dynamically

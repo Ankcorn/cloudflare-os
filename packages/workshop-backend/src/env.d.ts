@@ -9,14 +9,19 @@ declare global {
       // Deployment-wide admin usernames.
       ADMINS?: string[];
 
-      // AI Gateway mode: when CF_AI_GATEWAY is set, supported non-Workers providers are routed
-      // through Cloudflare AI Gateway with server-managed keys. Users don't need their own keys.
+      // AI Gateway mode: when CF_AI_GATEWAY is set, supported providers are routed through
+      // Cloudflare AI Gateway with server-managed keys. Users don't need their own keys.
+      // Inference goes over HTTPS with tokens (there is no Workers-binding transport), so the
+      // ACCOUNT_ID/API_TOKEN pair is REQUIRED whenever CF_AI_GATEWAY is set.
       CF_AI_GATEWAY?: string;            // Gateway name (enables gateway mode)
       CF_AI_GATEWAY_PROVIDERS?: string;   // Comma-separated list: "anthropic,openai,google,cloudflare"
-      CF_AI_GATEWAY_ACCOUNT_ID?: string;  // Gateway owner account ID for cross-account routing
-      CF_AI_GATEWAY_API_TOKEN?: string;   // Run + Read token for cross-account routing and costs
-      CF_AI_GATEWAY_WAI?: string;         // Optional same-account Workers AI gateway override
-      CF_AI_GATEWAY_WAI_DIRECT?: string;  // "true" to bypass a named Gateway for Workers AI
+      CF_AI_GATEWAY_ACCOUNT_ID?: string;  // Gateway owner account ID (required with CF_AI_GATEWAY)
+      CF_AI_GATEWAY_API_TOKEN?: string;   // Run + Read token for inference and cost-log reads
+      CF_AI_GATEWAY_WAI?: string;         // Optional Workers AI gateway override
+      CF_AI_GATEWAY_WAI_DIRECT?: string;  // "true" to route Workers AI to its plain REST endpoint
+                                          // (no gateway, no cost logs) instead of a named Gateway
+      // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
+      // provider -- the account ID and API token live in the user's model config, not in env.
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup

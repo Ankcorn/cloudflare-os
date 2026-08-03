@@ -10,18 +10,22 @@ const QUICK_MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export class AiGatewayConfig {
   readonly gateway: string;
   readonly workersAiGateway?: string;
-  readonly accountId?: string;
-  readonly apiToken?: string;
+  readonly accountId: string;
+  readonly apiToken: string;
   readonly providers: Set<string>;
 
   constructor(env: Cloudflare.Env) {
     this.gateway = env.CF_AI_GATEWAY!;
+    // Inference now goes over HTTPS with tokens (pi has no Workers-binding transport), so the
+    // account/token pair is required whenever gateway mode is enabled. The token-less
+    // same-account mode existed only because of the Workers binding.
+    if (!env.CF_AI_GATEWAY_ACCOUNT_ID || !env.CF_AI_GATEWAY_API_TOKEN) {
+      throw new Error(
+          "CF_AI_GATEWAY_ACCOUNT_ID and CF_AI_GATEWAY_API_TOKEN (a Run + Read token) are " +
+          "required when CF_AI_GATEWAY is set.");
+    }
     this.accountId = env.CF_AI_GATEWAY_ACCOUNT_ID;
     this.apiToken = env.CF_AI_GATEWAY_API_TOKEN;
-    if (!!this.accountId !== !!this.apiToken) {
-      throw new Error(
-          "CF_AI_GATEWAY_ACCOUNT_ID and CF_AI_GATEWAY_API_TOKEN must be configured together.");
-    }
     if (env.CF_AI_GATEWAY_WAI_DIRECT === "true" && env.CF_AI_GATEWAY_WAI) {
       throw new Error(
           "CF_AI_GATEWAY_WAI and CF_AI_GATEWAY_WAI_DIRECT cannot be configured together.");
