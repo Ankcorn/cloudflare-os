@@ -7644,6 +7644,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
     let changedChatIds = new Set<number>();
+    let changedChatMetadata: AiChatMetadata[] = [];
 
     subscriber = subscriber.dup();  // keep stub after return
     this.impl.addChatSubscriber(subscriber);
@@ -7666,14 +7667,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     let self = this;
-    let messageDelivery = Promise.resolve();
-    function queueMessage(record: AiChatMessage) {
-      // Preserve chat message order across async delivery.
-      messageDelivery = messageDelivery.then(async () => {
-        let delivered = record.type === "message" && record.attachments?.length ?
-            self.impl.hydrateChatMessageForClient(record) : record;
-        await subscriber.message(delivered);
-      }).catch(unsubscribe);
+    function deliverMessage(record: AiChatMessage) {
+      let delivered = record.type === "message" && record.attachments?.length ?
+          self.impl.hydrateChatMessageForClient(record) : record;
+      subscriber.message(delivered).catch(unsubscribe);
     }
 
     let msgSubscriber = {
@@ -7685,13 +7682,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           }
         }
 
-        queueMessage(record);
+        deliverMessage(record);
       },
       update(oldRecord: AiChatMessage, newRecord: AiChatMessage): void {
         // Chat messages are normally immutable, but connectionRequest messages are mutated in
         // place when the user accepts/denies. Re-deliver so the client (which indexes by
         // sequence) replaces the cached message and re-renders the card.
-        subscriber.message(newRecord).catch(unsubscribe);
+        deliverMessage(newRecord);
       },
       remove(record: AiChatMessage): void {
         // Never happens.
@@ -7709,7 +7706,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // Catch up on metadata changes.
       for (let meta of chatMeta.byLastActive.list({startAfter: startAfter.valueOf()})) {
         changedChatIds.add(meta.id);
-        subscriber.metadata(meta).catch(unsubscribe);
+        changedChatMetadata.push(meta);
       }
     }
 
@@ -7765,7 +7762,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (startAfter !== undefined) {
       // Catch up on messages.
       for (let msg of chats.byTimestamp.list({startAfter: startAfter.valueOf()})) {
-        queueMessage(msg);
+        deliverMessage(msg);
+      }
+      // Messages establish the durable state that the corresponding metadata describes.
+      for (let meta of changedChatMetadata) {
+        subscriber.metadata(meta).catch(unsubscribe);
       }
     }
 

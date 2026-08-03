@@ -489,7 +489,10 @@ export default function GadgetEditor() {
   const [proposedChanges, setProposedChanges] = useState<Uint8Array | undefined>(undefined)
   const [draftProposedChanges, setDraftProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
   const [streamingProposedChanges, setStreamingProposedChanges] = useState<StreamingProposedChanges | undefined>(undefined)
-  const [streamingActiveFile, setStreamingActiveFile] = useState<ActiveFileTarget | null | undefined>(undefined)
+  const [streamingActiveFileState, setStreamingActiveFileState] = useState<{
+    chatId: number
+    file: ActiveFileTarget | null | undefined
+  } | null>(null)
   const [hasCode, setHasCode] = useState<boolean | null>(null)
   const [chatCount, setChatCount] = useState<number | null>(null)
   const [hasChatZero, setHasChatZero] = useState(false)
@@ -580,6 +583,11 @@ export default function GadgetEditor() {
   // selection, in which case gadget-dependent views render their empty states for a frame.
   const selectedGadgetStub =
     gadget !== null && gadget.id === selectedGadgetId ? gadget.stub : null
+  // Only the selected chat's streaming drives this editor. Everything downstream then narrows it
+  // further to the selected gadget.
+  const streamingActiveFile = streamingActiveFileState?.chatId === effectiveSelectedChatId
+    ? streamingActiveFileState.file
+    : undefined
   // The file the agent is streaming edits into, when it is in the selected gadget. (Edits going
   // to a different gadget instead auto-switch the picker; see the effect below.)
   const streamingActiveFileForSelected =
@@ -759,66 +767,61 @@ export default function GadgetEditor() {
     setHasChatZero(chatZeroExists)
   }, [])
 
-  const hasAutoSwitchedToCodeRef = useRef(false)
-  const hasAutoSwitchedToUiRef = useRef(false)
-  const hadProposedChangesAtAgentStartRef = useRef(false)
-  // Set when an agent turn that started without proposed changes finishes; the actual switch to the
-  // gadget UI happens in the effect below, once `proposedChanges` reflects the turn's changes.
-  const pendingAutoSwitchToUiRef = useRef(false)
-  const proposedChangesRef = useRef(proposedChanges)
-  proposedChangesRef.current = proposedChanges
+  const turnOutputRef = useRef<{
+    chatId: number
+    wroteFile: boolean
+    wroteGadgetCode: boolean
+    userSelectedTab: boolean
+  } | null>(null)
 
   const handleAgentActiveChange = useCallback((chatId: number, isActive: boolean) => {
+    if (chatId !== selectedChatIdRef.current) return
     setIsAgentActive(isActive)
-    if (chatId !== 0) return
     if (isActive) {
-      hadProposedChangesAtAgentStartRef.current = proposedChangesRef.current !== undefined
-      // A new turn started; re-evaluate whether to auto-switch when it finishes.
-      pendingAutoSwitchToUiRef.current = false
-    } else {
-      // Arm the auto-switch rather than reading proposedChanges synchronously: the turn's
-      // "changes" message and the agent-inactive metadata update now arrive together, and
-      // `proposedChanges` lags by a render or two. The effect below completes the switch once it
-      // catches up.
-      if (!hasAutoSwitchedToUiRef.current && !hadProposedChangesAtAgentStartRef.current) {
-        pendingAutoSwitchToUiRef.current = true
+      turnOutputRef.current = {
+        chatId,
+        wroteFile: false,
+        wroteGadgetCode: false,
+        userSelectedTab: false,
       }
+      return
     }
+
+    let output = turnOutputRef.current
+    turnOutputRef.current = null
+    if (!output || output.chatId !== chatId || output.userSelectedTab) return
+    if (output.wroteGadgetCode) setActiveTab('app')
+    else if (output.wroteFile) setActiveTab('code')
   }, [])
 
-  // Auto-switch to the gadget UI after the first turn that produced code finishes. Driven by
-  // `proposedChanges`/`isAgentActive` state so it fires even when `proposedChanges` resolves after
-  // the agent-inactive transition.
-  useEffect(() => {
-    if (
-      pendingAutoSwitchToUiRef.current &&
-      !isAgentActive &&
-      proposedChanges !== undefined &&
-      !hasAutoSwitchedToUiRef.current
-    ) {
-      pendingAutoSwitchToUiRef.current = false
-      hasAutoSwitchedToUiRef.current = true
-      setActiveTab('app')
+  const handleStreamingActiveFileChange = useCallback(
+      (chatId: number, file: ActiveFileTarget | null | undefined) => {
+    if (file && chatId === selectedChatIdRef.current) {
+      let output = turnOutputRef.current
+      if (!output || output.chatId !== chatId) {
+        output = {chatId, wroteFile: false, wroteGadgetCode: false, userSelectedTab: false}
+        turnOutputRef.current = output
+      }
+      output.wroteFile = true
+      if (file.filename === 'client.js' || file.filename === 'server.js') {
+        output.wroteGadgetCode = true
+      }
+      if (!output.userSelectedTab) setActiveTab('code')
     }
-  }, [proposedChanges, isAgentActive])
+    setStreamingActiveFileState({chatId, file})
+  }, [])
 
-  // Show the Code tab while a fresh gadget's first files are being written.
-  useEffect(() => {
-    if (
-      streamingProposedChanges !== undefined &&
-      !hasAutoSwitchedToCodeRef.current &&
-      !effectiveHasCode
-    ) {
-      hasAutoSwitchedToCodeRef.current = true
-      setActiveTab('code')
-    }
-  }, [streamingProposedChanges, effectiveHasCode])
+  const handleTabSelect = useCallback((tab: RightTab) => {
+    let output = turnOutputRef.current
+    if (output?.chatId === selectedChatIdRef.current) output.userSelectedTab = true
+    setActiveTab(tab)
+  }, [])
 
   useEffect(() => {
     setProposedChanges(undefined)
     setDraftProposedChanges(undefined)
     setStreamingProposedChanges(undefined)
-    setStreamingActiveFile(undefined)
+    setStreamingActiveFileState(null)
     setHasCode(null)
     setChatCount(null)
     setHasChatZero(false)
@@ -831,10 +834,7 @@ export default function GadgetEditor() {
     setWorkpieces(new Map())
     setWorkpiecesReady(false)
     knownWorkpieceIdsRef.current = null
-    hasAutoSwitchedToCodeRef.current = false
-    hasAutoSwitchedToUiRef.current = false
-    hadProposedChangesAtAgentStartRef.current = false
-    pendingAutoSwitchToUiRef.current = false
+    turnOutputRef.current = null
     setUserNavigatedToList(false)
   }, [id])
 
@@ -1106,7 +1106,8 @@ export default function GadgetEditor() {
   // ── workpiece picker handlers ───────────────────────────────────────────────────
   const handleSelectWorkpiece = useCallback((workpieceId: WorkpieceId) => {
     if (isAgentActive) userPickedWorkpieceThisTurnRef.current = true
-    setActiveTab('app')
+    // Picking a gadget is a deliberate move to its view, so the turn must not pull the tab back.
+    handleTabSelect('app')
     setWorkspaceVisibility('open', workpieceId)
     const pendingChatId = workpieces.get(workpieceId)?.chatId
     navigate({
@@ -1119,7 +1120,7 @@ export default function GadgetEditor() {
         w: workpieceId,
       }),
     })
-  }, [id, navigate, isAgentActive, setWorkspaceVisibility, workpieces])
+  }, [id, navigate, isAgentActive, setWorkspaceVisibility, workpieces, handleTabSelect])
 
   const handleRenameWorkpiece = useCallback(async (workpieceId: WorkpieceId, title: string) => {
     if (!overseer) return
@@ -1423,7 +1424,7 @@ export default function GadgetEditor() {
                   onProposedChangesChange={setProposedChanges}
                   onDraftProposedChangesChange={setDraftProposedChanges}
                   onStreamingProposedChangesChange={updates => setStreamingProposedChanges(updates)}
-                  onStreamingActiveFileChange={setStreamingActiveFile}
+                  onStreamingActiveFileChange={handleStreamingActiveFileChange}
                   pendingConsoleLogCount={consoleLogCount}
                   consoleLogPreview={
                     consoleLogCount > 0 ? formatConsoleLogs(consoleLogBufferRef.current) : ''
@@ -1517,7 +1518,7 @@ export default function GadgetEditor() {
                       key={tab.value}
                       active={activeTab === tab.value}
                       label={tab.label}
-                      onClick={() => setActiveTab(tab.value)}
+                      onClick={() => handleTabSelect(tab.value)}
                     />
                   ))}
               </div>
