@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
-import { RpcStub, newMessagePortRpcSession } from 'capnweb'
+import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
@@ -127,39 +127,119 @@ interface GadgetUIProps {
 // How long to wait for a UI bundle before offering a retry instead of a spinner. Not a latency
 // budget: the point at which we conclude the reply is never coming.
 const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
+const RECONNECT_TIMEOUT_MS = 5_000
 
-export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
+export default function GadgetUI(props: GadgetUIProps) {
+  return <GadgetUISession key={props.chatId} {...props} />
+}
+
+function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasLoaded, setHasLoaded] = useState(false)
   const [isInvalidated, setIsInvalidated] = useState(false)
+  const [iframeGeneration, setIframeGeneration] = useState(0)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
   // Identifies the newest bundle load, so an older one can't write state after being superseded.
   const loadGenerationRef = useRef(0)
   // Bumped by the retry button to ask for a fresh load.
   const [retryNonce, setRetryNonce] = useState(0)
-  const handshakeGenerationRef = useRef(0)
+  const connectionGenerationRef = useRef(0)
+  const handshakePendingRef = useRef<number | null>(null)
+  const gadgetRef = useRef(gadget)
+  gadgetRef.current = gadget
   // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
   const gadgetStubRef = useRef<any>(null)
+  const pendingGadgetStubRef = useRef<{
+    promise: Promise<any>
+    resolve: (stub: any) => void
+    reject: (reason: unknown) => void
+  } | null>(null)
   const rpcSessionRef = useRef<any>(null)
-  // Keep latest onIframeEscape in a ref so the message-handler effect doesn't need to
-  // re-subscribe (and tear down the RPC session) whenever the callback identity changes.
+  // Keep latest callbacks in refs so the message-handler effect never tears down the RPC session.
   const onIframeEscapeRef = useRef(onIframeEscape)
-  useEffect(() => { onIframeEscapeRef.current = onIframeEscape }, [onIframeEscape])
+  const onConsoleLogRef = useRef(onConsoleLog)
+  onIframeEscapeRef.current = onIframeEscape
+  onConsoleLogRef.current = onConsoleLog
 
-  // Reloading deliberately discards iframe-local state. This is a stopgap: currently it is the
-  // only generic way to discard capabilities derived from the old connection and handshake again.
-  // A future redirectable-capability lifecycle should preserve the iframe across reconnects.
+  const suspendGadgetCalls = () => {
+    if (!pendingGadgetStubRef.current) {
+      let resolve!: (stub: any) => void
+      let reject!: (reason: unknown) => void
+      const promise = new Promise<any>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise
+        reject = rejectPromise
+      })
+      void promise.catch(() => {})
+      pendingGadgetStubRef.current = { promise, resolve, reject }
+    }
+    return pendingGadgetStubRef.current
+  }
+
+  const installGadgetStub = (stub: any) => {
+    gadgetStubRef.current = stub
+    stub.onRpcBroken?.(() => {
+      if (gadgetStubRef.current === stub) suspendGadgetCalls()
+    })
+  }
+
+  const resetConnection = (reason: unknown) => {
+    ++connectionGenerationRef.current
+    handshakePendingRef.current = null
+    pendingGadgetStubRef.current?.reject(reason)
+    pendingGadgetStubRef.current = null
+    gadgetStubRef.current?.[Symbol.dispose]?.()
+    gadgetStubRef.current = null
+    rpcSessionRef.current?.[Symbol.dispose]?.()
+    rpcSessionRef.current = null
+  }
+
+  const reloadIframe = (reason: unknown) => {
+    resetConnection(reason)
+    setIframeGeneration(generation => generation + 1)
+  }
+
   useEffect(() => {
-    setError(null)
-    setSandboxedHtml(null)
-    setHasLoaded(false)
-    // `loading` too, or the component keeps claiming to load on behalf of an abandoned load.
-    setLoading(false)
-    setIsInvalidated(false)
-  }, [gadget])
+    if (!rpcSessionRef.current) {
+      if (handshakePendingRef.current !== null) {
+        reloadIframe(new Error('Gadget changed during RPC handshake.'))
+      }
+      return
+    }
+
+    const generation = ++connectionGenerationRef.current
+    const isCurrent = () => generation === connectionGenerationRef.current
+    const pendingStub = suspendGadgetCalls()
+    const replacementPromise = Promise.resolve().then(() => gadget.connectToGadget(chatId))
+    void replacementPromise.then(stub => {
+      if (!isCurrent()) stub[Symbol.dispose]?.()
+    }, () => {})
+
+    const reconnect = async () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      try {
+        const replacementStub = await Promise.race([
+          replacementPromise,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('Timed out reconnecting gadget UI.')), RECONNECT_TIMEOUT_MS)
+          }),
+        ])
+        if (!isCurrent()) return
+        const oldStub = gadgetStubRef.current
+        installGadgetStub(replacementStub)
+        pendingStub.resolve(replacementStub)
+        if (pendingGadgetStubRef.current === pendingStub) pendingGadgetStubRef.current = null
+        oldStub?.[Symbol.dispose]?.()
+      } catch (caught) {
+        if (isCurrent()) reloadIframe(caught)
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout)
+      }
+    }
+    void reconnect()
+  }, [gadget, chatId])
 
   // Effect to handle reloadTrigger changes (code changes)
   useEffect(() => {
@@ -255,42 +335,47 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
       }
 
       if (event.data === 'handshake' && event.ports && event.ports[0]) {
-        const generation = ++handshakeGenerationRef.current
         const port = event.ports[0]
         let gadgetStub: any = null
+        resetConnection(new Error('Gadget iframe reloaded.'))
+        const generation = connectionGenerationRef.current
+        handshakePendingRef.current = generation
+        const isCurrent = () => !cancelled &&
+          generation === connectionGenerationRef.current &&
+          event.source === iframeRef.current?.contentWindow
         try {
-          // Dispose previous stubs if this is a re-handshake (e.g. iframe reload)
-          if (gadgetStubRef.current) {
-            gadgetStubRef.current[Symbol.dispose]?.()
-            gadgetStubRef.current = null
-          }
-          if (rpcSessionRef.current) {
-            rpcSessionRef.current[Symbol.dispose]?.()
-            rpcSessionRef.current = null
-          }
-
           // Open the RPC connection to the gadget's server side
-          gadgetStub = await gadget.connectToGadget(chatId)
-          if (cancelled || generation !== handshakeGenerationRef.current ||
-              event.source !== iframeRef.current?.contentWindow) {
+          gadgetStub = await gadgetRef.current.connectToGadget(chatId)
+          if (!isCurrent()) {
             gadgetStub[Symbol.dispose]?.()
             port.close()
             return
           }
-          // Create RPC session using the MessagePort and expose the gadget stub
-          const rpcSession = newMessagePortRpcSession(port, gadgetStub)
-          gadgetStubRef.current = gadgetStub
-          rpcSessionRef.current = rpcSession
+          installGadgetStub(gadgetStub)
+          // Redirectable target: swapping gadgetStubRef reconnects top-level calls without reloading.
+          const forwardingTarget = new Proxy(new RpcTarget() as any, {
+            get: (target, property, receiver) => {
+              if (typeof property === 'symbol' || property in target) {
+                return Reflect.get(target, property, receiver)
+              }
+              const pending = pendingGadgetStubRef.current
+              return pending
+                ? (...args: any[]) => pending.promise.then(stub => stub[property](...args))
+                : gadgetStubRef.current[property]
+            },
+          })
+          rpcSessionRef.current = newMessagePortRpcSession(port, forwardingTarget)
         } catch (caught) {
           gadgetStub?.[Symbol.dispose]?.()
           port.close()
-          if (cancelled || generation !== handshakeGenerationRef.current ||
-              event.source !== iframeRef.current?.contentWindow) return
+          if (!isCurrent()) return
           console.error('Failed to establish RPC connection:', caught)
           setError('Failed to connect gadget to server')
+        } finally {
+          if (handshakePendingRef.current === generation) handshakePendingRef.current = null
         }
-      } else if (event.data?.type === 'console' && onConsoleLog) {
-        onConsoleLog({
+      } else if (event.data?.type === 'console' && onConsoleLogRef.current) {
+        onConsoleLogRef.current({
           timestamp: new Date(),
           level: event.data.level,
           message: event.data.message,
@@ -303,19 +388,10 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
     window.addEventListener('message', handleMessage)
     return () => {
       cancelled = true
-      ++handshakeGenerationRef.current
       window.removeEventListener('message', handleMessage)
-      // Dispose stubs on cleanup (gadget/chatId change or unmount)
-      if (gadgetStubRef.current) {
-        gadgetStubRef.current[Symbol.dispose]?.()
-        gadgetStubRef.current = null
-      }
-      if (rpcSessionRef.current) {
-        rpcSessionRef.current[Symbol.dispose]?.()
-        rpcSessionRef.current = null
-      }
+      resetConnection(new Error('Gadget RPC session was closed.'))
     }
-  }, [gadget, chatId])
+  }, [])
 
   if (!isVisible && !hasLoaded) {
     // Don't render anything if not visible and never loaded
@@ -412,7 +488,7 @@ export default function GadgetUI({ gadget, height, reloadTrigger, isVisible = tr
   return (
     <div style={{ height, width: '100%' }}>
       <iframe
-        key={reloadTrigger}
+        key={`${reloadTrigger}:${iframeGeneration}`}
         ref={iframeRef}
         srcDoc={sandboxedHtml}
         style={{
