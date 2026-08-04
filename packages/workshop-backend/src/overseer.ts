@@ -5993,12 +5993,31 @@ class OverseerImpl implements AgentHooks {
 
     try {
       while (true) {
-        // 3. Determine uncovered bindings: in-scope gatekeepers with no account choice yet. On the
-        //    first open of a Gadget with any account-requiring binding, all bindings are uncovered,
-        //    so the modal appears once even when defaults are obvious. On a re-prompt, this is the
-        //    set of bindings that failed verification in the previous pass (step 5 dropped their
-        //    choices), each carrying its `passFailures` entry.
+        // 3. Determine uncovered bindings: in-scope gatekeepers with no account choice yet. Ambient
+        //    bindings use the collaborator's matching provided account automatically; unlike an
+        //    ordinary connection, there is no meaningful account choice when one already exists.
+        //    On a re-prompt, leave a failed ambient binding uncovered so the client can explain the
+        //    failure rather than silently retrying the same account.
         let uncovered = inScope.filter(gk => !(gk.id in accountChoices));
+        let ambientNeeds = uncovered.flatMap(gk => {
+          let spec = gk.creationSpec;
+          return spec?.type === "ambient" && !passFailures.has(gk.id)
+              ? [{gatekeeperId: gk.id, vendorId: spec.vendorId}]
+              : [];
+        });
+        if (ambientNeeds.length > 0) {
+          let accountsByVendor = new Map<string, number>();
+          for (let account of await clientUser.listProvidedAccounts()) {
+            if (account.description.singleton && !accountsByVendor.has(account.vendorId)) {
+              accountsByVendor.set(account.vendorId, account.accountId);
+            }
+          }
+          for (let need of ambientNeeds) {
+            let accountId = accountsByVendor.get(need.vendorId);
+            if (accountId !== undefined) accountChoices[need.gatekeeperId] = accountId;
+          }
+          uncovered = inScope.filter(gk => !(gk.id in accountChoices));
+        }
 
         // 4. If there are uncovered bindings, ask the client to choose accounts for them.
         if (uncovered.length > 0) {

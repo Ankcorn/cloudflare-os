@@ -87,6 +87,16 @@ async function setVerifyOutcome(
   }
 }
 
+async function ambientVerificationCount(label: string): Promise<number> {
+  const res = await harness.fetchWorker(
+    TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/ambient-verification-count",
+    { method: "POST", body: JSON.stringify({ label }) });
+  if (res.status !== 200) {
+    throw new Error(`Reading the ambient verification count failed with ${res.status}: ${await res.text()}`);
+  }
+  return (await res.json() as { count: number }).count;
+}
+
 type SharedGadget = {
   gadgetId: string;
   bobApi: RpcStub<AuthenticatedApi>;
@@ -154,6 +164,30 @@ async function bobOpensAndCloses(shared: SharedGadget): Promise<ObserverConfigRe
 }
 
 describe("observer re-verification", () => {
+  it.concurrent("automatically uses the collaborator's ambient account without prompting",
+      async () => {
+    await withSession(async publicApi => {
+      const [alice, bob] = nextUsernames("ambientalice", "ambientbob");
+      const aliceApi = await signUp(publicApi, alice);
+      const bobApi = await signUp(publicApi, bob);
+      const aliceAccount = await provisionAccount(aliceApi);
+      const bobAccount = await provisionAccount(bobApi);
+
+      const ownerWorkspace = await aliceApi.newGadget();
+      const { id: gadgetId } = await ownerWorkspace.getMetadata();
+      const collaborator = await ownerWorkspace.addCollaborator(bob, "build");
+      if (!collaborator) throw new Error(`Failed to share the gadget with ${bob}`);
+      ownerWorkspace[Symbol.dispose]();
+
+      // No ObserverConfigCallback is supplied. Opening can only succeed if the Workshop discovers
+      // Bob's ambient account itself; the fixture records which account's verifier it receives.
+      using sharedWorkspace = await bobApi.openGadget(gadgetId);
+      await expect(sharedWorkspace.getMetadata()).resolves.toMatchObject({ id: gadgetId });
+      expect(await ambientVerificationCount(accountLabel(bobAccount))).toBe(1);
+      expect(await ambientVerificationCount(accountLabel(aliceAccount))).toBe(0);
+    });
+  });
+
   it.concurrent("prompts once on the collaborator's first open, with no failure attached",
       async () => {
     await withSession(async publicApi => {
