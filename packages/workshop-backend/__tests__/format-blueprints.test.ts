@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { parseBlueprintKvRecord, sanitizeBlueprintOutput } from "../src/blueprint-archive.js";
+import * as Y from "yjs";
+import { parseBlueprintArchive, parseBlueprintKvRecord, sanitizeBlueprintOutput } from "../src/blueprint-archive.js";
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from "../src/format-blueprints.js";
 import { FORMAT_BLUEPRINTS } from "../src/generated/format-blueprints.js";
+
+async function readClientCode(entry: (typeof FORMAT_BLUEPRINTS)[number]): Promise<string> {
+  let archive = new Response(Uint8Array.fromBase64(entry.archive) as BufferSource).body!;
+  let {content} = await parseBlueprintArchive(archive);
+  let decompressed = content.pipeThrough(new DecompressionStream("gzip"));
+  let update = new Uint8Array(await new Response(decompressed).arrayBuffer());
+  let doc = new Y.Doc();
+  Y.applyUpdateV2(doc, update);
+  return doc.getMap<Y.Text>().get("client.js")?.toString() ?? "";
+}
 
 // Minimal in-memory stand-ins for the two bindings the installer writes to. They record what was
 // written so the test can assert on the installed blueprint the way a reader would see it.
@@ -63,6 +74,12 @@ describe("bundled format blueprints", () => {
       let content = r2.get(`${entry.blueprintId}/${record.metadata.version}`);
       expect(content, `${entry.blueprintId} content`).toBeDefined();
       expect(content!.byteLength).toBeGreaterThan(0);
+    }
+  });
+
+  it("ships print layouts for every standard output format", async () => {
+    for (let entry of FORMAT_BLUEPRINTS) {
+      expect(await readClientCode(entry), entry.blueprintId).toContain("@media print");
     }
   });
 

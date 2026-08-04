@@ -53,6 +53,7 @@ import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
 import { reportIssue } from './errorReporting'
+import GadgetExportMenu from './GadgetExportMenu'
 
 const NO_GADGETS: ReadonlySet<WorkpieceId> = new Set()
 
@@ -1588,6 +1589,15 @@ export default function GadgetEditor() {
                     />
                   ))}
               </div>
+
+              {!paneShowsActivity && (
+                <GadgetExportMenu
+                  gadget={selectedGadgetStub}
+                  gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
+                  chatId={previewChatId}
+                  disabled={activeTab !== 'app' || previewMode}
+                />
+              )}
 
               {!paneShowsActivity && (
                 <WorkshopIconButton

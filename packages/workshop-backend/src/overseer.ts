@@ -44,6 +44,7 @@ import {
   isAllowedChatAttachmentImageMimeType,
   validateChatAttachmentUpload,
 } from "./chat-attachment-validation";
+import { renderGadgetPdf } from "./browser-export";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
@@ -8973,6 +8974,16 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return this.impl.getGadgetFacet(this.id, chatId);
   }
 
+  async exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>> {
+    let browser = this.impl.env.BROWSER;
+    if (!browser) throw new Error("Gadget export is not configured for this deployment.");
+    let bundle = await this.getUiBundle(chatId);
+    if (!bundle) throw new Error("This Gadget does not have a UI to export.");
+    let gadget = await this.impl.getGadgetFacet(this.id, chatId);
+    let title = this.impl.getGadgetRecord(this.id).title;
+    return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
+  }
+
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
     let record = this.impl.getGadgetRecord(this.id);
     // Edges pending in other chats are those chats' unaccepted proposals, so they aren't listed.
@@ -9208,6 +9219,17 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
       interaction_type: "gadget_ui_connected",
     });
     return this.impl.getGadgetFacet(this.id, undefined);
+  }
+
+  async exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>> {
+    if (chatId !== undefined) this.#deny();
+    let browser = this.impl.env.BROWSER;
+    if (!browser) throw new Error("Gadget export is not configured for this deployment.");
+    let bundle = await this.getUiBundle();
+    if (!bundle) throw new Error("This Gadget does not have a UI to export.");
+    let gadget = await this.impl.getGadgetFacet(this.id);
+    let title = this.impl.getGadgetRecord(this.id).title;
+    return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
   }
 
   // --- Denied methods (build-only) ---

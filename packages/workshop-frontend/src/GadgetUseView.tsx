@@ -14,6 +14,7 @@ import GadgetUI from './GadgetUI'
 import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
 import TopBarNotice from './TopBarNotice'
+import GadgetExportMenu from './GadgetExportMenu'
 
 // The minimal, "use"-only experience: a shared top bar plus the gadget's deployed UI, and nothing
 // else. Collaborators with the "use" role may only render and interact with the gadget's mainline
@@ -21,7 +22,7 @@ import TopBarNotice from './TopBarNotice'
 // Gadget/Code/Connections controls, workspace activity, and every editor-only control. The
 // overseer and gadget passed in here are the restricted capabilities returned by openGadget() for
 // "use" sessions; calling anything outside getMetadata()/subscribeToMetadata()/subscribeToPresence()/
-// subscribeToWorkpieces()/getGadget() (and, on the gadget, getUiBundle()/connectToGadget())
+// subscribeToWorkpieces()/getGadget() (and, on the gadget, getUiBundle()/connectToGadget()/exportPdf())
 // would throw.
 //
 // When the workspace has more than one gadget, a simple picker in the top bar switches between
@@ -105,6 +106,10 @@ export default function GadgetUseView({
 
         {/* Right: presence and user menu */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          <GadgetExportMenu
+            gadget={gadget}
+            gadgetTitle={metadata.title}
+          />
           <GadgetPresence
             overseer={overseer}
             authenticatedApi={authenticatedApi}
