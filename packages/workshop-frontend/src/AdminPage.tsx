@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, type ChangeEvent } from 'react'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
-import { ShieldWarning, UserPlus } from '@phosphor-icons/react'
+import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
 import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
+import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
+import SiteLogo from './components/SiteLogo'
+import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
@@ -30,6 +33,7 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
 export default function AdminPage() {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  useDocumentTitle('Admin')
 
   // The admin capability (minted once via getAdminApi; null until loaded / for non-admins). Wrapped
   // in an object so useState doesn't treat the (callable) RPC stub as a state updater function.
@@ -63,6 +67,11 @@ export default function AdminPage() {
   const [siteNameDraft, setSiteNameDraft] = useState('')
   const [savingSiteName, setSavingSiteName] = useState(false)
 
+  // Current custom logo URL. Uploads are normalized to PNG before crossing the RPC boundary.
+  const [siteLogoUrl, setSiteLogoUrl] = useState<string | null>(null)
+  const [savingSiteLogo, setSavingSiteLogo] = useState(false)
+  const siteLogoInputRef = useRef<HTMLInputElement>(null)
+
   // Whether new account signups are allowed.
   const [signupsEnabled, setSignupsEnabled] = useState(true)
   const [savingSignups, setSavingSignups] = useState(false)
@@ -83,6 +92,7 @@ export default function AdminPage() {
     setSignupsEnabled(view.signupsEnabled)
     setSavedSiteName(view.siteName)
     setSiteNameDraft(view.siteName)
+    setSiteLogoUrl(view.siteLogo?.url ?? null)
     setResourceVendors(view.resourceVendors)
     setSavedInstructions(view.instanceInstructions)
     setInstructionsDraft(view.instanceInstructions)
@@ -299,6 +309,40 @@ export default function AdminPage() {
     }
   }
 
+  const handleSiteLogoChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !admin) return
+
+    setSavingSiteLogo(true)
+    try {
+      const data = await prepareSiteLogo(file)
+      const logo = await admin.api.setSiteLogo(data)
+      setSiteLogoUrl(logo ? cacheBustSiteLogoUrl(logo.url) : null)
+      toasts.add({ title: 'Logo saved', variant: 'success' })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save logo'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      setSavingSiteLogo(false)
+    }
+  }
+
+  const handleRemoveSiteLogo = async () => {
+    if (!admin) return
+    setSavingSiteLogo(true)
+    try {
+      await admin.api.setSiteLogo(null)
+      setSiteLogoUrl(null)
+      toasts.add({ title: 'Default logo restored', variant: 'success' })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to remove logo'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      setSavingSiteLogo(false)
+    }
+  }
+
   const handleSaveInstructions = async () => {
     if (!admin) return
     setSavingInstructions(true)
@@ -430,6 +474,55 @@ export default function AdminPage() {
             >
               Save
             </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Site logo */}
+      {activeTab === 'general' && (
+        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
+          <h2 className="text-lg font-semibold text-kumo-strong mb-1">Logo</h2>
+          <p className="text-sm text-kumo-subtle mb-5">
+            Shown in the app chrome, sign-in screens, and browser tab. Images are scaled without
+            cropping and converted to a static PNG. Square images work best. Applies on each
+            user&rsquo;s next connection.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex h-16 w-16 items-center justify-center rounded-xl border border-kumo-line bg-kumo-base p-2">
+              <SiteLogo size={40} srcOverride={siteLogoUrl}>
+                <Hexagon size={32} weight="bold" className="text-kumo-brand" />
+              </SiteLogo>
+            </div>
+            <input
+              ref={siteLogoInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/svg+xml"
+              className="hidden"
+              disabled={savingSiteLogo}
+              onChange={handleSiteLogoChange}
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => siteLogoInputRef.current?.click()}
+                loading={savingSiteLogo}
+                disabled={savingSiteLogo}
+              >
+                {siteLogoUrl ? 'Change logo' : 'Upload logo'}
+              </Button>
+              {siteLogoUrl && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleRemoveSiteLogo}
+                  disabled={savingSiteLogo}
+                >
+                  Restore default
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       )}

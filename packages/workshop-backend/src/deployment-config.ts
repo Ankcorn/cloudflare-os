@@ -8,6 +8,7 @@ import { getAuthGatekeeperAllowlist, isPasswordAuthEnabled } from "./auth/config
 import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
+import { siteLogoImage } from "./site-logo.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -50,6 +51,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
     signupsEnabled: config.signupsEnabled,
     siteName: config.siteName,
+    siteLogo: siteLogoImage(config.siteLogoConfigured),
     announcement: config.announcement,
     banner: config.banner.text,
     bannerColor: config.banner.color,

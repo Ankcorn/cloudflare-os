@@ -19,6 +19,8 @@ export type AdminConfig = {
   signupsEnabled: boolean;
   // Site name shown next to the top-bar logo, or "" to use the default ("gadgets").
   siteName: string;
+  /** Whether this deployment has a custom site logo. Image bytes are stored separately. */
+  siteLogoConfigured: boolean;
   // Extra instructions appended to the agent system prompt.
   instanceInstructions: string;
   // Centered top-bar notice. Markdown.
@@ -65,6 +67,7 @@ export type FormatCuration = {
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   signupsEnabled: true,
   siteName: "",
+  siteLogoConfigured: false,
   instanceInstructions: "",
   announcement: "",
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
@@ -263,6 +266,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
     return {
       signupsEnabled: typeof p.signupsEnabled === "boolean" ? p.signupsEnabled : true,
       siteName: typeof p.siteName === "string" ? p.siteName : "",
+      siteLogoConfigured: typeof p.siteLogoConfigured === "boolean" ? p.siteLogoConfigured : false,
       instanceInstructions: typeof p.instanceInstructions === "string" ? p.instanceInstructions : "",
       announcement: typeof p.announcement === "string" ? p.announcement : "",
       banner: {

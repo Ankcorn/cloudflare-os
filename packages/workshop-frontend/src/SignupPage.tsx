@@ -3,11 +3,13 @@ import { Link } from "@tanstack/react-router";
 import { RpcStub } from "capnweb";
 import { PublicApi } from "@gadgets/workshop-shared/api";
 import { Hexagon } from "@phosphor-icons/react";
-import { Input, Button, Banner } from "@cloudflare/kumo";
+import { Input, Button, Banner, Loader } from "@cloudflare/kumo";
 import { hashPassword } from "./passwordHash";
-import { useServerConfig, useSiteName } from "./ServerConfigContext";
+import { useServerConfig, useServerConfigError, useSiteName } from "./ServerConfigContext";
 import { useDocumentTitle } from "./useDocumentTitle";
 import OAuthButtons from "./components/auth/OAuthButtons";
+import SiteLogo from "./components/SiteLogo";
+import { useConnectionLost } from "./RpcContext";
 
 interface SignupPageProps {
   rpcStub: RpcStub<PublicApi>;
@@ -15,12 +17,10 @@ interface SignupPageProps {
 
 export default function SignupPage({ rpcStub }: SignupPageProps) {
   const serverConfig = useServerConfig();
+  const serverConfigError = useServerConfigError();
   const siteName = useSiteName();
+  const connectionLost = useConnectionLost();
   useDocumentTitle("Create account");
-  const authVendors = serverConfig?.authVendors ?? [];
-  const signupsEnabled = serverConfig?.signupsEnabled ?? true;
-  // The password create-account form requires both password auth AND open signups.
-  const passwordAuthEnabled = (serverConfig?.passwordAuthEnabled ?? true) && signupsEnabled;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -77,6 +77,35 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
     }
   };
 
+  if (!serverConfig) {
+    if (serverConfigError && !connectionLost) {
+      return (
+        <div
+          role="alert"
+          className="min-h-screen flex flex-col items-center justify-center gap-4 bg-kumo-base px-4"
+        >
+          <p className="text-sm text-kumo-danger text-center">
+            Couldn&apos;t load deployment settings.
+          </p>
+          <Button variant="secondary" onClick={() => window.location.reload()}>Reload</Button>
+        </div>
+      );
+    }
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-kumo-base px-4">
+        <Loader size="lg" />
+        <p className="text-sm text-kumo-subtle text-center">
+          {connectionLost ? "Can't reach the server. Retrying…" : "Loading…"}
+        </p>
+      </div>
+    );
+  }
+
+  const authVendors = serverConfig.authVendors ?? [];
+  const signupsEnabled = serverConfig.signupsEnabled;
+  // The password create-account form requires both password auth AND open signups.
+  const passwordAuthEnabled = serverConfig.passwordAuthEnabled && signupsEnabled;
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-kumo-base px-4 relative overflow-hidden">
       {/* Dot grid — fades from top to bottom */}
@@ -96,9 +125,11 @@ export default function SignupPage({ rpcStub }: SignupPageProps) {
       <div className="w-full max-w-sm relative">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-brand mb-3">
-            <Hexagon size={20} className="text-white" weight="bold" />
-          </div>
+          <SiteLogo size={40} className="mb-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-kumo-brand mb-3">
+              <Hexagon size={20} className="text-white" weight="bold" />
+            </div>
+          </SiteLogo>
           <h1 className="text-xl font-semibold text-kumo-default">
             {siteName}
           </h1>

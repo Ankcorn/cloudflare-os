@@ -31,6 +31,9 @@ import { getVendorIconBackground } from './components/vendorColors'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import { invalidateAvatarCache } from './useAvatar'
 import { useTheme } from './ThemeContext'
+import { useSiteName } from './ServerConfigContext'
+import SiteLogo from './components/SiteLogo'
+import { useDocumentTitle } from './useDocumentTitle'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +67,8 @@ export default function OnboardingWizard({
   const { authenticatedApi, currentUser } = useAuthenticatedApi()
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
+  const siteName = useSiteName()
+  useDocumentTitle('Setup')
 
   // Wizard state
   const [step, setStep] = useState(0) // 0 = avatar, 1 = model, 2 = connections
@@ -341,9 +346,11 @@ export default function OnboardingWizard({
             mounted ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-1'
           }`}
         >
-          <Hexagon size={22} className="text-kumo-brand" weight="bold" />
+          <SiteLogo size={22}>
+            <Hexagon size={22} className="text-kumo-brand" weight="bold" />
+          </SiteLogo>
           <span className="text-base font-semibold tracking-tight text-kumo-default">
-            gadgets
+            {siteName}
           </span>
         </div>
 
@@ -645,7 +652,7 @@ export default function OnboardingWizard({
 
             {/* ── Step 3: What you can do ───────────────────────────────────── */}
             <div className="w-full flex-shrink-0 p-8 min-h-[420px]">
-              <ShowcaseStep active={step === 3} />
+              <ShowcaseStep active={step === 3} siteName={siteName} />
             </div>
           </div>
 
@@ -767,7 +774,7 @@ const SHOWCASE_FEATURES: ShowcaseFeature[] = [
   },
 ]
 
-function ShowcaseStep({ active }: { active: boolean }) {
+function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string }) {
   // Mount-trigger for staggered fade-in when the step becomes visible
   const [revealed, setRevealed] = useState(false)
 
@@ -786,7 +793,7 @@ function ShowcaseStep({ active }: { active: boolean }) {
           You&apos;re all set
         </h2>
         <p className="text-sm text-kumo-subtle">
-          Here&apos;s a taste of what you can do with Gadgets
+          Here&apos;s a taste of what you can do with {siteName === 'gadgets' ? 'Gadgets' : siteName}
         </p>
       </div>
 

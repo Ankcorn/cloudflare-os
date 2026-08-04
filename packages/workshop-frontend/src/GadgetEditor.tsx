@@ -16,6 +16,7 @@ import {
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
 import UserMenu from './components/UserMenu'
+import SiteLogo from './components/SiteLogo'
 
 import {
   GadgetClient,
@@ -1330,9 +1331,12 @@ export default function GadgetEditor() {
         <div className="flex items-center gap-2 min-w-0">
           <Link
             to="/"
+            aria-label="Home"
             className="flex-shrink-0 hover:opacity-80 transition-opacity"
           >
-            <Hexagon size={22} className="text-kumo-brand" weight="bold" />
+            <SiteLogo size={22}>
+              <Hexagon size={22} className="text-kumo-brand" weight="bold" />
+            </SiteLogo>
           </Link>
 
           <span className="text-kumo-inactive flex-shrink-0">/</span>

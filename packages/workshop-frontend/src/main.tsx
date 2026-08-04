@@ -4,7 +4,7 @@ import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
-import { ServerConfigContext } from './ServerConfigContext'
+import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
@@ -12,6 +12,7 @@ import { applyAccentColor, applyStoredThemeMode } from './theme'
 import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
+import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -126,6 +127,7 @@ function AppWithConnection() {
     connectionLost: isConnectionLost,
   });
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [serverConfigError, setServerConfigError] = useState(false);
 
   useEffect(() => {
     let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
@@ -137,9 +139,17 @@ function AppWithConnection() {
   // server restart with changed config is picked up.
   useEffect(() => {
     let cancelled = false;
+    setServerConfigError(false);
     rpcState.stub.getServerConfig()
-      .then((cfg) => { if (!cancelled) setServerConfig(cfg); })
-      .catch(() => {});
+      .then((cfg) => {
+        if (!cancelled) {
+          setServerConfig(cfg.siteLogo ? {
+            ...cfg,
+            siteLogo: { url: cacheBustSiteLogoUrl(cfg.siteLogo.url) },
+          } : cfg);
+        }
+      })
+      .catch(() => { if (!cancelled) setServerConfigError(true); });
     return () => { cancelled = true; };
   }, [rpcState.stub]);
 
@@ -148,13 +158,19 @@ function AppWithConnection() {
     applyAccentColor(serverConfig?.accentColor ?? '');
   }, [serverConfig?.accentColor]);
 
+  useEffect(() => {
+    return applySiteFavicon(serverConfig?.siteLogo?.url);
+  }, [serverConfig]);
+
   return (
     <ThemeProvider>
       <RpcContext.Provider value={rpcState}>
-        <ServerConfigContext.Provider value={serverConfig}>
-          <AnnouncementBanner />
-          <RouterProvider router={router} />
-        </ServerConfigContext.Provider>
+        <ServerConfigErrorContext.Provider value={serverConfigError}>
+          <ServerConfigContext.Provider value={serverConfig}>
+            <AnnouncementBanner />
+            <RouterProvider router={router} />
+          </ServerConfigContext.Provider>
+        </ServerConfigErrorContext.Provider>
       </RpcContext.Provider>
     </ThemeProvider>
   );
