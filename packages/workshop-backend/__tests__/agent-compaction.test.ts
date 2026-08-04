@@ -103,7 +103,7 @@ describe("compaction trigger", () => {
 
     // Anthropic publishes an input-only window, so withholding anything would waste it.
     expect(getModelTokenLimits({
-      provider: "anthropic", model: "claude-opus-4-8", apiToken: "",
+      provider: "anthropic", model: "claude-opus-5", apiToken: "",
     })).toEqual({inputBudget: 1_000_000, maxOutputTokens: undefined});
   });
 
