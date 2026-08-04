@@ -9,6 +9,7 @@ packages/gatekeeper-*/src/generated/*-configurator-ui.js*
 packages/gatekeeper-*/src/generated/app.txt
 # Bundled format blueprints (regenerated at build time from FORMAT_BLUEPRINTS_DIR).
 packages/workshop-backend/src/generated/format-blueprints.ts
+packages/workshop-backend/src/generated/browser-export-runtime.txt
 
 # TypeScript build info
 *.tsbuildinfo
@@ -23,8 +24,9 @@ packages/workshop-backend/src/generated/format-blueprints.ts
 # Local dev secrets (loaded by run-dev-server.js)
 .dev.vars*
 
-# Site-specific production deployment configs.
+# Site-specific deployment configs.
 wrangler.prod.jsonc
+wrangler.staging.jsonc
 
 # Site-specific dev server configs.
 wrangler.dev.jsonc

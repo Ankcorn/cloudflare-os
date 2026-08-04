@@ -3,7 +3,7 @@
   "name": "workshop-backend",
   "main": ".wrangler/validate/src/server.ts",
   "build": {
-    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "command": "pnpm run build:worker",
     "watch_dir": "src"
   },
   "compatibility_date": "2026-02-02",
@@ -27,9 +27,16 @@
     "global_fetch_strictly_public",
 
     // The pi-ai inference layer wraps the official provider SDKs (@anthropic-ai/sdk, openai,
-    // @google/genai), which need Node compatibility. Otherwise, we'd only need nodejs_als.
+    // @google/genai), which need Node compatibility. Puppeteer (used for Gadget PDF exports)
+    // also requires Node compatibility. Otherwise, we'd only need nodejs_als.
     "nodejs_compat"
   ],
+
+  // Wrangler will launch a Chrome instance locally to emulate the Browser Run API during
+  // local development. Add "remote": true to use a remote browser running on Cloudflare instead.
+  "browser": {
+    "binding": "BROWSER"
+  },
 
   // Gatekeeper service bindings and the Workers AI binding are dynamically
   // added by run-dev-server.js (for dev) and generate-wrangler-prod.js (for

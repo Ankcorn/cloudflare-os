@@ -2689,6 +2689,12 @@ export interface GadgetClient extends WorkpieceClient {
   // @ts-ignore - TODO: Fix type instantiation issue
   connectToGadget(chatId?: number): Promise<RpcStub<any>>;
 
+  /**
+   * Renders the Gadget's UI as a PDF. If `chatId` is specified, the PDF includes changes currently
+   * proposed in that chat.
+   */
+  exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>>;
+
   // --- Binding management ---
   //
   // A gadget's bindings are edges mapping a name (as it appears in the gadget worker's `env`) to
@@ -2766,8 +2772,8 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 //
 // - "build": full access -- edit code, use and participate in chats, manage bindings, etc. (the
 //   same access the owner has, modulo the owner-only exceptions documented in sharing.md).
-// - "use": may only render and interact with the gadget's deployed UI (getUiBundle() and
-//   connectToGadget() on the mainline code), plus read basic metadata.
+// - "use": may only render, interact with, and export the gadget's deployed UI (getUiBundle(),
+//   connectToGadget(), and exportPdf()), plus read basic metadata.
 //
 // Roles are ordered build > use. A collaborator's effective role is the maximum role reachable
 // from the owner through their valid permission edges, where each edge grants

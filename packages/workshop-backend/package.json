@@ -6,18 +6,20 @@
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
     "deploy": "wrangler deploy",
-    "build": "node scripts/build-format-blueprints.mjs && tsc",
-    "types:check": "node scripts/build-format-blueprints.mjs && tsc --noEmit",
+    "build:worker": "node build-browser-runtime.mjs && pnpm exec capnweb-validate build --out .wrangler/validate",
+    "build": "node build-browser-runtime.mjs && node scripts/build-format-blueprints.mjs && tsc",
+    "types:check": "node build-browser-runtime.mjs && node scripts/build-format-blueprints.mjs && tsc --noEmit",
     "clean": "rm -rf dist",
-    "test": "node scripts/build-format-blueprints.mjs && vitest run && vitest run --config vitest.integration.config.ts",
-    "test:integration": "node scripts/build-format-blueprints.mjs && vitest run --config vitest.integration.config.ts",
-    "test:watch": "node scripts/build-format-blueprints.mjs && vitest",
+    "test": "node build-browser-runtime.mjs && node scripts/build-format-blueprints.mjs && vitest run && vitest run --config vitest.integration.config.ts",
+    "test:integration": "node build-browser-runtime.mjs && node scripts/build-format-blueprints.mjs && vitest run --config vitest.integration.config.ts",
+    "test:watch": "node build-browser-runtime.mjs && node scripts/build-format-blueprints.mjs && vitest",
     "build:format-blueprints": "node scripts/build-format-blueprints.mjs",
     "import:format-blueprint": "node --experimental-strip-types --no-warnings scripts/import-format-blueprint.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.83.0",
     "@earendil-works/pi-ai": "0.83.0",
+    "@cloudflare/puppeteer": "^1.2.0",
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/error-reporting": "workspace:*",
     "@gadgets/typed-storage": "workspace:*",
@@ -30,6 +32,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.20",
+    "esbuild": "^0.28.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.115.0"

@@ -44,6 +44,9 @@ declare global {
       >;
       FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
 
+      // Browser Run binding used to render Gadget exports. Optional for self-hosted deployments.
+      BROWSER?: BrowserRun;
+
       // ---------------------------------------------------------------------------------------------
       // Optional features: sign-in via authentication gatekeepers + AI Gateway billing (free-tier
       // limits / top-up). All OFF by default; existing password / Cloudflare Access deployments are
