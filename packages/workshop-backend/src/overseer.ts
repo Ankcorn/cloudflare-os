@@ -296,6 +296,15 @@ function observerBindingTitle(record: GatekeeperRecord): string {
   return record.resourceTitle || "Connection";
 }
 
+function observerBindingNeed(record: GatekeeperRecord): ObserverBindingNeed {
+  return {
+    gatekeeperId: record.id,
+    vendorId: observerVendorId(record)!,
+    resourceTitle: observerBindingTitle(record),
+    resourceUrl: record.resourceUrl,
+  };
+}
+
 // Copied from normalizeText() in agent-catalog.ts, minus its length clamp
 function oneLineReason(reason: string): string {
   return reason.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
@@ -5888,6 +5897,10 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
+  listObserverRequirements(role: CollaboratorRole): ObserverBindingNeed[] {
+    return this.#inScopeGatekeepers(role).map(observerBindingNeed);
+  }
+
   // Best-effort `removeObserver(observerId)` across the given gatekeeper ids. Never throws; logs
   // and continues on error. An orphaned observer entry only ever causes superfluous future checks,
   // never a data leak (the leak-relevant gate is authorizeObservation, which keys off the live
@@ -6029,10 +6042,7 @@ class OverseerImpl implements AgentHooks {
           }
 
           let needs: ObserverBindingNeed[] = uncovered.map(gk => ({
-            gatekeeperId: gk.id,
-            vendorId: observerVendorId(gk)!,
-            resourceTitle: observerBindingTitle(gk),
-            resourceUrl: gk.resourceUrl,
+            ...observerBindingNeed(gk),
             // Present only for bindings we're re-prompting because they just failed, so the client
             // can explain what went wrong and aim its re-authenticate affordance at that account.
             failure: passFailures.get(gk.id),
@@ -8551,6 +8561,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // the RPC-bound pieces (resolving profiles via User DOs, the `prohibitAllSharing` policy) and
   // delegate the rest.
 
+  async listObserverRequirements(
+      role: CollaboratorRole): Promise<ObserverBindingNeed[]> {
+    return this.impl.listObserverRequirements(role);
+  }
+
   async listCollaborators(): Promise<CollaboratorInfo[]> {
     return (await this.impl.getSharingManager()).listCollaborators();
   }
@@ -8908,6 +8923,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }): Promise<void> { this.#deny(); }
   async deleteBlueprint(_blueprintId: string): Promise<void> { this.#deny(); }
   async retryBlueprintPublish(_blueprintId: string): Promise<void> { this.#deny(); }
+  async listObserverRequirements(
+      _role: CollaboratorRole): Promise<ObserverBindingNeed[]> { this.#deny(); }
   async listCollaborators(): Promise<CollaboratorInfo[]> { this.#deny(); }
   async addCollaborator(_username: string, _role: CollaboratorRole, _note?: string)
       : Promise<CollaboratorInfo | null> { this.#deny(); }

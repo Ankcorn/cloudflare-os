@@ -203,10 +203,13 @@ export type ObserverBindingFailure = {
   reason: string;
 };
 
-// Describes one gatekeeper binding for which the opening user must choose a connected account
-// before they can observe the gadget. Passed to ObserverConfigCallback.configure().
+/**
+ * Describes one connection a non-owner must verify using one of their own accounts. Passed to
+ * ObserverConfigCallback.configure() when the opening user needs to choose an account; its result
+ * echoes `gatekeeperId` in an ObserverAccountChoice.
+ */
 export type ObserverBindingNeed = {
-  // The overseer-assigned gatekeeper id (a workpiece id). Echoed back in ObserverAccountChoice.
+  // The overseer-assigned gatekeeper id (a workpiece id).
   gatekeeperId: WorkpieceId;
   // The vendor the user must have a connected account for (e.g. "google"). The frontend filters
   // the user's connected accounts by this to find candidates.
@@ -1589,6 +1592,13 @@ export interface Overseer extends RpcTarget {
   retryBlueprintPublish(blueprintId: string): Promise<void>;
 
   // --- Collaborator management ---
+
+  /**
+   * List the connections a recipient with `role` must verify before opening this workspace, in
+   * the order the connections were created. Reports what sharing will cost the recipient; it
+   * grants nothing and mints no capability.
+   */
+  listObserverRequirements(role: CollaboratorRole): Promise<ObserverBindingNeed[]>;
 
   // List all collaborators. Available to owner and all collaborators.
   listCollaborators(): Promise<CollaboratorInfo[]>;

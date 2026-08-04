@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { Checkbox, Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import type { PortalContainer } from '@cloudflare/kumo'
-import { CaretDown, Check, Copy, Link, PencilSimple, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
+import { CaretDown, Check, Copy, Link, PencilSimple, ShieldCheck, ShieldWarning, Trash, UserPlus, X } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import {
   Overseer,
@@ -12,6 +12,7 @@ import {
   GadgetMetadata,
   AiChatAuthorInfo,
   CollaboratorRole,
+  ObserverBindingNeed,
 } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { PersonAvatar } from './components/PersonAvatar'
@@ -50,8 +51,8 @@ function formatRelativeTime(date: Date): string {
 }
 
 const ROLE_LABELS: Record<CollaboratorRole, string> = {
-  build: 'Can build',
-  use: 'Can use',
+  build: 'Workspace',
+  use: 'App only',
 }
 
 const ROLE_DESCRIPTIONS: Record<CollaboratorRole, string> = {
@@ -219,6 +220,79 @@ function DependentKeepList({
   )
 }
 
+// What a recipient is asked to do before the workspace will open for them. Recipients don't
+// inherit the owner's connections: they must point their own account at each connection in scope
+// for the selected access level, so sharers should know that cost before they invite anyone.
+function RecipientVerification({
+  requirements,
+  failed,
+  role,
+  headingId,
+  heading,
+}: {
+  requirements: ObserverBindingNeed[] | null
+  failed: boolean
+  role?: CollaboratorRole
+  headingId: string
+  heading: string
+}) {
+  let body: ReactNode
+  if (failed) {
+    body = (
+      <p className="px-1 text-[12px] leading-[16px] tracking-[-0.15px] text-kumo-subtle">
+        Couldn’t check which connections recipients will be asked to verify.
+      </p>
+    )
+  } else if (requirements === null || requirements.length === 0) {
+    // Still loading: stay silent rather than reserving space for an answer we don't have yet.
+    return null
+  } else {
+    body = (
+      <div className="rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5">
+        <p className="text-[12px] leading-[16px] tracking-[-0.15px] text-kumo-subtle">
+          {role ? (
+            <>People with <span className="font-medium text-kumo-default">{roleLabel(role)}</span> access must</>
+          ) : 'Recipients must'} prove their own account can reach:
+        </p>
+        <ul className="mt-1.5 max-h-32 space-y-1 overflow-y-auto">
+          {requirements.map(requirement => (
+            <li key={requirement.gatekeeperId} className="min-w-0">
+              <p className="truncate text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-default">
+                {requirement.resourceTitle}
+              </p>
+              {requirement.resourceUrl && (
+                <p className="truncate font-mono text-[11px] leading-4 text-kumo-inactive">
+                  {requirement.resourceUrl}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  return (
+    <section aria-labelledby={headingId} className="mt-4">
+      <div className="mb-2 flex items-center gap-1.5 px-1">
+        <ShieldCheck size={13} className="text-kumo-inactive" />
+        <h3 id={headingId} className="text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-subtle">
+          {heading}
+        </h3>
+      </div>
+      {body}
+    </section>
+  )
+}
+
+function sameRequirements(
+  left: ObserverBindingNeed[],
+  right: ObserverBindingNeed[],
+): boolean {
+  return left.length === right.length &&
+    left.every((requirement, index) => requirement.gatekeeperId === right[index].gatekeeperId)
+}
+
 export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi }: Props) {
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
@@ -231,6 +305,11 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
   const [newShareLinkId, setNewShareLinkId] = useState<string | null>(null)
   const [newShareLinkCopied, setNewShareLinkCopied] = useState(false)
+  const [invitedName, setInvitedName] = useState<string | null>(null)
+  const [invitedLinkCopied, setInvitedLinkCopied] = useState(false)
+  const [requirements, setRequirements] =
+    useState<Record<CollaboratorRole, ObserverBindingNeed[]> | null>(null)
+  const [requirementsFailed, setRequirementsFailed] = useState(false)
   const [creatingLink, setCreatingLink] = useState(false)
   const [showLinkComposer, setShowLinkComposer] = useState(false)
   const [confirmationTarget, setConfirmationTarget] = useState<ConfirmationTarget | null>(null)
@@ -310,6 +389,36 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     }
   }, [overseer])
 
+  // Refresh on focus as well as open: bindings cannot change in this modal, but they can change in
+  // another tab while it remains open. A failed refresh is informational and never blocks sharing.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    let requestId = 0
+    setRequirements(null)
+    const refresh = () => {
+      const thisRequest = ++requestId
+      setRequirementsFailed(false)
+      Promise.all([
+        overseer.listObserverRequirements('use'),
+        overseer.listObserverRequirements('build'),
+      ])
+        .then(([use, build]) => {
+          if (!cancelled && thisRequest === requestId) setRequirements({ use, build })
+        })
+        .catch(err => {
+          console.error('Failed to load observer requirements:', err)
+          if (!cancelled && thisRequest === requestId) setRequirementsFailed(true)
+        })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', refresh)
+    }
+  }, [open, overseer])
+
   useEffect(() => {
     if (open) {
       loadData()
@@ -318,6 +427,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
         setNewShareLink(null)
         setNewShareLinkId(null)
         setNewShareLinkCopied(false)
+        setInvitedName(null)
+        setInvitedLinkCopied(false)
         setNewLinkNote('')
         setShowLinkComposer(false)
         setConfirmationTarget(null)
@@ -344,6 +455,62 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     () => [...shareLinks].toSorted((a, b) => b.created.getTime() - a.created.getTime()),
     [shareLinks],
   )
+  let recipientVerification: ReactNode = null
+  if (requirementsFailed) {
+    recipientVerification = (
+      <RecipientVerification
+        requirements={null}
+        failed
+        headingId="recipient-verification-heading"
+        heading="Recipient verification"
+      />
+    )
+  } else if (requirements !== null) {
+    const inviteRequirements = requirements[addRole]
+    if (!showLinkComposer && !newShareLink) {
+      recipientVerification = (
+        <RecipientVerification
+          requirements={inviteRequirements}
+          failed={false}
+          role={addRole}
+          headingId="recipient-verification-heading"
+          heading="Recipient verification"
+        />
+      )
+    } else {
+      const linkRequirements = requirements[newLinkRole]
+      if (sameRequirements(inviteRequirements, linkRequirements)) {
+        recipientVerification = (
+          <RecipientVerification
+            requirements={inviteRequirements}
+            failed={false}
+            role={addRole === newLinkRole ? addRole : undefined}
+            headingId="recipient-verification-heading"
+            heading="Recipient verification"
+          />
+        )
+      } else {
+        recipientVerification = (
+          <>
+            <RecipientVerification
+              requirements={inviteRequirements}
+              failed={false}
+              role={addRole}
+              headingId="invite-verification-heading"
+              heading="Direct invite verification"
+            />
+            <RecipientVerification
+              requirements={linkRequirements}
+              failed={false}
+              role={newLinkRole}
+              headingId="link-verification-heading"
+              heading="Share-link verification"
+            />
+          </>
+        )
+      }
+    }
+  }
   const removeTarget = confirmationTarget?.kind === 'remove' ? confirmationTarget : null
   const revokeTarget = confirmationTarget?.kind === 'revoke' ? confirmationTarget : null
 
@@ -363,6 +530,18 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       setNewShareLinkCopied(true)
     } else {
       toasts.add({ title: 'Could not copy share link.', variant: 'error' })
+    }
+  }
+
+  // Where an invited collaborator opens the workspace. Adding them already granted access, so this
+  // carries no secret and is safe to show and re-show — unlike a share link, whose URL embeds a key.
+  const workspaceUrl = `${window.location.origin}/gadget/${metadata.id}`
+
+  const copyWorkspaceUrl = async () => {
+    if (await copyToClipboard(workspaceUrl)) {
+      setInvitedLinkCopied(true)
+    } else {
+      toasts.add({ title: 'Could not copy the workspace link.', variant: 'error' })
     }
   }
 
@@ -390,6 +569,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       } else {
         const landedId = result.profile.id
         setAddUsername('')
+        setInvitedName(result.profile.name)
+        setInvitedLinkCopied(false)
         await loadData()
         showLandedRow('person', landedId)
         toasts.add({ title: `Added ${result.profile.name} as a collaborator.`, variant: 'success' })
@@ -509,10 +690,15 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const handleSaveShareLinkNote = async () => {
     if (!editingShareLinkId || savingShareLinkNoteRef.current) return
     const linkId = editingShareLinkId
+    const note = editingShareLinkNote.trim()
+    if (note === (shareLinks.find(link => link.linkId === linkId)?.note ?? '')) {
+      cancelRenameShareLink()
+      return
+    }
     savingShareLinkNoteRef.current = true
     setSavingShareLinkNote(true)
     try {
-      await overseer.updateShareLink(linkId, editingShareLinkNote.trim() || undefined)
+      await overseer.updateShareLink(linkId, note || undefined)
       cancelRenameShareLink()
       await loadData()
       showLandedRow('shareLink', linkId)
@@ -653,6 +839,35 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </WorkshopButton>
           </div>
 
+          {invitedName && (
+            <div className="themed-compact-shadow mt-2 flex flex-wrap items-center gap-3 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5 share-fade-in">
+              <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-kumo-tint text-kumo-subtle">
+                {invitedLinkCopied ? <Check size={15} weight="bold" /> : <UserPlus size={15} weight="duotone" />}
+              </div>
+              <div className="min-w-[160px] flex-1">
+                <div className="flex items-baseline gap-1.5">
+                  <p className="text-[13px] leading-[18px] font-medium text-kumo-default">
+                    Added {invitedName}
+                  </p>
+                  <span className="text-[11px] leading-4 text-kumo-inactive">
+                    {invitedLinkCopied ? 'Link copied to your clipboard' : 'Send them this link to open it'}
+                  </span>
+                </div>
+                <p className="truncate font-mono text-[11px] leading-4 text-kumo-subtle">{workspaceUrl}</p>
+              </div>
+              <WorkshopButton tone="primary" onClick={copyWorkspaceUrl} className="gap-1.5 !rounded-xl">
+                {invitedLinkCopied ? <Check size={13} weight="bold" /> : <Copy size={13} />}
+                {invitedLinkCopied ? 'Copied' : 'Copy link'}
+              </WorkshopButton>
+              <WorkshopIconButton
+                aria-label="Dismiss added collaborator"
+                onClick={() => { setInvitedName(null); setInvitedLinkCopied(false) }}
+              >
+                <X size={14} />
+              </WorkshopIconButton>
+            </div>
+          )}
+
           <div className="mt-2">
             {(showLinkComposer || newShareLink) ? (
               newShareLink ? (
@@ -725,7 +940,9 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           </div>
           </div>
 
-          <section aria-labelledby="people-heading" className="mt-1">
+          {recipientVerification}
+
+          <section aria-labelledby="people-heading" className="mt-4">
             <div className="mb-2 px-1">
               <h3 id="people-heading" className="text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-subtle">
                 People with access
