@@ -107,12 +107,18 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     throw new Error("Collection not found or you don't have access.");
   }
 
+  #assertArtifactsAvailable(): void {
+    if (!this.env.ARTIFACTS) {
+      throw new Error("Git-backed Context collections are not enabled.");
+    }
+  }
+
   #assertAdmin(): void {
     if (!this.isAdmin) throw new Error("Admin access required.");
   }
 
-  async getViewerInfo(): Promise<{ isAdmin: boolean }> {
-    return { isAdmin: this.isAdmin };
+  async getViewerInfo(): Promise<{ isAdmin: boolean; supportsGitCollections: boolean }> {
+    return { isAdmin: this.isAdmin, supportsGitCollections: !!this.env.ARTIFACTS };
   }
 
   // --- Collection management ---
@@ -127,6 +133,9 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     if (visibility === "public") this.#assertAdmin();
     if (source !== "web" && source !== "git") {
       throw new Error(`Unsupported collection source: ${source}`);
+    }
+    if (source === "git" && !this.env.ARTIFACTS) {
+      throw new Error("Git-backed Context collections are not enabled.");
     }
 
     let id = crypto.randomUUID();
@@ -166,6 +175,7 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     title?: string; description?: string; icon?: string; branch?: string;
   }): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    if (options.branch !== undefined) this.#assertArtifactsAvailable();
     await this.#collection(collectionId).updateMetadata(options);
   }
 
@@ -175,21 +185,25 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     // stale-while-revalidate sync in the background, but they do not
     // have direct control over this.
     await this.#assertCanWrite(collectionId);
+    this.#assertArtifactsAvailable();
     await this.#collection(collectionId).syncArtifactSource();
   }
 
   async createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult> {
     await this.#assertCanWrite(collectionId);
+    this.#assertArtifactsAvailable();
     return this.#collection(collectionId).createGitToken();
   }
 
   async listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList> {
     await this.#assertCanWrite(collectionId);
+    this.#assertArtifactsAvailable();
     return this.#collection(collectionId).listGitTokens();
   }
 
   async revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean> {
     await this.#assertCanWrite(collectionId);
+    this.#assertArtifactsAvailable();
     return this.#collection(collectionId).revokeGitToken(tokenId);
   }
 

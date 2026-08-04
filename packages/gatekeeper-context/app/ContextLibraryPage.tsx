@@ -716,16 +716,23 @@ function CreateCollectionView({
   const [creating, setCreating] = useState(false);
   // Only admins may create public collections.
   const [isAdmin, setIsAdmin] = useState(false);
+  const [supportsGitCollections, setSupportsGitCollections] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     context
       .getViewerInfo()
       .then((info) => {
-        if (!cancelled) setIsAdmin(info.isAdmin);
+        if (!cancelled) {
+          setIsAdmin(info.isAdmin);
+          setSupportsGitCollections(info.supportsGitCollections);
+        }
       })
       .catch(() => {
-        if (!cancelled) setIsAdmin(false);
+        if (!cancelled) {
+          setIsAdmin(false);
+          setSupportsGitCollections(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -786,52 +793,54 @@ function CreateCollectionView({
             <div className="ctx-rise" style={{ animationDelay: "120ms" }}>
               <CollectionDescriptionField value={description} onChange={setDescription} />
             </div>
-            <div className="ctx-rise" style={{ animationDelay: "160ms" }}>
-              <FieldLabel>Type</FieldLabel>
-              <div role="radiogroup" aria-label="Collection type" className="grid gap-2">
-                {CONTENT_SOURCE_OPTIONS.map(({
-                  value,
-                  Icon,
-                  title: optionTitle,
-                  description: optionDescription,
-                }) => {
-                  const selected = source === value;
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      onClick={() => setSource(value)}
-                      className={`press flex items-start gap-3 rounded-xl border-2 px-3 py-2.5 text-left transition-[border-color,background-color] duration-150 ease-out ${
-                        selected
-                          ? "border-kumo-brand/50 bg-kumo-brand/[0.05]"
-                          : "border-kumo-line bg-kumo-base hover:border-kumo-ring/60"
-                      }`}
-                    >
-                      <Icon
-                        size={16}
-                        weight={selected ? "fill" : "regular"}
-                        className={`mt-0.5 shrink-0 ${selected ? "text-kumo-brand" : "text-kumo-subtle"}`}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                          {optionTitle}
+            {supportsGitCollections && (
+              <div className="ctx-rise" style={{ animationDelay: "160ms" }}>
+                <FieldLabel>Type</FieldLabel>
+                <div role="radiogroup" aria-label="Collection type" className="grid gap-2">
+                  {CONTENT_SOURCE_OPTIONS.map(({
+                    value,
+                    Icon,
+                    title: optionTitle,
+                    description: optionDescription,
+                  }) => {
+                    const selected = source === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setSource(value)}
+                        className={`press flex items-start gap-3 rounded-xl border-2 px-3 py-2.5 text-left transition-[border-color,background-color] duration-150 ease-out ${
+                          selected
+                            ? "border-kumo-brand/50 bg-kumo-brand/[0.05]"
+                            : "border-kumo-line bg-kumo-base hover:border-kumo-ring/60"
+                        }`}
+                      >
+                        <Icon
+                          size={16}
+                          weight={selected ? "fill" : "regular"}
+                          className={`mt-0.5 shrink-0 ${selected ? "text-kumo-brand" : "text-kumo-subtle"}`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                            {optionTitle}
+                          </span>
+                          <span className="mt-0.5 block text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                            {optionDescription}
+                          </span>
                         </span>
-                        <span className="mt-0.5 block text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-                          {optionDescription}
+                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+                          {selected && (
+                            <Check size={13} weight="bold" className="text-kumo-brand" />
+                          )}
                         </span>
-                      </span>
-                      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
-                        {selected && (
-                          <Check size={13} weight="bold" className="text-kumo-brand" />
-                        )}
-                      </span>
-                    </button>
-                  );
-                })}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
+            )}
             {isAdmin && (
               <div className="ctx-rise" style={{ animationDelay: "200ms" }}>
                 <FieldLabel>Visibility</FieldLabel>
@@ -1118,6 +1127,7 @@ function MetaField({
 function CollectionOverview({
   metadata,
   canWrite,
+  supportsGitCollections,
   refreshingSource,
   onRefreshSource,
   onEditDetails,
@@ -1126,6 +1136,7 @@ function CollectionOverview({
 }: {
   metadata: ContextCollectionMetadata;
   canWrite: boolean;
+  supportsGitCollections: boolean;
   refreshingSource: boolean;
   onRefreshSource: () => void;
   onEditDetails: () => void;
@@ -1152,7 +1163,7 @@ function CollectionOverview({
             </div>
             {canWrite && (
               <div className="flex shrink-0 items-center gap-2">
-                {isSynced && (
+                {isSynced && supportsGitCollections && (
                   <WorkshopButton
                     tone="secondary"
                     className="h-9!"
@@ -1180,7 +1191,7 @@ function CollectionOverview({
                   >
                     Edit details
                   </DropdownMenu.Item>
-                  {isSynced && (
+                  {isSynced && supportsGitCollections && (
                     <DropdownMenu.Item
                       icon={<Key size={13} className="mr-2" />}
                       onClick={onManageGitTokens}
@@ -1221,6 +1232,17 @@ function CollectionOverview({
           </div>
         </header>
 
+        {isSynced && !supportsGitCollections && (
+          <section className="mt-8 rounded-xl border border-kumo-line bg-kumo-elevated/60 px-5 py-4">
+            <p className="text-[13px] font-medium tracking-[-0.2px] text-kumo-default">
+              Git synchronization unavailable
+            </p>
+            <p className="mt-1 text-[13px] leading-5 tracking-[-0.2px] text-kumo-subtle">
+              Git content is read-only and shows its most recently cached version.
+            </p>
+          </section>
+        )}
+
         <section className="mt-9 border-t border-kumo-line pt-8">
           <p className="mb-3 text-[13px] font-medium leading-none tracking-[-0.2px] text-kumo-subtle">
             Description
@@ -1248,7 +1270,9 @@ function CollectionOverview({
                 </p>
                 <p className="mt-1 max-w-xl text-[13px] leading-5 tracking-[-0.2px] text-kumo-subtle">
                   {isSynced
-                    ? "This git mirror is empty. Mirror content from git, then refresh."
+                    ? supportsGitCollections
+                      ? "This git mirror is empty. Mirror content from git, then refresh."
+                      : "No Git content was cached before synchronization became unavailable."
                     : canWrite
                     ? "Use the + in the Files panel to create or upload skills or files. Agents use the names and descriptions to decide what to read."
                     : "This collection is empty."}
@@ -1271,6 +1295,7 @@ function CollectionSettingsModal({
   // Which step to open on. "delete" lands on the type-to-confirm step, not immediate deletion.
   initialMode,
   metadata,
+  supportsGitCollections,
   collectionId,
   onClose,
   onUpdated,
@@ -1279,6 +1304,7 @@ function CollectionSettingsModal({
   open: boolean;
   initialMode: "edit" | "delete";
   metadata: ContextCollectionMetadata;
+  supportsGitCollections: boolean;
   collectionId: string;
   onClose: () => void;
   onUpdated: () => void;
@@ -1318,7 +1344,8 @@ function CollectionSettingsModal({
     title.trim() !== metadata.title ||
     description.trim() !== metadata.description ||
     icon !== (metadata.icon ?? DEFAULT_COLLECTION_ICON) ||
-    (metadata.content.source === "git" && branch.trim() !== metadata.content.branch);
+    (metadata.content.source === "git" && supportsGitCollections &&
+      branch.trim() !== metadata.content.branch);
 
   const handleSave = async () => {
     const updates: {
@@ -1332,7 +1359,8 @@ function CollectionSettingsModal({
       updates.description = description.trim();
     if (icon !== (metadata.icon ?? DEFAULT_COLLECTION_ICON))
       updates.icon = icon;
-    if (metadata.content.source === "git" && branch.trim() !== metadata.content.branch)
+    if (metadata.content.source === "git" && supportsGitCollections &&
+        branch.trim() !== metadata.content.branch)
       updates.branch = branch.trim();
     if (Object.keys(updates).length === 0) {
       onClose();
@@ -1398,7 +1426,7 @@ function CollectionSettingsModal({
               <div>
                 <CollectionDescriptionField value={description} onChange={setDescription} />
               </div>
-              {metadata.content.source === "git" && (
+              {metadata.content.source === "git" && supportsGitCollections && (
                 <div>
                   <FieldLabel>Git branch</FieldLabel>
                   <WorkshopInput
@@ -2147,6 +2175,7 @@ function CollectionEditor({
   };
   // Default read-only until access loads so edit controls never flash to viewers.
   const [canWrite, setCanWrite] = useState(false);
+  const [supportsGitCollections, setSupportsGitCollections] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
 
   // Tree ⋮ deletes route through the same in-app confirmation dialog the document toolbar uses,
@@ -2200,14 +2229,16 @@ function CollectionEditor({
 
   const loadDocs = useCallback(async () => {
     try {
-      const [meta, list, writable] = await Promise.all([
+      const [meta, list, writable, viewer] = await Promise.all([
         context.getContextCollectionMetadata(collectionId),
         context.listContextDocuments(collectionId),
         context.canWriteContextCollection(collectionId),
+        context.getViewerInfo(),
       ]);
       setMetadata(meta);
       setDocs(list);
       setCanWrite(writable);
+      setSupportsGitCollections(viewer.supportsGitCollections);
     } catch (err) {
       console.error("Failed to load documents:", err);
     } finally {
@@ -2510,6 +2541,7 @@ function CollectionEditor({
           open={settingsOpen}
           initialMode={settingsMode}
           metadata={metadata}
+          supportsGitCollections={supportsGitCollections}
           collectionId={collectionId}
           onClose={() => setSettingsOpen(false)}
           onUpdated={loadDocs}
@@ -2517,7 +2549,7 @@ function CollectionEditor({
         />
       )}
 
-      {metadata?.content.source === "git" && (
+      {metadata?.content.source === "git" && supportsGitCollections && (
         <GitTokenManagementModal
           open={gitTokensOpen}
           collectionId={collectionId}
@@ -2693,7 +2725,9 @@ function CollectionEditor({
             ) : docs.length === 0 && pendingFolders.size === 0 && !creating ? (
               <p className="px-2 py-2 text-[12px] leading-5 text-kumo-inactive">
                 {metadata?.content.source === "git"
-                  ? "No files yet. Mirror content from git, then refresh."
+                  ? supportsGitCollections
+                    ? "No files yet. Mirror content from git, then refresh."
+                    : "No Git content was cached before synchronization became unavailable."
                   : canWrite ? "No files yet. Use + to create or upload skills or files." : "No files yet."}
               </p>
             ) : (
@@ -2736,6 +2770,7 @@ function CollectionEditor({
             <CollectionOverview
               metadata={metadata}
               canWrite={canWrite}
+              supportsGitCollections={supportsGitCollections}
               refreshingSource={refreshingSource}
               onRefreshSource={handleRefreshArtifactSource}
               onEditDetails={() => openSettings("edit")}

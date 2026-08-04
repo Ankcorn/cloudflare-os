@@ -141,13 +141,20 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     return ns.getByName(this.#domain());
   }
 
+  #artifacts(): Artifacts {
+    let artifacts = this.env.ARTIFACTS;
+    if (!artifacts) throw new Error("Git-backed Context collections are not enabled.");
+    return artifacts;
+  }
+
   async #createArtifactRepo(metadata: ContextCollectionMetadata): Promise<string> {
     // Artifact repo id is always set to collection id.
-    let created = await this.env.ARTIFACTS.create(metadata.id, {
+    let artifacts = this.#artifacts();
+    let created = await artifacts.create(metadata.id, {
       setDefaultBranch: DEFAULT_GIT_BRANCH,
     });
 
-    let repo = await this.env.ARTIFACTS.get(metadata.id);
+    let repo = await artifacts.get(metadata.id);
     // Artifacts auto-creates an initial write token when the repo is first
     // created. We don't want or need this token, so we immediately revoke it.
     await repo.revokeToken(created.token).catch((err) => {
@@ -457,7 +464,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async createGitToken(): Promise<ContextGitTokenCreateResult> {
     let meta = this.getMetadata();
     if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
-    let repo = await this.env.ARTIFACTS.get(meta.id);
+    let repo = await this.#artifacts().get(meta.id);
     let token = await repo.createToken("write", GIT_TOKEN_TTL_SECONDS);
     return {
       id: token.id,
@@ -469,7 +476,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async listGitTokens(): Promise<ContextGitTokenList> {
     if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
     let meta = this.getMetadata();
-    let repo = await this.env.ARTIFACTS.get(meta.id);
+    let repo = await this.#artifacts().get(meta.id);
     let result = await repo.listTokens();
     return {
       tokens: result.tokens
@@ -487,7 +494,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async revokeGitToken(tokenId: string): Promise<boolean> {
     if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
     let meta = this.getMetadata();
-    let repo = await this.env.ARTIFACTS.get(meta.id);
+    let repo = await this.#artifacts().get(meta.id);
     return repo.revokeToken(tokenId);
   }
 
@@ -496,6 +503,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   }
 
   #startBackgroundArtifactRefresh(): void {
+    if (!this.env.ARTIFACTS) return;
     let content = this.getMetadata().content;
     if (content.source !== "git") return;
     if (Date.now() - content.lastRefreshedAt.getTime() < GIT_REFRESH_MIN_INTERVAL_MS) return;
@@ -561,7 +569,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   async #loadArtifactSnapshot(): Promise<void> {
     const meta = this.getMetadata();
     if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
-    const result = await readArtifactRepoDocuments(this.env.ARTIFACTS, meta.id, meta.content.remote, meta.content.branch, meta.content.commit);
+    const result = await readArtifactRepoDocuments(
+        this.#artifacts(), meta.id, meta.content.remote, meta.content.branch, meta.content.commit);
     if (!result.changed) {
       // Nothing changed, just bump the refresh timestamp.
       const latestMeta = this.getMetadata();
@@ -638,7 +647,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       }
     }
 
-    if (meta.content.source === "git") {
+    if (meta.content.source === "git" && this.env.ARTIFACTS) {
       await this.env.ARTIFACTS.delete(id).catch((err) => {
         logger.warn("failed to delete Artifacts repo for context collection", {
           event: "artifacts.repo.delete.failed",
@@ -654,7 +663,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   // Account revocation clears the whole user-library index separately; don't update it per item.
   async deleteForRevokedOwner(): Promise<void> {
     let meta = this.getMetadata();
-    if (meta.content.source === "git" && meta.id) {
+    if (meta.content.source === "git" && meta.id && this.env.ARTIFACTS) {
       await this.env.ARTIFACTS.delete(meta.id).catch((err) => {
         logger.warn("failed to delete Artifacts repo while revoking context collection owner", {
           event: "artifacts.repo.delete.for.revoked.owner.failed",
