@@ -24,6 +24,25 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   ollama: 'Ollama',
 }
 
+// Placeholder hinting at the shape of each provider's API token.
+const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
+  anthropic: 'sk-ant-...',
+  openai: 'sk-...',
+  google: 'AIza...',
+  cloudflare: 'Cloudflare API token',
+  ollama: '(optional)',
+}
+
+// Example used in the custom-model placeholders for providers that have no suggested models
+// (currently Ollama, which serves whatever the user has pulled locally).
+const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
+
+// Pick an example model to show in the custom-model placeholders for the given provider.
+function exampleModel(provider: AiModelProvider): { modelId: string, name: string } {
+  const first = Object.entries(SUGGESTED_MODELS[provider])[0]
+  return first ? { modelId: first[0], name: first[1].name } : FALLBACK_EXAMPLE_MODEL
+}
+
 // Encode a selection into a string value for the Select component.
 function encodeSelection(provider: AiModelProvider, modelId?: string): string {
   return modelId ? `${provider}:${modelId}` : `other-${provider}`
@@ -80,7 +99,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   // Form fields (used for custom models)
   const [modelId, setModelId] = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [uniqueId, setUniqueId] = useState('')
   const [apiToken, setApiToken] = useState('')
   const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
@@ -103,7 +121,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setSelectValue(undefined)
       setModelId('')
       setDisplayName('')
-      setUniqueId('')
       setApiToken('')
       setAccountId('')
       setApiUrl('')
@@ -121,11 +138,9 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     if (sel.type === 'custom') {
       setModelId('')
       setDisplayName('')
-      setUniqueId('')
     } else {
       setModelId(sel.modelId)
       setDisplayName(sel.displayName)
-      setUniqueId(sel.modelId)
     }
     setApiToken('')
     setAccountId('')
@@ -142,7 +157,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     if (selection?.type === 'custom') {
       if (!modelId.trim()) newErrors.modelId = 'Please enter the model ID'
       if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
-      if (!uniqueId.trim()) newErrors.uniqueId = 'Please enter a unique ID'
     }
 
     const isOllama = selection?.provider === 'ollama'
@@ -176,7 +190,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
       const profile: AiChatAuthorInfo = {
         type: 'agent',
-        id: isSuggested ? finalModelId : uniqueId.trim(),
+        id: finalModelId,
         name: finalDisplayName,
       }
 
@@ -201,6 +215,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
   const options = buildOptions(gatewayMode, enabledProviders)
   const showCustomFields = selection?.type === 'custom'
+  const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
   const showCredentials = !gatewayMode
@@ -259,8 +274,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             <>
               <Input
                 label="Model ID"
-                placeholder="e.g., gpt-5.1-codex"
-                description="The model identifier as specified by the provider (e.g., 'gpt-5.1-codex', 'claude-sonnet-4-5')"
+                placeholder={`e.g., ${example!.modelId}`}
+                description={`The model identifier as specified by the provider (e.g., '${example!.modelId}')`}
                 value={modelId}
                 onChange={(e) => { setModelId(e.target.value); setErrors(prev => ({ ...prev, modelId: '' })) }}
                 error={errors.modelId}
@@ -269,22 +284,12 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
               <Input
                 label="Display Name"
-                placeholder="e.g., GPT 5.1 Codex"
+                placeholder={`e.g., ${example!.name}`}
                 description="Human-readable name shown in the UI"
                 value={displayName}
                 onChange={(e) => { setDisplayName(e.target.value); setErrors(prev => ({ ...prev, displayName: '' })) }}
                 error={errors.displayName}
                 variant={errors.displayName ? 'error' : 'default'}
-              />
-
-              <Input
-                label="Unique ID"
-                placeholder="e.g., gpt-5.1-codex or gpt-5.1-work"
-                description="Unique identifier for this model configuration. Defaults to the model ID."
-                value={uniqueId}
-                onChange={(e) => { setUniqueId(e.target.value); setErrors(prev => ({ ...prev, uniqueId: '' })) }}
-                error={errors.uniqueId}
-                variant={errors.uniqueId ? 'error' : 'default'}
               />
             </>
           )}
@@ -306,7 +311,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
           {showCredentials && selection && (
             <SensitiveInput
               label="API Token"
-              placeholder={isOllama ? '(optional)' : isCloudflare ? 'Cloudflare API token' : 'sk-...'}
+              placeholder={API_TOKEN_PLACEHOLDERS[selection.provider]}
               description={
                 isOllama
                   ? 'Optional for local Ollama access'

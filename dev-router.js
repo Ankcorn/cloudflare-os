@@ -17,27 +17,19 @@ export default {
       }
     }
 
-    if (url.pathname === "/api" || url.pathname.startsWith("/api/") ||
-        url.pathname === "/blueprint-screenshot" || url.pathname.startsWith("/blueprint-screenshot/")) {
-      return env.WORKSHOP_BACKEND.fetch(req);
-    }
-
     // Note: gatekeeper OAuth redirects land on the gatekeeper Workers themselves, at
     // `/gatekeeper/<name>/oauth` (handled by the loop above) — there are no backend /auth callbacks.
 
-    // Redirect to Vite dev server for frontend.
+    // Everything else goes to the backend. This includes the API routes (`/api`,
+    // `/blueprint-screenshot`) as well as all frontend requests.
     //
-    // Note that unfortunately when viewing this way, the frontend will refresh whenever
-    // wrangler restarts workerd. You may wish to open localhost:3000 directly in your
-    // browser to avoid that.
-    url.host = "localhost:3000";
-    try {
-      return await fetch(url, req);
-    } catch (err) {
-      return new Response(
-          "Couldn't reach frontend dev server. Please run it with `pnpm run dev-client`.",
-          {status: 500});
-    }
+    // In `run-local` mode the backend has a static `assets` binding configured (with
+    // `run_worker_first` for the API routes), so it serves the pre-built single-page app for these
+    // frontend requests. In normal dev mode the backend has no assets and frontend requests aren't
+    // expected here -- run the Vite dev server with `pnpm dev-client` and open localhost:3000
+    // directly instead. (We don't try to forward to localhost:3000 becaues it doesn't work well:
+    // Vite's HMR socket gets disconnected every time wrangler restarts workerd.)
+    return env.WORKSHOP_BACKEND.fetch(req);
   },
 
   async email(message, env, ctx) {

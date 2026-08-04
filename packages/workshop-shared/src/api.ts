@@ -939,22 +939,19 @@ export const SUGGESTED_MODELS: Record<
     },
   },
   "anthropic": {
-    "claude-opus-4-8": {name: "Claude Opus 4.8", contextWindow: 1000000},
-    "claude-opus-4-7": {name: "Claude Opus 4.7", contextWindow: 1000000},
-    "claude-opus-4-6": {name: "Claude Opus 4.6", contextWindow: 1000000},
+    // TODO: Include Fable -- but we need an admin option to disable it, since many orgs don't
+    //   allow it for ZDR reasons. It's sort of overkill for building gadgets anyway.
+    "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
-    "claude-sonnet-4-6": {name: "Claude Sonnet 4.6", contextWindow: 1000000},
+    "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
   "openai": {
-    "gpt-5.6": {name: "GPT 5.6", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-luna": {name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000},
     "gpt-5.6-terra": {name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000},
-    "gpt-5.5": {name: "GPT 5.5", contextWindow: 1050000, outputLimit: 128000},
-    "gpt-5.4": {name: "GPT 5.4", contextWindow: 1050000, outputLimit: 128000},
   },
   "google": {
-    "gemini-3.1-pro-preview": {name: "Gemini 3.1 Pro", contextWindow: 1048576},
+    "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
   },

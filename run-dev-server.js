@@ -53,6 +53,11 @@ execFileSync(
   { stdio: "inherit", cwd: WORKSHOP_BACKEND_DIR },
 );
 
+// In `run-local` mode the backend serves the pre-built frontend bundle as static assets (there is no
+// Vite dev server). In normal dev mode we leave assets unconfigured so the frontend is served by
+// Vite on :3000 and no `vite build` is required to start the dev server.
+const serveFrontendAssets = process.argv.includes("--serve-frontend-assets");
+
 // ---------------------------------------------------------------------------
 // Discover gatekeeper packages.
 // ---------------------------------------------------------------------------
@@ -264,6 +269,18 @@ for (const gk of gatekeepers) {
 
   if (useWorkersAi) {
     config.ai = { binding: "WORKERS_AI" };
+  }
+
+  // In run-local mode, serve the pre-built frontend bundle as static assets directly from the
+  // backend Worker (mirrors the production layout). The dev-router forwards all non-gatekeeper
+  // requests here; `run_worker_first` ensures the Worker handles the API routes while everything
+  // else falls back to the single-page app.
+  if (serveFrontendAssets) {
+    config.assets = {
+      directory: "../workshop-frontend/dist",
+      not_found_handling: "single-page-application",
+      run_worker_first: ["/api", "/api/*", "/blueprint-screenshot/*"],
+    };
   }
 
   config.build = { ...config.build, cwd: WORKSHOP_BACKEND_DIR };

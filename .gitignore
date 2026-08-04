@@ -13,6 +13,9 @@ packages/workshop-backend/src/generated/format-blueprints.ts
 # TypeScript build info
 *.tsbuildinfo
 
+# run-local build cache stamp
+.run-local-stamp
+
 # Cloudflare Workers
 .wrangler/
 .env
