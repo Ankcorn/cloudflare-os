@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Dialog, Select, Loader, Text, useKumoToastManager } from '@cloudflare/kumo'
-import { Warning, Plus, ArrowClockwise } from '@phosphor-icons/react'
+import { Warning, Plus, ArrowClockwise, CheckCircle } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import {
   AuthenticatedApi,
@@ -231,15 +231,15 @@ export default function ObserverConfigModal({
   return (
     <Dialog.Root open disablePointerDismissal onOpenChange={open => { if (!open) onCancel() }}>
       <Dialog className="p-6" size="lg">
-        <Dialog.Title className="text-lg font-semibold mb-2">
-          {isRetry ? 'Re-confirm access' : 'Confirm access'}
+        <Dialog.Title className="mb-2 text-lg font-semibold">
+          {isRetry ? 'Verify your access again' : 'Verify your access'}
         </Dialog.Title>
         <Text variant="secondary" size="sm" as="p">
           {isRetry
-            ? 'We couldn’t confirm your access to everything this Gadget has read. Re-authenticate ' +
+            ? 'We couldn’t confirm your access to everything this workspace has read. Re-authenticate ' +
               'the account below, or choose a different one, then try again.'
-            : 'To open this Gadget, choose which of your accounts to use for each service it relies on, ' +
-              'so we can confirm you’re allowed to see the data it uses.'}
+            : 'Before opening this workspace, confirm that your own accounts can access the connected ' +
+              'data it uses.'}
         </Text>
 
         {!ready || !vendorsReady ? (
@@ -255,7 +255,7 @@ export default function ObserverConfigModal({
               const chosen = accountFor(need.gatekeeperId)
 
               return (
-                <div key={need.gatekeeperId} className="border border-kumo-line rounded-lg p-4">
+                <div key={need.gatekeeperId} className="rounded-xl border border-kumo-line bg-kumo-base p-4">
                   <div className={`flex items-center gap-3${matching.length === 0 && !need.failure ? '' : ' mb-3'}`}>
                     <Avatar
                       src={vendor?.logo?.url}
@@ -301,26 +301,42 @@ export default function ObserverConfigModal({
 
                   {matching.length > 0 && (
                     <div className="flex flex-col gap-2">
-                      <Select
-                        className="w-full text-sm"
-                        value={
-                          choices[need.gatekeeperId] !== undefined
-                            ? String(choices[need.gatekeeperId])
-                            : undefined
-                        }
-                        placeholder={`Choose a ${vendorName} account…`}
-                        onValueChange={v =>
-                          setChoices(prev => ({ ...prev, [need.gatekeeperId]: Number(v) }))
-                        }
-                        renderValue={v => accountLabel(accounts.get(Number(v)), Number(v))}
-                      >
-                        {matching.map(acct => (
-                          <Select.Option key={acct.id} value={String(acct.id)}>
-                            {accountLabel(acct, acct.id)}
-                            {!acct.credentialsValid ? ' (expired)' : ''}
-                          </Select.Option>
-                        ))}
-                      </Select>
+                      {matching.length === 1 ? (
+                        <div className="flex min-h-10 items-center gap-3 rounded-lg border border-kumo-line bg-kumo-elevated/50 px-3 py-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] leading-4 text-kumo-subtle">Using your account</div>
+                            <div className="truncate text-sm font-medium text-kumo-default">
+                              {accountLabel(matching[0], matching[0].id)}
+                            </div>
+                          </div>
+                          {matching[0].credentialsValid && (
+                            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-kumo-success">
+                              <CheckCircle size={15} weight="fill" /> Ready
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <Select
+                          className="w-full text-sm"
+                          value={
+                            choices[need.gatekeeperId] !== undefined
+                              ? String(choices[need.gatekeeperId])
+                              : undefined
+                          }
+                          placeholder={`Choose a ${vendorName} account…`}
+                          onValueChange={v =>
+                            setChoices(prev => ({ ...prev, [need.gatekeeperId]: Number(v) }))
+                          }
+                          renderValue={v => accountLabel(accounts.get(Number(v)), Number(v))}
+                        >
+                          {matching.map(acct => (
+                            <Select.Option key={acct.id} value={String(acct.id)}>
+                              {accountLabel(acct, acct.id)}
+                              {!acct.credentialsValid ? ' (expired)' : ''}
+                            </Select.Option>
+                          ))}
+                        </Select>
+                      )}
 
                       {/* Offer re-authentication when we know the credentials are stale, and also
                           when this is the account that just failed verification: a gatekeeper that
@@ -375,7 +391,7 @@ export default function ObserverConfigModal({
             onClick={handleConfirm}
             disabled={!ready || !vendorsReady || !allSatisfied}
           >
-            {isRetry ? 'Try again' : 'Open Gadget'}
+            {isRetry ? 'Verify again' : 'Verify and open'}
           </WorkshopButton>
         </div>
       </Dialog>

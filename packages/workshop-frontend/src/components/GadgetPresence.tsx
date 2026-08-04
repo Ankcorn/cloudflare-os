@@ -7,8 +7,8 @@ import { PersonAvatar } from './PersonAvatar'
 const MAX_VISIBLE = 3
 
 const ROLE_LABELS: Record<PresenceParticipant['role'], string> = {
-  build: 'Can build',
-  use: 'Can use',
+  build: 'Workspace',
+  use: 'App only',
 }
 
 export function GadgetPresence({
@@ -191,7 +191,7 @@ export function GadgetPresence({
         render={
           <button
             type="button"
-            className="mr-2.5 inline-flex cursor-pointer items-center rounded-full border border-kumo-line bg-kumo-base/60 py-0.5 pl-1 pr-1.5 transition-[background-color,transform] duration-150 ease-out hover:bg-kumo-tint focus-visible:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.97]"
+            className="inline-flex cursor-pointer items-center rounded-full border border-kumo-line bg-kumo-base/60 p-0.5 transition-[background-color,transform] duration-150 ease-out hover:bg-kumo-tint focus-visible:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring active:scale-[0.97]"
             aria-label={ariaLabel}
           >
             <span ref={stackRef} className="relative flex -space-x-2">

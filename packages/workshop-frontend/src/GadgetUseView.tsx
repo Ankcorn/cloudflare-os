@@ -105,7 +105,7 @@ export default function GadgetUseView({
         )}
 
         {/* Right: presence and user menu */}
-        <div className="flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-2 flex-shrink-0">
           <GadgetExportMenu
             gadget={gadget}
             gadgetTitle={metadata.title}
@@ -115,9 +115,7 @@ export default function GadgetUseView({
             authenticatedApi={authenticatedApi}
             currentUserId={currentUserId}
           />
-          <div className="ml-2">
-            <UserMenu />
-          </div>
+          <UserMenu />
         </div>
       </div>
 
