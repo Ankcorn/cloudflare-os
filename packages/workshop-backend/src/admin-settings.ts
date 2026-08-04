@@ -7,6 +7,7 @@ import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
 import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
@@ -57,6 +58,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
   // resource listing needs no user context.
   private vendors: Map<string, Service<GatekeeperVendor>>;
+  // Every config setter writes the same authoritative singleton and KV mirror. Serialize the full
+  // read/modify/write operation so external KV I/O cannot let concurrent setters lose updates.
+  private adminConfigMutationTail = Promise.resolve();
+  // R2 and config are separate stores. Serialize logo changes so reset/upload operations cannot
+  // interleave while switching whether the fixed public object is enabled.
+  private siteLogoMutationTail = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -259,14 +266,30 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return this.#config();
   }
 
+  async #mutateAdminConfig(mutate: (config: AdminConfig) => AdminConfig): Promise<void> {
+    let previousMutation = this.adminConfigMutationTail;
+    let release!: () => void;
+    this.adminConfigMutationTail = new Promise<void>(resolve => { release = resolve; });
+    await previousMutation;
+    try {
+      let current = this.#config();
+      let next = mutate(current);
+      this.storage.adminConfig.put(next);
+      try {
+        await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
+      } catch (error) {
+        this.storage.adminConfig.put(current);
+        throw error;
+      }
+    } finally {
+      release();
+    }
+  }
+
   // Merge a partial update into the admin config and mirror it to KV. Callers (AdminApiImpl) validate
   // scalar values; this just persists atomically.
-  async updateAdminConfig(patch: Partial<AdminConfig>): Promise<void> {
-    // Merge over DEFAULT_ADMIN_CONFIG so a config persisted before a field was added gets that field
-    // backfilled on the next write (rather than carrying the stale shape forward).
-    let next = { ...this.#config(), ...patch };
-    this.storage.adminConfig.put(next);
-    await this.env.BLUEPRINTS.put(ADMIN_CONFIG_KEY, serializeAdminConfig(next));
+  updateAdminConfig(patch: Partial<AdminConfig>): Promise<void> {
+    return this.#mutateAdminConfig(config => ({ ...config, ...patch }));
   }
 
   // Read all admin-managed settings for the admin UI in one call: the stored config plus the live
@@ -281,6 +304,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return {
       signupsEnabled: config.signupsEnabled,
       siteName: config.siteName,
+      siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
       announcement: config.announcement,
       banner: config.banner,
@@ -318,10 +342,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // other. `mutate` returns the replacement list, or null to leave the config untouched.
   async #mutateFormats(mutate: (formats: FormatCuration[]) => FormatCuration[] | null)
       : Promise<void> {
-    let next = mutate(this.#config().formats);
-    // A no-op may be a retry after the prior KV write failed but DO storage succeeded. Mirror the
-    // current config again so idempotent retries repair that partial failure.
-    await this.updateAdminConfig(next ? {formats: next} : {});
+    await this.#mutateAdminConfig(config => {
+      let next = mutate(config.formats);
+      // A no-op may be a retry after the prior KV write failed but DO storage succeeded. Mirror the
+      // current config again so idempotent retries repair that partial failure.
+      return next ? {...config, formats: next} : config;
+    });
   }
 
   async promoteFormat(blueprintId: string): Promise<void> {
@@ -390,11 +416,44 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO).
   async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
     vendorId = vendorId.toLowerCase();
-    let map = { ...this.#config().disabledResources };
-    let disabled = new Set(map[vendorId] ?? []);
-    if (enabled) disabled.delete(urlPattern); else disabled.add(urlPattern);
-    if (disabled.size === 0) delete map[vendorId]; else map[vendorId] = [...disabled];
-    await this.updateAdminConfig({ disabledResources: map });
+    await this.#mutateAdminConfig(config => {
+      let map = { ...config.disabledResources };
+      let disabled = new Set(map[vendorId] ?? []);
+      if (enabled) disabled.delete(urlPattern); else disabled.add(urlPattern);
+      if (disabled.size === 0) delete map[vendorId]; else map[vendorId] = [...disabled];
+      return { ...config, disabledResources: map };
+    });
+  }
+
+  async setSiteLogo(data: Uint8Array | null): Promise<boolean> {
+    let previous = this.siteLogoMutationTail;
+    let release!: () => void;
+    this.siteLogoMutationTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      let current = this.#config();
+      if (data === null) {
+        await this.updateAdminConfig({ siteLogoConfigured: false });
+        try {
+          await this.env.BLUEPRINT_CONTENT.delete(SITE_LOGO_R2_KEY);
+        } catch (error) {
+          logger.warn("failed to delete disabled site logo", {
+            event: "site.logo.delete.failed", error,
+          });
+        }
+        return false;
+      }
+
+      await this.env.BLUEPRINT_CONTENT.put(SITE_LOGO_R2_KEY, data, {
+        httpMetadata: { contentType: "image/png" },
+      });
+      if (!current.siteLogoConfigured) {
+        await this.updateAdminConfig({ siteLogoConfigured: true });
+      }
+      return true;
+    } finally {
+      release();
+    }
   }
 
   // Set a gatekeeper's availability atomically (read-modify-write within the DO). Routes by kind: an
@@ -406,16 +465,20 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let vendor = this.vendors.get(vendorId);
     let autoProvisions = !!vendor && (await vendor.describe()).autoProvisionsAccount === true;
     if (autoProvisions) {
-      let modes = { ...this.#config().ambientGatekeeperModes };
-      if (mode === DEFAULT_AMBIENT_GATEKEEPER_MODE) delete modes[vendorId]; else modes[vendorId] = mode;
-      await this.updateAdminConfig({ ambientGatekeeperModes: modes });
+      await this.#mutateAdminConfig(config => {
+        let modes = { ...config.ambientGatekeeperModes };
+        if (mode === DEFAULT_AMBIENT_GATEKEEPER_MODE) delete modes[vendorId]; else modes[vendorId] = mode;
+        return { ...config, ambientGatekeeperModes: modes };
+      });
     } else {
       if (mode === "optional") {
         throw new Error(`"${vendorId}" is not an auto-provisioning gatekeeper; use 'enabled' or 'disabled'.`);
       }
-      let disabled = new Set(this.#config().disabledGatekeepers);
-      if (mode === "enabled") disabled.delete(vendorId); else disabled.add(vendorId);
-      await this.updateAdminConfig({ disabledGatekeepers: [...disabled] });
+      await this.#mutateAdminConfig(config => {
+        let disabled = new Set(config.disabledGatekeepers);
+        if (mode === "enabled") disabled.delete(vendorId); else disabled.add(vendorId);
+        return { ...config, disabledGatekeepers: [...disabled] };
+      });
     }
   }
 
@@ -508,6 +571,11 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
       throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
     }
     await this.admin.updateAdminConfig({ siteName: name });
+  }
+
+  async setSiteLogo(data: Uint8Array | null): Promise<AdminSettingsView['siteLogo']> {
+    if (data !== null) validateSiteLogo(data);
+    return siteLogoImage(await this.admin.setSiteLogo(data));
   }
 
   async setInstanceInstructions(text: string): Promise<void> {

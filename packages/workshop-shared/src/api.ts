@@ -669,12 +669,20 @@ export const MAX_INSTANCE_INSTRUCTIONS_LENGTH = 8000;
 // Maximum length (characters) of the admin-authored site name shown next to the top-bar logo.
 export const MAX_SITE_NAME_LENGTH = 40;
 
+/** Maximum byte length of an admin-uploaded site logo after browser-side PNG conversion. */
+export const MAX_SITE_LOGO_BYTES = 256 * 1024;
+
+/** Maximum width or height of an admin-uploaded site logo in pixels. */
+export const MAX_SITE_LOGO_DIMENSION = 512;
+
 // All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI.
 export type AdminSettingsView = {
   // Whether new account signups are allowed.
   signupsEnabled: boolean;
   // Site name shown next to the top-bar logo ("" falls back to the default, "gadgets").
   siteName: string;
+  /** Custom deployment logo, or undefined to use the default Gadgets mark. */
+  siteLogo?: AvatarImage;
   // Agent system-prompt instructions ("" when unset).
   instanceInstructions: string;
   // Top-bar notice text ("" when unset).
@@ -739,6 +747,11 @@ export interface AdminApi {
   // Set the site name shown next to the top-bar logo. Pass "" to reset to the default ("gadgets").
   // Rejects over MAX_SITE_NAME_LENGTH.
   setSiteName(name: string): Promise<void>;
+
+  /** Set the deployment logo from browser-rasterized PNG bytes and return its canonical public
+   * image, or undefined after reset. Pass null to restore the default Gadgets mark. The caller must
+   * supply decodable PNG data; the server enforces its header, size, and dimensions. */
+  setSiteLogo(data: Uint8Array | null): Promise<AvatarImage | undefined>;
 
   // Replace the agent system-prompt instructions. Pass "" to clear. Rejects over MAX_INSTANCE_INSTRUCTIONS_LENGTH.
   setInstanceInstructions(text: string): Promise<void>;
@@ -844,6 +857,9 @@ export type ServerConfig = {
 
   // Site name shown next to the top-bar logo (admin-configurable). Empty falls back to "gadgets".
   siteName: string;
+
+  /** Custom deployment logo, or undefined to use the default Gadgets mark. */
+  siteLogo?: AvatarImage;
 
   // Deployment-wide top-bar notice (centered text in the top navigation bar). Empty when none is set.
   announcement: string;

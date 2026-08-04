@@ -6,6 +6,7 @@ import { useSiteName } from '../ServerConfigContext'
 import { useState, useEffect, useRef } from 'react'
 import UserMenu from './UserMenu'
 import TopBarNotice from '../TopBarNotice'
+import SiteLogo from './SiteLogo'
 
 export default function Header() {
   const auth = useOptionalAuthenticatedApi()
@@ -45,11 +46,9 @@ export default function Header() {
         {/* Logo */}
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-2">
-            <Hexagon
-              size={22}
-              className="text-kumo-brand"
-              weight="bold"
-            />
+            <SiteLogo size={22} className="shrink-0">
+              <Hexagon size={22} className="text-kumo-brand" weight="bold" />
+            </SiteLogo>
             <span className="text-base font-semibold tracking-tight text-kumo-default">
               {siteName}
             </span>

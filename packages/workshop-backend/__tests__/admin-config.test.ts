@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
 
 describe("parseAdminConfig", () => {
   it("backfills fields missing from a config persisted before they existed", () => {
@@ -102,5 +102,18 @@ describe("format presentation", () => {
     expect(defaultOutputFormatId(long)).toBe(defaultOutputFormatId(long));
     expect(defaultOutputFormatId(long)).toHaveLength(40);
     expect(defaultOutputFormatId(long)).not.toBe(defaultOutputFormatId(long + "other"));
+  });
+});
+
+describe("admin config site logo", () => {
+  it("defaults legacy and malformed values to no custom logo", () => {
+    expect(parseAdminConfig("{}").siteLogoConfigured).toBe(false);
+    expect(parseAdminConfig('{"siteLogoConfigured":"yes"}').siteLogoConfigured).toBe(false);
+  });
+
+  it("round-trips configured logo state", () => {
+    let config = parseAdminConfig('{"siteLogoConfigured":true}');
+    expect(config.siteLogoConfigured).toBe(true);
+    expect(parseAdminConfig(serializeAdminConfig(config))).toEqual(config);
   });
 });

@@ -26,6 +26,7 @@ import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
+import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 
 const logger = createWorkshopLogger("workshop.server");
@@ -780,6 +781,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
+
+    if (url.pathname === SITE_LOGO_PATH) {
+      return serveSiteLogo(req, env.BLUEPRINT_CONTENT);
+    }
 
     if (url.pathname.startsWith(BLUEPRINT_SCREENSHOT_PATH_PREFIX)) {
       let blueprintId = url.pathname.slice(BLUEPRINT_SCREENSHOT_PATH_PREFIX.length);

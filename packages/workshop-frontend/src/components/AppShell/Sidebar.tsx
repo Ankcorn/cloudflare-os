@@ -11,6 +11,7 @@ import {
   Stack,
 } from '@phosphor-icons/react'
 import { useSiteName } from '../../ServerConfigContext'
+import SiteLogo from '../SiteLogo'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { openCommandPalette } from './commandPaletteBus'
 import SidebarItem from './SidebarItem'
@@ -62,8 +63,10 @@ export default function Sidebar({
           collapsed ? 'justify-center px-1.5' : 'justify-between gap-2 px-3',
         ].join(' ')}
       >
-        <Link to="/" className="flex min-w-0 items-center gap-2">
-          <Hexagon size={20} weight="bold" className="text-kumo-brand shrink-0" />
+        <Link to="/" aria-label={siteName} className="flex min-w-0 items-center gap-2">
+          <SiteLogo size={20} className="shrink-0">
+            <Hexagon size={20} weight="bold" className="text-kumo-brand shrink-0" />
+          </SiteLogo>
           {!collapsed && (
             <span className="truncate text-[14px] leading-5 font-semibold tracking-[-0.25px] text-kumo-default">
               {siteName}

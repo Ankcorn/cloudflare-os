@@ -21,6 +21,7 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api/client-errors': `http://${backendHost}`,
         '/blueprint-screenshot': `http://${backendHost}`,
+        '/api/site-logo': `http://${backendHost}`,
       },
     },
     build: {
