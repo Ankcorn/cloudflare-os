@@ -20,7 +20,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type CompactionCheckpoint } from "./agent";
+import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type StoredAssistantMessage } from "./agent";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
@@ -573,6 +573,14 @@ type ActiveAgentRecord = {
   callbackInitiated: boolean;
 };
 
+// One agent step's model-facing snapshot (see StoredAssistantMessage in agent.ts), keyed by the
+// chatId.sequence of the step's "message" record.
+type ChatModelDataRecord = {
+  chatId: number;
+  sequence: number;
+  message: StoredAssistantMessage;
+};
+
 const CHAT_DRAFT_AUTHOR_SPLIT_MS = 60_000;
 const CHAT_DRAFT_COMPACT_THRESHOLD = 128;
 const AGENT_RESPONSE_DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -862,6 +870,17 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // Keyed by chatId.sequence matching the agentCallback chat message.
       agentCallbackArgs: collection<{chatId: number, sequence: number, args: unknown[]}>()({
         primaryKey(entry) {
+          return `${keyString(entry.chatId)}.${keyString(entry.sequence)}`;
+        }
+      }),
+
+      // Model-facing snapshots of agent steps, replayed verbatim on later turns so reasoning
+      // (including provider-opaque signatures) and true model provenance survive turn boundaries
+      // and restarts. Stored separately from the chat messages so these payloads -- opaque and
+      // potentially several KB per step -- are never sent to clients. Keyed by chatId.sequence
+      // matching the step's "message" chat record.
+      chatModelData: collection<ChatModelDataRecord>()({
+        primaryKey(entry: ChatModelDataRecord) {
           return `${keyString(entry.chatId)}.${keyString(entry.sequence)}`;
         }
       }),
@@ -5210,7 +5229,8 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
+  addChatMessages(chatId: number, author: AiChatAuthorInfo,
+        msgs: AiChatMessageBodyWithModelData[],
         totalTokens?: number, aiGatewayLogId?: string,
         aiGatewayLogRoute?: AiGatewayLogRoute, estimatedCost?: number): void {
     let meta = this.storage.chatMeta.get(chatId);
@@ -5219,7 +5239,7 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
-    for (let msg of msgs) {
+    for (let {modelData, ...msg} of msgs) {
       if (msg.type === "changes") {
         meta.hasProposedChanges = true;
         this.proposedChangesChanged(chatId);
@@ -5258,6 +5278,13 @@ class OverseerImpl implements AgentHooks {
         author,
         ...msg,
       });
+
+      // The step's model-facing snapshot lands beside its message in the same synchronous step
+      // (atomic under the output gate), so the two can never disagree. Destructured off `msg`
+      // above so it can't leak into the client-visible record.
+      if (modelData) {
+        this.storage.chatModelData.put({chatId, sequence, message: modelData});
+      }
     }
 
     if (totalTokens !== undefined) {
@@ -5276,6 +5303,11 @@ class OverseerImpl implements AgentHooks {
       // surface a log id): fall back to the caller's catalog-priced estimate.
       this.#addChatCost(chatId, estimatedCost);
     }
+  }
+
+  getChatModelData(chatId: number, sequence: number): StoredAssistantMessage | undefined {
+    return this.storage.chatModelData.get(
+        `${keyString(chatId)}.${keyString(sequence)}`)?.message;
   }
 
   // Adds an inference cost (in dollars) to a chat's running total and the workspace-wide total.
@@ -8408,6 +8440,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     for (let entry of this.impl.storage.agentCallbackArgs.list(
         {prefix: `${keyString(chatId)}.`})) {
       this.impl.storage.agentCallbackArgs.delete(
+          `${keyString(entry.chatId)}.${keyString(entry.sequence)}`);
+    }
+
+    // Clean up the chat's model-facing snapshots.
+    for (let entry of this.impl.storage.chatModelData.list(
+        {prefix: `${keyString(chatId)}.`})) {
+      this.impl.storage.chatModelData.delete(
           `${keyString(entry.chatId)}.${keyString(entry.sequence)}`);
     }
 

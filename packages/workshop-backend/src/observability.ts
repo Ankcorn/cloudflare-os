@@ -20,6 +20,7 @@ export type WorkshopObservabilityFields = {
   outcome: "ok" | "error" | "usage_limit" | "callbacks_stalled" | "no_email" | "signups_disabled";
   path: string;
   resourceTitle: string;
+  sequence: number;
   size: number;
   status: number;
   statusCode: number;
