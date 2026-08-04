@@ -396,23 +396,21 @@ async subscribe(callback) {
 And on the client:
 
 \`\`\`
-function updateCallback(state) {
-  // update the state
+class Callback extends RpcTarget {
+  update(state) {
+    // update the UI
+  }
+
+  [Symbol.dispose]() {
+    // Connection lost. Resubscribe using new connection.
+    gadget.subscribe(this);
+  }
 }
 
-gadget.subscribe(updateCallback);
+gadget.subscribe(new Callback());
 \`\`\`
 
-NOTE: If you pass multiple callback functions to the server (e.g. wrapped in an object), each one must be \`dup()\`ed separately. Instead of doing that, consider writing a class that implements \`RpcTarget\`, which is a marker type from Cap'n Web that is automatically imported. Such a class can have multiple methods, but will be delivered to the server as a single stub with a single \`dup()\` method. Example:
-
-\`\`\`
-class Callbacks extends RpcTarget {
-  update(state) { ... }
-  reset() { ... }
-}
-
-gadget.subscribe(new Callbacks());
-\`\`\`
+The top-level \`gadget\` stub survives backend reconnects, and calls made while its replacement is being acquired will wait. However, other capabilities passed over RPC in either direction are disposed on disconnect, and must be re-acquired.
 
 DO NOT import \`RpcTarget\` in client.js. It is already imported.
 
