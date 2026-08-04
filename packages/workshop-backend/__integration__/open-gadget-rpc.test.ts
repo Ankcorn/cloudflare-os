@@ -69,9 +69,9 @@ async function openRejection(
   return await rejection(workspace.getMetadata());
 }
 
-describe("openGadget errors across native RPC and Cap'n Web", () => {
-  // flaky 15s timeout on cold workerd in CI (job 35853826)
-  it.skip("retains enumerable Error.code at the native Durable Object boundary", async () => {
+// TODO: This test suite keeps timing out in CI, skipping for now.
+describe.skip("openGadget errors across native RPC and Cap'n Web", () => {
+  it("retains enumerable Error.code at the native Durable Object boundary", async () => {
     const code = OPEN_GADGET_ERROR_CODES.workspaceNotFound;
     const local = createOpenGadgetError(code);
 
@@ -98,8 +98,7 @@ describe("openGadget errors across native RPC and Cap'n Web", () => {
     expectRpcCode(error, OPEN_GADGET_ERROR_CODES.workspaceNotFound);
   });
 
-  // TODO: This test case keeps timing out in CI, skipping for now.
-  it.skip("maps valid-but-missing IDs through AuthenticatedApi", async () => {
+  it("maps valid-but-missing IDs through AuthenticatedApi", async () => {
     using publicApi = await connect();
     const account = await createAccount(publicApi, "missing");
     using authenticated = await publicApi.authenticate(account.token);
