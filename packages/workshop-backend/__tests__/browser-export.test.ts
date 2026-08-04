@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const launch = vi.hoisted(() => vi.fn());
 vi.mock("@cloudflare/puppeteer", () => ({ launch }));
 
-const { limitStream, renderGadgetPdf } = await import("../src/browser-export.js");
+const { BrowserRpcTransport, limitStream, renderGadgetPdf } =
+    await import("../src/browser-export.js");
 
 type Harness = {
   browserClosed: () => boolean;
@@ -111,6 +112,19 @@ function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
 
 beforeEach(() => {
   launch.mockReset();
+});
+
+describe("BrowserRpcTransport", () => {
+  it("aborts all queued sends when stalled browser delivery exceeds the count limit", async () => {
+    let transport = new BrowserRpcTransport({
+      evaluate: () => new Promise(() => {}),
+    } as never);
+    let pending = Array.from({ length: 1024 }, () => transport.send("message"));
+    let pendingResults = Promise.allSettled(pending);
+
+    await expect(transport.send("overflow")).rejects.toThrow("send queue overflowed");
+    expect((await pendingResults).every(result => result.status === "rejected")).toBe(true);
+  });
 });
 
 describe("limitStream", () => {

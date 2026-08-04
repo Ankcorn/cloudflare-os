@@ -18,6 +18,10 @@ const MAX_EXPORT_BYTES = 100 * 1024 * 1024;
 const DOM_SETTLE_MS = 250;
 /** Budget for releasing the browser session once an export has settled. */
 const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
+/** Maximum number of pending Worker-to-browser RPC messages. */
+const MAX_PENDING_RPC_SENDS = 1024;
+/** Maximum total string length across all pending Worker-to-browser RPC messages. */
+const MAX_PENDING_RPC_SEND_CHARS = 32 * 1024 * 1024;
 /** CSP ignores `sandbox` in a meta tag, so serve the document through interception with a header. */
 const EXPORT_DOCUMENT_URL = "https://gadget-export.invalid/";
 // TODO: CSP and request interception do not cover WebRTC/STUN. The same gap exists for Gadgets
@@ -66,20 +70,36 @@ async function closeBrowser(browser: Awaited<ReturnType<typeof launch>>): Promis
   }
 }
 
-class BrowserRpcTransport implements RpcTransport {
+/** Ordered CDP transport for the RPC session between the Worker and remote browser. */
+export class BrowserRpcTransport implements RpcTransport {
   #sendChain = Promise.resolve();
+  #pendingSendCount = 0;
+  #pendingSendChars = 0;
   #abortReason = Promise.withResolvers<Error>();
 
   constructor(private page: Page) {}
 
   send(message: string): Promise<void> {
+    if (this.#pendingSendCount >= MAX_PENDING_RPC_SENDS ||
+        message.length > MAX_PENDING_RPC_SEND_CHARS - this.#pendingSendChars) {
+      let error = new Error("The Gadget export RPC send queue overflowed.");
+      this.abort(error);
+      return Promise.reject(error);
+    }
+
+    ++this.#pendingSendCount;
+    this.#pendingSendChars += message.length;
     let delivered = this.#sendChain.then(() =>
       this.#untilAborted(this.page.evaluate(
         text => globalThis.__workshopExportSendToBrowser(text),
         message,
       )));
-    this.#sendChain = delivered.catch(() => {});
-    return delivered;
+    let settled = delivered.finally(() => {
+      --this.#pendingSendCount;
+      this.#pendingSendChars -= message.length;
+    });
+    this.#sendChain = settled.catch(() => {});
+    return settled;
   }
 
   async receive(): Promise<string> {

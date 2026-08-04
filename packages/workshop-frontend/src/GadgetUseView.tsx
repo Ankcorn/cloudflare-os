@@ -111,7 +111,7 @@ export default function GadgetUseView({
         <div className="flex items-center gap-2 flex-shrink-0">
           <GadgetExportMenu
             gadget={gadget}
-            gadgetTitle={metadata.title}
+            gadgetTitle={gadgets.find(g => g.id === selectedGadgetId)?.title ?? 'Gadget'}
           />
           <GadgetPresence
             overseer={overseer}
