@@ -5,7 +5,7 @@ import { createWorkshopLogger } from "./observability";
 import * as Y from "yjs";
 import { Type } from "@earendil-works/pi-ai";
 import type {
-  AssistantMessage, ImageContent, Message, TSchema, TextContent, ToolCall,
+  AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall,
 } from "@earendil-works/pi-ai";
 import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
@@ -182,6 +182,47 @@ async function resolveBindingDescription(
   }
 }
 
+// A tool-call block as persisted in a StoredAssistantMessage: everything pi produced except the
+// arguments, which the step's AiToolCall record already stores (as `input`) and which replay
+// rehydrates by id (see rehydrateStoredAssistantMessage). Tool arguments are the one genuinely
+// large duplicate (writeFile/executeCode payloads are whole files); everything else is kept.
+export type StoredToolCall = Omit<ToolCall, "arguments">;
+
+// The AssistantMessage for one agent step, persisted exactly as pi produced it (except for
+// StoredToolCall's deliberate subtraction) so later turns can replay the step verbatim. This is
+// what preserves reasoning across turns and restarts: thinking blocks keep their provider
+// signatures (including encrypted/redacted payloads), and the message keeps its true
+// api/provider/model provenance, so pi's transformMessages can reflect same-model reasoning back
+// to the provider and apply its cross-model conversions when the user switches models. The
+// snapshot is subtractive on purpose -- copy everything, delete only what's provably redundant --
+// so fields pi adds in the future are retained by default (dropping them would silently reduce
+// fidelity and break prompt caching). Stored server-side only (see `chatModelData` in
+// overseer.ts); clients never receive these.
+export type StoredAssistantMessage = Omit<AssistantMessage, "content"> & {
+  content: (TextContent | ThinkingContent | StoredToolCall)[];
+};
+
+// A chat message body as the agent loop hands it to AgentHooks.addChatMessages: the client-visible
+// body, plus (for agent steps) the model-facing snapshot to persist alongside it. The overseer
+// strips `modelData` into separate storage; it must never reach clients.
+export type AiChatMessageBodyWithModelData = AiChatMessageBody & {
+  modelData?: StoredAssistantMessage;
+};
+
+// Snapshots a completed step's AssistantMessage for persistence. See StoredAssistantMessage for
+// why this copies everything and subtracts rather than picking fields. (Exported for tests.)
+export function makeStoredAssistantMessage(message: AssistantMessage): StoredAssistantMessage {
+  return {
+    ...message,
+    content: message.content.map(block => {
+      if (block.type !== "toolCall") return block;
+      let stored: StoredToolCall & {arguments?: Record<string, unknown>} = {...block};
+      delete stored.arguments;
+      return stored;
+    }),
+  };
+}
+
 // Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
 // dependencies.
 // TODO(cleanup): This is getting a bit large, and there's a lot of state that is passed into the
@@ -247,10 +288,16 @@ export interface AgentHooks {
   // from the turn's token usage, in dollars) as the fallback if the gateway can't produce a
   // cost; otherwise the estimate is applied directly, so direct-provider routes still get cost
   // accounting.
-  addChatMessages(chatId: number, author: AiChatAuthorInfo, msgs: AiChatMessageBody[],
+  addChatMessages(chatId: number, author: AiChatAuthorInfo,
+      msgs: AiChatMessageBodyWithModelData[],
       totalTokens?: number, aiGatewayLogId?: string, aiGatewayLogRoute?: AiGatewayLogRoute,
       estimatedCost?: number): void;
   emitChatStreamEvent(chatId: number, event: AiChatStreamEvent): void;
+
+  // Fetch the model-facing snapshot persisted for an agent step's "message" record, if any (see
+  // StoredAssistantMessage). Absent for messages persisted before snapshots existed; replay then
+  // falls back to reconstructing the message from the client-visible record.
+  getChatModelData(chatId: number, sequence: number): StoredAssistantMessage | undefined;
 
   // Record an observation in the Overseer audit log on behalf of a built-in agent tool
   // (i.e. one that isn't backed by a gatekeeper, like `webFetch`). Used to track which
@@ -958,6 +1005,35 @@ function jsonToolResultText(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// Rebuilds the model-facing assistant message for one agent step from its persisted snapshot,
+// verbatim except that each tool-call block's arguments are rehydrated from the step's AiToolCall
+// record (see StoredToolCall). Returns undefined -- the caller then falls back to reconstructing
+// the message from the display record -- if a block references a tool call the display record
+// doesn't have, which indicates a bug (the two are written together) or corrupted storage.
+// (Exported for tests.)
+export function rehydrateStoredAssistantMessage(
+    stored: StoredAssistantMessage, toolCalls: AiToolCall[] | undefined,
+    chatId: number, sequence: number): AssistantMessage | undefined {
+  let toolCallsById = new Map((toolCalls ?? []).map(tc => [tc.toolCallId, tc]));
+  let content: AssistantMessage["content"] = [];
+  for (let block of stored.content) {
+    if (block.type !== "toolCall") {
+      content.push(block);
+      continue;
+    }
+    let record = toolCallsById.get(block.id);
+    if (!record) {
+      logger.error("stored assistant message references unknown tool call", {
+        event: "agent.model.data.rehydrate.failed",
+        chatId, sequence, toolCallId: block.id,
+      });
+      return undefined;
+    }
+    content.push({...block, arguments: record.input as Record<string, unknown>});
+  }
+  return {...stored, content};
+}
+
 // Builds an assistant message reconstructed from the chat log, filling the bookkeeping fields pi
 // requires (provenance from the session's model, zero usage, a plain "stop").
 function makeReplayAssistantMessage(
@@ -1345,7 +1421,19 @@ export async function runAgent(
           content = parts.join("");
         }
 
-        if (msg.message === "" && !msg.reasoning && !msg.toolCalls && !msg.attachments?.length) {
+        // The step's persisted model-facing snapshot, if it has one (agent steps persisted since
+        // snapshots existed). Fetched before the empty-message check below: a step whose only
+        // model-visible content is reasoning (e.g. OpenAI encrypted reasoning with no text) has an
+        // empty display record but must still be replayed. A degenerate empty snapshot is treated
+        // as absent so the check can still drop the message.
+        let storedModelData = msg.author.type === "agent"
+            ? hooks.getChatModelData(chatId, msg.sequence) : undefined;
+        if (storedModelData && storedModelData.content.length === 0) {
+          storedModelData = undefined;
+        }
+
+        if (msg.message === "" && !msg.reasoning && !msg.toolCalls && !msg.attachments?.length &&
+            !storedModelData) {
           // Anthropic's API will throw an error if you try to send it an empty message.
           // Annoyingly, though, Claude will sometimes produce empty messages. Anyway, let's just
           // drop the message from the log...
@@ -1353,6 +1441,10 @@ export async function runAgent(
         }
 
         let modelMessage: Message;
+        // Set when the assistant message was replayed from its snapshot, whose content already
+        // includes the step's tool-call blocks; the append after the tool-result replay below
+        // must then be skipped.
+        let assistantContentComplete = false;
         switch (msg.author.type) {
           case "user":
           case "gadget":
@@ -1406,11 +1498,26 @@ export async function runAgent(
             }
             break;
 
-          case "agent":
-            modelMessage = makeReplayAssistantMessage(
-                content !== "" ? [{type: "text", text: content}] : [],
-                handle.model, msgTimestamp);
+          case "agent": {
+            // Prefer the persisted snapshot: replayed verbatim (thinking blocks with their
+            // signatures, text/thought signatures, true model provenance), it lets pi reflect
+            // same-model reasoning back to the provider and apply its cross-model conversions
+            // when the chat has switched models. Reconstruction is the fallback for messages
+            // persisted before snapshots existed (which never carried reasoning), stamped with
+            // the current model so pi treats them as same-model -- their historical behavior.
+            let rehydrated = storedModelData &&
+                rehydrateStoredAssistantMessage(storedModelData, msg.toolCalls, chatId,
+                    msg.sequence);
+            if (rehydrated) {
+              modelMessage = rehydrated;
+              assistantContentComplete = true;
+            } else {
+              modelMessage = makeReplayAssistantMessage(
+                  content !== "" ? [{type: "text", text: content}] : [],
+                  handle.model, msgTimestamp);
+            }
             break;
+          }
 
           default:
             msg.author.type satisfies never;
@@ -1611,7 +1718,7 @@ export async function runAgent(
             });
           }
 
-          if (modelMessage.role === "assistant") {
+          if (modelMessage.role === "assistant" && !assistantContentComplete) {
             modelMessage.content = [...modelMessage.content, ...modelToolCalls];
           }
         }
@@ -2818,10 +2925,10 @@ export async function runAgent(
         // to mis-consume. Tool calls the abort kept from running are recorded as errors below,
         // and shouldStopAfterTurn ends the loop right after this barrier.
 
-        let msgs: AiChatMessageBody[] = [];
+        let msgs: AiChatMessageBodyWithModelData[] = [];
 
         {
-          let msg: AiChatMessageBody = {
+          let msg: AiChatMessageBodyWithModelData = {
             type: "message",
             message: message.content.filter(block => block.type === "text")
                 .map(block => block.text).join(""),
@@ -2869,6 +2976,10 @@ export async function runAgent(
               return result;
             });
           }
+
+          // The model-facing snapshot rides along for the overseer to persist beside the display
+          // record.
+          msg.modelData = makeStoredAssistantMessage(message);
           msgs.push(msg);
         }
 
