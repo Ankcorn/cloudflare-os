@@ -167,6 +167,7 @@ packages/workshop-backend/src/agent.ts
   s_fcb81335a24bc2::t_57931177c934f4 276-278,333,1954-1958,2096-2097
   s_e53cf2c996845a::t_4d6cf0608ae6f0 1161,1665,1671,1806-1807,1979,2016-2017,2023-2024,2027,2031,2034,2042,2051,2055,2066,2205,2398,2402,2405,2409,2417,2425,2457,2462,2466,2472
   s_e53cf2c996845a::t_716e7698d96ea1 1219
+  s_fcb81335a24bc2::t_94daa1e6553486 377
 packages/gatekeeper-mcp-portal/src/configurator/server-configurator-ui.tsx
   s_ebf95fa6541f85::t_ea7abcf2e153a5 115
 packages/gatekeeper-slack/src/configurator/conversation-configurator-ui.tsx
