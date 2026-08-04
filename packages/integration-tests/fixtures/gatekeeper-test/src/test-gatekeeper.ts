@@ -65,6 +65,15 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     // Default to admitting: a collaborator's first open has to be able to succeed.
     return this.ctx.storage.kv.get<VerifyOutcome>(`outcome:${label}`) ?? { allow: true };
   }
+
+  recordAmbientVerification(label: string): void {
+    const key = `ambient-verifications:${label}`;
+    this.ctx.storage.kv.put(key, (this.ctx.storage.kv.get<number>(key) ?? 0) + 1);
+  }
+
+  getAmbientVerificationCount(label: string): number {
+    return this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0;
+  }
 }
 
 // ctx.exports is typed via the Cloudflare.GlobalProps declaration in env.d.ts, so loopback bindings
@@ -77,7 +86,7 @@ function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
 // Vendor
 
 type AccountProps = { label: string };
-type BindingProps = AccountProps & { resourceUrl: string };
+type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async describe(): Promise<VendorDescription> {
@@ -125,7 +134,14 @@ export class TestAccount
       // What the overseer names in a verification-failure message.
       uniqueName: this.ctx.props.label,
       avatar: AVATAR,
+      singleton: { tsType: "TestThing" },
     };
+  }
+
+  async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<TestSession>>> {
+    return this.ctx.exports.TestGatekeeper({
+      props: { label: this.ctx.props.label, resourceUrl: "test://ambient", ambient: true },
+    });
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -201,6 +217,15 @@ export type TestSession = Record<string, never>;
 export class TestGatekeeper
     extends DurableObject<Cloudflare.Env, BindingProps> implements Gatekeeper<TestSession> {
   async describe(): Promise<ResourceDescription> {
+    if (this.ctx.props.ambient) {
+      return {
+        url: this.ctx.props.resourceUrl,
+        title: "Test Ambient",
+        snippet: "An automatically-provided test capability.",
+        suggestedBindingName: "TEST_AMBIENT",
+        tsType: "TestThing",
+      };
+    }
     const name = decodeURIComponent(new URL(this.ctx.props.resourceUrl).pathname.split("/").pop()!);
     return {
       url: this.ctx.props.resourceUrl,
@@ -233,6 +258,11 @@ export class TestGatekeeper
    */
   async addObserver(id: string, user: Fetcher<TestVerifierApi>): Promise<void> {
     const label = await user.identify();
+    if (this.ctx.props.ambient) {
+      await control(this.ctx.exports).recordAmbientVerification(label);
+      this.ctx.storage.kv.put(`observer:${id}`, label);
+      return;
+    }
     const outcome = await control(this.ctx.exports).getVerifyOutcome(label);
     if (!outcome.allow) throw new Error(outcome.reason);
     this.ctx.storage.kv.put(`observer:${id}`, label);
@@ -304,6 +334,12 @@ export default {
         : { allow: false, reason: reason ?? "The test gatekeeper refused this account." };
       await control(ctx.exports).setVerifyOutcome(label, outcome);
       return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/control/ambient-verification-count" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      return Response.json({ count: await control(ctx.exports).getAmbientVerificationCount(label) });
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really

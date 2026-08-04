@@ -71,12 +71,13 @@ This feature replaces that all-or-nothing posture with a per-user, gatekeeper-me
   - **`use`** collaborators (UI only, no chat access — see `UseOverseerInterface`,
     `overseer.ts:2816`) must be verified only against **named bindings** (gatekeepers with a
     `bindingName`), since that is all the UI can invoke.
-- **User chooses the account.** A collaborator must have their own connected account for each
-  vendor the Gadget depends on, and they *choose* which of their accounts to use per binding (a
-  user may have e.g. work and personal Google accounts). The first time a new observer opens a
-  Gadget that has any account-requiring bindings, they are shown a configuration modal (with
-  sensible defaults pre-filled). If they are missing a needed account, they are prompted to
-  connect one. If they decline (or lack access), they cannot open the Gadget.
+- **Account selection.** A collaborator must have their own connected account for each vendor the
+  Gadget depends on. For ordinary bindings, they choose which account to use (e.g. work or personal
+  Google). If an account cannot be selected automatically, the configuration modal prompts them to
+  choose or connect one; declining denies the open. Ambient bindings are the exception to account
+  *selection*, not verification: when the collaborator already has the matching provided singleton
+  account, the overseer uses it automatically and still runs the gatekeeper's normal `addObserver`
+  check.
 - **Authorization is keyed on the sharing table, not on live sessions.** Because a Gadget may
   *store* observed data and re-display it later (even to a `use` observer who opens much later),
   every exclusion/enforcement decision keys off whether a user is still *authorized* in the
@@ -256,9 +257,9 @@ Logic:
 2. **Load the observer record** for `profileId` (may be absent).
 
 3. **Determine uncovered bindings**: in-scope account-requiring gatekeepers with no
-   `accountChoices` entry in the record. Note: the *first* open of a Gadget with any
-   account-requiring binding always has all bindings uncovered, so the modal appears once even
-   when defaults are obvious.
+   `accountChoices` entry in the record. Before prompting, automatically fill ambient bindings from
+   the collaborator's matching provided singleton accounts. Ordinary bindings, missing ambient
+   accounts, and bindings being re-prompted after a failed verification remain uncovered.
 
 4. **If there are uncovered bindings**, invoke `configureCb.configure(needs)` with one
    `ObserverBindingNeed` per uncovered binding. If `configureCb` is absent (e.g. a non-interactive
@@ -296,8 +297,9 @@ Notes:
   `addObserver` on every open is expensive should implement their own caching strategy — it is up
   to each gatekeeper to choose the right tradeoff between performance and immediacy of revocation.
 - Re-verification of already-covered bindings does **not** pop the modal; it silently reuses the
-  stored account choices. The modal is only for genuinely uncovered bindings (first open, or a
-  binding the owner added after this user last configured).
+  stored account choices. The modal is only for genuinely uncovered bindings (first open, a binding
+  the owner added after this user last configured, or an ambient binding without a matching provided
+  account).
 
 ### Step 4 — Frontend: the configuration modal
 
