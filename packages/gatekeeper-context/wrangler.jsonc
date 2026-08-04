@@ -33,13 +33,7 @@
     }
   ],
 
-  "artifacts": [
-    {
-      "binding": "ARTIFACTS",
-      "namespace": "gatekeeper-context-collections",
-      "remote": true
-    }
-  ],
+  // Optional: add an Artifacts binding named ARTIFACTS to enable Git-backed collections.
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

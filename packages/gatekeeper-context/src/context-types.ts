@@ -302,8 +302,8 @@ export function isMarkdownContentType(contentType: string): boolean {
 
 // Per-account management API exposed to the gatekeeper app iframe.
 export interface ContextApi extends RpcTarget {
-  // Gates creating/editing public collections.
-  getViewerInfo(): Promise<{ isAdmin: boolean }>;
+  // Gates creating/editing public collections and offering Git-backed collections.
+  getViewerInfo(): Promise<{ isAdmin: boolean; supportsGitCollections: boolean }>;
 
   createContextCollection(
     title: string, description: string, visibility: ContextCollectionVisibility, icon?: string,
