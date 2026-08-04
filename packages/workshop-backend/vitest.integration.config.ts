@@ -23,7 +23,11 @@ export default defineConfig({
   ],
   test: {
     include: ["__integration__/*.test.ts"],
-    testTimeout: 15_000,
+    // Whichever test runs first pays for workerd booting and instantiating the whole backend
+    // bundle -- ~6s on a dev machine and roughly 3x that on a CI runner, while every subsequent
+    // test in the file finishes in tens of milliseconds. The timeout has to clear that cold
+    // start, not the steady-state cost, or the first test fails wherever the runner is slow.
+    testTimeout: 60_000,
     // A rejected future capability is reported independently from the awaited pipelined call.
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {
