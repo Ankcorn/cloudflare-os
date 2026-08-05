@@ -27,7 +27,7 @@ Then visit: http://localhost:8787
 
 This runs the whole stack locally on wrangler and workerd. This is not meant for production use, but is a quick way to see what the product does.
 
-Alternatively, you can [deploy to your Cloudflare account](https://github.com/cloudflare/cloudflare-os-starter).
+Alternatively, you can [deploy to your Cloudflare account](https://os.cloudflare.app/deploy).
 
 (More options at the end of this readme.)
 
@@ -175,7 +175,7 @@ This differs from most agent harnesses, where MCP servers are configured upfront
 
 We've built an online flow that helps you deploy to your own Cloudflare account:
 
-https://os.cloudflare.app
+https://os.cloudflare.app/deploy
 
 Or, for more sophisticated deployment, with your gatekeepers and potentially code changes, check out our deployment starter repo:
 
