@@ -269,7 +269,7 @@ export class SharingManager {
   }): CollaboratorInfo {
     // Don't add the owner as a collaborator.
     if (opts.profile.id === this.ownerProfileId) {
-      throw new Error("Cannot add the gadget owner as a collaborator.");
+      throw new Error("Cannot add the workspace owner as a collaborator.");
     }
 
     let callerRole = this.#requireCallerRole(opts.caller);
@@ -604,7 +604,7 @@ export class SharingManager {
     if (caller.isOwner) return "build";
     let role = this.computeEffectiveRoles().get(caller.profileId);
     if (!role) {
-      throw new Error("You do not have permission to share this gadget.");
+      throw new Error("You do not have permission to share this workspace.");
     }
     return role;
   }

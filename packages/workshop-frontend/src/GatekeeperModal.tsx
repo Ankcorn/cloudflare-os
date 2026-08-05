@@ -33,6 +33,7 @@ import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionCon
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
 import { matchesResourceUrl } from './resourceMatching'
 import { reportIssue } from './errorReporting'
+import { useSiteName } from './ServerConfigContext'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -106,14 +107,15 @@ type ConfiguratorFrameState = {
   resourceUrlPattern: string
 }
 
-const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
+function platformConnectionTypes(siteName: string): ConnectionType[] {
+  return [
   {
     id: 'ai-model',
     groupKey: 'platform:ai-model',
     groupLabel: 'AI Model',
     title: 'AI Model',
-    vendor: 'Gadgets',
-    description: 'Expose a selected model to this gadget as a capability.',
+    vendor: siteName,
+    description: 'Expose a selected model through this connection.',
     icon: Sparkle,
     accent: '#f6edff',
     iconColor: '#7c3aed',
@@ -123,13 +125,14 @@ const PLATFORM_CONNECTION_TYPES: ConnectionType[] = [
     groupKey: 'platform:agent-spawner',
     groupLabel: 'Agent',
     title: 'Agent',
-    vendor: 'Gadgets',
-    description: 'Allow this gadget to start new AI agent conversations with selected tools.',
+    vendor: siteName,
+    description: 'Allow this connection to start new AI agent conversations with selected tools.',
     icon: Robot,
     accent: '#f2f0ff',
     iconColor: '#7c3aed',
   },
-]
+  ]
+}
 
 function connectionForResource(vendor: VendorOption, resource: SupportedResource): ConnectionType {
   return {
@@ -244,11 +247,12 @@ export default function GatekeeperModal({
     configuratorCollectResourceUrlRef.current = collect
   }, [])
 
+  const siteName = useSiteName()
   const allConnections = useMemo(() => [
-    ...PLATFORM_CONNECTION_TYPES,
+    ...platformConnectionTypes(siteName),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .map(resource => connectionForResource(vendor, resource))),
-  ], [vendors])
+  ], [siteName, vendors])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -476,8 +480,8 @@ export default function GatekeeperModal({
   // Preserves the order in which a vendor's first item appears in the flat list.
   // Used to render a collapsible, grouped picker when the search box is empty.
   // Platform types (AI Model, Agent) each have their own unique groupKey so
-  // they remain single-item leaves rather than collapsing into a shared
-  // 'Gadgets' bucket.
+  // they remain single-item leaves rather than collapsing into one bucket
+  // named after the site.
   const groupedConnections = useMemo(() => {
     const groups = new Map<string, { label: string; items: ConnectionType[] }>()
     for (const connection of allConnections) {

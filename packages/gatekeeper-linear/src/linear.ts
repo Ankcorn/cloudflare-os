@@ -125,7 +125,7 @@ const SELF_CLOSING_HTML = `<!DOCTYPE html>
 <html lang="en">
   <body>
     <script type="text/javascript">window.close();</script>
-    <p>Authorization complete. You may close this tab and return to the Gadgets Workshop.</p>
+    <p>Authorization complete. You may close this tab and return to Cloudflare OS.</p>
   </body>
 </html>`;
 
@@ -135,7 +135,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6;">This authorization link is invalid or has expired. Please return to the Gadgets Workshop and try again.</p>
+      <p style="color: #555; line-height: 1.6;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
       <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #5e6ad2; color: white; border: none; border-radius: 4px; cursor: pointer;">Close</button>
     </div>
   </body>
@@ -438,7 +438,7 @@ export default {
     if (relPath === "/oauth") {
       const error = url.searchParams.get("error");
       if (error) {
-        return new Response("Linear authorization failed. Please restart the connection flow from Gadgets.", {
+        return new Response("Linear authorization failed. Please restart the connection flow from Cloudflare OS.", {
           status: 400,
           headers: { "Content-Type": "text/plain; charset=utf-8" },
         });
@@ -485,7 +485,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#f4f5f8",
       tagline: "Triage, create, and update issues",
       description:
-        "Connect your Linear account so Gadgets can read and manage issues, projects, and " +
+        "Connect your Linear account so Cloudflare OS can read and manage issues, projects, and " +
         "comments across the teams you choose.",
     };
   }
@@ -1469,7 +1469,7 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
       if (!(await verifier.hasTeamAccess(ws, teamKeyOrId))) {
         throw new Error(
           `This collaborator does not have access to the Linear team \`${teamKeyOrId}\`, so they ` +
-          `cannot be allowed to observe data the Gadget read from it.`);
+          `cannot be allowed to observe data this workspace read from it.`);
       }
       return;
     }
@@ -1479,7 +1479,7 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
       if (!(await verifier.hasIssueAccess(ws, issueRef))) {
         throw new Error(
           `This collaborator does not have access to the Linear issue \`${issueRef}\`, so they ` +
-          `cannot be allowed to observe data the Gadget read from it.`);
+          `cannot be allowed to observe data this workspace read from it.`);
       }
       return;
     }
@@ -1501,7 +1501,7 @@ export class LinearGatekeeperImpl extends DurableObject<Env, LinearGatekeeperImp
         teamIds.map(teamId => verifier.hasTeamAccess(ws, teamId)));
       if (teamAccess.some(hasAccess => !hasAccess)) {
         throw new Error(
-          `This collaborator does not have access to a Linear team whose data the Gadget has read, ` +
+          `This collaborator does not have access to a Linear team whose data this workspace has read, ` +
           `so they cannot be allowed to observe it.`);
       }
       for (const teamId of teamIds) checked.add(teamId);

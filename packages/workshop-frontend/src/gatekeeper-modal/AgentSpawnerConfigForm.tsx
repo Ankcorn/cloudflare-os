@@ -80,7 +80,7 @@ export function AgentSpawnerConfigForm({
     <section className="grid gap-4">
       <ConnectionConfigField
         label="Display name"
-        description="Name this agent capability for the gadget."
+        description="Name this agent capability for this connection."
       >
         <WorkshopInput
           aria-label="Agent display name"

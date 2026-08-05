@@ -112,7 +112,7 @@ export default {
 
       {toolsReady && <Field
         label={soleServer ? `Tools · ${soleServer.title}` : "Tools"}
-        description="Choose how much of this server the Gadget may call."
+        description="Choose how much of this server this connection may call."
       >
         <RadioCards
           value={mode}

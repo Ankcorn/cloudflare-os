@@ -70,7 +70,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/" });
     const gadgetRoute = createRoute({
       getParentRoute: () => rootRoute,
-      path: "/gadget/$id",
+      path: "/workspace/$id",
     });
     const history = createMemoryHistory({ initialEntries: ["/"] });
     const router = createRouter({
@@ -99,7 +99,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await act(async () => {
       await host!.openWorkspace(WORKSPACE_ID, 2);
       await vi.waitFor(() =>
-        expect(router.state.location.pathname).toBe(`/gadget/${WORKSPACE_ID}`),
+        expect(router.state.location.pathname).toBe(`/workspace/${WORKSPACE_ID}`),
       );
     });
     expect(router.state.location.search).toEqual({ w: 2 });
@@ -126,7 +126,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await expect(host.openWorkspace("../evil")).rejects.toThrow(
       "Invalid gatekeeper app workspace target",
     );
-    expect(router.state.location.pathname).toBe(`/gadget/${WORKSPACE_ID}`);
+    expect(router.state.location.pathname).toBe(`/workspace/${WORKSPACE_ID}`);
 
     await act(async () => {
       await host!.openPrompt("  Create a daily brief.  ");

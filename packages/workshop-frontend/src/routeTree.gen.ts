@@ -21,9 +21,9 @@ import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
-import { Route as ChatIdRouteImport } from './routes/chat.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
+import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -85,11 +85,6 @@ const BlueprintIdRoute = BlueprintIdRouteImport.update({
   path: '/blueprint/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ChatIdRoute = ChatIdRouteImport.update({
-  id: '/chat/$id',
-  path: '/chat/$id',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const GadgetIdRoute = GadgetIdRouteImport.update({
   id: '/gadget/$id',
   path: '/gadget/$id',
@@ -98,6 +93,11 @@ const GadgetIdRoute = GadgetIdRouteImport.update({
 const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
   id: '/gatekeepers_/$appId',
   path: '/gatekeepers/$appId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
+  id: '/workspace/$id',
+  path: '/workspace/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -114,9 +114,9 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
-  '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/workspace/$id': typeof WorkspaceIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -131,9 +131,9 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
-  '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/workspace/$id': typeof WorkspaceIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -149,9 +149,9 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
-  '/chat/$id': typeof ChatIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
+  '/workspace/$id': typeof WorkspaceIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -168,9 +168,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
-    | '/chat/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/workspace/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -185,9 +185,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
-    | '/chat/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/workspace/$id'
   id:
     | '__root__'
     | '/'
@@ -202,9 +202,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
-    | '/chat/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
+    | '/workspace/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -220,9 +220,9 @@ export interface RootRouteChildren {
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
-  ChatIdRoute: typeof ChatIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
+  WorkspaceIdRoute: typeof WorkspaceIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -311,13 +311,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BlueprintIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/chat/$id': {
-      id: '/chat/$id'
-      path: '/chat/$id'
-      fullPath: '/chat/$id'
-      preLoaderRoute: typeof ChatIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/gadget/$id': {
       id: '/gadget/$id'
       path: '/gadget/$id'
@@ -330,6 +323,13 @@ declare module '@tanstack/react-router' {
       path: '/gatekeepers/$appId'
       fullPath: '/gatekeepers/$appId'
       preLoaderRoute: typeof GatekeepersAppIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/workspace/$id': {
+      id: '/workspace/$id'
+      path: '/workspace/$id'
+      fullPath: '/workspace/$id'
+      preLoaderRoute: typeof WorkspaceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -348,9 +348,9 @@ const rootRouteChildren: RootRouteChildren = {
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,
-  ChatIdRoute: ChatIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
+  WorkspaceIdRoute: WorkspaceIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

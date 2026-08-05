@@ -179,7 +179,7 @@ export class ConfluenceObserverTracker {
       const access = await Promise.all(sets.map(setId => this.#hasSetAccess(verifier, setId)));
       if (access.some(hasAccess => !hasAccess)) {
         throw new Error(
-          "This collaborator does not have access to Confluence data the Gadget has read, so they " +
+          "This collaborator does not have access to Confluence data this workspace has read, so they " +
           "cannot be allowed to observe it.");
       }
       for (const setId of sets) checked.add(setId);

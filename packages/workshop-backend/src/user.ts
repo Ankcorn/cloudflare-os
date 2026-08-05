@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -452,7 +452,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   ): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (record && !record.owner) {
-      throw new Error("User owns this Gadget; it's not shared with them.");
+      throw new Error("User owns this workspace; it's not shared with them.");
     }
     let now = new Date();
     if (record) {
@@ -719,7 +719,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async updateTitle(gadgetId: string, title: string) {
     let record = this.storage.gadgets.get(gadgetId);
     if (!record) {
-      throw new Error("No such gadget belonging to user.");
+      throw new Error("No such workspace belonging to user.");
     }
     record.title = title;
     this.storage.gadgets.put(record);
@@ -728,7 +728,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async updatePinned(gadgetId: string, pinned: boolean) {
     let record = this.storage.gadgets.get(gadgetId);
     if (!record) {
-      throw new Error("No such gadget belonging to user.");
+      throw new Error("No such workspace belonging to user.");
     }
     record.pinned = pinned;
     this.storage.gadgets.put(record);
@@ -1023,17 +1023,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   private blueprintSummary(record: BlueprintUserRecord, pinnedBlueprintIds: Set<string>): BlueprintUserSummary {
-    let gadget = record.gadgetId ? this.storage.gadgets.get(record.gadgetId) : undefined;
     return {
       id: record.id,
       title: record.metadata.title,
       description: record.metadata.description,
-      gadgetId: record.gadgetId ?? "",
-      gadgetTitle: record.gadgetId ? (gadget?.title ?? "Deleted Gadget") : "Imported Blueprint",
+      source: this.blueprintSource(record),
       version: record.metadata.version,
       lastUpdated: record.metadata.lastUpdated,
       pinned: pinnedBlueprintIds.has(record.id) || undefined,
     };
+  }
+
+  // A blueprint with no `gadgetId` was added to the library rather than published from one of this
+  // user's workspaces; one whose workspace is no longer registered here was published from a
+  // workspace that has since been deleted.
+  private blueprintSource(record: BlueprintUserRecord): BlueprintSource {
+    if (!record.gadgetId) return { type: "imported" };
+    let workspace = this.storage.gadgets.get(record.gadgetId);
+    if (!workspace) return { type: "deletedWorkspace" };
+    return { type: "workspace", workspaceId: record.gadgetId, workspaceTitle: workspace.title };
   }
 
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {

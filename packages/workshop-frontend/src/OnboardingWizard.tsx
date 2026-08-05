@@ -754,7 +754,7 @@ const SHOWCASE_FEATURES: ShowcaseFeature[] = [
     icon: Sparkle,
     iconColor: 'text-media-100',
     iconBg: 'bg-media-200',
-    title: 'Build apps or just chat',
+    title: 'Build gadgets or just chat',
     description:
       'Create full web apps, or keep it simple with agent-only conversations. Your call.',
   },
@@ -764,7 +764,7 @@ const SHOWCASE_FEATURES: ShowcaseFeature[] = [
     iconBg: 'bg-compute-200',
     title: 'Collaborate in real time',
     description:
-      'Share a gadget with teammates and work on it together, live.',
+      'Share a workspace with teammates and work on it together, live.',
   },
   {
     icon: Key,
@@ -803,7 +803,7 @@ function ShowcaseStep({ active, siteName }: { active: boolean; siteName: string 
           You&apos;re all set
         </h2>
         <p className="text-sm text-kumo-subtle">
-          Here&apos;s a taste of what you can do with {siteName === 'gadgets' ? 'Gadgets' : siteName}
+          Here&apos;s a taste of what you can do with {siteName}
         </p>
       </div>
 

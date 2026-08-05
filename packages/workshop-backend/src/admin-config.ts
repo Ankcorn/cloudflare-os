@@ -17,7 +17,8 @@ export type AdminConfig = {
   // authentication config — which auth providers exist and whether password login is on stay
   // env-driven (see auth/config.ts).
   signupsEnabled: boolean;
-  // Site name shown next to the top-bar logo, or "" to use the default ("gadgets").
+  // Site name shown next to the top-bar logo, or "" to use DEFAULT_SITE_NAME. Resolve it for
+  // display with `resolveSiteName()`.
   siteName: string;
   /** Whether this deployment has a custom site logo. Image bytes are stored separately. */
   siteLogoConfigured: boolean;

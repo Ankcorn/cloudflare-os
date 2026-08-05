@@ -52,12 +52,12 @@ function formatRelativeTime(date: Date): string {
 
 const ROLE_LABELS: Record<CollaboratorRole, string> = {
   build: 'Workspace',
-  use: 'App only',
+  use: 'Gadget only',
 }
 
 const ROLE_DESCRIPTIONS: Record<CollaboratorRole, string> = {
-  build: 'Edit the app, use chat, and manage access.',
-  use: 'Use the app without agent chat or editing.',
+  build: 'Edit gadgets, use chat, and manage access.',
+  use: 'Use gadgets without agent chat or editing.',
 }
 
 function roleLabel(role: CollaboratorRole | undefined): string {
@@ -535,7 +535,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
   // Where an invited collaborator opens the workspace. Adding them already granted access, so this
   // carries no secret and is safe to show and re-show — unlike a share link, whose URL embeds a key.
-  const workspaceUrl = `${window.location.origin}/gadget/${metadata.id}`
+  const workspaceUrl = `${window.location.origin}/workspace/${metadata.id}`
 
   const copyWorkspaceUrl = async () => {
     if (await copyToClipboard(workspaceUrl)) {
@@ -590,7 +590,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     try {
       const { key, linkId } = await overseer.createShareLink(
         newLinkRole, newLinkNote.trim() || undefined)
-      const url = `${window.location.origin}/gadget/${metadata.id}#share=${key}`
+      const url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
       setNewLinkNote('')
@@ -618,7 +618,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       let url = copiedUrlsRef.current.get(linkId)
       if (!url) {
         const { key } = await overseer.newShareLinkKey(linkId)
-        url = `${window.location.origin}/gadget/${metadata.id}#share=${key}`
+        url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
         copiedUrlsRef.current.set(linkId, url)
       }
       const copied = await copyToClipboard(url)
@@ -780,13 +780,13 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                 <ShieldWarning size={22} weight="duotone" />
               </div>
               <p className="mt-3 text-[14px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
-                This gadget can’t be shared
+                This workspace can’t be shared
               </p>
               <p className="mt-1.5 max-w-[320px] text-balance text-[12px] leading-[18px] tracking-[-0.1px] text-kumo-subtle">
                 It has observed sensitive data that can only be accessed by you, the owner.
               </p>
               <p className="mt-2 max-w-[320px] text-balance text-[12px] leading-[18px] tracking-[-0.1px] text-kumo-subtle">
-                To share something similar, create a new gadget or fork this one by creating a blueprint.
+                To share something similar, create a blueprint from a gadget in this workspace, then use it to create a new workspace.
               </p>
             </div>
           ) : (

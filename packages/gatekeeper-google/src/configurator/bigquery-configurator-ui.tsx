@@ -27,7 +27,7 @@ export default {
 
   render({ values, setValues, clearFields, ui }) {
     return <Section>
-      <Field label="Project" description="Start with the Google Cloud project this gadget can query.">
+      <Field label="Project" description="Start with the Google Cloud project this connection can query.">
         <Autocomplete
           name="projectId"
           value={values.projectId}

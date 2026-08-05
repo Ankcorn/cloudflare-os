@@ -9,7 +9,7 @@
 // @param source How to name the thing that was read from: a hostname for a bare endpoint, a gateway
 // name for a portal. Interpolated into a sentence, so it should read as a noun phrase.
 export function observerRefusalMessage(source: string): string {
-  return `a Gadget that reads from ${source} can only be opened by its owner, because there is no ` +
+  return `a workspace that reads from ${source} can only be opened by its owner, because there is no ` +
     `way to check whether anyone else is allowed to see what it read. Publish it as a blueprint ` +
     `instead, so each person connects their own account.`;
 }

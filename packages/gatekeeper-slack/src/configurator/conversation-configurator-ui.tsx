@@ -25,7 +25,7 @@ export default {
     return <Section>
       <Field
         label="Conversation"
-        description="Choose a channel or direct message this gadget can read."
+        description="Choose a channel or direct message this connection can read."
       >
         <Autocomplete
           name="conversationId"

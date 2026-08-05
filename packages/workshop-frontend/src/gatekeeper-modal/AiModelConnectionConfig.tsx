@@ -19,7 +19,7 @@ export function AiModelConnectionConfig({
     <section className="grid gap-3">
       <ConnectionConfigField
         label="Model"
-        description="Choose which model this gadget can call."
+        description="Choose the model this connection can use."
       >
         <Select
           aria-label="Select an AI model"

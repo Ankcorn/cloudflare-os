@@ -403,7 +403,7 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
     <div className="flex items-center justify-center px-6 text-center" style={{ height }}>
       <div className="max-w-[360px]">
         <p className="m-0 text-[15px] leading-[22px] font-semibold tracking-[-0.3px] text-kumo-default">
-          No apps yet
+          No gadgets yet
         </p>
         <p className="mt-1.5 mb-0 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
           Ask the agent in chat to build something, and it will appear here.
@@ -462,7 +462,7 @@ export default function GadgetEditor() {
       if (!isEditingTitleRef.current) setTitleInput(nextMetadata.title)
     },
     onShareKeyConsumed: () => {
-      if (id) navigate({ to: '/gadget/$id', params: { id }, search: {}, replace: true })
+      if (id) navigate({ to: '/workspace/$id', params: { id }, search: {}, replace: true })
     },
     onInvalidShareKey: () => {
       toasts.add({ title: 'Invalid or expired share link.', variant: 'error' })
@@ -535,7 +535,7 @@ export default function GadgetEditor() {
   const enterGadgetFullscreen = useCallback(() => {
     if (window.location.hash !== '#fullscreen') {
       // pushState so the browser Back button also exits fullscreen — natural for many users
-      // and helpful for bookmarks: a bookmarked /gadget/foo#fullscreen can still go Back to a
+      // and helpful for bookmarks: a bookmarked /workspace/foo#fullscreen can still go Back to a
       // useful (non-fullscreen) state if there's prior history.
       window.history.pushState(null, '', '#fullscreen')
     }
@@ -903,7 +903,7 @@ export default function GadgetEditor() {
     setActiveTab('app')
     setWorkspaceVisibility('open', target.id)
     navigate({
-      to: '/gadget/$id',
+      to: '/workspace/$id',
       params: { id: id! },
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.id }),
       replace: true,
@@ -1012,7 +1012,7 @@ export default function GadgetEditor() {
         }
       }
       navigate({
-        to: '/gadget/$id',
+        to: '/workspace/$id',
         params: { id: id! },
         // Keep committed selections, but clear draft selections outside their branch.
         search: (prev: Record<string, unknown>) => ({
@@ -1036,7 +1036,7 @@ export default function GadgetEditor() {
     if (simpleMode) {
       if (urlChatId === 0) {
         navigate({
-          to: '/gadget/$id',
+          to: '/workspace/$id',
           params: { id: id! },
           search: (prev: Record<string, unknown>) => ({ ...prev, chat: undefined }),
           replace: true,
@@ -1147,7 +1147,7 @@ export default function GadgetEditor() {
     if (userPickedWorkpieceThisTurnRef.current) return
     if (!visibleGadgets.some(g => g.id === target.workpieceId)) return
     navigate({
-      to: '/gadget/$id',
+      to: '/workspace/$id',
       params: { id: id! },
       search: (prev: Record<string, unknown>) => ({ ...prev, w: target.workpieceId }),
       replace: true,
@@ -1162,7 +1162,7 @@ export default function GadgetEditor() {
     setWorkspaceVisibility('open', workpieceId)
     const pendingChatId = workpieces.get(workpieceId)?.chatId
     navigate({
-      to: '/gadget/$id',
+      to: '/workspace/$id',
       params: { id: id! },
       // Selecting a draft also returns to its creating conversation.
       search: (prev: Record<string, unknown>) => ({
@@ -1239,7 +1239,7 @@ export default function GadgetEditor() {
       await overseer.stub.deleteSelf()
       navigate({ to: '/' })
     } catch {
-      toasts.add({ title: 'Failed to delete gadget', variant: 'error' })
+      toasts.add({ title: 'Failed to delete workspace', variant: 'error' })
       setIsDeleting(false)
       setDeleteDialogOpen(false)
     }
@@ -1358,7 +1358,7 @@ export default function GadgetEditor() {
                 onClick={handleSaveTitle}
                 disabled={!titleInput.trim()}
                 className="!h-7 !w-7 hover:text-kumo-brand disabled:opacity-30"
-                aria-label="Save gadget title"
+                aria-label="Save workspace title"
               >
                 <Check size={14} />
               </WorkshopIconButton>
@@ -1378,8 +1378,8 @@ export default function GadgetEditor() {
               <WorkshopIconButton
                 onClick={() => setIsEditingTitle(true)}
                 className="!h-7 !w-7 flex-shrink-0"
-                title="Rename gadget"
-                aria-label="Rename gadget"
+                title="Rename workspace"
+                aria-label="Rename workspace"
               >
                 <Pencil size={16} />
               </WorkshopIconButton>
@@ -1421,8 +1421,8 @@ export default function GadgetEditor() {
 
           <WorkshopIconButton
             onClick={() => setShareModalOpen(true)}
-            title="Share gadget"
-            aria-label="Share gadget"
+            title="Share workspace"
+            aria-label="Share workspace"
           >
             <ShareNetwork size={15} />
           </WorkshopIconButton>
@@ -1440,8 +1440,8 @@ export default function GadgetEditor() {
             <WorkshopIconButton
               danger
               onClick={() => setDeleteDialogOpen(true)}
-              title="Delete gadget"
-              aria-label="Delete gadget"
+              title="Delete workspace"
+              aria-label="Delete workspace"
             >
               <Trash size={16} />
             </WorkshopIconButton>
@@ -1779,7 +1779,7 @@ export default function GadgetEditor() {
 
       <DeleteConfirmationDialog
         open={deleteDialogOpen}
-        title="Delete gadget?"
+        title="Delete workspace?"
         description={<>This removes <span className="font-medium text-kumo-default">{metadata.title}</span>. You can&apos;t undo this.</>}
         isDeleting={isDeleting}
         onOpenChange={setDeleteDialogOpen}

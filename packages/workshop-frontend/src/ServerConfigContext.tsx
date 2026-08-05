@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import { ServerConfig, AuthVendorInfo } from '@gadgets/workshop-shared/api'
+import { ServerConfig, AuthVendorInfo, resolveSiteName } from '@gadgets/workshop-shared/api'
 
 // Deployment-level configuration fetched once at boot via PublicApi.getServerConfig().
 // `null` while still loading.
@@ -19,7 +19,7 @@ export function useServerConfigError(): boolean {
 // Convenience: the admin-configured site name, falling back to the default while config is still
 // loading or when the admin hasn't set one.
 export function useSiteName(): string {
-  return (useContext(ServerConfigContext)?.siteName ?? '').trim() || 'gadgets'
+  return resolveSiteName(useContext(ServerConfigContext)?.siteName)
 }
 
 // Convenience: the gatekeeper vendors offered as sign-in methods (empty until config loads / none).

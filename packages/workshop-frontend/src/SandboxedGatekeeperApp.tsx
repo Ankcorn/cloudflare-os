@@ -258,7 +258,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   }, [setOverlayPhase])
   const openTarget = useCallback<OpenTarget>(({ workspaceId, gadgetId }) => {
     navigate({
-      to: '/gadget/$id',
+      to: '/workspace/$id',
       params: { id: workspaceId },
       search: gadgetId === undefined ? {} : { w: gadgetId },
     })

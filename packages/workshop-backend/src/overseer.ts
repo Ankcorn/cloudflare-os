@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -285,7 +285,7 @@ function fallbackBindingName(base: string, isTaken: (name: string) => boolean): 
 function observerVendorId(record: GatekeeperRecord): string | null {
   if (!record.creationSpec) {
     throw new Error(
-        "This Gadget has a legacy connection that must be reconnected by its owner before it can be shared.");
+        "This workspace has a legacy connection that must be reconnected by its owner before it can be shared.");
   }
   return "vendorId" in record.creationSpec ? record.creationSpec.vendorId : null;
 }
@@ -684,7 +684,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
-      title: "Untitled Gadget",
+      title: "Untitled Workspace",
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -2647,8 +2647,8 @@ class OverseerImpl implements AgentHooks {
       if ((await this.getSharingManager()).hasAnyShares()) {
         throw new Error(
             "This observation was blocked because it contains sensitive data that must only be " +
-            "shown to the account owner, but this Gadget is shared with other users. Try again " +
-            "from a Gadget that is not shared.");
+            "shown to the account owner, but this workspace is shared with other users. Try again " +
+            "from a workspace that is not shared.");
       }
 
       this.storage.prohibitAllSharing.put(true);
@@ -2814,7 +2814,7 @@ class OverseerImpl implements AgentHooks {
       //   a search index, then it's not leaking anything. If we had a search provider we could
       //   trust... for now though, we will be extra-careful specifically when prohibiting sharing.
       throw new Error(
-          "This gadget has observed sensitive data. To prevent leaks, the Gadget is prohibited " +
+          "This workspace has observed sensitive data. To prevent leaks, the workspace is prohibited " +
           "from fetching from public web sites.");
     }
 
@@ -2859,7 +2859,7 @@ class OverseerImpl implements AgentHooks {
       : Promise<void> {
     if (this.storage.prohibitAllSharing.get()) {
       throw new Error(
-          "This gadget has observed sensitive data. To prevent leaks, the Gadget is prohibited " +
+          "This workspace has observed sensitive data. To prevent leaks, the workspace is prohibited " +
           "from performing actions.");
     }
 
@@ -3560,7 +3560,7 @@ class OverseerImpl implements AgentHooks {
     chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>,
   ): void {
     if (this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId)) {
-      throw new Error("This chat already has an undelivered Gadget response target.");
+      throw new Error("This chat already has an undelivered workspace response target.");
     }
     chatGatewayRpcTarget = chatGatewayRpcTarget.dup();
     try {
@@ -4147,7 +4147,7 @@ class OverseerImpl implements AgentHooks {
   async deliverAgentCallback(
       chatId: number, methodName: string, args: unknown[],
       initiatorUserId: string, initiatorModelId: string): Promise<unknown> {
-    if (!this.ownerId) throw new Error("Gadget has been deleted.");
+    if (!this.ownerId) throw new Error("Workspace has been deleted.");
 
     // Compute the summary eagerly (it only reads, doesn't mutate or need the sequence).
     let argsSummary = summarizeArgs(args);
@@ -4309,7 +4309,7 @@ class OverseerImpl implements AgentHooks {
   // =======================================================================================
 
   #ownerUserDo() {
-    if (!this.ownerId) throw new Error("Gadget is not initialized.");
+    if (!this.ownerId) throw new Error("Workspace is not initialized.");
     return this.users.get(this.users.idFromString(this.ownerId));
   }
 
@@ -4819,7 +4819,7 @@ class OverseerImpl implements AgentHooks {
       selection: {builtin: true, commandId: "compact"},
       name: "compact",
       description: "Summarize older context while preserving recent messages.",
-      providerLabel: "Workshop",
+      providerLabel: resolveSiteName((await readAdminConfig(this.env)).siteName),
     }, ...await collectSlashCommands(sources)];
   }
 
@@ -5026,7 +5026,7 @@ class OverseerImpl implements AgentHooks {
       codeSnapshot?: Uint8Array,
       screenshot?: BlueprintScreenshotUpload | null,
   ): Promise<void> {
-    if (!this.ownerId) throw new Error("Gadget not initialized.");
+    if (!this.ownerId) throw new Error("Workspace not initialized.");
 
     // Mark dirty.
     record.dirty = true;
@@ -5082,7 +5082,7 @@ class OverseerImpl implements AgentHooks {
 
   // Delete a blueprint's propagated data (KV, R2, User DO, local).
   async deleteBlueprintPropagation(record: BlueprintGadgetRecord): Promise<void> {
-    if (!this.ownerId) throw new Error("Gadget not initialized.");
+    if (!this.ownerId) throw new Error("Workspace not initialized.");
 
     // Delete from KV first (stops public access).
     await this.env.BLUEPRINTS.delete(record.id);
@@ -5174,7 +5174,7 @@ class OverseerImpl implements AgentHooks {
       // Also rename the gadget if this is the first chat. Since the gadget likely doesn't have
       // any code yet, the user still sees it as just a chat, and therefore it makes sense to
       // apply the same title as the chat itself.
-      if (chatId === 0 && this.storage.title.get() === "Untitled Gadget" && this.ownerId) {
+      if (chatId === 0 && ["Untitled Gadget", "Untitled Workspace"].includes(this.storage.title.get()) && this.ownerId) {
         this.storage.title.put(result);
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         await owner.updateTitle(this.ctx.id.toString(), result);
@@ -5516,7 +5516,7 @@ class OverseerImpl implements AgentHooks {
   // --- Connection-request hooks ---
 
   #ownerUserStub() {
-    if (!this.ownerId) throw new Error("Gadget has been deleted.");
+    if (!this.ownerId) throw new Error("Workspace has been deleted.");
     return this.users.get(this.users.idFromString(this.ownerId));
   }
 
@@ -6069,7 +6069,7 @@ class OverseerImpl implements AgentHooks {
           if (!configureCb) {
             // Non-interactive open (e.g. no UI). We can't configure, so deny.
             throw new Error(
-                "To open this Gadget, you must choose connected accounts for the services it " +
+                "To open this workspace, you must choose connected accounts for the services it " +
                 "uses, but no configuration channel was provided.");
           }
 
@@ -6096,7 +6096,7 @@ class OverseerImpl implements AgentHooks {
           let stillUncovered = uncovered.filter(gk => !(gk.id in accountChoices));
           if (stillUncovered.length > 0) {
             throw new Error(
-                "You must connect an account for every service this Gadget uses in order to open " +
+                "You must connect an account for every service this workspace uses in order to open " +
                 "it.");
           }
         }
@@ -6159,7 +6159,7 @@ class OverseerImpl implements AgentHooks {
           // Terminal. Name each failed connection and account so the user knows what to fix, rather
           // than reporting an anonymous refusal.
           throw new Error(
-              "This Gadget could not confirm that you are permitted to observe all of the data it " +
+              "This workspace could not confirm that you are permitted to observe all of the data it " +
               "has accessed:\n" +
               await this.#describeObserverFailures(clientUser, inScope, failures));
         }
@@ -6227,7 +6227,7 @@ class OverseerImpl implements AgentHooks {
       return ownerProfileId;
     }
 
-    if (!this.ownerId) throw new Error("Gadget is not initialized.");
+    if (!this.ownerId) throw new Error("Workspace is not initialized.");
     const ownerDo = this.users.get(this.users.idFromString(this.ownerId));
     const ownerProfile = await ownerDo.whoami();
     this.ownerProfileId = ownerProfile.id;
@@ -6497,9 +6497,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let callerId = caller.id.toString();
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
+      let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
       return {
         accepted: false,
-        message: "Please create a Gadgets account to continue.",
+        message: `Please create a ${siteName} account to continue.`,
       };
     }
 
@@ -6520,14 +6521,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       if (this.impl.storage.prohibitAllSharing.get()) {
         return {
           accepted: false,
-          message: "This Gadget has sharing disabled, so only its owner can access it.",
+          message: "This workspace has sharing disabled, so only its owner can access it.",
         };
       }
       let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id);
       if (role !== "build") {
         return {
           accepted: false,
-          message: "You do not have access to interact with this Gadget through its agent.",
+          message: "You do not have access to interact with this workspace through its agent.",
         };
       }
     }
@@ -6558,9 +6559,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // The caller must have an available agent model.
     let aiModel = userContext.aiModel;
     if (!aiModel) {
+      let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
       return {
         accepted: false,
-        message: "Your Gadgets account needs an AI model configured before it can respond.",
+        message: `Your ${siteName} account needs an AI model configured before it can respond.`,
       };
     }
 
@@ -6596,7 +6598,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       );
     }
 
-    return { accepted: true, chatPath: `/gadget/${this.ctx.id.toString()}?chat=${chatId}` };
+    return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
   }
 
   // Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
@@ -6712,7 +6714,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async spawnAgent(
       title: string, prompt: string, config: AgentSpawnerConfig,
       creatorUserId?: string, callable?: boolean) {
-    if (!this.impl.ownerId) throw new Error("Gadget has been deleted.");
+    if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
     if (callable && !config.modelId) {
       throw new Error("Cannot create a callable agent without a model.");
     }
@@ -7307,7 +7309,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async deleteSelf(): Promise<void> {
     if (!this.isOwner) {
-      throw new Error("Only the gadget owner can delete it.");
+      throw new Error("Only the workspace owner can delete it.");
     }
 
     this.impl.recordGadgetAnalytics({
@@ -8390,7 +8392,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async deleteChat(chatId: number): Promise<void> {
     let response = this.impl.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
     if (response?.status === "waiting") {
-      this.impl.deliverExternalMessageResponse(response, "The chat was deleted before the Gadget responded.");
+      this.impl.deliverExternalMessageResponse(response, "The chat was deleted before the agent responded.");
     }
 
     // Delete any gadgets and binding edges still provisional to this chat (stamped or not):
@@ -8621,7 +8623,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
-          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
@@ -8680,7 +8682,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<{ key: string; linkId: string }> {
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
-          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
@@ -8691,7 +8693,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
-          "This gadget has observed sensitive data. To prevent leaks, the Gadget cannot be " +
+          "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
@@ -9169,7 +9171,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   async createBlueprint(title?: string, description?: string,
                         screenshotUpload?: BlueprintScreenshotUpload)
       : Promise<BlueprintGadgetSummary> {
-    if (!this.impl.ownerId) throw new Error("Gadget not initialized.");
+    if (!this.impl.ownerId) throw new Error("Workspace not initialized.");
 
     // NOTE: It is INTENTIONAL that collaborators can publish blueprints on behalf of the owner.
     //   We may in the future create different collaborator permission levels, in which case we'd
