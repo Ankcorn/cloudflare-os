@@ -37,7 +37,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 
 // ─── constants ──────────────────────────────────────────────────────────────────
 
-const TOTAL_STEPS = 4
+const TOTAL_STEPS_WITH_CONNECTIONS = 4
 
 // Maps RPC vendor IDs to logo keys in our logoComponents map
 const VENDOR_LOGO_MAP: Record<string, string> = {
@@ -284,7 +284,17 @@ export default function OnboardingWizard({
 
   // ── navigation ────────────────────────────────────────────────────────────────
 
-  const goNext = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS - 1))
+  const showConnectionsStep = vendorsLoading || vendors.length > 0
+  const totalSteps = showConnectionsStep
+    ? TOTAL_STEPS_WITH_CONNECTIONS
+    : TOTAL_STEPS_WITH_CONNECTIONS - 1
+  const showcaseStep = totalSteps - 1
+
+  useEffect(() => {
+    setStep((currentStep) => Math.min(currentStep, showcaseStep))
+  }, [showcaseStep])
+
+  const goNext = () => setStep((s) => Math.min(s + 1, totalSteps - 1))
   const goBack = () => setStep((s) => Math.max(s - 1, 0))
 
   const handleFinish = async () => {
@@ -374,7 +384,7 @@ export default function OnboardingWizard({
 
         {/* Step indicator */}
         <div className="flex items-center justify-center gap-2 mb-8">
-          {Array.from({ length: TOTAL_STEPS }).map((_, i) => (
+          {Array.from({ length: totalSteps }).map((_, i) => (
             <div
               key={i}
               className={`h-1.5 rounded-full transition-all duration-400 ${
@@ -567,7 +577,7 @@ export default function OnboardingWizard({
             </div>
 
             {/* ── Step 2: Connections ───────────────────────────────────────── */}
-            <div className="w-full flex-shrink-0 p-8 min-h-[420px]">
+            <div className={`w-full flex-shrink-0 p-8 min-h-[420px] ${showConnectionsStep ? '' : 'hidden'}`}>
               <div>
                 <h2 className="text-lg font-medium text-kumo-default mb-1">
                   Connect your services
@@ -650,9 +660,9 @@ export default function OnboardingWizard({
               </div>
             </div>
 
-            {/* ── Step 3: What you can do ───────────────────────────────────── */}
+            {/* ── Final step: What you can do ────────────────────────────────── */}
             <div className="w-full flex-shrink-0 p-8 min-h-[420px]">
-              <ShowcaseStep active={step === 3} siteName={siteName} />
+              <ShowcaseStep active={step === showcaseStep} siteName={siteName} />
             </div>
           </div>
 
@@ -672,7 +682,7 @@ export default function OnboardingWizard({
 
             <div className="flex items-center gap-3">
               {/* Primary action */}
-              {step < TOTAL_STEPS - 1 ? (
+              {step < totalSteps - 1 ? (
                 <button
                   onClick={goNext}
                   className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-150 text-kumo-inverse bg-kumo-brand hover:bg-kumo-brand-hover"
