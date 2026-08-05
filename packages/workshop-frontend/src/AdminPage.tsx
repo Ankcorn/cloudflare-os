@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -444,13 +444,13 @@ export default function AdminPage() {
           <h2 className="text-lg font-semibold text-kumo-strong mb-1">Site name</h2>
           <p className="text-sm text-kumo-subtle mb-5">
             Shown next to the logo in the top bar. Leave empty to use the default
-            (&ldquo;gadgets&rdquo;). Applies on each user&rsquo;s next connection.
+            (&ldquo;{DEFAULT_SITE_NAME}&rdquo;). Applies on each user&rsquo;s next connection.
           </p>
 
           <Input
             value={siteNameDraft}
             onChange={(e) => setSiteNameDraft(e.target.value)}
-            placeholder="gadgets"
+            placeholder={DEFAULT_SITE_NAME}
             maxLength={MAX_SITE_NAME_LENGTH}
           />
 

@@ -17,7 +17,7 @@ export default {
   render({ values, setValues, ui }) {
     const availabilityMode = values.availabilityMode === "allVisible" ? "allVisible" : "thisCalendar";
     return <Section>
-      <Field label="Calendar" description="Choose the calendar this gadget can read and manage.">
+      <Field label="Calendar" description="Choose the calendar this connection can read and manage.">
         <Autocomplete
           name="calendarId"
           value={values.calendarId}

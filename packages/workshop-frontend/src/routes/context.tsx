@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { BookOpen, Sparkle, type Icon as PhosphorIcon } from '@phosphor-icons/react'
 import { useDocumentTitle } from '../useDocumentTitle'
 import ComingSoonPreview from '../components/ComingSoonPreview'
+import { useSiteName } from '../ServerConfigContext'
 
 // Context & Skills. The knowledge/skills surface isn't built into the rail yet — agents read
 // curated collections of documents (context) and reusable skills. Until then this page shows a
@@ -56,6 +57,7 @@ function ContextRow({ item }: { item: ContextItem }) {
 
 function ContextPage() {
   useDocumentTitle('Context & Skills')
+  const siteName = useSiteName()
   return (
     <div className="mx-auto flex h-full w-full max-w-4xl flex-col px-6 sm:px-10">
       <header className="px-3 pb-4 pt-10">
@@ -67,7 +69,7 @@ function ContextPage() {
 
       <ComingSoonPreview
         icon={BookOpen}
-        title="Context & Skills are coming soon to Gadgets"
+        title={`Context & Skills are coming soon to ${siteName}`}
         description="A preview of how you'll author knowledge collections and skills for your agents to draw on."
       >
         <div className="chat-panel min-h-0 flex-1 overflow-y-auto pb-8 pt-1">

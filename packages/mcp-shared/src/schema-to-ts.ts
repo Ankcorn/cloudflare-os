@@ -343,7 +343,7 @@ export function generateSessionTypes(args: {
   }
   lines.push(" *");
   // Kept in the agent's view because the agent can otherwise build a share flow that cannot work.
-  lines.push(" * Only the owner can open a Gadget using this binding. To give it to someone else,");
+  lines.push(" * Only the owner can open a workspace using this binding. To give it to someone else,");
   lines.push(" * publish it as a blueprint so they connect their own account.");
   lines.push(" */");
   lines.push(`export interface ${typeName} {`);

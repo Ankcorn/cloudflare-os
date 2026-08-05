@@ -62,7 +62,7 @@ export class ContextObserverTracker {
       ));
       if (access.some(hasAccess => !hasAccess)) {
         throw new Error(
-          "This collaborator does not have access to a Context collection whose data the Gadget " +
+          "This collaborator does not have access to a Context collection whose data this workspace " +
           "has read, so they cannot be allowed to observe it.",
         );
       }

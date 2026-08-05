@@ -37,7 +37,7 @@ export default {
   render({ values, setValues, clearFields }) {
     const mode = values.mode ?? "all";
     return <Section>
-      <Field label="Mailbox scope" description="Choose whether this gadget can access all Gmail messages or a narrower native Gmail view.">
+      <Field label="Mailbox scope" description="Choose whether this connection can access all Gmail messages or a narrower native Gmail view.">
         <RadioCards
           value={mode}
           options={[

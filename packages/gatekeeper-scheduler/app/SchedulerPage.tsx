@@ -346,7 +346,7 @@ function ScheduleRow({
   onOpen: () => void;
 }) {
   const timing = formatTiming(schedule, now);
-  const target = targetTitle ?? "Unavailable gadget";
+  const target = targetTitle ?? "Unavailable workspace";
   // A workspace the user can no longer see has nothing to open.
   const unavailable = targetTitle === null;
   // Only failed schedules have something to expand: why they need attention. The caret is a sibling

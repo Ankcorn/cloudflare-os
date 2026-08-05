@@ -463,14 +463,14 @@ function OutputsPage() {
 
   const openOutput = (output: OutputSummary) => {
     navigate({
-      to: '/gadget/$id',
+      to: '/workspace/$id',
       params: { id: output.workspaceId },
       search: { w: output.workpieceId },
     })
   }
 
   const openWorkspace = (output: OutputSummary) => {
-    navigate({ to: '/gadget/$id', params: { id: output.workspaceId }, search: {} })
+    navigate({ to: '/workspace/$id', params: { id: output.workspaceId }, search: {} })
   }
 
   const beginRename = (output: OutputSummary) => {

@@ -20,7 +20,7 @@ export default {
 
   render({ values, setValues }) {
     return <Section>
-      <Field label="Email name" description="Choose the local part of the mailbox address this gadget can receive.">
+      <Field label="Email name" description="Choose the local part of the mailbox address this connection can receive.">
         <TextInput
           name="emailName"
           value={values.emailName}

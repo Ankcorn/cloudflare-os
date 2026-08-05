@@ -183,7 +183,7 @@ export function GadgetPresence({
   const overflow = display.length - visible.length
   const count = display.length
   const label = `${count} ${count === 1 ? 'person' : 'people'} here now`
-  const ariaLabel = `${count} ${count === 1 ? 'person' : 'people'} viewing this gadget`
+  const ariaLabel = `${count} ${count === 1 ? 'person' : 'people'} viewing this workspace`
 
   return (
     <Popover>

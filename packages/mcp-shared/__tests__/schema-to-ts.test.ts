@@ -307,7 +307,7 @@ describe("generateSessionTypes", () => {
 
   it("tells the agent sharing will not work, so it does not build a flow that cannot succeed", () => {
     const generated = generate([tool({ name: "read_it" }, "read")]);
-    expect(generated).toContain("Only the owner can open a Gadget using this binding");
+    expect(generated).toContain("Only the owner can open a workspace using this binding");
     expect(generated).toContain("publish it as a blueprint");
   });
 

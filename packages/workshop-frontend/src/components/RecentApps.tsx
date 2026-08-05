@@ -37,7 +37,7 @@ function AppRow({ gadget }: { gadget: GadgetMetadataWithTimestamps }) {
 
   return (
     <Link
-      to="/gadget/$id"
+      to="/workspace/$id"
       params={{ id: gadget.id }}
       className="group flex items-center gap-4 p-3 rounded-xl border border-kumo-line bg-kumo-base hover:border-kumo-fill transition-all cursor-pointer"
     >
@@ -49,7 +49,7 @@ function AppRow({ gadget }: { gadget: GadgetMetadataWithTimestamps }) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <h3 className="text-sm font-medium text-kumo-default truncate">
-          {gadget.title || 'Untitled Gadget'}
+          {gadget.title || 'Untitled Workspace'}
         </h3>
         {gadget.owner && (
           <p className="text-xs text-kumo-subtle truncate mt-0.5">
@@ -94,7 +94,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-kumo-default">Recent gadgets</h2>
+          <h2 className="text-sm font-medium text-kumo-default">Recent workspaces</h2>
         </div>
         <div className="flex flex-col gap-2">
           {[1, 2].map((i) => (
@@ -109,7 +109,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="text-center py-8 text-sm text-kumo-danger">
-          Unable to load your gadgets. Check your connection and try refreshing.
+          Unable to load your workspaces. Check your connection and try refreshing.
         </div>
       </section>
     )
@@ -119,7 +119,7 @@ export default function RecentApps() {
     return (
       <section className="w-full max-w-2xl mx-auto">
         <div className="text-center py-8 text-kumo-inactive text-sm">
-          No gadgets yet. Create your first one above!
+          No workspaces yet. Create your first one above!
         </div>
       </section>
     )
@@ -129,7 +129,7 @@ export default function RecentApps() {
     <section className="w-full max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-kumo-default">
-          Recent gadgets
+          Recent workspaces
         </h2>
         <Link
           to="/"

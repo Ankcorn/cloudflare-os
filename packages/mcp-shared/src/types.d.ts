@@ -1,6 +1,6 @@
 // Base types for MCP-server sessions.
 //
-// These are prepended to every generated per-server `.d.ts` (see `schema-to-ts.ts`), so a Gadget's
+// These are prepended to every generated per-server `.d.ts` (see `schema-to-ts.ts`), so a workspace's
 // coding agent always has them in scope. One method per tool, plus `callTool` overloads, is
 // generated from the server's own tool catalog and appended below this file's contents.
 

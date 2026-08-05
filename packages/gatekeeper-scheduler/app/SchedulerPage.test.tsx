@@ -250,7 +250,7 @@ describe("SchedulerPage", () => {
     const rows = [
       ...container!.querySelectorAll<HTMLButtonElement>('[data-action="open-schedule"]'),
     ];
-    expect(container!.textContent).toContain("Unavailable gadget");
+    expect(container!.textContent).toContain("Unavailable workspace");
     expect(rows.find((row) => row.textContent?.includes("Missed reminder"))?.disabled).toBe(true);
     expect(rows.find((row) => row.textContent?.includes("Quarterly export"))?.disabled).toBe(false);
   });

@@ -262,7 +262,7 @@ export default function CommandPalette({
         label: g.title || 'Untitled workspace',
         hint: 'Workspace',
         icon: <SquaresFour size={15} className="text-kumo-inactive" />,
-        run: () => navigate({ to: '/gadget/$id', params: { id: g.id } }),
+        run: () => navigate({ to: '/workspace/$id', params: { id: g.id } }),
       }))
 
     const bpBase: Command[] = blueprints

@@ -235,7 +235,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (started && !closed) {
         // this.ctx.abort() would be nicer here, but it is still marked experimental in the
         // workers runtime.
-        this.abortSession(new Error("lost connection to gadget DO"));
+        this.abortSession(new Error("lost connection to workspace DO"));
       }
     }
 
@@ -271,7 +271,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async newGadget(): Promise<RpcStub<Overseer>> {
     let id = this.overseers.newUniqueId().toString();
-    await this.user.newGadget(id, "Untitled Gadget");
+    await this.user.newGadget(id, "Untitled Workspace");
     recordAnalytics(this.ctx, this.env, {
       event_name: "gadget_created",
       user_id: this.user.id.toString(),
@@ -280,7 +280,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     });
     let result = await this.openGadget(id);
     if (!result) {
-      throw new Error("Open failed despite newly-created gadget?");
+      throw new Error("Open failed despite newly-created workspace?");
     }
     return result;
   }

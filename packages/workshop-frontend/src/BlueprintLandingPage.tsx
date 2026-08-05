@@ -578,7 +578,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments)
     try {
       let metadata = await overseer.getMetadata()
-      window.location.href = `/gadget/${metadata.id}`
+      window.location.href = `/workspace/${metadata.id}`
     } catch (err: any) {
       setError(err.message || 'Failed to create gadget from blueprint.')
     } finally {
@@ -712,8 +712,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     setRemovingFromLibrary(true)
     let overseer: ReturnType<typeof authenticatedApi.openGadget> | null = null
     try {
-      if (ownBlueprintSummary?.gadgetId && ownBlueprintSummary.gadgetTitle !== 'Deleted Gadget') {
-        overseer = authenticatedApi.openGadget(ownBlueprintSummary.gadgetId)
+      // The source workspace owns its blueprints, so it must do the deleting. Once it is gone (or
+      // the blueprint was never published from one), the user record is all there is to clean up.
+      if (ownBlueprintSummary?.source.type === 'workspace') {
+        overseer = authenticatedApi.openGadget(ownBlueprintSummary.source.workspaceId)
         await overseer.deleteBlueprint(id)
       } else {
         await authenticatedApi.deleteOrphanedBlueprint(id)
@@ -778,6 +780,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
+  // Only set when the workspace this blueprint was published from is still around to open.
+  let sourceWorkspace =
+    ownBlueprintSummary?.source.type === 'workspace' ? ownBlueprintSummary.source : null
 
   return (
     <div className="min-h-full bg-kumo-base">
@@ -885,13 +890,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   {updatingPinned ? 'Updating...' : (isPinned ? 'Unfavorite' : 'Favorite')}
                 </DropdownMenu.Item>
 
-                {ownBlueprintSummary?.gadgetId && ownBlueprintSummary.gadgetTitle !== 'Deleted Gadget' && (
+                {sourceWorkspace && (
                   <DropdownMenu.Item
                     icon={<ArrowSquareOut size={13} className="mr-2" />}
-                    onClick={() => window.open(`/gadget/${ownBlueprintSummary.gadgetId}`, '_blank', 'noopener,noreferrer')}
+                    onClick={() => window.open(`/workspace/${sourceWorkspace.workspaceId}`, '_blank', 'noopener,noreferrer')}
                     className={MENU_ITEM}
                   >
-                    Go to gadget
+                    Go to workspace
                   </DropdownMenu.Item>
                 )}
 

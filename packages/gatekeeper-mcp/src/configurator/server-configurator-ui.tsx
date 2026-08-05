@@ -41,7 +41,7 @@ export default {
     const selectedCount = (values.tools ?? "").split(",").filter(Boolean).length;
 
     return <Section>
-      <Field label="Tools" description="Choose how much of this server the Gadget may call.">
+      <Field label="Tools" description="Choose how much of this server this connection may call.">
         <RadioCards
           value={mode}
           options={[

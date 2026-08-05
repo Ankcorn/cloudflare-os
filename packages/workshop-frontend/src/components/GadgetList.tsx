@@ -72,7 +72,7 @@ function AppRow({
 
   return (
     <Link
-      to="/gadget/$id"
+      to="/workspace/$id"
       params={{ id: gadget.id }}
       className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
       onClick={(e) => {
@@ -104,7 +104,7 @@ function AppRow({
             />
           ) : (
             <h3 className="text-sm font-medium text-kumo-default truncate">
-              {gadget.title || 'Untitled Gadget'}
+              {gadget.title || 'Untitled Workspace'}
             </h3>
           )}
         </div>
@@ -237,7 +237,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     try {
       if (deleteTarget.owner) {
         await authenticatedApi.dismissSharedGadget(deleteTarget.id)
-        toasts.add({ title: 'Gadget removed from list', variant: 'success' })
+        toasts.add({ title: 'Workspace removed from list', variant: 'success' })
       } else {
         const overseer = await authenticatedApi.openGadget(deleteTarget.id)
         try {
@@ -245,12 +245,12 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
         } finally {
           overseer[Symbol.dispose]()
         }
-        toasts.add({ title: 'Gadget deleted', variant: 'success' })
+        toasts.add({ title: 'Workspace deleted', variant: 'success' })
       }
       setGadgets(prev => prev.filter(g => g.id !== deleteTarget.id))
     } catch (err) {
-      console.error('Failed to delete gadget:', err)
-      toasts.add({ title: 'Failed to delete gadget', variant: 'error' })
+      console.error('Failed to delete workspace:', err)
+      toasts.add({ title: 'Failed to delete workspace', variant: 'error' })
     } finally {
       setIsDeleting(false)
       setDeleteTarget(null)
@@ -267,7 +267,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       overseer = null
     } catch (err) {
       overseer?.[Symbol.dispose]()
-      console.error('Failed to open gadget for sharing:', err)
+      console.error('Failed to open workspace for sharing:', err)
       toasts.add({ title: 'Failed to open share settings', variant: 'error' })
     }
   }
@@ -288,7 +288,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     try {
       await overseer.setPinned(newPinned)
     } catch (err) {
-      console.error('Failed to pin gadget:', err)
+      console.error('Failed to pin workspace:', err)
       setGadgets(prev => {
         const reverted = prev.map(g => g.id === gadget.id ? { ...g, pinned: gadget.pinned } : g)
         return reverted.toSorted((a, b) => {
@@ -311,9 +311,9 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     try {
       await overseer.setTitle(newTitle)
     } catch (err) {
-      console.error('Failed to rename gadget:', err)
+      console.error('Failed to rename workspace:', err)
       setGadgets(prev => prev.map(g => g.id === gadget.id ? { ...g, title: gadget.title } : g))
-      toasts.add({ title: 'Failed to rename gadget', variant: 'error' })
+      toasts.add({ title: 'Failed to rename workspace', variant: 'error' })
     } finally {
       (await overseer)[Symbol.dispose]()
     }
@@ -334,11 +334,11 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       {showHeader && (
         <div className="px-6 sm:px-10 lg:px-10 pt-10 lg:pt-10 mb-4">
           <h2 className="text-lg font-semibold text-kumo-default">
-            Your gadgets
+            Your workspaces
           </h2>
           {!loading && gadgets.length === 0 && !loadError && (
             <p className="mt-1 text-sm text-kumo-inactive">
-              You haven&apos;t created any gadgets yet
+              You haven&apos;t created any workspaces yet
             </p>
           )}
         </div>
@@ -375,13 +375,13 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
           </>
         ) : loadError ? (
           <div className="text-center py-12 text-sm">
-            <p className="text-kumo-danger">Something went wrong loading your gadgets.</p>
+            <p className="text-kumo-danger">Something went wrong loading your workspaces.</p>
             <button onClick={loadGadgets} className="text-kumo-brand mt-1 underline">Try again</button>
           </div>
         ) : filtered.length === 0 ? (
           search ? (
             <div className="text-center py-12 text-kumo-inactive text-sm">
-              No gadgets found
+              No workspaces found
             </div>
           ) : (
             <FeaturedBlueprintsGallery />
@@ -406,11 +406,11 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
         open={deleteTarget !== null}
         onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
         isDeleting={isDeleting}
-        title={deleteTarget?.owner ? 'Remove gadget' : 'Delete gadget'}
+        title={deleteTarget?.owner ? 'Remove workspace' : 'Delete workspace'}
         description={
           deleteTarget?.owner
-            ? `Remove "${deleteTarget?.title || 'Untitled Gadget'}" from your list? You can still access it via its link.`
-            : `Delete "${deleteTarget?.title || 'Untitled Gadget'}"? This cannot be undone.`
+            ? `Remove "${deleteTarget?.title || 'Untitled Workspace'}" from your list? You can still access it via its link.`
+            : `Delete "${deleteTarget?.title || 'Untitled Workspace'}"? This cannot be undone.`
         }
         confirmLabel={deleteTarget?.owner ? 'Remove' : 'Delete'}
         confirmingLabel={deleteTarget?.owner ? 'Removing...' : 'Deleting...'}
@@ -424,7 +424,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       >
         <Dialog className="p-8" size="sm">
           <Dialog.Title className="text-lg font-semibold">
-            {infoTarget?.title || 'Untitled Gadget'}
+            {infoTarget?.title || 'Untitled Workspace'}
           </Dialog.Title>
           <div className="mt-4 flex flex-col gap-3 text-sm">
             <div className="flex justify-between">

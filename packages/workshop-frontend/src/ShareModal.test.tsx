@@ -71,7 +71,7 @@ vi.mock('./clipboard', () => ({ copyToClipboard: (text: string) => copyToClipboa
 import ShareModal from './ShareModal'
 
 const METADATA = { id: 'trip-planner', title: 'Trip planner' } as GadgetMetadata
-const WORKSPACE_URL = `${window.location.origin}/gadget/trip-planner`
+const WORKSPACE_URL = `${window.location.origin}/workspace/trip-planner`
 
 const CURRENT_USER: AiChatAuthorInfo = { type: 'user', id: 'dan@cloudflare.com', name: 'Dan' }
 

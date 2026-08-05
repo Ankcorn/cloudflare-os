@@ -23,6 +23,7 @@ import {
 } from '@gadgets/workshop-shared/gatekeeper'
 import { ConnectedAccountsSubscriber, GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { useSiteName } from '../ServerConfigContext'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -253,9 +254,11 @@ function SectionEyebrow({ label, count }: { label: string; count?: number }) {
 function ConnectorsHeroDiagram({
   accounts,
   vendors,
+  siteName,
 }: {
   accounts: AccountEntry[]
   vendors: VendorEntry[]
+  siteName: string
 }) {
   const [hoveredSource, setHoveredSource] = useState<number | null>(null)
   const seen = new Set<string>()
@@ -287,7 +290,7 @@ function ConnectorsHeroDiagram({
   ]
   const nodeSize = 44
   const gatekeeper = { x: 176, y: 58, width: 52, height: 52 }
-  const gadget = { x: 268, y: 58, width: 120, height: 52 }
+  const gadget = { x: 268, y: 58, width: 172, height: 52 }
   const gatekeeperInput = {
     x: gatekeeper.x,
     y: gatekeeper.y + gatekeeper.height / 2,
@@ -313,10 +316,10 @@ function ConnectorsHeroDiagram({
   }
 
   return (
-    <div className="relative isolate hidden h-[176px] w-[392px] lg:block">
+    <div className="relative isolate hidden h-[176px] w-[444px] lg:block">
       <svg
         className="absolute inset-0 h-full w-full text-kumo-line"
-        viewBox="0 0 392 176"
+        viewBox="0 0 444 176"
         fill="none"
       >
         {nodes[0] && (
@@ -420,12 +423,12 @@ function ConnectorsHeroDiagram({
         </div>
       </div>
 
-      <div className="absolute left-[268px] top-[58px] z-10 flex h-[52px] w-[120px] items-center gap-2 rounded-2xl border border-kumo-line bg-kumo-elevated pl-2 pr-4">
+      <div className="absolute left-[268px] top-[58px] z-10 flex h-[52px] w-[172px] items-center gap-2 rounded-2xl border border-kumo-line bg-kumo-elevated pl-2 pr-4">
         <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-kumo-base text-kumo-brand">
           <Hexagon size={17} weight="bold" />
         </div>
-        <span className="relative -top-px text-base leading-5 font-semibold tracking-tight text-kumo-default">
-          gadgets
+        <span className="relative -top-px min-w-0 truncate text-base leading-5 font-semibold tracking-tight text-kumo-default">
+          {siteName}
         </span>
       </div>
     </div>
@@ -439,6 +442,7 @@ type ModalTarget =
 
 function ConnectorsPage() {
   useDocumentTitle('Gatekeepers')
+  const siteName = useSiteName()
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -736,7 +740,7 @@ function ConnectorsPage() {
   return (
     <div className="min-h-[calc(100vh-3.5rem-1px)] bg-kumo-base">
       <div className="mx-auto w-full max-w-5xl px-4 py-12 sm:px-8 sm:py-14">
-        <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,540px)_392px] lg:items-center lg:justify-between">
+        <header className="mb-8 grid gap-8 lg:grid-cols-[minmax(0,540px)_444px] lg:items-center lg:justify-between">
           <div>
             <h1 className="m-0 text-3xl font-semibold leading-tight tracking-tight text-kumo-default sm:text-[34px]">
               Gatekeepers
@@ -746,7 +750,7 @@ function ConnectorsPage() {
               them into anything you build.
             </p>
           </div>
-          <ConnectorsHeroDiagram accounts={accounts} vendors={vendors} />
+          <ConnectorsHeroDiagram accounts={accounts} vendors={vendors} siteName={siteName} />
         </header>
 
         <div className="mb-6 flex items-center gap-3">

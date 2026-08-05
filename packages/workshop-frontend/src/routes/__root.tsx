@@ -46,10 +46,9 @@ function RootComponent() {
   // native — sidebar and all — instead of floating on a bare page.
   const standalone = isSignup || (isBlueprint && !isAuthenticated)
 
-  // Chat routes hide the header (fullscreen mode)
-  const isChat = pathname.startsWith('/chat/')
-  // Gadget editor also fullscreen
-  const isGadgetEditor = pathname.startsWith('/gadget/')
+  // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
+  // here so the chrome doesn't flash in during the redirect to /workspace/.
+  const isWorkspaceEditor = pathname.startsWith('/workspace/') || pathname.startsWith('/gadget/')
 
   const handleLoginSuccess = () => {
     const token = localStorage.getItem('authToken')
@@ -124,8 +123,7 @@ function RootComponent() {
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               connectionLost={connectionLost}
-              isChat={isChat}
-              isGadgetEditor={isGadgetEditor}
+              isWorkspaceEditor={isWorkspaceEditor}
             />
           </Toasty>
         </TooltipProvider>
@@ -142,13 +140,11 @@ function RootComponent() {
 function AuthenticatedShell({
   authenticatedApi,
   connectionLost,
-  isChat,
-  isGadgetEditor,
+  isWorkspaceEditor,
 }: {
   authenticatedApi: RpcStub<AuthenticatedApi>
   connectionLost: boolean
-  isChat: boolean
-  isGadgetEditor: boolean
+  isWorkspaceEditor: boolean
 }) {
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
@@ -179,9 +175,9 @@ function AuthenticatedShell({
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
-  // Normal app shell. Chat and the Gadget editor are rendered fullscreen (no chrome); everything
-  // else gets the persistent left-rail AppShell.
-  const fullscreen = isChat || isGadgetEditor
+  // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else
+  // gets the persistent left-rail AppShell.
+  const fullscreen = isWorkspaceEditor
   return (
     <>
       {connectionLost && <ConnectionLostBanner />}

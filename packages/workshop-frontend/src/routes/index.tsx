@@ -115,7 +115,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
         // Open the conversation we just started.
-        navigate({ to: "/gadget/$id", params: { id }, search: { chat } });
+        navigate({ to: "/workspace/$id", params: { id }, search: { chat } });
       } catch (err) {
         console.error("Failed to create gadget:", err);
         // A retry reuses the provisional gadget while the draft contains gadget-scoped references.
@@ -123,7 +123,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
           provisionalOverseerRef.current?.stub[Symbol.dispose]();
           provisionalOverseerRef.current = null;
         }
-        toasts.add({ title: "Failed to create gadget", variant: "error" });
+        toasts.add({ title: "Failed to create workspace", variant: "error" });
         throw err;
       }
     },
