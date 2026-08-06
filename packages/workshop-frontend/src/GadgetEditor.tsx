@@ -30,6 +30,7 @@ import {
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
+import { logRpcFailure } from './rpcErrors'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
@@ -455,6 +456,7 @@ export default function GadgetEditor() {
     retry: retryOpen,
     cancelObserverConfig,
     updateTitle,
+    notifyWorkspaceRpcError,
   } = useWorkspaceOpen({
     id,
     authenticatedApi,
@@ -1112,7 +1114,13 @@ export default function GadgetEditor() {
         if (cancelled) { s[Symbol.dispose](); return }
         sub = s
       })
-      .catch(err => console.error('Failed to subscribe to workpieces:', err))
+      .catch(err => {
+        // Notify so a DO reset schedules a workspace reopen; this subscription (and the console
+        // log one below) is mounted for the whole workspace, so recovery doesn't have to wait
+        // for a user action to trip over the dead session.
+        notifyWorkspaceRpcError(err, 'workpieces.subscribe')
+        logRpcFailure('Failed to subscribe to workpieces:', err)
+      })
     return () => {
       cancelled = true
       subscriber.cancel()
@@ -1197,7 +1205,10 @@ export default function GadgetEditor() {
         if (cancelled) { s[Symbol.dispose](); return }
         sub = s
       })
-      .catch(err => console.error('Failed to subscribe to console logs:', err))
+      .catch(err => {
+        notifyWorkspaceRpcError(err, 'console-logs.subscribe')
+        logRpcFailure('Failed to subscribe to console logs:', err)
+      })
     return () => { cancelled = true; sub?.[Symbol.dispose]() }
   }, [overseer])
 
@@ -1483,6 +1494,7 @@ export default function GadgetEditor() {
                 <ChatInterface
                   key={id}
                   overseer={overseer.stub}
+                  onWorkspaceRpcError={notifyWorkspaceRpcError}
                   selectedChatId={effectiveSelectedChatId}
                   onNavigateToChat={navigateToChat}
                   onProposedChangesChange={setProposedChanges}

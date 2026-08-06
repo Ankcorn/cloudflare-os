@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { ActionLogEntry, ActionsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
+import { logRpcFailure } from './rpcErrors'
 
 // One ref-counted subscription per Overseer stub, shared across consumers.
 // `startAfter: epoch 0` asks the backend to replay full history through the
@@ -91,7 +92,9 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
       if (store.generation === generation) {
         store.isReady = true
         notify(store)
-        console.error('Failed to subscribe to actions:', err)
+        // Quiet for transient errors: GadgetEditor's always-mounted subscriptions notify the
+        // workspace reopen, which replaces the overseer stub and resubscribes this store.
+        logRpcFailure('Failed to subscribe to actions:', err)
       }
     }
   })()

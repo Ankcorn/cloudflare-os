@@ -11,6 +11,7 @@ import CodeEditor from './CodeEditor'
 import CodeDiffEditor from './CodeDiffEditor'
 import type { StreamingProposedChanges } from './ChatInterface'
 import { saveTextToFile } from './fileTransfers'
+import { logRpcFailure } from './rpcErrors'
 
 // RpcTarget implementation for receiving code updates from the server
 class CodeSubscriberImpl extends RpcTarget implements CodeSubscriber {
@@ -656,10 +657,12 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
           setIsReady(true)
         }
       } catch (error) {
-        console.error('Failed to subscribe to code updates:', error)
+        // Quiet for transient errors: the workspace reopen replaces the overseer stub, which
+        // re-runs this effect and resubscribes.
+        const transient = logRpcFailure('Failed to subscribe to code updates:', error)
         // Only show error if we've never successfully loaded (never reached ready state)
         if (!isReadyRef.current) {
-          toasts.add({ title: 'Failed to load code files', variant: 'error' })
+          if (!transient) toasts.add({ title: 'Failed to load code files', variant: 'error' })
           setLoading(false)
         }
         // For reconnection failures after we've loaded, don't show toast - user can keep editing

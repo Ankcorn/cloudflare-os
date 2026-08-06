@@ -163,6 +163,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   const onConsoleLogRef = useRef(onConsoleLog)
   onIframeEscapeRef.current = onIframeEscape
   onConsoleLogRef.current = onConsoleLog
+  const errorRef = useRef(error)
+  errorRef.current = error
 
   const suspendGadgetCalls = () => {
     if (!pendingGadgetStubRef.current) {
@@ -205,6 +207,13 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     if (!rpcSessionRef.current) {
       if (handshakePendingRef.current !== null) {
         reloadIframe(new Error('Gadget changed during RPC handshake.'))
+      } else if (errorRef.current !== null) {
+        // A replacement client arrived while showing a failure — e.g. the workspace reopened
+        // after a DO reset, which never fires onRpcBroken. Retry through it like "Try again".
+        setError(null)
+        setHasLoaded(false)
+        setIsInvalidated(false)
+        setRetryNonce(n => n + 1)
       }
       return
     }
