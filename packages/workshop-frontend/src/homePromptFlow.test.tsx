@@ -57,7 +57,9 @@ describe("Home prompt route flow", () => {
     container?.remove();
     localStorage.clear();
     testState.seeds.length = 0;
+    testState.listModels.mockReset().mockResolvedValue([]);
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
 
   it("seeds the composer once, clears route state, and does not create a workspace", async () => {
@@ -72,5 +74,23 @@ describe("Home prompt route flow", () => {
     expect(Math.max(...testState.seeds.map(({ nonce }) => nonce ?? 0))).toBe(1);
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/", search: {}, replace: true });
     expect(testState.newGadget).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a Durable Object reset after the model retry is exhausted", async () => {
+    vi.useFakeTimers();
+    const reset = Object.assign(new Error("reset"), { durableObjectReset: true });
+    testState.listModels.mockRejectedValue(reset);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(<HomePageContent />));
+    await act(async () => vi.runAllTimersAsync());
+
+    expect(testState.listModels).toHaveBeenCalledTimes(2);
+    expect(testState.addToast).toHaveBeenCalledWith({
+      title: "Couldn't load AI models",
+      variant: "error",
+    });
   });
 });
