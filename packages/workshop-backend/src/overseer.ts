@@ -934,7 +934,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
 type OverseerStorage = ReturnType<typeof makeOverseerStorage>;
 
 // Don't build a snapshot until we have at least 64k of logs since the last one.
-const MIN_SNAPSHOT_THRESHOLD: number = 256; //65536;
+const MIN_SNAPSHOT_THRESHOLD: number = 65536;
 
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
