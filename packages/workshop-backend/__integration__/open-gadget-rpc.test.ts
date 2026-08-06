@@ -1,3 +1,4 @@
+import { abortAllDurableObjects } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import {
@@ -131,5 +132,28 @@ describe.skip("openGadget errors across native RPC and Cap'n Web", () => {
 
     const browserError = await openRejection(intruder, metadata.id);
     expectRpcCode(browserError, OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+  });
+});
+
+// The DO-reset recovery contract: a user-DO reset must not poison the API session. A stub is
+// bound to one incarnation of the object and is permanently broken by a reset, so the
+// authenticated API re-resolves its user-DO stub per call — the same session recovers on the
+// next request with no reconnect. abortAllDurableObjects() is the non-graceful teardown, the
+// local stand-in for the storage-timeout/overload resets observed in production. (Deliberately
+// not evictDurableObject(): eviction is graceful — it drains in-flight work and never breaks a
+// stub — so it cannot reproduce this failure.)
+describe("user-DO reset recovery", () => {
+  it("recovers on the same session after the user DO is reset", async () => {
+    using publicApi = await connect();
+    const account = await createAccount(publicApi, "reset");
+    using authenticated = await publicApi.authenticate(account.token);
+
+    expect(await authenticated.listModels()).toBeInstanceOf(Array);
+
+    await abortAllDurableObjects();
+
+    // Same socket, same AuthenticatedApiImpl. With the per-call stub getter this reaches the
+    // restarted object; with a session-cached stub it would reject with the abort error forever.
+    expect(await authenticated.listModels()).toBeInstanceOf(Array);
   });
 });

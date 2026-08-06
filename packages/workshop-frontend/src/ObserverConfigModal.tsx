@@ -1,3 +1,4 @@
+import { withDoResetRetry } from './rpcErrors'
 import { useState, useEffect, useRef } from 'react'
 import { Dialog, Select, Loader, Text, useKumoToastManager } from '@cloudflare/kumo'
 import { Warning, Plus, ArrowClockwise, CheckCircle } from '@phosphor-icons/react'
@@ -143,8 +144,8 @@ export default function ObserverConfigModal({
       }
     }
 
-    authenticatedApi
-      .subscribeConnectedAccounts(new Subscriber(), { includeForcedAutoProvisionedAccounts: true })
+    withDoResetRetry(() => authenticatedApi
+      .subscribeConnectedAccounts(new Subscriber(), { includeForcedAutoProvisionedAccounts: true }))
       .then(stub => {
         if (cancelled) { stub[Symbol.dispose](); return }
         subStub = stub
@@ -163,10 +164,10 @@ export default function ObserverConfigModal({
   // ── load vendor metadata for display and resource-scope resolution ─────────────
   useEffect(() => {
     let cancelled = false
-    Promise.all([
+    withDoResetRetry(() => Promise.all([
       authenticatedApi.listGatekeeperVendors(),
       authenticatedApi.listAddableGatekeepers(),
-    ])
+    ]))
       .then(([vendors, addable]) => {
         if (cancelled) return
         const map = new Map<string, GatekeeperVendorInfo>()
