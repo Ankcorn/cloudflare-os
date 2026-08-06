@@ -21,6 +21,7 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
+import { logRpcFailure } from './rpcErrors'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -70,11 +71,14 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       setHooks(hookList.filter((hook) => hook.gadgetId === id))
       onHasGatekeepersChange?.(bindingList.length > 0)
     } catch (err) {
-      // Loud on purpose: this panel has no retry path, so a quieted transient failure would
-      // silently render "no connected resources".
-      console.error('Failed to load gatekeepers:', err)
-      reportIssue('connections.load', err)
-      toasts.add({ title: 'Failed to load connections', variant: 'error' })
+      // Transient failures stay quiet: this panel reloads on every overseer stub replacement
+      // (effect below), so the workspace reopen / socket reconnect is its retry path — a
+      // do-reset here even schedules that reopen via logRpcFailure. The panel may sit empty
+      // until recovery lands, but the window is bounded by the retry, no longer indefinite.
+      if (!logRpcFailure('Failed to load gatekeepers:', err, { reportSite: 'connections.load' })) {
+        reportIssue('connections.load', err)
+        toasts.add({ title: 'Failed to load connections', variant: 'error' })
+      }
     } finally {
       setLoading(false)
     }
@@ -92,7 +96,9 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       }
       await loadGatekeepers()
     } catch (err) {
-      console.error('Failed to toggle hook:', err)
+      // A do-reset schedules the workspace reopen inside logRpcFailure. Keep the toast even
+      // then: the click genuinely did nothing, and the reopen won't replay it.
+      logRpcFailure('Failed to toggle hook:', err, { reportSite: 'hook.toggle' })
       toasts.add({ title: `Failed to ${enabled ? 'enable' : 'disable'} hook`, variant: 'error' })
       // Revert optimistic update.
       setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled: !enabled } : h)))
@@ -111,7 +117,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       await overseer.deleteHook(deleteHookTarget.id)
       await loadGatekeepers()
     } catch (err) {
-      console.error('Failed to delete hook:', err)
+      logRpcFailure('Failed to delete hook:', err, { reportSite: 'hook.delete' })
       toasts.add({ title: 'Failed to delete hook', variant: 'error' })
     } finally {
       setDeleteHookTarget(null)

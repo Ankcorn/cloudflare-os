@@ -487,4 +487,40 @@ describe('GadgetUI RPC recovery', () => {
     const reloadedChild = connectIframe(container.querySelector('iframe')!)
     await expect(reloadedChild.read()).resolves.toBe('reloaded')
   })
+
+  it('retries through a replacement gadget client after a failed handshake', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const first = fakeGadget(
+        'first',
+        'document.body.textContent = "first"',
+        vi.fn<() => Promise<RpcStub<TestGadget>>>(async () => {
+          throw new Error('The execution context which hosts this callback is no longer running.')
+        }),
+      )
+      await act(async () => {
+        root.render(<GadgetUI gadget={first.stub} height="100px" />)
+      })
+      await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+      await act(async () => {
+        dispatchIframeHandshake(container.querySelector('iframe')!, new MessageChannel().port2)
+      })
+      // The failed handshake swaps the iframe for the error banner (Kumo's Banner renders no
+      // text under jsdom, so assert on the swap rather than the banner copy).
+      await vi.waitFor(() => expect(consoleError).toHaveBeenCalledWith(
+        'Failed to establish RPC connection:', expect.anything()))
+      expect(container.querySelector('iframe')).toBeNull()
+
+      // The workspace reopened and produced a fresh client: the error must clear and the
+      // bundle reload on its own, without the manual "Try again".
+      const replacement = fakeGadget('replacement', 'document.body.textContent = "replacement"')
+      await act(async () => {
+        root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
+      })
+      await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+      expect(replacement.getUiBundle).toHaveBeenCalled()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
 })

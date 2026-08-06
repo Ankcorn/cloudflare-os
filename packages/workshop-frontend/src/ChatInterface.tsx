@@ -5237,7 +5237,7 @@ function ChatInterface({
           forceUpdate();
         }
       } catch (err) {
-        if (!logRpcFailure("Failed to subscribe to chats:", err)) {
+        if (!logRpcFailure("Failed to subscribe to chats:", err, { reportSite: 'chat.subscribe' })) {
           reportIssue('chat.subscription-load', err)
           toasts.add({ title: "Unable to load conversations", variant: "error" });
         }
@@ -5246,9 +5246,13 @@ function ChatInterface({
 
     subscribe();
 
-    // Set up reconnection handling
-    overseer.onRpcBroken?.((error) => {
-      console.warn("RPC connection broken:", error);
+    // Socket-level teardown only: onRpcBroken never fires for a DO reset behind a healthy
+    // session (workerd probe — see useWorkspaceOpen), so the subscribe catch above owns that
+    // recovery path via logRpcFailure's workspace recovery hook. No logging here: the
+    // connection manager already reports the outage once, and callbacks from every overseer
+    // generation fire together at teardown (capnweb has no unregister API), so a log line
+    // here multiplies per reopen.
+    overseer.onRpcBroken?.(() => {
       setIsSubscribed(false);
       // Cache persists, component will get new overseer prop and resubscribe
     });

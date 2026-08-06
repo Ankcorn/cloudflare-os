@@ -13,6 +13,7 @@ import {
   type Overseer,
 } from '@gadgets/workshop-shared/api'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
+import { logRpcFailure } from './rpcErrors'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -37,6 +38,13 @@ function api(overseer: RpcStub<Overseer>): RpcStub<AuthenticatedApi> {
   return { openGadget: () => overseer } as unknown as RpcStub<AuthenticatedApi>
 }
 
+function resetError() {
+  return Object.assign(
+    new Error('Durable Object storage operation exceeded timeout which caused object to be reset.'),
+    { durableObjectReset: true },
+  )
+}
+
 const METADATA = {
   id: 'workspace-1',
   title: 'Quarterly planning',
@@ -51,6 +59,7 @@ function WorkspaceProbe({ authenticatedApi }: { authenticatedApi: RpcStub<Authen
     onMetadata: () => {},
     onShareKeyConsumed: () => {},
   })
+  if (state.workspaceLost) return <p>reconnecting</p>
   if (state.error?.kind === 'open') {
     return (
       <WorkspaceOpenErrorPage
@@ -140,5 +149,282 @@ describe('useWorkspaceOpen', () => {
     expect(document.title).toBe('Cloudflare OS')
     expect(firstSubscriptionDispose).toHaveBeenCalledOnce()
     expect(deniedOverseerDispose).toHaveBeenCalledOnce()
+  })
+
+  it('coalesces a burst of DO-reset errors into one reopen', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+          callback(METADATA)
+          return disposableStub({}) as RpcStub<{}>
+        },
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+      expect(openGadget).toHaveBeenCalledTimes(1)
+
+      // Any call site quieting a do-reset through logRpcFailure triggers the mounted
+      // workspace's registered recovery hook; a burst coalesces into one reopen.
+      act(() => {
+        for (let i = 0; i < 5; i++) expect(logRpcFailure('Failed op:', resetError())).toBe(true)
+      })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps backing off while each reopen succeeds but immediately fails again', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+          callback(METADATA)
+          return disposableStub({}) as RpcStub<{}>
+        },
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+      expect(openGadget).toHaveBeenCalledTimes(1)
+
+      act(() => { logRpcFailure('Failed op:', resetError()) })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+
+      // The flapping-DO shape: the reopen itself succeeded moments ago, then failed again. That
+      // quick success must NOT reset the gap back to the 500ms floor — the second reopen waits
+      // out the grown (jittered 5s) gap.
+      act(() => { logRpcFailure('Failed op:', resetError()) })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+      await act(async () => { vi.advanceTimersByTime(5400) })
+      expect(openGadget).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resets the backoff once the workspace has stayed healthy for a while', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+          callback(METADATA)
+          return disposableStub({}) as RpcStub<{}>
+        },
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+
+      // First outage grows the gap to 5s...
+      act(() => { logRpcFailure('Failed op:', resetError()) })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+
+      // ...but after a long healthy stretch, a fresh outage starts back at the 500ms floor.
+      await act(async () => { vi.advanceTimersByTime(31000) })
+      act(() => { logRpcFailure('Failed op:', resetError()) })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reopens for a flag-only retryable error (worker lost its connection to the DO)', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+          callback(METADATA)
+          return disposableStub({}) as RpcStub<{}>
+        },
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+      expect(openGadget).toHaveBeenCalledTimes(1)
+
+      // No durableObjectReset flag and no recognizable message — only `retryable`, which
+      // classifies as do-reset (arrived over a healthy socket, so no reconnect will cure it).
+      const retryableError = Object.assign(new Error('internal error'), { retryable: true })
+      act(() => {
+        expect(logRpcFailure('Failed op:', retryableError)).toBe(true)
+      })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not reopen for connection-class errors', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async () => disposableStub({}) as RpcStub<{}>,
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+
+      // Still quieted (transient), but recovery belongs to the connection manager's reconnect,
+      // not a workspace reopen.
+      act(() => {
+        expect(logRpcFailure('Failed op:', new Error('Peer closed WebSocket: 1006 '))).toBe(true)
+      })
+      await act(async () => { vi.advanceTimersByTime(6000) })
+      expect(openGadget).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows reconnecting instead of a terminal error when the initial open fails transiently', async () => {
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const overseer = disposableStub({
+      subscribeToMetadata: vi.fn<() => Promise<RpcStub<{}>>>(async () => { throw resetError() }),
+    }) as unknown as RpcStub<Overseer>
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<WorkspaceProbe authenticatedApi={api(overseer)} />))
+
+    expect(container.textContent).toContain('reconnecting')
+    expect(container.textContent).not.toContain('access')
+  })
+
+  it('reschedules the reopen when an attempt never settles', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'debug').mockImplementation(() => {})
+    try {
+      let captured!: ReturnType<typeof useWorkspaceOpen>
+      let hang = false
+      const openGadget = vi.fn<() => RpcStub<Overseer>>(() => disposableStub({
+        subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+          if (hang) return new Promise<RpcStub<{}>>(() => {})
+          callback(METADATA)
+          return disposableStub({}) as RpcStub<{}>
+        },
+      }) as unknown as RpcStub<Overseer>)
+      const authenticatedApi = { openGadget } as unknown as RpcStub<AuthenticatedApi>
+
+      function Probe() {
+        captured = useWorkspaceOpen({
+          id: 'workspace-1',
+          authenticatedApi,
+          onInvalidShareKey: () => {},
+          onMetadata: () => {},
+          onShareKeyConsumed: () => {},
+        })
+        return null
+      }
+
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+      expect(openGadget).toHaveBeenCalledTimes(1)
+
+      hang = true
+      act(() => {
+        expect(logRpcFailure('Failed op:', resetError())).toBe(true)
+      })
+      await act(async () => { vi.advanceTimersByTime(600) })
+      expect(openGadget).toHaveBeenCalledTimes(2)
+
+      // The stranded attempt neither resolves nor rejects. The settlement deadline must turn it
+      // back into a scheduled retry with the pill showing, not a silent stall.
+      await act(async () => { vi.advanceTimersByTime(15100) })
+      expect(captured.workspaceLost).toBe(true)
+
+      hang = false
+      await act(async () => { vi.advanceTimersByTime(6000) })  // 5s gap, jittered up to 5.75s
+      expect(openGadget).toHaveBeenCalledTimes(3)
+      expect(captured.workspaceLost).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

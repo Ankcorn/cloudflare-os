@@ -82,25 +82,39 @@ export function isTransientRpcError(err: unknown): boolean {
   return cls === 'do-reset' || cls === 'connection'
 }
 
+// Exactly one workspace is open per tab; its useWorkspaceOpen registers its recovery hook here,
+// making logRpcFailure the single do-reset recovery entry point: every call site that logs a
+// failure the standard way schedules a coalesced, backed-off reopen — quieting an error as
+// "transient" can then never orphan it, and new call sites need no per-site recovery wiring.
+// The hook also owns reset telemetry (tagged with the workspace id) for sites that name a
+// `reportSite`. Connection-class errors are owned by the connection manager's reconnect instead.
+let workspaceRecoveryHook: ((err: unknown, reportSite?: string) => void) | null = null
+
+/** Registers the open workspace's do-reset recovery hook; pass null on unmount. */
+export function setWorkspaceRecoveryHook(
+  hook: ((err: unknown, reportSite?: string) => void) | null,
+) {
+  workspaceRecoveryHook = hook
+}
+
 // Logs an RPC failure: quietly for transient errors (a retry or reconnect is expected to cure
 // them), loudly otherwise. Returns true when transient so call sites can skip their toasts.
-// Pass `reportSite` from action paths (sends, creates) to also report do-reset errors to the
-// client-errors endpoint, so resets that cost the user an action stay visible in telemetry.
+// A do-reset also schedules recovery of the open workspace (hook above). Pass `reportSite` from
+// action paths (sends, creates, approvals) to also report do-reset errors to the client-errors
+// endpoint, so resets that cost the user an action stay visible in telemetry.
 export function logRpcFailure(
   message: string, err: unknown, options?: { reportSite?: string },
 ): boolean {
   const cls = classifyRpcError(err)
-  if (cls === 'do-reset' && options?.reportSite) reportDoResetError(options.reportSite, err)
+  if (cls === 'do-reset') {
+    if (workspaceRecoveryHook) workspaceRecoveryHook(err, options?.reportSite)
+    else if (options?.reportSite) reportDoResetError(options.reportSite, err)
+  }
   const transient = cls === 'do-reset' || cls === 'connection'
   if (transient) console.debug(message, err)
   else console.error(message, err)
   return transient
 }
-
-// No client-side retry lives here on purpose: the Worker owns DO-reset recovery (fresh stubs,
-// one same-colo retry for idempotent reads — see workshop-backend's do-retry.ts), so a do-reset
-// error that reaches the browser already survived that and is worth surfacing. Connection-class
-// errors are owned by the connection manager's reconnect.
 
 /** Reports a DO-reset error to the client-errors endpoint (no-op unless reporting is enabled). */
 export function reportDoResetError(site: string, err: unknown, options?: { gadgetId?: string }) {

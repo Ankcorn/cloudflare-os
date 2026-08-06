@@ -30,6 +30,7 @@ import {
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
+import { logRpcFailure } from './rpcErrors'
 import GadgetCodeInterface from './GadgetCodeInterface'
 import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
@@ -450,7 +451,7 @@ export default function GadgetEditor() {
     overseer,
     metadata,
     error,
-    connectionLost,
+    workspaceLost,
     observerConfig,
     retry: retryOpen,
     cancelObserverConfig,
@@ -1112,7 +1113,13 @@ export default function GadgetEditor() {
         if (cancelled) { s[Symbol.dispose](); return }
         sub = s
       })
-      .catch(err => console.error('Failed to subscribe to workpieces:', err))
+      .catch(err => {
+        // A reset that rejects this (or the console-log subscribe below) schedules a workspace
+        // reopen via logRpcFailure's recovery hook. That only covers resets with the subscribe
+        // in flight: once established, a subscription whose DO resets goes silent with no
+        // client-side signal, and recovery waits for the next failing call in the workspace.
+        logRpcFailure('Failed to subscribe to workpieces:', err, { reportSite: 'workpieces.subscribe' })
+      })
     return () => {
       cancelled = true
       subscriber.cancel()
@@ -1197,7 +1204,9 @@ export default function GadgetEditor() {
         if (cancelled) { s[Symbol.dispose](); return }
         sub = s
       })
-      .catch(err => console.error('Failed to subscribe to console logs:', err))
+      .catch(err => {
+        logRpcFailure('Failed to subscribe to console logs:', err, { reportSite: 'console-logs.subscribe' })
+      })
     return () => { cancelled = true; sub?.[Symbol.dispose]() }
   }, [overseer])
 
@@ -1413,7 +1422,7 @@ export default function GadgetEditor() {
             onViewActivity={openActivity}
           />
 
-          {connectionLost && (
+          {workspaceLost && (
             <span className="text-xs text-kumo-warning px-2 py-0.5 rounded-full bg-kumo-warning-tint border border-kumo-warning/20">
               Reconnecting…
             </span>
