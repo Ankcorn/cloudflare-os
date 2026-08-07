@@ -95,6 +95,14 @@
       "created_at": "2026-08-07T09:53:08Z",
       "repoId": 1211925923,
       "pullRequestNo": 71
+    },
+    {
+      "name": "kote2kote",
+      "id": 1725754,
+      "comment_id": 5218335731,
+      "created_at": "2026-08-07T14:30:21Z",
+      "repoId": 1211925923,
+      "pullRequestNo": 73
     }
   ]
 }
