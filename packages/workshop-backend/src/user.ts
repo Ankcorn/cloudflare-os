@@ -278,6 +278,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
 
+  // Fresh per incarnation, never persisted. In-memory subscription state dies with the
+  // incarnation, so a caller that remembers the incarnation it subscribed against can detect
+  // "my subscription is gone" by comparing — resets are otherwise invisible to callers.
+  #incarnationId = crypto.randomUUID();
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
 
@@ -296,7 +301,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async authenticate(token: string): Promise<void> {
-    let tokenBytes = Uint8Array.fromBase64(token);
+    let tokenBytes: Uint8Array;
+    try {
+      tokenBytes = Uint8Array.fromBase64(token);
+    } catch {
+      // A corrupt (non-Base64) token must classify as an auth failure like any other bad token,
+      // not surface as the decoder's SyntaxError.
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
     let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
     let tokenId = new Uint8Array(hash).toHex();
     let session = this.storage.sessions.get(tokenId);
@@ -1332,9 +1344,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.ensureResources(resourceUrlPatterns);
   }
 
+  /** The id of this in-memory incarnation of the object; changes on every reset/eviction. */
+  getIncarnationId(): string {
+    return this.#incarnationId;
+  }
+
   async subscribeConnectedAccounts(
       subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
-      : Promise<RpcStub<{}>> {
+      : Promise<{disposer: RpcStub<{}>, incarnationId: string}> {
     if (filter?.includeForcedAutoProvisionedAccounts) await this.#ensureAutoProvisionedAccounts();
 
     let connectedAccounts = this.storage.connectedAccounts;
@@ -1424,6 +1441,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       async update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord) {
         await notifyAdd(newRecord);
       },
+      // Census note (load-bearing for the server's subscription recovery): every remove
+      // funnels through here, and deletion has exactly one source today — the owner's own
+      // disconnectAccount (credential expiry, dedup, and re-login all put(), i.e. re-add).
+      // A remove missed while a registration is dead is NOT reconciled and ghosts until the
+      // next re-subscribe; the same ghost occurs inside a HEALTHY registration when a remove
+      // lands mid-replay, before notifyAdd records the id in seenIds (pre-existing). A new
+      // remove-emitting path silently widens the window — revisit reconciliation then.
       remove(record: ConnectedAccountRecord): void {
         if (seenIds.has(record.id)) {
           subscriber.remove(record.id);
@@ -1447,12 +1471,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     subscriber.ready().catch(unsubscribe);
 
-    return new RpcStub<{}>({
+    let disposer = new RpcStub<{}>({
       [Symbol.dispose]() {
         unsubscribe();
         subscriber[Symbol.dispose]();
       }
     });
+    // Returned atomically so the caller's incarnation stamp can't race a reset between the
+    // subscribe and a separate incarnation read.
+    return { disposer, incarnationId: this.#incarnationId };
   }
 
   async disconnectAccount(accountId: number): Promise<void> {
