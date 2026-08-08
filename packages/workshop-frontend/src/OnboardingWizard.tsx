@@ -1,4 +1,4 @@
-import { logRpcFailure, withDoResetRetry } from './rpcErrors'
+import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { RpcTarget } from 'capnweb'
@@ -120,10 +120,10 @@ export default function OnboardingWizard({
   // Load models + AI config
   const fetchModels = useCallback(async () => {
     try {
-      const [modelList, cfg] = await withDoResetRetry(() => Promise.all([
+      const [modelList, cfg] = await Promise.all([
         authenticatedApi.listModels(),
         authenticatedApi.getAiConfig(),
-      ]))
+      ])
       setModels(modelList)
       setAiConfig(cfg)
       // Default to the first model in the list
@@ -221,7 +221,7 @@ export default function OnboardingWizard({
     const subscriber = new AccountsSubscriber()
     let subscriptionStub: { [Symbol.dispose](): void } | null = null
 
-    withDoResetRetry(() => authenticatedApi.subscribeConnectedAccounts(subscriber))
+    authenticatedApi.subscribeConnectedAccounts(subscriber)
       .then((stub) => {
         if (cancelled) {
           stub[Symbol.dispose]()

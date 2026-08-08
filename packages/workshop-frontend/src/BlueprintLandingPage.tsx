@@ -1,4 +1,4 @@
-import { logRpcFailure, withDoResetRetry } from './rpcErrors'
+import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcStub, RpcTarget } from 'capnweb'
@@ -121,7 +121,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   // When authenticated, fetch models for binding assignment.
   useEffect(() => {
     if (isAuthenticated && authenticatedApi) {
-      withDoResetRetry(() => authenticatedApi.listModels())
+      authenticatedApi.listModels()
         .then(setModels)
         .catch(err => logRpcFailure('Failed to load models:', err))
     } else {
@@ -184,7 +184,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       ready() {}
     }
 
-    withDoResetRetry(() => authenticatedApi.subscribeConnectedAccounts(new AccountsSubscriber()))
+    authenticatedApi.subscribeConnectedAccounts(new AccountsSubscriber())
       .then(stub => {
         if (cancelled) {
           stub[Symbol.dispose]()

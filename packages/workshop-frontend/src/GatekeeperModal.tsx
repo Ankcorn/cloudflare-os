@@ -1,4 +1,4 @@
-import { logRpcFailure, withDoResetRetry } from './rpcErrors'
+import { logRpcFailure } from './rpcErrors'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, useKumoToastManager, type PortalContainer } from '@cloudflare/kumo'
 import {
@@ -369,7 +369,7 @@ export default function GatekeeperModal({
     setSpawnerEnv(
       (spawnerEnvCandidatesRef.current ?? []).map(entry => ({ ...entry, enabled: true })))
 
-    withDoResetRetry(() => authenticatedApi.listModels()).then(models => {
+    authenticatedApi.listModels().then(models => {
       if (cancelled) return
       setAvailableModels(models)
       if (models.length > 0) {
@@ -388,7 +388,7 @@ export default function GatekeeperModal({
       toasts.add({ title: "Couldn't load AI models", variant: 'error' })
     })
 
-    withDoResetRetry(() => authenticatedApi.listGatekeeperVendors()).then(vendors => {
+    authenticatedApi.listGatekeeperVendors().then(vendors => {
       if (cancelled) return
       setVendors(vendors)
     }).catch(err => {
@@ -432,7 +432,7 @@ export default function GatekeeperModal({
     }
 
     const subscriber = new AccountsSubscriber()
-    withDoResetRetry(() => authenticatedApi.subscribeConnectedAccounts(subscriber))
+    authenticatedApi.subscribeConnectedAccounts(subscriber)
       .then(stub => {
         if (cancelled) {
           stub[Symbol.dispose]()

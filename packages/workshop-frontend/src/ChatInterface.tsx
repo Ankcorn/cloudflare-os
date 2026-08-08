@@ -1,4 +1,4 @@
-import { isDurableObjectResetError, isTransientRpcError, logRpcFailure, reportDoResetError } from "./rpcErrors";
+import { isTransientRpcError, logRpcFailure } from "./rpcErrors";
 import {
   Fragment,
   memo,
@@ -1842,11 +1842,10 @@ export const ChatInput = ({
   const [capsules, setCapsules] = useState<InputCapsule[]>([]);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isSending, setIsSending] = useState(false);
-  const [sendHiccup, setSendHiccup] = useState(false);
-  const chatKeyRef = useRef(chatKey);
-  chatKeyRef.current = chatKey;
-
-  useEffect(() => setSendHiccup(false), [chatKey]);
+  // The chat the "may not have been sent" hint belongs to; the render condition scopes it, and
+  // leaving the chat dismisses it.
+  const [sendHiccup, setSendHiccup] = useState<{ chatKey?: number | null } | null>(null);
+  useEffect(() => setSendHiccup(null), [chatKey]);
   const [isAttachmentDragActive, setIsAttachmentDragActive] = useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<SelectedSlashCommand | null>(null);
   // The caret the slash command picker parses at. Deliberately updated only when it moves to a
@@ -2285,7 +2284,7 @@ export const ChatInput = ({
 
   const handleSend = async () => {
     if (sendInFlightRef.current || isSending || isBlocked) return;
-    setSendHiccup(false);
+    setSendHiccup(null);
     const attachmentsSnapshot = pendingAttachments;
     const readyAttachments = attachmentsSnapshot
       .filter((attachment) => attachment.uploadState === "ready" && attachment.ref)
@@ -2467,9 +2466,7 @@ export const ChatInput = ({
     const submittedChatKey = chatKey;
     void handleSend().catch((err) => {
       // The onSend handlers already log; the composer only needs the hint state.
-      if (isTransientRpcError(err) && chatKeyRef.current === submittedChatKey) {
-        setSendHiccup(true);
-      }
+      if (isTransientRpcError(err)) setSendHiccup({ chatKey: submittedChatKey });
     });
   };
 
@@ -3064,7 +3061,7 @@ export const ChatInput = ({
           </div>
         )}
         {draftUpdateBanner}
-        {sendHiccup && (
+        {sendHiccup && sendHiccup.chatKey === chatKey && (
           <div className="px-4 pt-2 text-xs text-kumo-warning">
             Connection hiccup — your message may not have been sent. Check the thread, then try again.
           </div>
@@ -5386,8 +5383,7 @@ function ChatInterface({
         );
       }
     } catch (err) {
-      if (isDurableObjectResetError(err)) reportDoResetError("chat.send", err);
-      if (!logRpcFailure("Failed to send message:", err)) {
+      if (!logRpcFailure("Failed to send message:", err, { reportSite: "chat.send" })) {
         toasts.add({ title: "Failed to send message", variant: "error" });
       }
       throw err;
@@ -5410,8 +5406,7 @@ function ChatInterface({
           message, model, capsules, attachments, formats);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
-      if (isDurableObjectResetError(err)) reportDoResetError("chat.new", err);
-      if (!logRpcFailure("Failed to create new chat:", err)) {
+      if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
         toasts.add({ title: "Failed to start conversation", variant: "error" });
       }
       throw err;

@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newWorkersRpcResponse } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, WORKERD_DEAD_CAPABILITY_MESSAGE } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -71,10 +71,6 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
-// Escape hatch on the wrapped user-DO stub (see #wrapUserStub) exposing its raw target, so the
-// never-sent retry path can re-issue a call without re-entering the retry wrapper.
-const RAW_USER_STUB = Symbol("rawUserStub");
-
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
@@ -91,25 +87,26 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   private users: DurableObjectNamespace<UserDurableObject>;
 
+  // One stub per session, because e-order (in-order delivery to the DO) is guaranteed per stub.
+  // A stub is permanently broken once its incarnation of the object resets, so the wrapper below
+  // drops both fields on a stub-breaking rejection and the next call re-resolves fresh ones.
+  // `rawUserStub` is the Proxy's target, kept so the never-sent retry can re-issue a call
+  // without re-entering the wrapper.
   private userStub?: DurableObjectStub<UserDurableObject>;
+  private rawUserStub?: DurableObjectStub<UserDurableObject>;
 
-  // E-order (in-order delivery to the DO) is guaranteed per stub, so the session shares one stub
-  // while it's healthy. But a stub is bound to one incarnation of the object and is permanently
-  // broken once that incarnation resets, so the wrapper below drops the cached stub the moment a
-  // call through it fails with a stub-breaking error, and the next call re-resolves a fresh one.
   private get user(): DurableObjectStub<UserDurableObject> {
-    return this.userStub ??= this.#wrapUserStub(this.users.get(this.userId));
+    return this.userStub ??=
+        this.#wrapUserStub(this.rawUserStub = this.users.get(this.userId));
   }
 
   // Calls on a stub whose DO already reset while idle reject flagless with the brokenness
   // reason; the flagged (`durableObjectReset`) error only reaches calls in flight at reset time.
-  // Verified in a workerd probe — see DO_RESET_MESSAGES in workshop-frontend/src/rpcErrors.ts,
-  // which pins the first string. The distinction matters: a flagless rejection matching one of
-  // these proves the call never reached the DO, so re-issuing it on a fresh stub cannot
-  // double-execute — safe even for writes.
+  // The distinction matters: a flagless rejection matching one of these proves the call never
+  // reached the DO, so re-issuing it on a fresh stub cannot double-execute — safe even for writes.
   static readonly #DEAD_CAPABILITY_MESSAGES = [
-    // What production resets leave as the brokenness reason.
-    "The execution context which hosts this callback is no longer running",
+    // What production resets leave as the brokenness reason; the frontend canary test pins it.
+    WORKERD_DEAD_CAPABILITY_MESSAGE,
     // What vitest-pool-workers' abortAllDurableObjects() leaves — never occurs in production;
     // listed so integration tests exercise the real never-sent retry path.
     "Application called abortAllDurableObjects().",
@@ -120,9 +117,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // (see #DEAD_CAPABILITY_MESSAGES), re-issues it once on the fresh stub. Flagged errors are
   // rethrown untouched — the call may have executed, and the frontend owns that recovery.
   #wrapUserStub(stub: DurableObjectStub<UserDurableObject>): DurableObjectStub<UserDurableObject> {
-    const wrapped: DurableObjectStub<UserDurableObject> = new Proxy(stub, {
+    return new Proxy(stub, {
       get: (target, prop) => {
-        if (prop === RAW_USER_STUB) return target;
         const value = Reflect.get(target, prop);
         if (typeof value !== "function") return value;
         return (...args: unknown[]) => {
@@ -139,14 +135,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
             if (flagged || neverSent) {
               // Guard against thrashing: concurrent failures on the same dead stub must not
               // each discard the replacement the first one already resolved.
-              if (this.userStub === wrapped) this.userStub = undefined;
+              if (this.rawUserStub === target) this.userStub = this.rawUserStub = undefined;
               if (neverSent) {
-                // Retry exactly once, against the raw target of the re-armed stub — going
-                // through the proxy again would retry unboundedly under repeated resets.
-                const raw = (this.user as unknown as Record<symbol, unknown>)[RAW_USER_STUB] as
-                    DurableObjectStub<UserDurableObject>;
-                return Reflect.apply(Reflect.get(raw, prop) as (...a: unknown[]) => unknown,
-                    raw, args);
+                // Retry exactly once, on the raw target of the re-armed cache — retrying through
+                // the proxy would retry unboundedly under repeated resets.
+                void this.user;
+                const fresh = this.rawUserStub!;
+                return Reflect.apply(Reflect.get(fresh, prop) as (...a: unknown[]) => unknown,
+                    fresh, args);
               }
             }
             throw err;
@@ -154,7 +150,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
         };
       },
     });
-    return wrapped;
   }
 
   #isAdmin(): boolean {

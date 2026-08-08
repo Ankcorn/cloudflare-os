@@ -4,6 +4,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { withReadRetries } from "./rpcErrors";
 
 const testState = vi.hoisted(() => {
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
@@ -27,11 +28,18 @@ vi.mock("@cloudflare/kumo", () => ({
   useKumoToastManager: () => ({ add: testState.addToast }),
 }));
 
-vi.mock("./AuthContext", () => ({
-  useAuthenticatedApi: () => ({
-    authenticatedApi: testState.authenticatedApi,
-  }),
-}));
+vi.mock("./AuthContext", () => {
+  // The read-retry chokepoint wraps the stub where useAuth creates it; mirror that here so this
+  // suite exercises the same retry policy the app ships. Wrapped once — effects key on the
+  // stub's identity, so a fresh proxy per render would loop them.
+  let wrapped: unknown;
+  return {
+    useAuthenticatedApi: () => ({
+      authenticatedApi: (wrapped ??= withReadRetries(
+        testState.authenticatedApi as unknown as Parameters<typeof withReadRetries>[0])),
+    }),
+  };
+});
 
 vi.mock("./ChatInterface", () => ({
   ChatInput: ({ seedText, seedNonce }: { seedText?: string; seedNonce?: number }) => {

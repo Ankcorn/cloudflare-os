@@ -1,4 +1,4 @@
-import { isDurableObjectResetError, logRpcFailure, reportDoResetError, withDoResetRetry } from "../rpcErrors";
+import { classifyRpcError, logRpcFailure } from "../rpcErrors";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
@@ -58,15 +58,17 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
   useEffect(() => {
     let cancelled = false;
-    withDoResetRetry(() => authenticatedApi.listModels())
+    authenticatedApi.listModels()
       .then((list) => {
         if (cancelled) return;
         setModels(list);
         setSelectedModel(getStoredSelectedModel(list));
       })
       .catch((err) => {
-        const transient = logRpcFailure("Failed to fetch models:", err);
-        if (!transient || isDurableObjectResetError(err)) {
+        logRpcFailure("Failed to fetch models:", err);
+        // Toast unless it's a connection error (reconnect refetches); a do-reset here already
+        // survived the read retry, so the user should hear about it.
+        if (classifyRpcError(err) !== "connection") {
           toasts.add({ title: "Couldn't load AI models", variant: "error" });
         }
       });
@@ -119,8 +121,8 @@ export function HomePageContent({ prompt }: HomeSearch) {
         // Open the conversation we just started.
         navigate({ to: "/workspace/$id", params: { id }, search: { chat } });
       } catch (err) {
-        if (isDurableObjectResetError(err)) reportDoResetError("workspace.create", err);
-        const transient = logRpcFailure("Failed to create gadget:", err);
+        const transient = logRpcFailure("Failed to create gadget:", err,
+            { reportSite: "workspace.create" });
         // A retry reuses the provisional gadget while the draft contains gadget-scoped references.
         if (!attachments?.length && !capsules?.length) {
           provisionalOverseerRef.current?.stub[Symbol.dispose]();

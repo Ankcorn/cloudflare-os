@@ -1,4 +1,4 @@
-import { logRpcFailure, withDoResetRetry } from '../rpcErrors'
+import { logRpcFailure } from '../rpcErrors'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -483,7 +483,7 @@ function ConnectorsPage() {
     setAccountsLoaded(false)
     setVendorsLoaded(false)
 
-    withDoResetRetry(() => authenticatedApi.listAddableGatekeepers())
+    authenticatedApi.listAddableGatekeepers()
       .then((list) => {
         if (!cancelled) setAddable(list)
       })
@@ -491,7 +491,7 @@ function ConnectorsPage() {
         logRpcFailure('Failed to load addable gatekeepers:', err)
       })
 
-    withDoResetRetry(() => authenticatedApi.listGatekeeperVendors())
+    authenticatedApi.listGatekeeperVendors()
       .then((vendorList) => {
         if (cancelled) return
         const unavailable = vendorList.filter((v) => v.unavailable)
@@ -551,7 +551,7 @@ function ConnectorsPage() {
 
     const subscriber = new AccountsSubscriber()
 
-    withDoResetRetry(() => authenticatedApi.subscribeConnectedAccounts(subscriber))
+    authenticatedApi.subscribeConnectedAccounts(subscriber)
       .then((stub) => {
         if (cancelled) {
           stub[Symbol.dispose]()

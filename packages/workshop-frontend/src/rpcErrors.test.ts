@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs'
 // @ts-expect-error node builtin without @types/node
 import { createRequire } from 'node:module'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { deserialize, serialize } from 'capnweb'
 import { AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api'
 
@@ -13,12 +13,15 @@ import { reportIssue } from './errorReporting'
 import {
   classifyRpcError, getDurableObjectId, isDurableObjectResetError, isOverloadedError,
   CONNECTION_MESSAGES, isTransientRpcError, logRpcFailure, reportDoResetError, withDoResetRetry,
+  withReadRetries,
 } from './rpcErrors'
+
+const rpcError = (message: string, props?: object) => Object.assign(new Error(message), props)
 
 // The reject frame observed in prod for a DO storage-timeout reset.
 function storageTimeoutReset() {
-  return Object.assign(
-    new Error('Durable Object storage operation exceeded timeout which caused object to be reset.'),
+  return rpcError(
+    'Durable Object storage operation exceeded timeout which caused object to be reset.',
     { remote: true, overloaded: true, durableObjectReset: true, durableObjectId: 'eed0859e' },
   )
 }
@@ -29,8 +32,7 @@ describe('classifyRpcError', () => {
   })
 
   it('trusts the durableObjectReset flag over an unrecognized message', () => {
-    const err = Object.assign(new Error('internal error'), { durableObjectReset: true })
-    expect(classifyRpcError(err)).toBe('do-reset')
+    expect(classifyRpcError(rpcError('internal error', { durableObjectReset: true }))).toBe('do-reset')
   })
 
   it('falls back to known reset messages without flags', () => {
@@ -46,12 +48,11 @@ describe('classifyRpcError', () => {
   })
 
   it('prefers do-reset when both reset and retryable flags are set', () => {
-    const err = Object.assign(new Error('x'), { durableObjectReset: true, retryable: true })
-    expect(classifyRpcError(err)).toBe('do-reset')
+    expect(classifyRpcError(rpcError('x', { durableObjectReset: true, retryable: true }))).toBe('do-reset')
   })
 
   it('classifies the retryable flag as connection', () => {
-    expect(classifyRpcError(Object.assign(new Error('x'), { retryable: true }))).toBe('connection')
+    expect(classifyRpcError(rpcError('x', { retryable: true }))).toBe('connection')
   })
 
   it('classifies capnweb transport messages as connection', () => {
@@ -66,8 +67,7 @@ describe('classifyRpcError', () => {
   it('classifies auth failures, which must never be retried or quieted', () => {
     // Coded errors are authoritative; bare messages are the fallback for older deployments.
     expect(classifyRpcError(createAuthError(AUTH_ERROR_CODES.invalidSessionToken))).toBe('auth')
-    expect(classifyRpcError(Object.assign(new Error('nope'), { code: 'INVALID_SESSION_TOKEN' })))
-        .toBe('auth')
+    expect(classifyRpcError(rpcError('nope', { code: 'INVALID_SESSION_TOKEN' }))).toBe('auth')
     expect(classifyRpcError(new Error('invalid session token'))).toBe('auth')
     expect(classifyRpcError(new Error('Not authenticated with Access.'))).toBe('auth')
   })
@@ -114,38 +114,24 @@ describe('reportDoResetError', () => {
 })
 
 describe('withDoResetRetry', () => {
-  it('retries once after a reset error', async () => {
+  afterEach(() => vi.useRealTimers())
+
+  it.each([
+    ['reset', storageTimeoutReset()],
+    ['retryable-flagged invocation', rpcError('internal error', { remote: true, retryable: true })],
+  ])('retries once after a %s failure', async (_kind, failure) => {
     vi.useFakeTimers()
-    try {
-      const fn = vi.fn<() => Promise<string>>().mockRejectedValueOnce(storageTimeoutReset()).mockResolvedValueOnce('ok')
-      const result = withDoResetRetry(fn)
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(await result).toBe('ok')
-      expect(fn).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
+    const fn = vi.fn<() => Promise<string>>().mockRejectedValueOnce(failure).mockResolvedValueOnce('ok')
+    const result = withDoResetRetry(fn)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await result).toBe('ok')
+    expect(fn).toHaveBeenCalledTimes(2)
   })
 
   it('does not retry non-reset errors', async () => {
     const fn = vi.fn<() => Promise<string>>().mockRejectedValue(new Error('Workspace not found.'))
     await expect(withDoResetRetry(fn)).rejects.toThrow('Workspace not found.')
     expect(fn).toHaveBeenCalledTimes(1)
-  })
-
-  it('retries once on a retryable-flagged invocation failure', async () => {
-    vi.useFakeTimers()
-    try {
-      const fn = vi.fn<() => Promise<string>>()
-        .mockRejectedValueOnce(Object.assign(new Error('internal error'), { remote: true, retryable: true }))
-        .mockResolvedValueOnce('ok')
-      const result = withDoResetRetry(fn)
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(await result).toBe('ok')
-      expect(fn).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
   })
 
   // Local transport errors carry no flags; their recovery belongs to the connection manager,
@@ -158,16 +144,39 @@ describe('withDoResetRetry', () => {
 
   it('gives up after the second failure', async () => {
     vi.useFakeTimers()
-    try {
-      const fn = vi.fn<() => Promise<string>>().mockRejectedValue(storageTimeoutReset())
-      const result = withDoResetRetry(fn)
-      result.catch(() => {})
-      await vi.advanceTimersByTimeAsync(2000)
-      await expect(result).rejects.toThrow('exceeded timeout')
-      expect(fn).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
+    const fn = vi.fn<() => Promise<string>>().mockRejectedValue(storageTimeoutReset())
+    const result = withDoResetRetry(fn)
+    result.catch(() => {})
+    await vi.advanceTimersByTimeAsync(2000)
+    await expect(result).rejects.toThrow('exceeded timeout')
+    expect(fn).toHaveBeenCalledTimes(2)
+  })
+})
+
+// The chokepoint installed by useAuth: listed idempotent reads retry via withDoResetRetry,
+// everything else passes through untouched.
+describe('withReadRetries', () => {
+  afterEach(() => vi.useRealTimers())
+
+  const wrap = (methods: object) =>
+    withReadRetries(methods as unknown as Parameters<typeof withReadRetries>[0])
+
+  it('retries a listed read once after a reset', async () => {
+    vi.useFakeTimers()
+    const listModels = vi.fn<() => Promise<unknown[]>>()
+      .mockRejectedValueOnce(storageTimeoutReset()).mockResolvedValueOnce([])
+    const api = wrap({ listModels })
+    const result = api.listModels()
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await result).toEqual([])
+    expect(listModels).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes writes through with no retry', async () => {
+    const setQuickModel = vi.fn<() => Promise<void>>().mockRejectedValue(storageTimeoutReset())
+    const api = wrap({ setQuickModel })
+    await expect(api.setQuickModel('m')).rejects.toThrow('exceeded timeout')
+    expect(setQuickModel).toHaveBeenCalledTimes(1)
   })
 })
 
