@@ -71,6 +71,10 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
+// Escape hatch on the wrapped user-DO stub (see #wrapUserStub) exposing its raw target, so the
+// never-sent retry path can re-issue a call without re-entering the retry wrapper.
+const RAW_USER_STUB = Symbol("rawUserStub");
+
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
@@ -87,11 +91,70 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   private users: DurableObjectNamespace<UserDurableObject>;
 
-  // A stub is bound to one incarnation of the DO and is poisoned once that incarnation resets,
-  // so re-resolve per call instead of caching one for the session (per the DO error-handling
-  // docs: create a fresh stub per attempt). Stub creation is local and lazy — not a network call.
+  private userStub?: DurableObjectStub<UserDurableObject>;
+
+  // E-order (in-order delivery to the DO) is guaranteed per stub, so the session shares one stub
+  // while it's healthy. But a stub is bound to one incarnation of the object and is permanently
+  // broken once that incarnation resets, so the wrapper below drops the cached stub the moment a
+  // call through it fails with a stub-breaking error, and the next call re-resolves a fresh one.
   private get user(): DurableObjectStub<UserDurableObject> {
-    return this.users.get(this.userId);
+    return this.userStub ??= this.#wrapUserStub(this.users.get(this.userId));
+  }
+
+  // Calls on a stub whose DO already reset while idle reject flagless with the brokenness
+  // reason; the flagged (`durableObjectReset`) error only reaches calls in flight at reset time.
+  // Verified in a workerd probe — see DO_RESET_MESSAGES in workshop-frontend/src/rpcErrors.ts,
+  // which pins the first string. The distinction matters: a flagless rejection matching one of
+  // these proves the call never reached the DO, so re-issuing it on a fresh stub cannot
+  // double-execute — safe even for writes.
+  static readonly #DEAD_CAPABILITY_MESSAGES = [
+    // What production resets leave as the brokenness reason.
+    "The execution context which hosts this callback is no longer running",
+    // What vitest-pool-workers' abortAllDurableObjects() leaves — never occurs in production;
+    // listed so integration tests exercise the real never-sent retry path.
+    "Application called abortAllDurableObjects().",
+  ];
+
+  // Intercepts every method call on the user-DO stub. On a stub-breaking rejection, drops the
+  // cached stub so the next call re-resolves; if the rejection proves the call was never sent
+  // (see #DEAD_CAPABILITY_MESSAGES), re-issues it once on the fresh stub. Flagged errors are
+  // rethrown untouched — the call may have executed, and the frontend owns that recovery.
+  #wrapUserStub(stub: DurableObjectStub<UserDurableObject>): DurableObjectStub<UserDurableObject> {
+    const wrapped: DurableObjectStub<UserDurableObject> = new Proxy(stub, {
+      get: (target, prop) => {
+        if (prop === RAW_USER_STUB) return target;
+        const value = Reflect.get(target, prop);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          // Reflect.apply, not value.apply(): on a JSRPC method proxy, `.apply` is an RPC path
+          // segment (it would invoke a remote method named "apply"), not Function.prototype.apply.
+          const result = Reflect.apply(value, target, args);
+          if (typeof (result as PromiseLike<unknown> | null)?.then !== "function") return result;
+          // JsRpcPromise.then validates its first parameter as a Function — no `undefined` slot.
+          return (result as Promise<unknown>).then((v: unknown) => v, (err: unknown) => {
+            const flags = err as { durableObjectReset?: unknown, retryable?: unknown } | null;
+            const flagged = flags?.durableObjectReset === true || flags?.retryable === true;
+            const neverSent = !flagged && err instanceof Error &&
+                AuthenticatedApiImpl.#DEAD_CAPABILITY_MESSAGES.some(m => err.message.includes(m));
+            if (flagged || neverSent) {
+              // Guard against thrashing: concurrent failures on the same dead stub must not
+              // each discard the replacement the first one already resolved.
+              if (this.userStub === wrapped) this.userStub = undefined;
+              if (neverSent) {
+                // Retry exactly once, against the raw target of the re-armed stub — going
+                // through the proxy again would retry unboundedly under repeated resets.
+                const raw = (this.user as unknown as Record<symbol, unknown>)[RAW_USER_STUB] as
+                    DurableObjectStub<UserDurableObject>;
+                return Reflect.apply(Reflect.get(raw, prop) as (...a: unknown[]) => unknown,
+                    raw, args);
+              }
+            }
+            throw err;
+          });
+        };
+      },
+    });
+    return wrapped;
   }
 
   #isAdmin(): boolean {

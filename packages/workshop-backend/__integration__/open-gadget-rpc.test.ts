@@ -135,12 +135,14 @@ describe.skip("openGadget errors across native RPC and Cap'n Web", () => {
   });
 });
 
-// The DO-reset recovery contract: a user-DO reset must not poison the API session. A stub is
-// bound to one incarnation of the object and is permanently broken by a reset, so the
-// authenticated API re-resolves its user-DO stub per call — the same session recovers on the
-// next request with no reconnect. abortAllDurableObjects() is the non-graceful teardown, the
-// local stand-in for the storage-timeout/overload resets observed in production. (Deliberately
-// not evictDurableObject(): eviction is graceful — it drains in-flight work and never breaks a
+// The DO-reset recovery contract: a user-DO reset must not poison the API session. E-order is
+// per-stub, so the authenticated API shares one user-DO stub per session while it's healthy; a
+// reset permanently breaks that stub, so a stub-breaking rejection drops the cache, and a
+// rejection that proves the call was never sent (the flagless dead-capability error — the
+// flagged one only reaches calls in flight at reset time) is transparently re-issued once on a
+// fresh stub. abortAllDurableObjects() is the non-graceful teardown, the local stand-in for the
+// storage-timeout/overload resets observed in production. (Deliberately not
+// evictDurableObject(): eviction is graceful — it drains in-flight work and never breaks a
 // stub — so it cannot reproduce this failure.)
 describe("user-DO reset recovery", () => {
   it("recovers on the same session after the user DO is reset", async () => {
@@ -152,8 +154,26 @@ describe("user-DO reset recovery", () => {
 
     await abortAllDurableObjects();
 
-    // Same socket, same AuthenticatedApiImpl. With the per-call stub getter this reaches the
-    // restarted object; with a session-cached stub it would reject with the abort error forever.
+    // Same socket, same AuthenticatedApiImpl. The cached stub is dead, so this call rejects
+    // locally without reaching the DO and is re-issued once on a fresh stub — it must succeed
+    // with no client-visible failure. This doubles as the canary for workerd's dead-capability
+    // message: if that string drifts, the never-sent retry stops firing and this fails loudly.
     expect(await authenticated.listModels()).toBeInstanceOf(Array);
+  });
+
+  it("re-arms the cached stub after recovery instead of churning or staying poisoned", async () => {
+    using publicApi = await connect();
+    const account = await createAccount(publicApi, "rearm");
+    using authenticated = await publicApi.authenticate(account.token);
+
+    expect(await authenticated.listModels()).toBeInstanceOf(Array);
+
+    await abortAllDurableObjects();
+
+    // First call recovers via the never-sent retry; the calls after it must ride the re-armed
+    // cached stub (a poisoned or thrashing cache would reject here).
+    expect(await authenticated.listModels()).toBeInstanceOf(Array);
+    expect(await authenticated.isOnboardingCompleted()).toBeTypeOf("boolean");
+    expect(await authenticated.whoami()).toBeTruthy();
   });
 });
