@@ -21,69 +21,99 @@ export const GADGET_EXPORT_ENTRYPOINT = "ExportHandler";
 */
 export type GadgetExportFormat =
   | {
-    // A Gadget can support multiple HTML or PDF export variants by returning
-    // multiple browser-mode export entries with different ids. When the Gadget
-    // UI is loaded in a remote browser, globalThis.gadgetExportFormatId will be
-    // set to the selected format id so the Gadget UI knows which variant to
-    // render.
+    /**
+     * Unique, non-empty identifier for this format. A Gadget can support
+     * multiple HTML variants with different ids. During browser rendering, the
+     * global variable `gadgetExportFormatId` identifies the selected variant.
+     */
     id: string;
-    // User-facing label for the export format. Usually "HTML" unless multiple
-    // HTML variants are supported
+
+    /** User-facing label, usually "HTML" unless multiple variants are supported. */
     label: string;
+
+    /** Selects browser-based rendering. */
     mode: "browser";
+
+    /** Media type produced by this browser-based format. */
     contentType: "text/html";
   }
   | {
+    /**
+     * Unique, non-empty identifier for this format. A Gadget can support
+     * multiple PDF variants with different ids. During browser rendering, the
+     * global variable `gadgetExportFormatId` identifies the selected variant.
+     */
     id: string;
-    // User-facing label for the export format. Usually "PDF" unless multiple
-    // PDF variants are supported
+
+    /** User-facing label, usually "PDF" unless multiple variants are supported. */
     label: string;
+
+    /** Selects browser-based rendering. */
     mode: "browser";
+
+    /** Media type produced by this browser-based format. */
     contentType: "application/pdf";
   }
   | {
+    /** Unique, non-empty identifier for this format. */
     id: string;
+
+    /** User-facing label for the export format. */
     label: string;
+
+    /** Selects server-side generation by the Gadget's export handler. */
     mode: "custom";
+
+    /** Media type produced by this custom format. */
     contentType: string;
+
+    /** File extension, including the leading dot. */
     fileExtension: string;
   };
 
 /**
  * Optional Worker entrypoint exported by a Gadget as `ExportHandler` to
  * customize file export behavior.
+ *
+ * @typeParam Gadget The Gadget Durable Object type accepted by the handler.
  */
 export interface GadgetExportEntrypoint<Gadget extends DurableObject = DurableObject>
     extends WorkerEntrypoint {
   /**
-   * Lists the export formats supported by this Gadget. When this entrypoint or
-   * method is absent, the Workshop defaults to:
+   * Lists the export formats supported by this Gadget. When this entrypoint is
+   * absent, the Workshop defaults to:
    *  - { id: "html", label: "HTML", mode: "browser", contentType: "text/html"}
    *  - { id: "pdf", label: "PDF", mode: "browser", contentType: "application/pdf"}
+   * Every `ExportHandler` entrypoint must implement this method. The Workshop rejects
+   * a missing `getExportFormats` method instead of applying defaults.
    *
    * When implementing this method, the Gadget should return these browser-mode
    * export formats in addition to any custom formats, unless it specifically
-   * does not want to support browser-mode HTML or PDF exports. Export format
-   * ids must be unique across both modes.
+   * does not want to support browser-mode HTML or PDF exports.
    */
   getExportFormats(gadget: Fetcher<Gadget>): Promise<GadgetExportFormat[]>;
 
   /**
    * Produces the custom format identified by an id returned from
    * `getExportFormats()`. Only called for custom-mode export formats.
-   * Browser-mode export formats are handled by the workshop backend.
+   * Browser-mode export formats are handled by the Workshop backend.
+   *
+   * The Workshop enforces 30s export duration and 100MB file size limits while
+   * consuming the returned stream. It derives the filename from the Gadget
+   * title and the format's `fileExtension`; the handler does not control the
+   * base filename.
    */
   export(gadget: Fetcher<Gadget>, id: string): Promise<ReadableStream<Uint8Array>>;
 }
 
-// Export API exposed to the workshop UI:
+// Export API exposed to the Workshop UI:
 
 /**
  * Describes an export format that a Gadget supports. Hides browser- vs.
  * custom-mode and default format implementation details.
  */
 export type GadgetClientExportFormat = {
-  /** Identifier to pass to `GadgetClientExportApi.export()`. */
+  /** Identifier to pass to `GadgetClientExportMethods.export()`. */
   id: string;
 
   /** Media type of the exported file. */
@@ -93,18 +123,18 @@ export type GadgetClientExportFormat = {
   label: string;
 
   /**
-   * File extension, including the leading dot. Inferred by workshop for
+   * File extension, including the leading dot. Inferred by the Workshop for
    * browser-mode exports.
    */
   fileExtension: string;
 };
 
-
 /**
- * Gadget export API used by the workshop UI, and potentially the workshop agent
- * in the future.
+ * Export methods that will be added directly to `GadgetClient`, rather than
+ * exposed as a separate RPC capability. These methods replace the existing
+ * `GadgetClient.exportPdf()` method when implemented.
  */
-export interface GadgetClientExportApi {
+export interface GadgetClientExportMethods {
   /**
    * Lists supported export formats, including default formats if the Gadget
    * does not implement ExportHandler.
