@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { isDoResetError, retryOnDoReset } from "../src/do-retry";
+import {
+  DoCallTimeoutError, isDoResetError, retryOnDoReset, withDoCallTimeout,
+} from "../src/do-retry";
 
 // Synthetic errors shaped like workerd's tagged rejections (jsg/util.c++). Local aborts reject
 // flagless (pinned by the "user-DO reset flags" integration test), so the predicate and retry
@@ -36,6 +38,39 @@ describe("isDoResetError", () => {
   });
 });
 
+describe("withDoCallTimeout", () => {
+  it("passes through a completion inside the deadline", async () => {
+    await expect(withDoCallTimeout(Promise.resolve("ok"), 1_000)).resolves.toBe("ok");
+  });
+
+  it("passes through a rejection inside the deadline unchanged", async () => {
+    const failure = new Error("some app error");
+    await expect(withDoCallTimeout(Promise.reject(failure), 1_000)).rejects.toBe(failure);
+  });
+
+  it("rejects with DoCallTimeoutError once the deadline lapses", async () => {
+    const error = await withDoCallTimeout(new Promise<never>(() => {}), 5).then(
+      () => { throw new Error("expected a timeout"); },
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(DoCallTimeoutError);
+    expect((error as DoCallTimeoutError).timeoutMs).toBe(5);
+  });
+
+  it("swallows the orphaned call's late rejection", async () => {
+    let rejectLate!: (e: Error) => void;
+    const late = new Promise<never>((_, reject) => { rejectLate = reject; });
+    await expect(withDoCallTimeout(late, 1)).rejects.toBeInstanceOf(DoCallTimeoutError);
+    rejectLate(new Error("late loser"));
+    // An unhandled rejection surfacing here would fail the run (vitest treats it as fatal).
+    await scheduler.wait(5);
+  });
+
+  it("is not a reset by flag — retryOnDoReset matches it by class instead", () => {
+    expect(isDoResetError(new DoCallTimeoutError(5))).toBe(false);
+  });
+});
+
 describe("retryOnDoReset", () => {
   const immediate: readonly [number, number] = [0, 0];
 
@@ -65,6 +100,17 @@ describe("retryOnDoReset", () => {
       .mockRejectedValueOnce(second);
     await expect(retryOnDoReset(fn, undefined, immediate)).rejects.toBe(second);
     expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries once after a deadline timeout (the wedged-object path)", async () => {
+    const failure = new DoCallTimeoutError(5);
+    const onRetry = vi.fn();
+    const fn = vi.fn<() => Promise<string>>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce("ok");
+    expect(await retryOnDoReset(fn, onRetry, immediate)).toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledExactlyOnceWith({ error: failure, delayMs: 0 });
   });
 
   it("does not retry non-reset failures", async () => {

@@ -20,17 +20,43 @@ export function isDoResetError(e: unknown): boolean {
   return flags.durableObjectReset === true || flags.retryable === true;
 }
 
+/** Rejection minted by `withDoCallTimeout`: the DO never answered within the deadline. A reset
+ * rejects; an object wedged behind a closed input gate (e.g. a stuck storage op) does not — the
+ * call just queues, and every caller up the chain hangs with it. The deadline converts that
+ * silence into an error. `retryOnDoReset` treats it like a reset, under the same contract: the
+ * call must be idempotent and each attempt must mint a fresh stub. */
+export class DoCallTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Durable Object call did not complete within ${timeoutMs}ms.`);
+  }
+}
+
+/** Bounds an IDEMPOTENT DO call. workerd RPC has no cancellation, so a timed-out call is left
+ * running and its eventual settlement is swallowed. Never wrap a write: a timed-out write may
+ * still commit, and the caller must see that ambiguity — not a deadline error that invites a
+ * retry. */
+export async function withDoCallTimeout<T>(call: Promise<T>, timeoutMs: number): Promise<T> {
+  const timedOut = Symbol("timedOut");
+  const result = await Promise.race([
+    call,
+    scheduler.wait(timeoutMs).then(() => timedOut),
+  ]);
+  if (result !== timedOut) return result as T;
+  void call.catch(() => {});  // the orphaned call must not surface as an unhandled rejection
+  throw new DoCallTimeoutError(timeoutMs);
+}
+
 export interface DoRetryInfo {
   /** The initial call's rejection that is about to be retried. */
   error: unknown;
   delayMs: number;
 }
 
-/** Runs `fn`, retrying ONCE after a short jittered delay if it rejects with a DO-reset error.
- * `fn` MUST be idempotent and MUST mint a fresh stub per invocation (a stub is permanently
- * broken once its incarnation resets). `onRetry` fires before the delay. A second failure
- * propagates unchanged — the client's socket-level recovery is the backstop, not a retry
- * loop. */
+/** Runs `fn`, retrying ONCE after a short jittered delay if it rejects with a DO-reset error
+ * or a `withDoCallTimeout` deadline. `fn` MUST be idempotent and MUST mint a fresh stub per
+ * invocation (a stub is permanently broken once its incarnation resets). `onRetry` fires
+ * before the delay. A second failure propagates unchanged — the client's socket-level
+ * recovery is the backstop, not a retry loop. */
 export async function retryOnDoReset<T>(
     fn: () => Promise<T>,
     onRetry?: (info: DoRetryInfo) => void,
@@ -38,7 +64,7 @@ export async function retryOnDoReset<T>(
   try {
     return await fn();
   } catch (e) {
-    if (!isDoResetError(e)) throw e;
+    if (!isDoResetError(e) && !(e instanceof DoCallTimeoutError)) throw e;
     const delayMs = delayRangeMs[0] + Math.random() * (delayRangeMs[1] - delayRangeMs[0]);
     onRetry?.({ error: e, delayMs });
     await scheduler.wait(delayMs);

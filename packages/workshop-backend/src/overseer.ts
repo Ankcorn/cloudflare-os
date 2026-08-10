@@ -22,6 +22,7 @@ import {
 } from "./ai-gateway";
 import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type StoredAssistantMessage } from "./agent";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
+import { DoCallTimeoutError, isDoResetError, retryOnDoReset, withDoCallTimeout } from "./do-retry";
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
@@ -48,6 +49,14 @@ import { renderGadgetPdf } from "./browser-export";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
+
+// Deadline for the user-DO chat-context read on the chat hot path. The read is a same-colo
+// storage lookup, normally single-digit ms; the deadline only exists for the object that is
+// wedged behind a closed input gate (stuck storage op), which rejects nothing and would
+// otherwise queue the call — and the browser's send behind it — forever. Generous enough to
+// clear a slow cold start; small enough that the client's failure path engages while the user
+// is still watching.
+const CHAT_CONTEXT_TIMEOUT_MS = 10_000;
 
 let CODE_MODE_HARNESS =
 `import { WorkerEntrypoint, restore, RpcStub, RpcTarget } from "cloudflare:workers";
@@ -7162,6 +7171,35 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return profilePromise;
   }
 
+  // User-DO chat-context read for the chat hot path (newChat/sendChatMessage and friends).
+  // Mirrors the Worker-side #userRead choke point (server.ts): the retained `clientUser` stub
+  // is pinned to one incarnation and permanently broken once the object resets, so every
+  // attempt mints a fresh stub, and one jittered retry absorbs the reset. The deadline covers
+  // the case a reset flag can't: an object wedged behind a closed input gate rejects nothing,
+  // so without it the send — and the browser behind it — hangs forever. getChatContext is a
+  // pure read, so both the retry and the timeout are safe.
+  async #chatContext(modelId: string | null): Promise<UserChatContext> {
+    try {
+      return await retryOnDoReset(
+          () => withDoCallTimeout(
+              this.impl.users.get(this.clientUser.id).getChatContext(modelId),
+              CHAT_CONTEXT_TIMEOUT_MS),
+          ({error, delayMs}) => this.impl.logger.warn("user DO reset observed", {
+            event: "user_do.reset.retrying", operation: "getChatContext",
+            durableObjectId: this.clientUser.id.toString(), delayMs, error,
+          }));
+    } catch (e) {
+      // The retry also failed (or the failure wasn't retriable): this reaches the client.
+      if (isDoResetError(e) || e instanceof DoCallTimeoutError) {
+        this.impl.logger.warn("user DO reset observed", {
+          event: "user_do.reset.surfaced", operation: "getChatContext",
+          durableObjectId: this.clientUser.id.toString(), error: e,
+        });
+      }
+      throw e;
+    }
+  }
+
   async getMetadata(): Promise<GadgetMetadata> {
     let result: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
@@ -7274,7 +7312,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       let taken = new Set(
           [...this.impl.storage.gadgets.list()].map(gadget => gadget.bindingName));
       for (let name of chatNames ?? []) taken.add(name);
-      let userMeta = await this.clientUser.getChatContext(null);
+      let userMeta = await this.#chatContext(null);
       if (userMeta.quickModel) {
         bindingName = await this.impl.generateBindingName(
             title, taken, {config: userMeta.quickModel, initiator: userMeta.profile});
@@ -7476,7 +7514,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
-    let chatMeta = await this.clientUser.getChatContext(modelId);
+    let chatMeta = await this.#chatContext(modelId);
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
       config: chatMeta.aiModel!.config,
@@ -7532,7 +7570,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       config,
     };
     if (config.modelId) {
-      let chatMeta = await this.clientUser.getChatContext(config.modelId);
+      let chatMeta = await this.#chatContext(config.modelId);
       if (chatMeta.aiModel) {
         creationSpec.modelProvider = chatMeta.aiModel.config.provider;
         creationSpec.modelName = chatMeta.aiModel.config.model;
@@ -7840,7 +7878,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
-    let userMeta = await this.clientUser.getChatContext(modelId);
+    let userMeta = await this.#chatContext(modelId);
     if (!userMeta.aiModel) return;  // No model resolved; nothing to resume.
 
     let preparation = this.impl.waitForChatMessagePreparation(chatId);
@@ -7971,7 +8009,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   ): Promise<ChatAttachmentHandle> {
     let provider: AiModelConfig["provider"] | undefined;
     if (modelId !== null) {
-      provider = (await this.clientUser.getChatContext(modelId)).aiModel?.config.provider;
+      provider = (await this.#chatContext(modelId)).aiModel?.config.provider;
     }
     attachment = validateChatAttachmentUpload(
       attachment,
@@ -8195,7 +8233,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[]): Promise<number> {
-    let userMeta = await this.clientUser.getChatContext(chosenModelId);
+    let userMeta = await this.#chatContext(chosenModelId);
     return this.impl.newChat(this.clientUser, userMeta, initialMessage, capsules, attachments,
                              undefined, undefined, formats);
   }
@@ -8204,7 +8242,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[]): Promise<void> {
-    let userMeta = await this.clientUser.getChatContext(chosenModelId);
+    let userMeta = await this.#chatContext(chosenModelId);
     return this.impl.sendChatMessage(
         this.clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
   }
@@ -8221,7 +8259,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async mergeChanges(chatId: number, mergeThrough: number | null,
                      options?: { includeDraft?: boolean }): Promise<void> {
-    let userMeta = await this.clientUser.getChatContext(null);
+    let userMeta = await this.#chatContext(null);
 
     let meta = this.impl.assertChatNotActive(chatId);
     if (options?.includeDraft) {
@@ -8487,7 +8525,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async retryAgent(chatId: number, modelId: string): Promise<void> {
-    let userMeta = await this.clientUser.getChatContext(modelId);
+    let userMeta = await this.#chatContext(modelId);
 
     let meta = this.impl.assertChatNotActive(chatId);
     if (!userMeta.aiModel) {
