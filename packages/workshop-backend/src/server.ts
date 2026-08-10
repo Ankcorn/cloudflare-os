@@ -72,6 +72,12 @@ type Env = Cloudflare.Env & {
 
 // =======================================================================================
 
+/** What UserDurableObject.subscribeConnectedAccounts returns, as seen from the Worker. Derived
+ * from the method rather than hand-written because the native stub's Unstubify type transform
+ * mangles capnweb stubs nested in returns, so the two call sites cast through this (same known
+ * type-system gap as the Overseer stub casts). */
+type UserSubscription = Awaited<ReturnType<UserDurableObject["subscribeConnectedAccounts"]>>;
+
 type UserStub = DurableObjectStub<UserDurableObject>;
 
 /** Async-method view of the user stub, backing the #query/#command sugar: the same method
@@ -83,6 +89,27 @@ type UserDoProxy = {
     UserStub[K] extends (...args: infer A) => infer R
         ? (...args: A) => Promise<Awaited<R>> : never;
 };
+
+/** One browser subscription, held in the session's Worker context (which survives DO resets)
+ * so the DO-side registration can be re-created after the object's in-memory state dies.
+ * Re-subscribing triggers the DO's normal catch-up replay (`add` per current account, then
+ * `ready()`), which subscribers absorb as upserts. Accepted staleness: an account REMOVED
+ * while the registration was dead ghosts until the component next re-subscribes — removes
+ * have exactly one source today (see the census note in user.ts), and pruning against the
+ * replay was tried and deleted (the replay is lossy by design, so the prune removed live
+ * accounts more often than ghosts). */
+interface SubscriptionEntry {
+  /** Worker-held dup of the browser's subscriber stub; passed to the DO on each (re-)subscribe. */
+  subscriber: RpcStub<ConnectedAccountsSubscriber>;
+  filter?: ConnectedAccountsFilter;
+  /** DO-minted disposer for the current registration; poisoned by a reset, replaced on
+   * re-subscribe. Disposal is always best-effort. */
+  doDisposer: RpcStub<{}>;
+  /** Incarnation the current registration was made under; recovery skips entries already at
+   * the target incarnation, so a subscribe that raced the trigger is not replayed twice. */
+  incarnation: string;
+  disposed: boolean;
+}
 
 @validateRpc()
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
@@ -113,8 +140,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.users.get(this.#userId);
   }
 
-  // Every RPC into the user DO goes through #userQuery, #userCommand, or #userCall — a naked
-  // `this.#user.x()` elsewhere is a review defect. The #query/#command proxies below are sugar routing plain delegations
+  // Every RPC into the user DO goes through #userQuery, #userCommand, or #userCall (the
+  // recovery internals below are the one exception) — a naked `this.#user.x()` elsewhere is a
+  // review defect. The #query/#command proxies below are sugar routing plain delegations
   // through these same chokepoints. Query vs command is a retry-safety split, not a
   // storage-semantics one: a query is idempotent (safe to replay against the restarted
   // object), a command is not — see listProvidedAccounts for a "list" that is a command. This
@@ -135,6 +163,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (isDoResetError(e)) this.#onUserDoReset(operation, e, "surfaced");
       throw e;
     }
+    this.#maybeRevalidateSubscriptions();
     return result;
   }
 
@@ -161,7 +190,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async #userCall<T>(operation: string,
                      fn: (user: DurableObjectStub<UserDurableObject>) => Promise<T>): Promise<T> {
     try {
-      return await fn(this.#user);
+      let result = await fn(this.#user);
+      this.#maybeRevalidateSubscriptions();
+      return result;
     } catch (e) {
       if (isDoResetError(e)) this.#onUserDoReset(operation, e, "surfaced");
       throw e;
@@ -191,7 +222,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   /** Central reset observation point. `retrying` = a query retry is about to absorb it;
    * `surfaced` = the error reaches the client. The split is what lets the absorption thesis be
-   * checked in telemetry. */
+   * checked in telemetry. Kicks off subscription recovery either way. */
   #onUserDoReset(operation: string, error: unknown, outcome: "retrying" | "surfaced",
                  delayMs?: number) {
     logger.warn("user DO reset observed", {
@@ -200,6 +231,157 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       durableObjectId: this.#userId.toString(),
       error,
     });
+    this.#triggerRecovery();
+  }
+
+  // ── subscription recovery ─────────────────────────────────────────────────────────────────
+  //
+  // The DO holds subscriber registrations in memory only, so a reset destroys them while the
+  // browser's WebSocket stays healthy. Triggers feeding #triggerRecovery:
+  //  1. a call rejecting with reset flags (#onUserDoReset);
+  //  2. throttled drift checks after successful calls — a call issued after the reset just
+  //     restarts the object and succeeds, so there is no error to observe;
+  //  3. a subscribe returning an incarnation that differs from an existing entry's stamp.
+  //
+  // TODO(stopgap): all of this exists because native JSRPC stubs have no brokenness callback
+  // (capnweb's `onRpcBroken` exists browser-side only, as of 2026-08). Given one,
+  // `doDisposer.onRpcBroken(() => this.#triggerRecovery())` deletes getIncarnationId(), the
+  // throttled check, and the idle window. Disposal-detection (the overseer's notifyClosed
+  // HACK: a sentinel whose dispose fires when the holder dies) was considered and rejected for
+  // now — it rests on undocumented teardown ordering plus per-registration sentinel plumbing,
+  // while the stamp is atomic and self-describing — but it would close the idle window and the
+  // blind spot below, so it is the strongest candidate shape for a follow-up.
+  //
+  // Accepted costs: live registrations pin the user DO resident (pre-existing — Workers RPC
+  // keeps the callee alive while stubs are live); a fully idle session learns nothing
+  // until its next user-DO call, so its connected-accounts list silently stops updating
+  // (worst case: watching for an OAuth connect completing in a popup); and the stamp is not a
+  // COMPLETE death signal — the DO tears down its own registration when a delivery to the
+  // browser rejects (catch(unsubscribe) in user.ts) without changing incarnation, a death this
+  // machinery cannot see. The client's socket-level reconnect is the backstop for all three.
+
+  #subscriptions = new Set<SubscriptionEntry>();
+  /** Serializes recovery passes. Triggers are not deduplicated — every trigger queues a pass —
+   * but redundant passes coalesce into cheap no-ops (one incarnation read, every entry's
+   * stamp already current). */
+  #recoveryChain: Promise<void> = Promise.resolve();
+  #lastIncarnationCheck = 0;
+  static readonly #INCARNATION_CHECK_INTERVAL_MS = 30_000;
+  /** Consecutive drifted passes; bounds the self-re-queue in #recoverSubscriptions. Reset by
+   * any pass that completes without drift. */
+  #driftRequeues = 0;
+  static readonly #MAX_DRIFT_REQUEUES = 3;
+
+  /** Cheap, throttled, fire-and-forget drift check — call after any successful user-DO RPC.
+   * Sync on purpose so callers never pay latency for it; the recovery pass itself compares
+   * incarnations and no-ops when the registrations are still live. */
+  #maybeRevalidateSubscriptions() {
+    if (this.#subscriptions.size === 0) return;
+    let now = Date.now();
+    if (now - this.#lastIncarnationCheck < AuthenticatedApiImpl.#INCARNATION_CHECK_INTERVAL_MS) {
+      return;
+    }
+    this.#lastIncarnationCheck = now;
+    this.#triggerRecovery();
+  }
+
+  /** Queues a recovery pass behind any in-flight one. Best-effort: a failed pass leaves the
+   * affected entries' stamps stale, so the next trigger (flags or throttled check) retries. */
+  #triggerRecovery() {
+    this.#recoveryChain = this.#recoveryChain.then(() => this.#recoverSubscriptions());
+    // Guarded: this runs on the success path of the chokepoints (and in their catch blocks),
+    // and recovery is fire-and-forget bookkeeping — a waitUntil() rejection during context
+    // teardown must not replace a call's result or strip a flagged error of its flags.
+    try { this.ctx.waitUntil(this.#recoveryChain); } catch {}
+  }
+
+  /** Registers a subscriber with the DO and unwraps the result envelope, which owns its nested
+   * stubs — so the retained disposer is dup()'d and the envelope disposed. The subscriber stub
+   * is consumed by the send, so callers pass a dup(). */
+  async #registerSubscriber(subscriber: RpcStub<ConnectedAccountsSubscriber>,
+                            filter?: ConnectedAccountsFilter): Promise<UserSubscription> {
+    let result = await this.#user.subscribeConnectedAccounts(subscriber, filter) as unknown as
+        UserSubscription & Partial<Disposable>;
+    try {
+      return { disposer: result.disposer.dup(), incarnationId: result.incarnationId };
+    } finally {
+      result[Symbol.dispose]?.();
+    }
+  }
+
+  /** Re-subscribes every registration whose incarnation stamp is no longer the object's
+   * current one. Entry stamps are the only recovery state, each returned atomically by the
+   * subscribe that created it. Runs serialized via #triggerRecovery, never rejects. */
+  async #recoverSubscriptions(): Promise<void> {
+    if (this.#subscriptions.size === 0) return;
+    try {
+      let incarnation = await this.#user.getIncarnationId();
+      let recovered = 0;
+      let drifted = false;
+      // Iterating the live Set across the awaits is safe: an entry unsubscribed mid-pass is
+      // skipped via the disposed check; one added mid-pass carries an up-to-date stamp.
+      for (let entry of this.#subscriptions) {
+        if (entry.disposed || entry.incarnation === incarnation) continue;
+        // Dispose the old registration first: a no-op on a dead incarnation, and on a
+        // false-positive trigger it prevents double-delivery from two live registrations.
+        try { entry.doDisposer[Symbol.dispose](); } catch {}
+        let subscription = await this.#registerSubscriber(entry.subscriber.dup(), entry.filter);
+        if (entry.disposed) {
+          // Unsubscribed while the re-subscribe was in flight: tear down the orphan.
+          try { subscription.disposer[Symbol.dispose](); } catch {}
+          continue;
+        }
+        entry.doDisposer = subscription.disposer;
+        entry.incarnation = subscription.incarnationId;
+        recovered++;
+        if (subscription.incarnationId !== incarnation) drifted = true;
+      }
+      if (drifted) {
+        // The object reset AGAIN mid-pass, so some stamps are stale again. Re-queue after a
+        // jittered pause — a hot loop would hammer an already-failing object with replay work —
+        // and capped: a crashlooping object falls back to the ordinary triggers instead.
+        if (++this.#driftRequeues <= AuthenticatedApiImpl.#MAX_DRIFT_REQUEUES) {
+          logger.info("user DO reset again during subscription recovery", {
+            event: "user_do.subscription.recover_requeued",
+            durableObjectId: this.#userId.toString(),
+          });
+          await scheduler.wait(500 + Math.random() * 1000);
+          this.#triggerRecovery();
+        } else {
+          this.#lastIncarnationCheck = 0;
+          logger.warn("user DO kept resetting during subscription recovery; deferring", {
+            event: "user_do.subscription.recover_deferred",
+            durableObjectId: this.#userId.toString(),
+          });
+        }
+        return;
+      }
+      this.#driftRequeues = 0;
+      if (recovered > 0) {
+        logger.info("re-subscribed after user DO reset", {
+          event: "user_do.subscription.recovered",
+          durableObjectId: this.#userId.toString(),
+        });
+      }
+    } catch (e) {
+      // Un-stamp the throttle: it was stamped before this pass ran, and the pass may have
+      // disposed a registration it then failed to replace — the next successful call must be
+      // able to re-trigger immediately rather than in 30s.
+      this.#lastIncarnationCheck = 0;
+      logger.warn("re-subscribe after user DO reset failed", {
+        event: "user_do.subscription.recover_failed",
+        durableObjectId: this.#userId.toString(),
+        error: e,
+      });
+    }
+  }
+
+  #unsubscribeEntry(entry: SubscriptionEntry) {
+    if (entry.disposed) return;
+    entry.disposed = true;
+    this.#subscriptions.delete(entry);
+    try { entry.doDisposer[Symbol.dispose](); } catch {}
+    entry.subscriber[Symbol.dispose]();
   }
 
   #isAdmin(): boolean {
@@ -441,21 +623,45 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#command.provisionAmbientAccount(vendorId);
   }
 
-  subscribeConnectedAccounts(
+  async subscribeConnectedAccounts(
       subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
       : Promise<RpcStub<{}>> {
-    // #userCall: registration is not retry-safe (a retry after a lost response duplicates
-    // it, and the includeForcedAutoProvisionedAccounts filter provisions accounts — see
-    // listGatekeeperApps), and it must not stall the command chain (its replay awaits vendor
-    // describes).
-    //
-    // TODO(deferred): the DO holds this registration in memory only, so a reset silently kills
-    // it while the browser's WebSocket stays healthy — the connected-accounts list stops
-    // updating until the component re-subscribes or the socket-level reconnect kicks in.
-    // Self-healing (incarnation-stamped re-registration from the session, which survives DO
-    // resets) is deliberately split out to feat/do-reset-subscription-self-heal.
-    return this.#userCall("subscribeConnectedAccounts",
-        user => user.subscribeConnectedAccounts(subscriber, filter));
+    // Dup the browser's subscriber stub: the param handle dies when this call returns, but
+    // re-subscribing after a reset needs it for the life of the subscription. Each
+    // (re-)subscribe sends its own dup(); the master is disposed only by #unsubscribeEntry.
+    let kept = subscriber.dup();
+    let subscription: UserSubscription;
+    try {
+      // #userCall: registration is not retry-safe (a retry after a lost response duplicates
+      // it, and the includeForcedAutoProvisionedAccounts filter provisions accounts — see
+      // listGatekeeperApps), and it must not stall the command chain (its replay awaits vendor
+      // describes). A subscribe raced by a reset surfaces to the component's fallback.
+      subscription = await this.#userCall("subscribeConnectedAccounts",
+          () => this.#registerSubscriber(kept.dup(), filter));
+    } catch (e) {
+      kept[Symbol.dispose]();
+      throw e;
+    }
+    let entry: SubscriptionEntry = {
+      subscriber: kept, filter, doDisposer: subscription.disposer,
+      incarnation: subscription.incarnationId, disposed: false,
+    };
+    this.#subscriptions.add(entry);
+
+    // A stamp mismatch among live entries means the object reset between an earlier subscribe
+    // and this one: the older registrations are already dead. This fresh entry's own stamp
+    // makes the recovery pass skip it and re-subscribe only the dead ones.
+    for (let other of this.#subscriptions) {
+      if (!other.disposed && other.incarnation !== entry.incarnation) {
+        this.#triggerRecovery();
+        break;
+      }
+    }
+
+    // Worker-minted disposer: unlike the DO-minted one it wraps, it survives resets, so the
+    // browser's dispose always cleanly tears down whichever registration is current.
+    let unsubscribe = () => this.#unsubscribeEntry(entry);
+    return new RpcStub<{}>({ [Symbol.dispose]() { unsubscribe(); } });
   }
 
   disconnectAccount(accountId: number): Promise<void> {

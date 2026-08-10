@@ -118,7 +118,9 @@ export interface ConnectedAccountsSubscriber {
       supportedResources: SupportedResource[], credentialsValid: boolean, vendorId: string): void;
   remove(id: number): void;
 
-  // Called after add() has been called for all accounts known so far.
+  // Called after add() has been called for all accounts known so far. Re-fires at the end of
+  // every catch-up replay when the server re-registers this subscriber after a Durable Object
+  // reset, so implementations must keep it idempotent (and treat repeat add() as an upsert).
   ready(): void;
 }
 
