@@ -15,8 +15,8 @@ export const GADGET_EXPORT_ENTRYPOINT = "ExportHandler";
  * formats that can be easily captured using the Browser Run binding.
  *
  * Custom mode: The server-side export handler entrypoint returns the file
- * content directly. Export targets are unrestricted, and a Gadget may (on rare
- * occasion) reimplement a browser-mode export target server-side if it wants
+ * content directly. Export file formats are unrestricted, and a Gadget may (on
+ * rare occasion) reimplement a browser-mode file format server-side if it wants
  * total control over the exported file content.
 */
 export type GadgetExportTarget =
