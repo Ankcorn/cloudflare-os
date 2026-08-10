@@ -37,7 +37,8 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
-import { createWorkshopLogger, obsContext, traced } from "./observability";
+import { createWorkshopLogger, obsContext, traced, tracedPipelined } from "./observability";
+import type { TraceSpan } from "@gadgets/backend-utils/tracing";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import {
   assertChatAttachmentSupportedByProvider,
@@ -2037,6 +2038,9 @@ class OverseerImpl implements AgentHooks {
       overseerId: this.ctx.id.toString(),
       target,
       caller,
+      vendorId: target.type === "gatekeeper"
+          ? gatekeeperVendorId(this.storage.gatekeepers.get(target.id))
+          : undefined,
     };
     return this.ctx.exports.GatekeeperLoopback({props});
   }
@@ -6830,6 +6834,10 @@ type GatekeeperLoopbackProps = {
   target: BindingLoopbackTarget;
 
   caller: GatekeeperCaller;
+
+  // Target gatekeeper's vendor id (immutable, so safe to denormalize), stamped on the
+  // loopback's trace. Absent for gadget targets.
+  vendorId?: string;
 };
 
 type BindingLoopbackTarget = {
@@ -6853,9 +6861,26 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let stub: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(ctx.props.overseerId));
 
-    // @ts-ignore: LSP-only RPC types bug, "type instantiation is excessively deep"
-    let session = stub.startGatekeeperSession(
-        this.ctx.props.target, this.ctx.props.caller);
+    let {target: bindingTarget, caller, vendorId} = ctx.props;
+    let stampIdentity = (span: TraceSpan) => {
+      span.setAttribute("bindingTargetType", bindingTarget.type);
+      span.setAttribute("bindingTargetId", bindingTarget.id);
+      span.setAttribute("vendorId", vendorId);
+      span.setAttribute("callerFrom", caller.from);
+      if ("chatId" in caller) span.setAttribute("chatId", caller.chatId);
+      if (caller.from === "gadget") span.setAttribute("callerGadgetId", caller.gadgetId);
+    };
+    // Immediately-closed stamp: an unended span's attributes are never streamed (pinned in
+    // backend-utils tracing.test.ts), so this is what identifies a hung invocation.
+    traced("gatekeeper.loopback.identity", stampIdentity);
+
+    // Measures session resolution; on a hang, its never-closed spanOpen marks the stage.
+    // tracedPipelined returns the RpcPromise unchanged, so the Proxy still pipelines.
+    let session = tracedPipelined("gatekeeper.loopback.resolve", (span) => {
+      stampIdentity(span);
+      // @ts-ignore: LSP-only RPC types bug, "type instantiation is excessively deep"
+      return stub.startGatekeeperSession(bindingTarget, caller);
+    });
 
     return new Proxy(session, {
       get(target, prop, receiver) {
@@ -9398,8 +9423,33 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async openSession(): Promise<RpcStub<Session>> {
+    let caller = this.caller;
+    let vendorId = gatekeeperVendorId(this.impl.storage.gatekeepers.get(this.id));
+    let fields = {
+      operation: "gatekeeper.session.open",
+      gatekeeperId: this.id,
+      callerFrom: caller.from,
+      ...(vendorId !== undefined && {vendorId}),
+      ...("chatId" in caller && caller.chatId !== undefined && {chatId: caller.chatId}),
+      ...(caller.from === "gadget" && caller.gadgetId !== undefined
+          && {callerGadgetId: caller.gadgetId}),
+    };
+    // Span covers the common path; only failures log. Awaiting is safe here: this async
+    // function already adopted the promise, so caller-side pipelining is unaffected.
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
+    return obsContext.with(fields, () => traced("gatekeeper.session.open", async () => {
+      let startedAt = Date.now();
+      try {
+        return await this.facet.startSession(
+            new ApprovalQueueImpl(this.impl, this.id, this.caller));
+      } catch (error) {
+        logger.warn("gatekeeper session open failed", {
+          event: "gatekeeper.session.open.failed",
+          durationMs: Date.now() - startedAt, outcome: "error", error,
+        });
+        throw error;
+      }
+    }));
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {

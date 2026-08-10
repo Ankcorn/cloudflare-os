@@ -2,10 +2,19 @@ import { tracing } from "cloudflare:workers";
 
 type Attribute = boolean | number | string;
 
-// The span surface exposed to callbacks. Lifetime is managed by `traced`, so no `end()`.
+// The span surface exposed to callbacks. Lifetime is managed by the tracer helpers, so no `end()`.
 export interface TraceSpan {
   readonly isTraced: boolean;
   setAttribute(key: string, value?: Attribute): void;
+}
+
+function stampContext(span: Pick<TraceSpan, "setAttribute">,
+    context: Readonly<Record<string, unknown>>) {
+  for (const [key, value] of Object.entries(context)) {
+    if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      span.setAttribute(key, value);
+    }
+  }
 }
 
 /**
@@ -18,13 +27,7 @@ export interface TraceSpan {
 export function createTracer(getContext: () => Readonly<Record<string, unknown>>) {
   return function traced<Result>(name: string, callback: (span: TraceSpan) => Result): Result {
     return tracing.enterSpan(name, (span) => {
-      if (span.isTraced) {
-        for (const [key, value] of Object.entries(getContext())) {
-          if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-            span.setAttribute(key, value);
-          }
-        }
-      }
+      if (span.isTraced) stampContext(span, getContext());
       // Boolean marker only: error text is unbounded and possibly sensitive, so it belongs to
       // logs/reporting, not trace attributes.
       const fail = () => span.setAttribute("error", true);
@@ -39,6 +42,43 @@ export function createTracer(getContext: () => Readonly<Record<string, unknown>>
             : result;
       } catch (err) {
         fail();
+        throw err;
+      }
+    });
+  };
+}
+
+/**
+ * Like `createTracer`, but the helper returns the callback result unchanged, preserving RPC
+ * promise/stub identity where `traced`'s `.catch` wrapper would collapse pipelining. A side
+ * observer ends the span on settle (`error: true` on rejection).
+ *
+ * A promise that never settles streams only its spanOpen — attributes flush at close and are
+ * lost (pinned by __tests__/tracing.test.ts) — so identity that must survive hangs needs a
+ * separately-ended span alongside.
+ */
+export function createPipelinedTracer(getContext: () => Readonly<Record<string, unknown>>) {
+  return function tracedPipelined<Result extends PromiseLike<unknown>>(
+      name: string, callback: (span: TraceSpan) => Result): Result {
+    return tracing.startActiveSpan(name, (span) => {
+      if (span.isTraced) stampContext(span, getContext());
+      try {
+        const result = callback(span);
+        if (!span.isTraced) {
+          span.end();
+          return result;
+        }
+        // Side observer only: `result` is returned as-is, never wrapped.
+        void result.then(
+            () => span.end(),
+            () => {
+              span.setAttribute("error", true);
+              span.end();
+            });
+        return result;
+      } catch (err) {
+        span.setAttribute("error", true);
+        span.end();
         throw err;
       }
     });

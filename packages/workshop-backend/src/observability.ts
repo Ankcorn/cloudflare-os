@@ -1,5 +1,5 @@
 import { createObservabilityContext } from "@gadgets/backend-utils/observability-context";
-import { createTracer } from "@gadgets/backend-utils/tracing";
+import { createPipelinedTracer, createTracer } from "@gadgets/backend-utils/tracing";
 
 /** Observability fields emitted by the Workshop backend. */
 export type WorkshopObservabilityFields = {
@@ -8,6 +8,10 @@ export type WorkshopObservabilityFields = {
   autoProvisioned: boolean;
   blueprintId: string;
   callbackInitiated: boolean;
+  // Who initiated a binding call (`operation` names what is being done).
+  callerFrom: "agent" | "gadget" | "user" | "hook";
+  // The calling gadget's workpiece id (`gadgetId` is the overseer DO id).
+  callerGadgetId: number;
   chatId: number;
   durationMs: number;
   eventName: string;
@@ -42,3 +46,6 @@ export function createWorkshopLogger(component: string) {
 
 /** Runs `callback` in a trace span carrying the ambient observability fields as attributes. */
 export const traced = createTracer(obsContext.get);
+
+/** Like `traced`, but returns the callback's promise unchanged — safe around pipelined RPC. */
+export const tracedPipelined = createPipelinedTracer(obsContext.get);
