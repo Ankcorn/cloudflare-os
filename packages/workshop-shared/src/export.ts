@@ -87,7 +87,7 @@ export interface GadgetExportEntrypoint<Gadget extends DurableObject = DurableOb
    *  - { id: "html", label: "HTML", mode: "browser", contentType: "text/html"}
    *  - { id: "pdf", label: "PDF", mode: "browser", contentType: "application/pdf"}
    * Every `ExportHandler` entrypoint must implement this method. The Workshop rejects
-   * a missing `getExportFormats` method instead of applying defaults. Returning an
+   * a missing `getExportTargets` method instead of applying defaults. Returning an
    * empty list disables file exports.
    *
    * When implementing this method, the Gadget should return these browser-mode
