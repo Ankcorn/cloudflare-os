@@ -296,7 +296,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async authenticate(token: string): Promise<void> {
-    let tokenBytes = Uint8Array.fromBase64(token);
+    let tokenBytes: Uint8Array;
+    try {
+      tokenBytes = Uint8Array.fromBase64(token);
+    } catch {
+      // A corrupt (non-Base64) token must classify as an auth failure like any other bad token,
+      // not surface as the decoder's SyntaxError.
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
     let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
     let tokenId = new Uint8Array(hash).toHex();
     let session = this.storage.sessions.get(tokenId);
@@ -1424,6 +1431,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       async update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord) {
         await notifyAdd(newRecord);
       },
+      // Census note: every remove funnels through here, and deletion has exactly one source
+      // today — the owner's own disconnectAccount (credential expiry, dedup, and re-login all
+      // put(), i.e. re-add). A remove that lands mid-replay, before notifyAdd records the id in
+      // seenIds, ghosts until the next re-subscribe (pre-existing).
       remove(record: ConnectedAccountRecord): void {
         if (seenIds.has(record.id)) {
           subscriber.remove(record.id);
