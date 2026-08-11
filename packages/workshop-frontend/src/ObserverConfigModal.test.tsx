@@ -211,6 +211,53 @@ describe('ObserverConfigModal account selection', () => {
     expect(window.open).toHaveBeenCalledWith(
       'https://accounts.google.test/oauth', '_blank', 'noopener,noreferrer',
     )
+    expect(rendered.textContent).not.toContain('Ready')
+    expect(verify?.disabled).toBe(true)
+  })
+
+  it('checks the resource grant when legacy account metadata omits it', async () => {
+    const ensureAccountResources = vi.fn<
+      (accountId: number, resourceUrlPatterns: string[]) => Promise<{ url?: string }>
+    >().mockResolvedValue({ url: 'https://accounts.google.test/oauth' })
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+    const legacy = account(1, 'dan@cloudflare.com')
+    const rendered = await render([legacy], {
+      api: fakeApi([legacy], { ensureAccountResources }),
+    })
+
+    const verify = [...rendered.querySelectorAll('button')]
+      .find(button => button.textContent === 'Verify and open')
+    const grant = [...rendered.querySelectorAll('button')]
+      .find(button => button.textContent === 'Grant the access needed to verify this resource')
+    expect(verify?.disabled).toBe(true)
+    expect(grant).toBeDefined()
+
+    await act(async () => grant!.click())
+
+    expect(ensureAccountResources).toHaveBeenCalledWith(1, [DOC_RESOURCE.urlPattern])
+    expect(window.open).toHaveBeenCalledWith(
+      'https://accounts.google.test/oauth', '_blank', 'noopener,noreferrer',
+    )
+  })
+
+  it('allows verification when the gatekeeper confirms an unknown grant needs no OAuth', async () => {
+    const ensureAccountResources = vi.fn<
+      (accountId: number, resourceUrlPatterns: string[]) => Promise<{ url?: string }>
+    >().mockResolvedValue({})
+    const legacy = account(1, 'dan@cloudflare.com')
+    const rendered = await render([legacy], {
+      api: fakeApi([legacy], { ensureAccountResources }),
+    })
+
+    const grant = [...rendered.querySelectorAll('button')]
+      .find(button => button.textContent === 'Grant the access needed to verify this resource')
+    await act(async () => grant!.click())
+
+    const verify = [...rendered.querySelectorAll('button')]
+      .find(button => button.textContent === 'Verify and open')
+    expect(ensureAccountResources).toHaveBeenCalledWith(1, [DOC_RESOURCE.urlPattern])
+    expect(rendered.textContent).toContain('Ready')
+    expect(verify?.disabled).toBe(false)
   })
 
   it('allows verification when the account already has the required grant', async () => {

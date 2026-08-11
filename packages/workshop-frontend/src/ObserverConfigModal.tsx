@@ -60,12 +60,11 @@ function requiredResourceUrlPatterns(
   return resolved.ok && resolved.resource.grantable ? [resolved.resource.urlPattern] : []
 }
 
-// Filter required resource types down to those the account has not granted yet. An omitted
-// granted-resource list denotes a legacy or full-scope account and therefore satisfies every
-// requirement.
+// Older account records may not list which resources were granted. Ask the gatekeeper to check
+// instead of assuming the account has access.
 function missingResourceUrlPatterns(account: AccountInfo, required: string[]): string[] {
   const granted = account.description.grantedResourceUrlPatterns
-  return granted === undefined ? [] : required.filter(pattern => !granted.includes(pattern))
+  return granted === undefined ? required : required.filter(pattern => !granted.includes(pattern))
 }
 
 interface ObserverConfigModalProps {
@@ -252,7 +251,29 @@ export default function ObserverConfigModal({
     try {
       const { url } = await authenticatedApi.ensureAccountResources(account.id, missing)
       if (url) window.open(url, '_blank', 'noopener,noreferrer')
-      else setGranting(null)
+      else {
+        // The gatekeeper confirmed this account already has access. Update the modal so the user can
+        // continue without an OAuth flow.
+        setAccounts(prev => {
+          const current = prev.get(account.id)
+          if (!current) return prev
+          const next = new Map(prev)
+          next.set(account.id, {
+            ...current,
+            description: {
+              ...current.description,
+              grantedResourceUrlPatterns: [
+                ...new Set([
+                  ...(current.description.grantedResourceUrlPatterns ?? []),
+                  ...missing,
+                ]),
+              ],
+            },
+          })
+          return next
+        })
+        setGranting(null)
+      }
     } catch (err) {
       console.error('Failed to request additional access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
