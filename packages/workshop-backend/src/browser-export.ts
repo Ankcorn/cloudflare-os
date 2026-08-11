@@ -12,8 +12,14 @@ const logger = createLogger<BrowserExportLogFields>({ component: "workshop.brows
 
 /** Wall-clock budget covering launch, rendering, and delivery of the entire export. */
 const MAX_EXPORT_DURATION_MS = 30_000;
-/** Largest export the Workshop will stream. Enforced while streaming, never buffered in full. */
-const MAX_EXPORT_BYTES = 100 * 1024 * 1024;
+/** Largest PDF the Workshop will stream. Enforced while streaming, never buffered in full. */
+const MAX_PDF_BYTES = 100 * 1024 * 1024;
+/** Largest screenshot accepted as model input. */
+const MAX_SCREENSHOT_BYTES = 1024 * 1024;
+/** Fixed viewport for agent screenshots; capture parameters are never model-controlled. */
+const SCREENSHOT_VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
+/** Try the higher quality first, then recompress the same rendered page if it exceeds the cap. */
+const SCREENSHOT_QUALITIES = [80, 50] as const;
 /** Quiet period indicating that the client has finished its initial DOM updates. */
 const DOM_SETTLE_MS = 250;
 /** Budget for releasing the browser session once an export has settled. */
@@ -200,11 +206,11 @@ function releaseWhenSettled(
   });
 }
 
-async function waitForDomSettled(page: Page): Promise<void> {
-  await page.evaluate(async (quietMs: number) => {
+async function waitForDomSettled(page: Page, waitForFonts: boolean): Promise<void> {
+  await page.evaluate(async (quietMs: number, fonts: boolean) => {
     const browser = globalThis as unknown as {
       __workshopExportModulePromise: Promise<Record<string, unknown>>;
-      document: { documentElement: unknown };
+      document: { documentElement: unknown; fonts: { ready: Promise<unknown> } };
       MutationObserver: new(callback: () => void) => {
         observe(target: unknown, options: Record<string, boolean>): void;
         disconnect(): void;
@@ -212,6 +218,7 @@ async function waitForDomSettled(page: Page): Promise<void> {
     };
     // Make sure that client module has been loaded before watching DOM.
     await browser.__workshopExportModulePromise;
+    if (fonts) await browser.document.fonts.ready;
     await new Promise<void>(resolve => {
       let timer: ReturnType<typeof setTimeout>;
       let observer = new browser.MutationObserver(() => {
@@ -230,22 +237,34 @@ async function waitForDomSettled(page: Page): Promise<void> {
       });
       timer = setTimeout(finish, quietMs);
     });
-  }, DOM_SETTLE_MS);
+  }, DOM_SETTLE_MS, waitForFonts);
 }
 
 /**
- * Renders a Gadget's UI as PDF in a remote browser and streams the bytes back.
+ * Captures a Gadget's UI as either a streamed PDF or a bounded JPEG in a remote browser.
  *
  * Takes ownership of `gadget` and disposes it once the export settles. The
- * returned stream must be consumed or cancelled: the browser session stays open
- * until it settles or times out.
+ * PDF stream must be consumed or cancelled: its browser session stays open until
+ * it settles or times out. JPEG captures release the browser before returning.
  */
-export async function renderGadgetPdf(
+export function screenCapture(
   browserBinding: BrowserRun,
   clientCode: string,
-  documentTitle: string,
   gadget: RpcStub<any>,
-): Promise<ReadableStream<Uint8Array>> {
+  options: {format: "pdf"; documentTitle: string},
+): Promise<ReadableStream<Uint8Array>>;
+export function screenCapture(
+  browserBinding: BrowserRun,
+  clientCode: string,
+  gadget: RpcStub<any>,
+  options: {format: "jpeg"},
+): Promise<Uint8Array>;
+export async function screenCapture(
+  browserBinding: BrowserRun,
+  clientCode: string,
+  gadget: RpcStub<any>,
+  options: {format: "pdf"; documentTitle: string} | {format: "jpeg"},
+): Promise<ReadableStream<Uint8Array> | Uint8Array> {
   let deadline = createDeadline(MAX_EXPORT_DURATION_MS, "Browser export timed out.");
 
   let launchPromise = launch(browserBinding);
@@ -287,6 +306,9 @@ export async function renderGadgetPdf(
   try {
     let source = await deadline.race((async () => {
       let page = await browser.newPage();
+      if (options.format === "jpeg") {
+        await page.setViewport(SCREENSHOT_VIEWPORT);
+      }
       await page.setRequestInterception(true);
       page.on("request", (request) => {
         let url = request.url();
@@ -309,19 +331,44 @@ export async function renderGadgetPdf(
       page.on("close", () => transport.abort(new Error("Browser page closed.")));
       let rpcSession = new RpcSession(transport, gadget);
       sessionCloser = rpcSession.getRemoteMain();
-      await waitForDomSettled(page);
-      await page.emulateMediaType("print");
-      await page.evaluate(title => {
-        let browser = globalThis as unknown as { document: { title: string } };
-        browser.document.title = title;
-      }, documentTitle);
-      return page.createPDFStream({
-        preferCSSPageSize: true,
-        printBackground: true,
-        waitForFonts: true,
-      });
+      await waitForDomSettled(page, options.format === "jpeg");
+
+      if (options.format === "pdf") {
+        await page.emulateMediaType("print");
+        await page.evaluate(title => {
+          let browser = globalThis as unknown as { document: { title: string } };
+          browser.document.title = title;
+        }, options.documentTitle);
+        return {
+          format: "pdf" as const,
+          body: await page.createPDFStream({
+            preferCSSPageSize: true,
+            printBackground: true,
+            waitForFonts: true,
+          }),
+        };
+      }
+
+      for (let quality of SCREENSHOT_QUALITIES) {
+        let body = await page.screenshot({
+          type: "jpeg",
+          quality,
+          fullPage: false,
+          captureBeyondViewport: false,
+        });
+        if (body.byteLength <= MAX_SCREENSHOT_BYTES) {
+          return {format: "jpeg" as const, body};
+        }
+      }
+      throw new Error(`Gadget screenshots may not exceed ${MAX_SCREENSHOT_BYTES} bytes.`);
     })());
-    return releaseWhenSettled(limitStream(source, MAX_EXPORT_BYTES), release);
+
+    if (source.format === "pdf") {
+      return releaseWhenSettled(limitStream(source.body, MAX_PDF_BYTES), release);
+    }
+
+    await release();
+    return source.body;
   } catch (error) {
     // Deliberately omits the caught value: failures here can carry Gadget-authored exception text,
     // which must not reach logs or the external issue Reporter.

@@ -1,37 +1,72 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RpcStub, RpcTarget } from "capnweb";
 
 const launch = vi.hoisted(() => vi.fn());
 vi.mock("@cloudflare/puppeteer", () => ({ launch }));
 
-const { BrowserRpcTransport, limitStream, renderGadgetPdf } =
+const { BrowserRpcTransport, limitStream, screenCapture } =
     await import("../src/browser-export.js");
 
 type Harness = {
   browserClosed: () => boolean;
   clientInitialized: () => boolean;
+  fontsWaitedFor: () => boolean;
   gadgetDisposed: () => boolean;
+  mediaTypes: () => string[];
   pdfRequested: () => boolean;
   renderSettled: () => boolean;
+  screenshotQualities: () => number[];
+  viewport: () => {width: number; height: number; deviceScaleFactor?: number} | undefined;
+  viewportSetBeforeNavigation: () => boolean;
 };
 
-function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true) {
+class TestGadget extends RpcTarget {
+  constructor(private onDispose: () => void) {
+    super();
+  }
+
+  [Symbol.dispose]() {
+    this.onDispose();
+  }
+}
+
+function makeHarness({
+  pdfChunks = ["%PDF-1.4"],
+  closePdf = true,
+  screenshotSizes = [100],
+}: {
+  pdfChunks?: string[];
+  closePdf?: boolean;
+  screenshotSizes?: number[];
+} = {}) {
   let browserClosed = false;
   let clientInitialized = false;
   let documentTitle: string | undefined;
+  let fontsWaitedFor = false;
   let gadgetDisposed = false;
+  let mediaTypes: string[] = [];
+  let navigationStarted = false;
   let pdfRequested = false;
   let renderSettled = false;
+  let screenshotQualities: number[] = [];
+  let viewport: {width: number; height: number; deviceScaleFactor?: number} | undefined;
+  let viewportSetBeforeNavigation = false;
 
   let page = {
+    setViewport: async (value: typeof viewport) => {
+      viewport = value;
+      viewportSetBeforeNavigation = !navigationStarted;
+    },
     setRequestInterception: async () => {},
     on: () => {},
-    goto: async () => {},
+    goto: async () => { navigationStarted = true; },
     mainFrame: () => ({}),
-    emulateMediaType: async () => {},
+    emulateMediaType: async (type: string) => { mediaTypes.push(type); },
     evaluate: (fn: (...args: never[]) => unknown, ...args: unknown[]) => {
       if (fn.toString().includes("__workshopExportModulePromise")) {
         clientInitialized = true;
         renderSettled = fn.toString().includes("MutationObserver");
+        fontsWaitedFor = args[1] === true;
         return Promise.resolve();
       }
       if (fn.toString().includes("document.title")) {
@@ -53,6 +88,14 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true) {
         },
       });
     },
+    screenshot: async ({quality}: {quality: number}) => {
+      expect(clientInitialized).toBe(true);
+      expect(renderSettled).toBe(true);
+      screenshotQualities.push(quality);
+      let size = screenshotSizes[Math.min(screenshotQualities.length - 1,
+          screenshotSizes.length - 1)];
+      return new Uint8Array(size);
+    },
   };
 
   launch.mockResolvedValue({
@@ -62,31 +105,32 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true) {
     },
   });
 
-  let gadget = {
-    [Symbol.dispose]: () => {
-      gadgetDisposed = true;
-    },
-  };
+  let gadget = new RpcStub(new TestGadget(() => { gadgetDisposed = true; }));
 
   let harness: Harness = {
     browserClosed: () => browserClosed,
     clientInitialized: () => clientInitialized,
+    fontsWaitedFor: () => fontsWaitedFor,
     gadgetDisposed: () => gadgetDisposed,
+    mediaTypes: () => mediaTypes,
     pdfRequested: () => pdfRequested,
     renderSettled: () => renderSettled,
+    screenshotQualities: () => screenshotQualities,
+    viewport: () => viewport,
+    viewportSetBeforeNavigation: () => viewportSetBeforeNavigation,
   };
   return { gadget, harness };
 }
 
 function render(pdfChunks?: string[], closePdf = true) {
-  let { gadget, harness } = makeHarness(pdfChunks, closePdf);
-  let stream = renderGadgetPdf(
+  let { gadget, harness } = makeHarness({pdfChunks, closePdf});
+  let result = screenCapture(
     {} as BrowserRun,
     "export default {}",
-    "Test Gadget",
     gadget as never,
+    {format: "pdf", documentTitle: "Test Gadget"},
   );
-  return { stream, harness };
+  return { result, harness };
 }
 
 async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -139,21 +183,25 @@ describe("limitStream", () => {
   });
 });
 
-describe("renderGadgetPdf", () => {
+describe("screenCapture", () => {
   it("settles the client render, streams a PDF, and releases the browser", async () => {
-    let { stream, harness } = render();
+    let { result, harness } = render();
+    let capture = await result;
 
-    expect(await collect(await stream)).toBe("%PDF-1.4");
+    expect(await collect(capture)).toBe("%PDF-1.4");
     expect(harness.clientInitialized()).toBe(true);
     expect(harness.renderSettled()).toBe(true);
+    expect(harness.fontsWaitedFor()).toBe(false);
+    expect(harness.mediaTypes()).toEqual(["print"]);
     expect(harness.pdfRequested()).toBe(true);
     expect(harness.browserClosed()).toBe(true);
+    expect(harness.gadgetDisposed()).toBe(true);
   });
 
   it("releases the browser when the consumer cancels the stream", async () => {
-    let { stream, harness } = render(["first", "second"]);
+    let { result, harness } = render(["first", "second"]);
 
-    let reader = (await stream).getReader();
+    let reader = (await result).getReader();
     await reader.read();
     await reader.cancel("no longer needed");
 
@@ -163,8 +211,8 @@ describe("renderGadgetPdf", () => {
   it("releases the browser when the export stream exceeds its deadline", async () => {
     vi.useFakeTimers();
     try {
-      let { stream, harness } = render(["first"], false);
-      let reader = (await stream).getReader();
+      let { result, harness } = render(["first"], false);
+      let reader = (await result).getReader();
       await expect(reader.read()).resolves.toMatchObject({ done: false });
 
       await vi.advanceTimersByTimeAsync(30_000);
@@ -183,11 +231,11 @@ describe("renderGadgetPdf", () => {
       let browserClosed = false;
       let gadgetDisposed = false;
       launch.mockReturnValue(pendingLaunch.promise);
-      let result = renderGadgetPdf(
+      let result = screenCapture(
         {} as BrowserRun,
         "export default {}",
-        "Test Gadget",
         { [Symbol.dispose]: () => { gadgetDisposed = true; } } as never,
+        {format: "pdf", documentTitle: "Test Gadget"},
       );
       let rejection = expect(result).rejects.toThrow("Browser export timed out.");
 
@@ -209,12 +257,68 @@ describe("renderGadgetPdf", () => {
     let gadgetDisposed = false;
     launch.mockRejectedValue(new Error("no browser available"));
 
-    await expect(renderGadgetPdf(
+    await expect(screenCapture(
       {} as BrowserRun,
       "export default {}",
-      "Test Gadget",
       { [Symbol.dispose]: () => { gadgetDisposed = true; } } as never,
+      {format: "pdf", documentTitle: "Test Gadget"},
     )).rejects.toThrow("no browser available");
     expect(gadgetDisposed).toBe(true);
+  });
+
+  it("captures a bounded JPEG at the fixed viewport and releases before returning", async () => {
+    let {gadget, harness} = makeHarness({screenshotSizes: [123]});
+
+    let capture = await screenCapture(
+      {} as BrowserRun,
+      "export default {}",
+      gadget as never,
+      {format: "jpeg"},
+    );
+
+    expect(capture).toBeInstanceOf(Uint8Array);
+    expect(capture.byteLength).toBe(123);
+    expect(harness.viewport()).toEqual({width: 1280, height: 720, deviceScaleFactor: 1});
+    expect(harness.viewportSetBeforeNavigation()).toBe(true);
+    expect(harness.fontsWaitedFor()).toBe(true);
+    expect(harness.mediaTypes()).toEqual([]);
+    expect(harness.screenshotQualities()).toEqual([80]);
+    expect(harness.browserClosed()).toBe(true);
+    expect(harness.gadgetDisposed()).toBe(true);
+  });
+
+  it("retries JPEG encoding on the same page when the first capture exceeds the limit", async () => {
+    let {gadget, harness} = makeHarness({
+      screenshotSizes: [1024 * 1024 + 1, 1024],
+    });
+
+    let capture = await screenCapture(
+      {} as BrowserRun,
+      "export default {}",
+      gadget as never,
+      {format: "jpeg"},
+    );
+
+    expect(capture.byteLength).toBe(1024);
+    expect(harness.screenshotQualities()).toEqual([80, 50]);
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(harness.browserClosed()).toBe(true);
+    expect(harness.gadgetDisposed()).toBe(true);
+  });
+
+  it("rejects an oversized JPEG and releases the browser", async () => {
+    let {gadget, harness} = makeHarness({
+      screenshotSizes: [1024 * 1024 + 1],
+    });
+
+    await expect(screenCapture(
+      {} as BrowserRun,
+      "export default {}",
+      gadget as never,
+      {format: "jpeg"},
+    )).rejects.toThrow("Gadget screenshots may not exceed 1048576 bytes.");
+    expect(harness.screenshotQualities()).toEqual([80, 50]);
+    expect(harness.browserClosed()).toBe(true);
+    expect(harness.gadgetDisposed()).toBe(true);
   });
 });

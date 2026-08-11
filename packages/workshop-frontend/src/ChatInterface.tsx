@@ -51,6 +51,7 @@ import {
   Question,
   ArrowUpRight,
   Blueprint,
+  Camera,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -673,6 +674,8 @@ function getToolCallSummary(
           : undefined,
       };
     }
+    case "captureGadgetScreenshot":
+      return { verb: "Captured screenshot", target: tc.input.gadget };
     case "giveUp":
       return { verb: "Stopped" };
     case "webFetch": {
@@ -751,6 +754,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Fetched ${pluralize(count, "page")}`;
     case "executeCode":
       return count === 1 ? "Ran code" : `Ran code ${formatTimes(count)}`;
+    case "captureGadgetScreenshot":
+      return `Captured ${pluralize(count, "screenshot")}`;
     case "describeBinding":
       return `Inspected ${pluralize(count, "binding")}`;
     case "setBindingHook":
@@ -790,6 +795,8 @@ function getToolIcon(
       return PencilSimple;
     case "executeCode":
       return Terminal;
+    case "captureGadgetScreenshot":
+      return Camera;
     case "webFetch":
       return Globe;
     case "describeBinding":
@@ -831,6 +838,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Creating gadget";
     case "executeCode":
       return "Running code";
+    case "captureGadgetScreenshot":
+      return "Capturing screenshot";
     case "webFetch":
       return "Fetching web page";
     case "observeUserChanges":
@@ -858,6 +867,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "saveCapsuleAsBinding": return "Saving";
     case "createGadget": return "Creating gadget";
     case "executeCode": return "Running code";
+    case "captureGadgetScreenshot": return "Capturing";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
     case "giveUp": return "Stopping";
@@ -878,6 +888,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "editFile": return `Making ${count} edits`;
     case "webFetch": return `Fetching ${pluralize(count, "page")}`;
     case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
+    case "captureGadgetScreenshot": return `Capturing ${pluralize(count, "screenshot")}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
     case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
     case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;

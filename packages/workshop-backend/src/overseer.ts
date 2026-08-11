@@ -44,7 +44,7 @@ import {
   isAllowedChatAttachmentImageMimeType,
   validateChatAttachmentUpload,
 } from "./chat-attachment-validation";
-import { renderGadgetPdf } from "./browser-export";
+import { screenCapture } from "./browser-export";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
@@ -1501,6 +1501,26 @@ class OverseerImpl implements AgentHooks {
     return this.defaultGadgetId === id ? "" : `${id}`;
   }
 
+  getGadgetUiBundle(id: WorkpieceId, chatId?: number): UiBundle | null {
+    // TODO: Bundle the UI? For now we just return client.js.
+    if (chatId !== undefined) {
+      let meta = this.getChatMetaOrThrow(chatId);
+      if (!meta.activeAgent) {
+        this.materializeChatDraft(chatId, meta);
+      }
+    }
+
+    let {ydoc} = this.buildYDoc("current");
+    if (chatId !== undefined) {
+      this.getProposedChanges(chatId).forEach(({update}) => {
+        if (update !== undefined) Y.applyUpdateV2(ydoc, update);
+      });
+    }
+
+    let file = ydoc.getMap<Y.Text>(this.gadgetRootName(id)).get("client.js");
+    return file ? {jsCode: file.toString()} : null;
+  }
+
   // Facet name for the given gadget. The facet name is a storage key, so the default gadget
   // keeps the legacy name "gadget"; all others get `gadget${id}` (collision-free with
   // `gatekeeper${id}` thanks to the shared workpiece counter).
@@ -2833,6 +2853,23 @@ class OverseerImpl implements AgentHooks {
       ai: this.env.WORKERS_AI,
       gateway: getAiGatewayConfig(this.env),
     };
+  }
+
+  canCaptureGadgetScreenshot(): boolean {
+    return this.env.BROWSER !== undefined;
+  }
+
+  async captureGadgetScreenshot(chatId: number, gadgetId: WorkpieceId): Promise<Uint8Array> {
+    let browser = this.env.BROWSER;
+    if (!browser) throw new Error("Gadget screen capture is not configured for this deployment.");
+
+    let resolved = this.resolveWorkpieceRoot(gadgetId, true, chatId);
+    let bundle = this.getGadgetUiBundle(resolved.workpieceId, chatId);
+    if (!bundle) throw new Error("This Gadget does not have a UI to capture.");
+
+    let gadget = await this.startGatekeeperSession(
+        {type: "gadget", id: resolved.workpieceId}, {from: "agent", chatId});
+    return screenCapture(browser, bundle.jsCode, gadget, {format: "jpeg"});
   }
 
   // Record an observation that originated from a built-in agent tool (not a gatekeeper).
@@ -9036,30 +9073,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 
   async getUiBundle(chatId?: number): Promise<UiBundle | null> {
-    // TODO: Bundle the UI? For now we just return client.js.
-    if (chatId !== undefined) {
-      let meta = this.impl.getChatMetaOrThrow(chatId);
-      if (!meta.activeAgent) {
-        this.impl.materializeChatDraft(chatId, meta);
-      }
-    }
-
-    let {ydoc} = this.impl.buildYDoc("current");
-
-    if (chatId !== undefined) {
-      this.impl.getProposedChanges(chatId).forEach(({update}) => {
-        if (update !== undefined) {
-          Y.applyUpdateV2(ydoc, update);
-        }
-      });
-    }
-
-    let file = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(this.id)).get("client.js");
-    if (file) {
-      return { jsCode: file.toString() };
-    } else {
-      return null;
-    }
+    return this.impl.getGadgetUiBundle(this.id, chatId);
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
@@ -9079,7 +9093,8 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     if (!bundle) throw new Error("This Gadget does not have a UI to export.");
     let gadget = await this.impl.getGadgetFacet(this.id, chatId);
     let title = this.impl.getGadgetRecord(this.id).title;
-    return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
+    return screenCapture(
+        browser, bundle.jsCode, gadget, {format: "pdf", documentTitle: title});
   }
 
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
@@ -9300,10 +9315,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (chatId !== undefined) {
       this.#deny();
     }
-
-    let {ydoc} = this.impl.buildYDoc("current");
-    let file = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(this.id)).get("client.js");
-    return file ? { jsCode: file.toString() } : null;
+    return this.impl.getGadgetUiBundle(this.id);
   }
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
@@ -9327,7 +9339,8 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     if (!bundle) throw new Error("This Gadget does not have a UI to export.");
     let gadget = await this.impl.getGadgetFacet(this.id);
     let title = this.impl.getGadgetRecord(this.id).title;
-    return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
+    return screenCapture(
+        browser, bundle.jsCode, gadget, {format: "pdf", documentTitle: title});
   }
 
   // --- Denied methods (build-only) ---

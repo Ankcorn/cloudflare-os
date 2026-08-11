@@ -2141,6 +2141,14 @@ export type AiToolCall = {
   // Output, if the code actually ran. (Otherwise, `error` should be present.)
   output?: string;
 } | {
+  // Capture a fresh render of a Gadget's UI for the agent's visual inspection. The image is
+  // deliberately ephemeral; `output` is the text-only marker used when replaying chat history.
+  toolName: "captureGadgetScreenshot";
+  input: {
+    gadget: string;
+  };
+  output?: string;
+} | {
   toolName: "giveUp";
   input: {
     error: string;
