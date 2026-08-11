@@ -127,6 +127,9 @@ describe("tracedPipelined", () => {
 // the stamp becomes redundant.
 describe("unended span visibility in tail events", () => {
   it("streams the open event but not the attributes of a span that never ends", { timeout: 15_000 }, async () => {
+    // Start fresh so marker strings can be reused by future tests without flaking.
+    await probeEnv.SPAN_RECORDER.clear();
+
     // Control: an ended span reaches the recorder with its attributes.
     tracedPipelined("pin-ended-span", (span) => {
       span.setAttribute("pinMarkerEnded", "yes");

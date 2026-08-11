@@ -6864,8 +6864,10 @@ export class GatekeeperLoopback extends WorkerEntrypoint<Cloudflare.Env, Gatekee
     let {target: bindingTarget, caller, vendorId} = ctx.props;
     let stampIdentity = (span: TraceSpan) => {
       span.setAttribute("bindingTargetType", bindingTarget.type);
+      // For gatekeeper targets this is the same workpiece id logged as `gatekeeperId` on the
+      // gatekeeper.session.open span.
       span.setAttribute("bindingTargetId", bindingTarget.id);
-      span.setAttribute("vendorId", vendorId);
+      span.setAttribute("vendorId", vendorId); // undefined is a no-op
       span.setAttribute("callerFrom", caller.from);
       if ("chatId" in caller) span.setAttribute("chatId", caller.chatId);
       if (caller.from === "gadget") span.setAttribute("callerGadgetId", caller.gadgetId);
