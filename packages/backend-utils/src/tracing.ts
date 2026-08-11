@@ -68,8 +68,8 @@ export function createPipelinedTracer(getContext: () => Readonly<Record<string, 
           span.end();
           return result;
         }
-        // Side observer only: `result` is returned as-is, never wrapped. Note observing does
-        // force resolution delivery, which pipeline-only callers would otherwise skip.
+        // Side observer only: `result` is returned as-is, never wrapped. The RPC return message
+        // flows regardless; observing only materializes the result locally, off the critical path.
         void result.then(
             () => span.end(),
             () => {
