@@ -18,8 +18,16 @@ const MAX_PDF_BYTES = 100 * 1024 * 1024;
 const MAX_SCREENSHOT_BYTES = 1024 * 1024;
 /** Fixed viewport for agent screenshots; capture parameters are never model-controlled. */
 const SCREENSHOT_VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
-/** Try the higher quality first, then recompress the same rendered page if it exceeds the cap. */
-const SCREENSHOT_QUALITIES = [80, 50] as const;
+// TODO: Remove this progressive degradation ladder once model inputs support larger screenshots;
+// preserving the original full-resolution capture is preferable.
+const SCREENSHOT_ATTEMPTS = [
+  {quality: 80, scale: 1},
+  {quality: 50, scale: 1},
+  {quality: 40, scale: 0.75},
+  {quality: 35, scale: 0.5},
+  {quality: 30, scale: 0.25},
+  {quality: 20, scale: 0.1},
+] as const;
 /** Quiet period indicating that the client has finished its initial DOM updates. */
 const DOM_SETTLE_MS = 250;
 /** Budget for releasing the browser session once an export has settled. */
@@ -349,12 +357,24 @@ export async function screenCapture(
         };
       }
 
-      for (let quality of SCREENSHOT_QUALITIES) {
+      for (let {quality, scale} of SCREENSHOT_ATTEMPTS) {
         let body = await page.screenshot({
           type: "jpeg",
           quality,
-          fullPage: false,
-          captureBeyondViewport: false,
+          ...(scale === 1 ? {
+            fullPage: false,
+            captureBeyondViewport: false,
+          } : {
+            // The clip remains the full CSS viewport; its scale changes only the output pixels.
+            clip: {
+              x: 0,
+              y: 0,
+              width: SCREENSHOT_VIEWPORT.width,
+              height: SCREENSHOT_VIEWPORT.height,
+              scale,
+            },
+            captureBeyondViewport: true,
+          }),
         });
         if (body.byteLength <= MAX_SCREENSHOT_BYTES) {
           return {format: "jpeg" as const, body};

@@ -16,6 +16,7 @@ type Harness = {
   pdfRequested: () => boolean;
   renderSettled: () => boolean;
   screenshotQualities: () => number[];
+  screenshotScales: () => number[];
   viewport: () => {width: number; height: number; deviceScaleFactor?: number} | undefined;
   viewportSetBeforeNavigation: () => boolean;
 };
@@ -49,6 +50,7 @@ function makeHarness({
   let pdfRequested = false;
   let renderSettled = false;
   let screenshotQualities: number[] = [];
+  let screenshotScales: number[] = [];
   let viewport: {width: number; height: number; deviceScaleFactor?: number} | undefined;
   let viewportSetBeforeNavigation = false;
 
@@ -88,10 +90,11 @@ function makeHarness({
         },
       });
     },
-    screenshot: async ({quality}: {quality: number}) => {
+    screenshot: async ({quality, clip}: {quality: number; clip?: {scale?: number}}) => {
       expect(clientInitialized).toBe(true);
       expect(renderSettled).toBe(true);
       screenshotQualities.push(quality);
+      screenshotScales.push(clip?.scale ?? 1);
       let size = screenshotSizes[Math.min(screenshotQualities.length - 1,
           screenshotSizes.length - 1)];
       return new Uint8Array(size);
@@ -116,6 +119,7 @@ function makeHarness({
     pdfRequested: () => pdfRequested,
     renderSettled: () => renderSettled,
     screenshotQualities: () => screenshotQualities,
+    screenshotScales: () => screenshotScales,
     viewport: () => viewport,
     viewportSetBeforeNavigation: () => viewportSetBeforeNavigation,
   };
@@ -283,6 +287,7 @@ describe("screenCapture", () => {
     expect(harness.fontsWaitedFor()).toBe(true);
     expect(harness.mediaTypes()).toEqual([]);
     expect(harness.screenshotQualities()).toEqual([80]);
+    expect(harness.screenshotScales()).toEqual([1]);
     expect(harness.browserClosed()).toBe(true);
     expect(harness.gadgetDisposed()).toBe(true);
   });
@@ -301,12 +306,33 @@ describe("screenCapture", () => {
 
     expect(capture.byteLength).toBe(1024);
     expect(harness.screenshotQualities()).toEqual([80, 50]);
+    expect(harness.screenshotScales()).toEqual([1, 1]);
     expect(launch).toHaveBeenCalledTimes(1);
     expect(harness.browserClosed()).toBe(true);
     expect(harness.gadgetDisposed()).toBe(true);
   });
 
-  it("rejects an oversized JPEG and releases the browser", async () => {
+  it("progressively downscales the same viewport until the JPEG fits", async () => {
+    let oversized = 1024 * 1024 + 1;
+    let {gadget, harness} = makeHarness({
+      screenshotSizes: [oversized, oversized, oversized, 1024],
+    });
+
+    let capture = await screenCapture(
+      {} as BrowserRun,
+      "export default {}",
+      gadget as never,
+      {format: "jpeg"},
+    );
+
+    expect(capture.byteLength).toBe(1024);
+    expect(harness.screenshotQualities()).toEqual([80, 50, 40, 35]);
+    expect(harness.screenshotScales()).toEqual([1, 1, 0.75, 0.5]);
+    expect(harness.browserClosed()).toBe(true);
+    expect(harness.gadgetDisposed()).toBe(true);
+  });
+
+  it("rejects rather than returning an oversized JPEG if every fallback exceeds the cap", async () => {
     let {gadget, harness} = makeHarness({
       screenshotSizes: [1024 * 1024 + 1],
     });
@@ -317,7 +343,8 @@ describe("screenCapture", () => {
       gadget as never,
       {format: "jpeg"},
     )).rejects.toThrow("Gadget screenshots may not exceed 1048576 bytes.");
-    expect(harness.screenshotQualities()).toEqual([80, 50]);
+    expect(harness.screenshotQualities()).toEqual([80, 50, 40, 35, 30, 20]);
+    expect(harness.screenshotScales()).toEqual([1, 1, 0.75, 0.5, 0.25, 0.1]);
     expect(harness.browserClosed()).toBe(true);
     expect(harness.gadgetDisposed()).toBe(true);
   });
