@@ -19,6 +19,10 @@
     "./error-reporting": {
       "types": "./src/error-reporting.ts",
       "import": "./src/error-reporting.ts"
+    },
+    "./trace-reporting": {
+      "types": "./src/trace-reporting.ts",
+      "import": "./src/trace-reporting.ts"
     }
   },
   "scripts": {
@@ -29,7 +33,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@gadgets/error-reporting": "workspace:*"
+    "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/trace-reporting": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.8",

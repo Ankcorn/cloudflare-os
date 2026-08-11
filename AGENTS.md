@@ -115,3 +115,16 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
   Install automatic capture only in trusted first-party surfaces, never gadget/user-authored code.
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
+
+IMPORTANT: Tracing dispatches to up to two destinations from one call site:
+- Wrap operations with `traced(name, callback)` (`createTracer` from
+  `@gadgets/backend-utils/tracing`); every span always feeds native Workers tracing.
+- When a `TRACE_SINK` service binding and a sampled trace are present, the same spans are also
+  batched to the optional private trace sink (`createSpanSink` from
+  `@gadgets/backend-utils/trace-reporting`, contract in `@gadgets/trace-reporting`). Like
+  `ERROR_REPORTER`, the binding is absent in local dev and vanilla deployments, and the sink is
+  then inert. Sampling is decided once per trace at the root span (`TRACE_SINK_SAMPLE_RATE`), so
+  traces arrive whole or not at all.
+- Span attributes obey the log-field rules: bounded scalars only, never secrets, prompts, tokens,
+  headers, or request/response bodies. Error text stays out of spans — mark failures with the
+  `error: true` attribute (done automatically) and route detail to logs/`reportIssue`.

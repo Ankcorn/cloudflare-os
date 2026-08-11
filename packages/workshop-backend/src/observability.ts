@@ -1,4 +1,5 @@
 import { createObservabilityContext } from "@gadgets/backend-utils/observability-context";
+import { createSpanSink } from "@gadgets/backend-utils/trace-reporting";
 import { createTracer } from "@gadgets/backend-utils/tracing";
 
 /** Observability fields emitted by the Workshop backend. */
@@ -41,5 +42,9 @@ export function createWorkshopLogger(component: string) {
   return obsContext.createLogger({ component });
 }
 
-/** Runs `callback` in a trace span carrying the ambient observability fields as attributes. */
-export const traced = createTracer(obsContext.get);
+/**
+ * Runs `callback` in a trace span carrying the ambient observability fields as attributes.
+ * Spans also reach the optional private trace sink when `TRACE_SINK` is bound and the trace
+ * is sampled (`TRACE_SINK_SAMPLE_RATE`); without the binding the sink is inert.
+ */
+export const traced = createTracer(obsContext.get, createSpanSink());
