@@ -2030,6 +2030,9 @@ export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
 // on several variants), never by workpiece ID. Logs persisted before multi-gadget workspaces lack
 // these names; when a name is absent, the workspace's `defaultGadgetId` (from `GadgetMetadata`)
 // is assumed, and it is an error for it to be omitted when there is no default.
+/** Trusted viewport presets available to the agent's Gadget screenshot tool. */
+export type GadgetScreenshotViewport = "desktop" | "mobile";
+
 export type AiToolCall = {
   // ID of the original tool call, useful to reproduce the model messages.
   toolCallId: string;
@@ -2146,6 +2149,8 @@ export type AiToolCall = {
   toolName: "captureGadgetScreenshot";
   input: {
     gadget: string;
+    // Defaults to desktop for calls recorded before viewport selection was supported.
+    viewport?: GadgetScreenshotViewport;
   };
   output?: string;
 } | {

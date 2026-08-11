@@ -17,7 +17,13 @@ type Harness = {
   renderSettled: () => boolean;
   screenshotQualities: () => number[];
   screenshotScales: () => number[];
-  viewport: () => {width: number; height: number; deviceScaleFactor?: number} | undefined;
+  viewport: () => {
+    width: number;
+    height: number;
+    deviceScaleFactor?: number;
+    isMobile?: boolean;
+    hasTouch?: boolean;
+  } | undefined;
   viewportSetBeforeNavigation: () => boolean;
 };
 
@@ -51,7 +57,13 @@ function makeHarness({
   let renderSettled = false;
   let screenshotQualities: number[] = [];
   let screenshotScales: number[] = [];
-  let viewport: {width: number; height: number; deviceScaleFactor?: number} | undefined;
+  let viewport: {
+    width: number;
+    height: number;
+    deviceScaleFactor?: number;
+    isMobile?: boolean;
+    hasTouch?: boolean;
+  } | undefined;
   let viewportSetBeforeNavigation = false;
 
   let page = {
@@ -310,6 +322,26 @@ describe("screenCapture", () => {
     expect(launch).toHaveBeenCalledTimes(1);
     expect(harness.browserClosed()).toBe(true);
     expect(harness.gadgetDisposed()).toBe(true);
+  });
+
+  it("renders the mobile preset before navigation", async () => {
+    let {gadget, harness} = makeHarness();
+
+    await screenCapture(
+      {} as BrowserRun,
+      "export default {}",
+      gadget as never,
+      {format: "jpeg", viewport: "mobile"},
+    );
+
+    expect(harness.viewport()).toEqual({
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 1,
+      isMobile: true,
+      hasTouch: true,
+    });
+    expect(harness.viewportSetBeforeNavigation()).toBe(true);
   });
 
   it("progressively downscales the same viewport until the JPEG fits", async () => {

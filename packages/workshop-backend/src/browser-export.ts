@@ -1,6 +1,7 @@
-import { launch, type Page } from "@cloudflare/puppeteer";
+import { launch, type Page, type Viewport } from "@cloudflare/puppeteer";
 import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
 import { createLogger } from "@gadgets/backend-utils/logger";
+import type { GadgetScreenshotViewport } from "@gadgets/workshop-shared/api";
 import BROWSER_EXPORT_RUNTIME from "./generated/browser-export-runtime.txt";
 
 type BrowserExportLogFields = {
@@ -16,8 +17,17 @@ const MAX_EXPORT_DURATION_MS = 30_000;
 const MAX_PDF_BYTES = 100 * 1024 * 1024;
 /** Largest screenshot accepted as model input. */
 const MAX_SCREENSHOT_BYTES = 1024 * 1024;
-/** Fixed viewport for agent screenshots; capture parameters are never model-controlled. */
-const SCREENSHOT_VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
+/** Trusted viewport presets; the model chooses a name, never arbitrary capture dimensions. */
+const SCREENSHOT_VIEWPORTS = {
+  desktop: {width: 1280, height: 720, deviceScaleFactor: 1},
+  mobile: {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    isMobile: true,
+    hasTouch: true,
+  },
+} as const satisfies Record<GadgetScreenshotViewport, Viewport>;
 // TODO: Remove this progressive degradation ladder once model inputs support larger screenshots;
 // preserving the original full-resolution capture is preferable.
 const SCREENSHOT_ATTEMPTS = [
@@ -158,6 +168,7 @@ delete globalThis.__workshopExportRuntime;
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body>
   <script src="${runtimeUrl}"></script>
@@ -265,13 +276,14 @@ export function screenCapture(
   browserBinding: BrowserRun,
   clientCode: string,
   gadget: RpcStub<any>,
-  options: {format: "jpeg"},
+  options: {format: "jpeg"; viewport?: GadgetScreenshotViewport},
 ): Promise<Uint8Array>;
 export async function screenCapture(
   browserBinding: BrowserRun,
   clientCode: string,
   gadget: RpcStub<any>,
-  options: {format: "pdf"; documentTitle: string} | {format: "jpeg"},
+  options: {format: "pdf"; documentTitle: string} |
+      {format: "jpeg"; viewport?: GadgetScreenshotViewport},
 ): Promise<ReadableStream<Uint8Array> | Uint8Array> {
   let deadline = createDeadline(MAX_EXPORT_DURATION_MS, "Browser export timed out.");
 
@@ -314,8 +326,10 @@ export async function screenCapture(
   try {
     let source = await deadline.race((async () => {
       let page = await browser.newPage();
+      let screenshotViewport: Viewport | undefined;
       if (options.format === "jpeg") {
-        await page.setViewport(SCREENSHOT_VIEWPORT);
+        screenshotViewport = SCREENSHOT_VIEWPORTS[options.viewport ?? "desktop"];
+        await page.setViewport(screenshotViewport);
       }
       await page.setRequestInterception(true);
       page.on("request", (request) => {
@@ -356,6 +370,7 @@ export async function screenCapture(
           }),
         };
       }
+      if (!screenshotViewport) throw new TypeError("Screenshot viewport is missing.");
 
       for (let {quality, scale} of SCREENSHOT_ATTEMPTS) {
         let body = await page.screenshot({
@@ -369,8 +384,8 @@ export async function screenCapture(
             clip: {
               x: 0,
               y: 0,
-              width: SCREENSHOT_VIEWPORT.width,
-              height: SCREENSHOT_VIEWPORT.height,
+              width: screenshotViewport.width,
+              height: screenshotViewport.height,
               scale,
             },
             captureBeyondViewport: true,

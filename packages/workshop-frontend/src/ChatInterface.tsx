@@ -675,7 +675,10 @@ function getToolCallSummary(
       };
     }
     case "captureGadgetScreenshot":
-      return { verb: "Captured screenshot", target: tc.input.gadget };
+      return {
+        verb: "Captured screenshot",
+        target: `${tc.input.gadget} (${tc.input.viewport ?? "desktop"})`,
+      };
     case "giveUp":
       return { verb: "Stopped" };
     case "webFetch": {
