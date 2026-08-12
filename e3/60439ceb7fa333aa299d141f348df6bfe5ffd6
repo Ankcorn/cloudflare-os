@@ -39,6 +39,7 @@ packages/mcp-shared/src/facet.ts
   s_e25e29d8ebebad::t_10a335af6ad641 13-24,29,33-40,44-50,62-64,71,75-82,130-131,133,137,146,150-272,304-309,324-325,327-347,361-364
 packages/mcp-shared/__tests__/session.test.ts
   s_e25e29d8ebebad::t_10a335af6ad641 4-11,36,65-292
+  s_e25e29d8ebebad::t_faba2b73c0d81d 50,64
 packages/mcp-shared/src/scope.ts
   s_e25e29d8ebebad::t_10a335af6ad641 18,86-89,95,104-106,161-163
 packages/mcp-shared/__tests__/client-pagination.test.ts
