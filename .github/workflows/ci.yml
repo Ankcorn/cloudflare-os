@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: "22.14.0"
+  NODE_VERSION: "24.19.0"
 
 jobs:
+  # Parallel to `test` so lint and test failures surface on the same run; type checking lives in Build.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -22,19 +23,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # Ahead of setup-node, which shells out to `pnpm store path` to find the directory it caches.
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-
-      - name: Enable Corepack
-        run: corepack enable
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Lint
-        run: pnpm lint
+        run: pnpm lint:check
 
   test:
     name: Build and test
@@ -45,17 +48,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # Ahead of setup-node, which shells out to `pnpm store path` to find the directory it caches.
+      - name: Enable Corepack
+        run: corepack enable
+
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-
-      - name: Enable Corepack
-        run: corepack enable
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Codegen, the frontend/SPA bundles, and the repo's single type check (`types:check` aliases this).
       - name: Build
         run: pnpm build
 
