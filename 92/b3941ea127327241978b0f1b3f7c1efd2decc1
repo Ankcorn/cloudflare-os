@@ -1,5 +1,6 @@
 packages/mcp-shared/src/account.ts
   s_e25e29d8ebebad::t_45578454327a67 169-178,202-208,308,317-322,375-381,585-590
+  s_e25e29d8ebebad::t_87e7c3f95af8ff 309
 ---
 {
   "schema_version": "authorship/3.0.0",
