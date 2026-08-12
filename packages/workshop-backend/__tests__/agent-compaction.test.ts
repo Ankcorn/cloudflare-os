@@ -114,6 +114,17 @@ describe("compaction trigger", () => {
         .toEqual({inputBudget: 128_000, maxOutputTokens: undefined});
   });
 
+  it("uses declared OpenAI-compatible token limits", () => {
+    expect(getModelTokenLimits({
+      provider: "openai-compatible",
+      model: "provider/model",
+      apiToken: "token",
+      apiUrl: "https://example.com/v1",
+      contextWindow: 128_000,
+      outputLimit: 8_192,
+    })).toEqual({inputBudget: 119_808, maxOutputTokens: 8_192});
+  });
+
   it("recognizes /compact as the newest message, and only there", () => {
     let compact = record(1, user, {
       type: "slashCommand", request: {id: {builtin: true, commandId: "compact"}, args: ""},

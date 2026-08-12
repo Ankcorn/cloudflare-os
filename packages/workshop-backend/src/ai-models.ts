@@ -20,6 +20,7 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import { normalizeAiModelConfig } from "./ai-model-config.js";
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -134,6 +135,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
+    case "openai-compatible": return undefined;
     default: return undefined;
   }
 }
@@ -163,6 +165,21 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
     sendSessionAffinityHeaders: true,
   };
 }
+
+const OPENAI_COMPATIBLE_PROFILES = {
+  conservative: {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    supportsReasoningEffort: false,
+    supportsUsageInStreaming: false,
+    maxTokensField: "max_tokens",
+    supportsStrictMode: false,
+    supportsLongCacheRetention: false,
+  },
+} satisfies Record<
+  NonNullable<AiModelConfig["compatibilityProfile"]>,
+  OpenAICompletionsCompat
+>;
 
 // Build the pi model descriptor for reaching a provider's own native API through an AI Gateway
 // (the platform's or a user's). `gatewayUrl` is a gateway root -- over HTTPS
@@ -356,6 +373,13 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  if (config.provider === "openai-compatible") {
+    if (getAiGatewayConfig(env)) {
+      throw new Error("OpenAI-compatible models are not available in AI Gateway mode.");
+    }
+    return getModelDirect(normalizeAiModelConfig(config), options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -509,6 +533,24 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
+    case "openai-compatible":
+      return makeHandle({
+        model: {
+          id: config.model,
+          name: config.model,
+          api: "openai-completions",
+          provider: "openai-compatible",
+          baseUrl: config.apiUrl!,
+          reasoning: false,
+          input: ["text"],
+          cost: ZERO_COST,
+          contextWindow: config.contextWindow!,
+          maxTokens: config.outputLimit!,
+          compat: OPENAI_COMPATIBLE_PROFILES[config.compatibilityProfile ?? "conservative"],
+        },
+        apiKey: config.apiToken,
+        sessionAffinity,
+      });
     case "anthropic":
       return makeHandle({
         model: {

@@ -8,6 +8,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage, ImageContent, Message, TSchema, TextContent, ThinkingContent, ToolCall,
 } from "@earendil-works/pi-ai";
+import { modelSupportsChatAttachment } from "./chat-attachment-validation";
 import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
 } from "@earendil-works/pi-agent-core";
@@ -1428,7 +1429,8 @@ export async function runAgent(
                   async (attachment): Promise<(TextContent | ImageContent)[]> => {
                 let filename = attachment.name ? ` (${attachment.name})` : "";
                 let data = await hooks.getChatAttachmentData(chatId, attachment.id);
-                if (attachment.mimeType.startsWith("image/")) {
+                if (attachment.mimeType.startsWith("image/") &&
+                    modelSupportsChatAttachment(handle.model, attachment.mimeType)) {
                   return [{
                     type: "image",
                     data: data.toBase64(),

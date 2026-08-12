@@ -1136,8 +1136,9 @@ export type CloudflareAccountOption = {
   accountName: string;
 };
 
-/** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+/** Supported AI providers. "openai-compatible" names the Chat Completions protocol, not a vendor. */
+export type AiModelProvider =
+    "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "openai-compatible";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
@@ -1170,6 +1171,15 @@ export type AiModelConfig = {
    * alternative provider that provides a compatible API.
    */
   apiUrl?: string;
+
+  // Maximum total tokens accepted by the model. Required for OpenAI-compatible models.
+  contextWindow?: number;
+
+  // Maximum tokens generated in one response. Required for OpenAI-compatible models.
+  outputLimit?: number;
+
+  // Request behavior for an OpenAI-compatible endpoint. Defaults to "conservative".
+  compatibilityProfile?: "conservative";
 };
 
 /**
@@ -1212,6 +1222,8 @@ export const SUGGESTED_MODELS: Record<
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
+  },
+  "openai-compatible": {
   },
 };
 

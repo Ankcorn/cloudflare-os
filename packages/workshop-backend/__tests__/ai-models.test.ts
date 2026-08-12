@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { Type } from "@earendil-works/pi-ai";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 
@@ -55,10 +56,18 @@ const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // Runs one request through the handle with the fetch stub and returns what was sent.
-async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
-  const stream = await handle.stream(handle.model, {
+async function captureRequest(
+  handle: ModelHandle,
+  context: Parameters<ModelHandle["stream"]>[1] = {
     messages: [{ role: "user", content: "hello", timestamp: 0 }],
-  }, { fetch: fetchStub, maxRetries: 0 });
+  },
+  options: NonNullable<Parameters<ModelHandle["stream"]>[2]> = {},
+): Promise<CapturedRequest> {
+  const stream = await handle.stream(handle.model, context, {
+    ...options,
+    fetch: fetchStub,
+    maxRetries: 0,
+  });
   const message = await stream.result();
   expect(message.stopReason).toBe("error");
   expect(capturedRequests.length).toBeGreaterThan(0);
@@ -499,6 +508,60 @@ describe("getModel direct routing (no gateway)", () => {
       }, INITIATOR);
       expect(handle.model.baseUrl).toBe("http://my-ollama:11434/v1");
     }
+  });
+
+  it("uses a conservative OpenAI-compatible Chat Completions profile", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "openai-compatible",
+      model: "provider/model",
+      apiToken: "custom-token",
+      apiUrl: "https://models.example.com/api/v1",
+      contextWindow: 128_000,
+      outputLimit: 8_192,
+      compatibilityProfile: "conservative",
+    }, INITIATOR, {
+      userGateway: { accountId: "user-account-id", apiKey: "user-token" },
+    });
+
+    expect(handle.model).toMatchObject({
+      api: "openai-completions",
+      provider: "openai-compatible",
+      baseUrl: "https://models.example.com/api/v1",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    });
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle, {
+      systemPrompt: "System instructions",
+      messages: [{ role: "user", content: "hello", timestamp: 0 }],
+      tools: [{ name: "lookup", description: "Look something up", parameters: Type.Object({}) }],
+    }, { maxTokens: 2_048 });
+    const body = JSON.parse(request.body);
+
+    expect(request.url).toBe("https://models.example.com/api/v1/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer custom-token");
+    expect(body.messages[0]).toEqual({ role: "system", content: "System instructions" });
+    expect(body.max_tokens).toBe(2_048);
+    expect(body.tools[0].function).not.toHaveProperty("strict");
+    expect(body).not.toHaveProperty("store");
+    expect(body).not.toHaveProperty("stream_options");
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("reasoning");
+    expect(body).not.toHaveProperty("thinking");
+  }, 15000);
+
+  it("rejects OpenAI-compatible models in platform Gateway mode", () => {
+    expect(() => getModel(env(), {
+      provider: "openai-compatible",
+      model: "provider/model",
+      apiToken: "custom-token",
+      apiUrl: "https://models.example.com/v1",
+      contextWindow: 128_000,
+      outputLimit: 8_192,
+    }, INITIATOR)).toThrow("not available in AI Gateway mode");
   });
 });
 

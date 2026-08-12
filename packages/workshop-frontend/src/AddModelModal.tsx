@@ -22,6 +22,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',
+  'openai-compatible': 'OpenAI-compatible',
 }
 
 // Placeholder hinting at the shape of each provider's API token.
@@ -31,6 +32,7 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
+  'openai-compatible': 'sk-...',
 }
 
 // Example used in the custom-model placeholders for providers that have no suggested models
@@ -39,6 +41,9 @@ const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
 
 // Pick an example model to show in the custom-model placeholders for the given provider.
 function exampleModel(provider: AiModelProvider): { modelId: string, name: string } {
+  if (provider === 'openai-compatible') {
+    return { modelId: 'provider/model-name', name: 'My Model' }
+  }
   const first = Object.entries(SUGGESTED_MODELS[provider])[0]
   return first ? { modelId: first[0], name: first[1].name } : FALLBACK_EXAMPLE_MODEL
 }
@@ -66,6 +71,7 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
   const providerOrder = Object.keys(SUGGESTED_MODELS) as AiModelProvider[]
 
   for (const provider of providerOrder) {
+    if (gatewayMode && provider === 'openai-compatible') continue
     if (enabledProviders && !enabledProviders.has(provider)) continue
 
     // In gateway mode, suggested models are already built-in, so don't list them.
@@ -81,7 +87,9 @@ function buildOptions(gatewayMode: boolean, enabledProviders: Set<string> | null
 
     options.push({
       value: encodeSelection(provider),
-      label: `Other ${PROVIDER_LABELS[provider] || provider}...`,
+      label: provider === 'openai-compatible'
+        ? 'OpenAI-compatible model...'
+        : `Other ${PROVIDER_LABELS[provider] || provider}...`,
       provider,
     })
   }
@@ -102,6 +110,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const [apiToken, setApiToken] = useState('')
   const [accountId, setAccountId] = useState('')
   const [apiUrl, setApiUrl] = useState('')
+  const [contextWindow, setContextWindow] = useState('')
+  const [outputLimit, setOutputLimit] = useState('')
 
   // Validation errors
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -124,6 +134,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       setApiToken('')
       setAccountId('')
       setApiUrl('')
+      setContextWindow('')
+      setOutputLimit('')
       setErrors({})
       setAdvancedOpen(false)
     }
@@ -145,6 +157,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     setApiToken('')
     setAccountId('')
     setApiUrl(sel.provider === 'ollama' ? 'http://localhost:11434' : '')
+    setContextWindow('')
+    setOutputLimit('')
   }
 
   const validate = (): boolean => {
@@ -161,6 +175,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     const isOllama = selection?.provider === 'ollama'
     const isCloudflare = selection?.provider === 'cloudflare'
+    const isOpenAiCompatible = selection?.provider === 'openai-compatible'
     const showCredentials = !gatewayMode
 
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
@@ -173,6 +188,38 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
     if (showCredentials && isOllama && !apiUrl.trim()) {
       newErrors.apiUrl = 'Please enter the Ollama API URL'
+    }
+
+    if (showCredentials && isOpenAiCompatible) {
+      if (!apiUrl.trim()) {
+        newErrors.apiUrl = 'Please enter the API base URL'
+      } else {
+        try {
+          const url = new URL(apiUrl.trim())
+          if (url.protocol !== 'https:') {
+            newErrors.apiUrl = 'Base URL must use HTTPS'
+          } else if (url.username || url.password) {
+            newErrors.apiUrl = 'Base URL must not contain credentials'
+          } else if (url.search || url.hash) {
+            newErrors.apiUrl = 'Base URL must not contain a query string or fragment'
+          }
+        } catch {
+          newErrors.apiUrl = 'Please enter a valid HTTPS URL'
+        }
+      }
+
+      const parsedContextWindow = Number(contextWindow)
+      const parsedOutputLimit = Number(outputLimit)
+      if (!contextWindow.trim() || !Number.isSafeInteger(parsedContextWindow) ||
+          parsedContextWindow <= 0) {
+        newErrors.contextWindow = 'Context window must be a positive integer'
+      }
+      if (!outputLimit.trim() || !Number.isSafeInteger(parsedOutputLimit) ||
+          parsedOutputLimit <= 0) {
+        newErrors.outputLimit = 'Maximum output tokens must be a positive integer'
+      } else if (!newErrors.contextWindow && parsedOutputLimit >= parsedContextWindow) {
+        newErrors.outputLimit = 'Maximum output tokens must be less than the context window'
+      }
     }
 
     setErrors(newErrors)
@@ -200,6 +247,11 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         apiToken: gatewayMode ? '' : apiToken.trim(),
         ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
         ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
+        ...(selection!.provider === 'openai-compatible' && {
+          contextWindow: Number(contextWindow),
+          outputLimit: Number(outputLimit),
+          compatibilityProfile: 'conservative' as const,
+        }),
       }
 
       await authenticatedApi.addModel(profile, config)
@@ -218,6 +270,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
+  const isOpenAiCompatible = selection?.provider === 'openai-compatible'
   const showCredentials = !gatewayMode
 
   // Group options by provider for rendering with visual separators.
@@ -317,6 +370,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                   ? 'Optional for local Ollama access'
                   : isCloudflare
                   ? 'An API token with Workers AI Read + Edit permissions (in the dashboard: Workers AI > Use REST API > Create a Workers AI API Token)'
+                  : isOpenAiCompatible
+                  ? 'Bearer token sent to the configured endpoint'
                   : `Your ${PROVIDER_LABELS[selection.provider]} API token for billing`
               }
               value={apiToken}
@@ -339,8 +394,52 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
             />
           )}
 
+          {showCredentials && isOpenAiCompatible && (
+            <>
+              <Input
+                label="Base URL"
+                placeholder="https://openrouter.ai/api/v1"
+                description="HTTPS API root; /chat/completions is added automatically"
+                value={apiUrl}
+                onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
+                error={errors.apiUrl}
+                variant={errors.apiUrl ? 'error' : 'default'}
+              />
+              <Input
+                label="Context Window"
+                type="number"
+                min={1}
+                step={1}
+                placeholder="128000"
+                description="Maximum total tokens accepted by the model"
+                value={contextWindow}
+                onChange={(e) => {
+                  setContextWindow(e.target.value)
+                  setErrors(prev => ({ ...prev, contextWindow: '' }))
+                }}
+                error={errors.contextWindow}
+                variant={errors.contextWindow ? 'error' : 'default'}
+              />
+              <Input
+                label="Maximum Output Tokens"
+                type="number"
+                min={1}
+                step={1}
+                placeholder="8192"
+                description="Maximum tokens generated in one response"
+                value={outputLimit}
+                onChange={(e) => {
+                  setOutputLimit(e.target.value)
+                  setErrors(prev => ({ ...prev, outputLimit: '' }))
+                }}
+                error={errors.outputLimit}
+                variant={errors.outputLimit ? 'error' : 'default'}
+              />
+            </>
+          )}
+
           {/* Advanced Settings for non-Ollama, non-Cloudflare providers */}
-          {showCredentials && selection && !isOllama && !isCloudflare && (
+          {showCredentials && selection && !isOllama && !isCloudflare && !isOpenAiCompatible && (
             <Collapsible.Root
               open={advancedOpen}
               onOpenChange={setAdvancedOpen}
