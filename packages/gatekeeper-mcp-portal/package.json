@@ -16,8 +16,8 @@
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "^0.8.0",
-    "capnweb-validate": "0.2.1"
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
   },
   "devDependencies": {
     "typescript": "catalog:",
