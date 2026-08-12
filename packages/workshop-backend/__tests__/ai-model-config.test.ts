@@ -38,6 +38,11 @@ describe("normalizeAiModelConfig", () => {
     { name: "URL query", overrides: { apiUrl: "https://example.com/v1?route=chat" }, error: "query" },
     { name: "URL fragment", overrides: { apiUrl: "https://example.com/v1#chat" }, error: "fragment" },
     { name: "zero context window", overrides: { contextWindow: 0 }, error: "context window" },
+    {
+      name: "excessive context window",
+      overrides: { contextWindow: 2_000_001 },
+      error: "at most 2000000",
+    },
     { name: "fractional output limit", overrides: { outputLimit: 1.5 }, error: "output limit" },
     {
       name: "output equal to context",

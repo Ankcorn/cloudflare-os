@@ -1,4 +1,4 @@
-import type { AiModelConfig } from "@gadgets/workshop-shared/api";
+import {MAX_CUSTOM_MODEL_CONTEXT_WINDOW, type AiModelConfig} from "@gadgets/workshop-shared/api";
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
 
@@ -35,6 +35,10 @@ export function normalizeAiModelConfig(config: AiModelConfig): AiModelConfig {
 
   if (!Number.isSafeInteger(config.contextWindow) || config.contextWindow! <= 0) {
     throw new Error("OpenAI-compatible context window must be a positive integer.");
+  }
+  if (config.contextWindow! > MAX_CUSTOM_MODEL_CONTEXT_WINDOW) {
+    throw new Error(
+        `OpenAI-compatible context window must be at most ${MAX_CUSTOM_MODEL_CONTEXT_WINDOW}.`);
   }
   if (!Number.isSafeInteger(config.outputLimit) || config.outputLimit! <= 0) {
     throw new Error("OpenAI-compatible output limit must be a positive integer.");

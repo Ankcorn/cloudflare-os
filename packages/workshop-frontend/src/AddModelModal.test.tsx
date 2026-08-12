@@ -155,6 +155,7 @@ describe('AddModelModal OpenAI-compatible provider', () => {
     { baseUrl: 'http://models.example.com/v1', contextWindow: '128000', outputLimit: '8192' },
     { baseUrl: 'https://models.example.com/v1?route=chat', contextWindow: '128000', outputLimit: '8192' },
     { baseUrl: 'https://models.example.com/v1', contextWindow: '8192', outputLimit: '8192' },
+    { baseUrl: 'https://models.example.com/v1', contextWindow: '2000001', outputLimit: '8192' },
   ])('does not submit invalid endpoint settings', async ({ baseUrl, contextWindow, outputLimit }) => {
     render({ enabled: false })
     select('other-openai-compatible')

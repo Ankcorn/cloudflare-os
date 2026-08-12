@@ -553,6 +553,34 @@ describe("getModel direct routing (no gateway)", () => {
     expect(body).not.toHaveProperty("thinking");
   }, 15000);
 
+  it("consumes a successful OpenAI-compatible Chat Completions stream", async () => {
+    const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
+      provider: "openai-compatible",
+      model: "provider/model",
+      apiToken: "custom-token",
+      apiUrl: "https://models.example.com/v1",
+      contextWindow: 128_000,
+      outputLimit: 8_192,
+    }, INITIATOR);
+    const chunks = [
+      {id: "chat-1", object: "chat.completion.chunk", created: 0, model: "provider/model",
+        choices: [{index: 0, delta: {role: "assistant", content: "Hello"}, finish_reason: null}]},
+      {id: "chat-1", object: "chat.completion.chunk", created: 0, model: "provider/model",
+        choices: [{index: 0, delta: {}, finish_reason: "stop"}]},
+    ];
+    const fetch = (async () => new Response(
+        `${chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`,
+        {headers: {"content-type": "text/event-stream"}})) as typeof globalThis.fetch;
+
+    const stream = await handle.stream(handle.model, {
+      messages: [{role: "user", content: "hello", timestamp: 0}],
+    }, {fetch, maxRetries: 0});
+
+    const message = await stream.result();
+    expect(message.stopReason).toBe("stop");
+    expect(message.content).toEqual([{type: "text", text: "Hello"}]);
+  });
+
   it("rejects OpenAI-compatible models in platform Gateway mode", () => {
     expect(() => getModel(env(), {
       provider: "openai-compatible",

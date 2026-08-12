@@ -1,4 +1,5 @@
-import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
+import {MAX_CUSTOM_MODEL_CONTEXT_WINDOW, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT,
+  type AiChatMessage, type AiModelConfig}
   from "@gadgets/workshop-shared/api";
 import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
@@ -28,9 +29,11 @@ const DEFAULT_CONTEXT_WINDOW = 128_000;
 export function getModelTokenLimits(config: AiModelConfig):
     {inputBudget: number, maxOutputTokens?: number} {
   if (config.provider === "openai-compatible") {
+    let contextWindow = Math.min(config.contextWindow!, MAX_CUSTOM_MODEL_CONTEXT_WINDOW);
+    let maxOutputTokens = Math.min(config.outputLimit!, contextWindow - 1);
     return {
-      inputBudget: config.contextWindow! - config.outputLimit!,
-      maxOutputTokens: config.outputLimit,
+      inputBudget: contextWindow - maxOutputTokens,
+      maxOutputTokens,
     };
   }
   let model = SUGGESTED_MODELS[config.provider][config.model];

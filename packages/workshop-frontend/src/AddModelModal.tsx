@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, MAX_CUSTOM_MODEL_CONTEXT_WINDOW, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -213,6 +213,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       if (!contextWindow.trim() || !Number.isSafeInteger(parsedContextWindow) ||
           parsedContextWindow <= 0) {
         newErrors.contextWindow = 'Context window must be a positive integer'
+      } else if (parsedContextWindow > MAX_CUSTOM_MODEL_CONTEXT_WINDOW) {
+        newErrors.contextWindow = `Context window must be at most ${MAX_CUSTOM_MODEL_CONTEXT_WINDOW}`
       }
       if (!outputLimit.trim() || !Number.isSafeInteger(parsedOutputLimit) ||
           parsedOutputLimit <= 0) {
@@ -409,6 +411,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
                 label="Context Window"
                 type="number"
                 min={1}
+                max={MAX_CUSTOM_MODEL_CONTEXT_WINDOW}
                 step={1}
                 placeholder="128000"
                 description="Maximum total tokens accepted by the model"

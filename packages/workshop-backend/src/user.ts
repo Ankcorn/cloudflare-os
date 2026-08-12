@@ -706,17 +706,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       profile: this.storage.profile.get()
     };
     if (modelId) {
-      // In AI Gateway mode, resolve gateway models first.
-      if (gwConfig) {
-        result.aiModel = gwConfig.resolveModel(modelId);
+      let storedModel = this.storage.aiModels.get(modelId);
+      if (gwConfig && storedModel?.config.provider === "openai-compatible") {
+        throw new Error("OpenAI-compatible models are not available in AI Gateway mode.");
       }
-      if (!result.aiModel) {
-        let storedModel = this.storage.aiModels.get(modelId);
-        if (gwConfig && storedModel?.config.provider === "openai-compatible") {
-          throw new Error("OpenAI-compatible models are not available in AI Gateway mode.");
-        }
-        result.aiModel = storedModel;
-      }
+      result.aiModel = gwConfig?.resolveModel(modelId) ?? storedModel;
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
     }
 

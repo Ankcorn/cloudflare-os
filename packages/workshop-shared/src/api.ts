@@ -1182,6 +1182,9 @@ export type AiModelConfig = {
   compatibilityProfile?: "conservative";
 };
 
+/** Largest custom context window accepted for compaction and inference. */
+export const MAX_CUSTOM_MODEL_CONTEXT_WINDOW = 2_000_000;
+
 /**
  * Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the
  * model's window, so every Cloudflare model reserves this much of it for the response.
