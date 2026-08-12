@@ -6,6 +6,7 @@ packages/mcp-shared/src/account.ts
 packages/mcp-shared/src/connection.ts
   s_e25e29d8ebebad::t_e0bf4fcad647a4 10-14,16,18,32-33,56-62,71-78,84,89-95,97-101,106,109,112-113,117-121,123-124,142-151,170-172
   s_e25e29d8ebebad::t_10a335af6ad641 15,17,20,186-189,192-207
+  s_e25e29d8ebebad::t_bfd393328004af 102-105,153,164
 packages/mcp-shared/src/fetch.ts
   s_e25e29d8ebebad::t_e0bf4fcad647a4 15-16,21-27,35-42,97-101,103,135,154-156,196
 packages/mcp-shared/__tests__/fetch.test.ts
@@ -40,6 +41,7 @@ packages/mcp-shared/src/facet.ts
 packages/mcp-shared/__tests__/session.test.ts
   s_e25e29d8ebebad::t_10a335af6ad641 4-11,36,65-292
   s_e25e29d8ebebad::t_faba2b73c0d81d 50,64
+  s_e25e29d8ebebad::t_3ebfcf16031608 12
 packages/mcp-shared/src/scope.ts
   s_e25e29d8ebebad::t_10a335af6ad641 18,86-89,95,104-106,161-163
 packages/mcp-shared/__tests__/client-pagination.test.ts
