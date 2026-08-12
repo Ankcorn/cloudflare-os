@@ -10,6 +10,64 @@ AGENTS.md
 pnpm-workspace.yaml
   s_6b06793b4e8acf::t_c26bfbb0b0a290 12,17-20
   s_6b06793b4e8acf::t_322f08dd8d52c6 9-10
+packages/gatekeeper-google/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-mcp/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/mcp-shared/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 35
+packages/gatekeeper-notion/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 12
+packages/mcp-shared/tsconfig.test.json
+  s_6b06793b4e8acf::t_d2492d06941410 2
+packages/gatekeeper-scheduler/tsconfig.json
+  s_6b06793b4e8acf::t_394b9af40721a0 8
+packages/router/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 10
+packages/workshop-backend/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-cloudflare/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 10
+packages/gatekeeper-zoominfo/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/workshop-frontend/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 10
+packages/error-reporting/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 13
+packages/gatekeeper-supabase/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-linear/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-mcp-portal/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/workshop-shared/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 38
+packages/gatekeeper-context/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 13
+packages/configurator-ui/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 13
+packages/workshop-shared/tsconfig.json
+  s_6b06793b4e8acf::t_394b9af40721a0 4
+packages/gatekeeper-github/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 12
+packages/gatekeeper-email/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/backend-utils/tsconfig.json
+  s_6b06793b4e8acf::t_394b9af40721a0 8
+packages/gatekeeper-confluence/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 12
+packages/gatekeeper-scheduler/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 14
+packages/configurator-ui/tsconfig.json
+  s_6b06793b4e8acf::t_394b9af40721a0 5
+packages/gatekeeper-spotify/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-slack/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/gatekeeper-homeassistant/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 11
+packages/backend-utils/package.json
+  s_6b06793b4e8acf::t_bf6ee2baae0680 26
 ---
 {
   "schema_version": "authorship/3.0.0",

@@ -36,7 +36,7 @@ packages/workshop-frontend/package.json
 packages/gatekeeper-scheduler/package.json
   s_6b06793b4e8acf::t_bb8d81d71d527f 26,39-40,43-44
 .github/workflows/ci.yml
-  s_6b06793b4e8acf::t_c66c1e2303112c 29,43-44
+  s_6b06793b4e8acf::t_c66c1e2303112c 16-18,29,43-44,43-45
   s_6b06793b4e8acf::t_51c0d9e8031364 20-21,37,42
   s_6b06793b4e8acf::t_2b08632b70d06f 16-18,45
   s_6b06793b4e8acf::t_86e8cc7aa5e852 19
@@ -45,7 +45,7 @@ packages/configurator-ui/tsconfig.json
 packages/gatekeeper-mcp/package.json
   s_6b06793b4e8acf::t_bb8d81d71d527f 23-25
 packages/backend-utils/tsconfig.json
-  s_6b06793b4e8acf::t_e242b5c99fa8e6 12
+  s_6b06793b4e8acf::t_e242b5c99fa8e6 10-13,12
   s_6b06793b4e8acf::t_2b08632b70d06f 10-11,13
   s_6b06793b4e8acf::t_fedd384c7373ef 8
 packages/integration-tests/package.json
@@ -74,7 +74,7 @@ package.json
   s_6b06793b4e8acf::t_8887e0c5c6bde5 16,24-26
 packages/gatekeeper-mcp/tsconfig.json
   s_6b06793b4e8acf::t_2b08632b70d06f 18-19,21
-  s_6b06793b4e8acf::t_58d041e2f37366 20
+  s_6b06793b4e8acf::t_58d041e2f37366 18-21,20
 packages/gatekeeper-supabase/package.json
   s_6b06793b4e8acf::t_bb8d81d71d527f 21-22
 packages/gatekeeper-mcp-portal/package.json
