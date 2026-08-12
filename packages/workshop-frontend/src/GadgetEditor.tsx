@@ -1601,6 +1601,7 @@ export default function GadgetEditor() {
                   gadget={selectedGadgetStub}
                   gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
                   chatId={previewChatId}
+                  revision={uiReloadTrigger}
                   disabled={activeTab !== 'app' || previewMode}
                 />
               )}

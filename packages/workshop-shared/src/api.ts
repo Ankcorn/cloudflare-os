@@ -26,6 +26,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { GadgetExportFormat } from "./export.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -2766,10 +2767,16 @@ export interface GadgetClient extends WorkpieceClient {
   connectToGadget(chatId?: number): Promise<RpcStub<any>>;
 
   /**
-   * Renders the Gadget's UI as a PDF. If `chatId` is specified, the PDF includes changes currently
-   * proposed in that chat.
+   * Lists the Gadget's supported file export formats. If `chatId` is specified,
+   * the formats are read from the code currently proposed in that chat.
    */
-  exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>>;
+  getExportFormats(chatId?: number): Promise<GadgetExportFormat[]>;
+
+  /**
+   * Exports the format with the given ID. If `chatId` is specified, the export
+   * uses changes currently proposed in that chat.
+   */
+  export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>>;
 
   // --- Binding management ---
   //
@@ -2849,7 +2856,7 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
 // - "build": full access -- edit code, use and participate in chats, manage bindings, etc. (the
 //   same access the owner has, modulo the owner-only exceptions documented in sharing.md).
 // - "use": may only render, interact with, and export the gadget's deployed UI (getUiBundle(),
-//   connectToGadget(), and exportPdf()), plus read basic metadata.
+//   connectToGadget(), getExportFormats(), and export()), plus read basic metadata.
 //
 // Roles are ordered build > use. A collaborator's effective role is the maximum role reachable
 // from the owner through their valid permission edges, where each edge grants

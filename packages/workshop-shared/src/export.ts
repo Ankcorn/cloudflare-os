@@ -1,9 +1,17 @@
-import type { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import type { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 
 // Gadget-facing export API:
 
 /** Name under which a Gadget may export its optional export handler entrypoint. */
 export const GADGET_EXPORT_ENTRYPOINT = "ExportHandler";
+
+declare global {
+  /**
+   * Identifies the selected browser-mode export format. This is undefined when
+   * the Gadget UI is rendered interactively.
+   */
+  var gadgetExportFormatId: string | undefined;
+}
 
 /**
  * Describes an export format that a Gadget supports. Export formats are split
@@ -41,6 +49,10 @@ export type GadgetExportFormat = {
   fileExtension: string;
 };
 
+/** Serializable capability exposing a Gadget Durable Object's public RPC methods. */
+export type GadgetExportCapability<Gadget extends DurableObject = DurableObject> =
+  RpcStub<RpcTarget & Pick<Gadget, keyof Gadget>>;
+
 /**
  * Optional Worker entrypoint exported by a Gadget as `ExportHandler` to
  * customize file export behavior.
@@ -65,7 +77,7 @@ export interface GadgetExportEntrypoint<Gadget extends DurableObject = DurableOb
    * export formats in addition to any server-mode formats, unless it specifically
    * does not want to support browser-mode HTML or PDF exports.
    */
-  getExportFormats(gadget: Fetcher<Gadget>): Promise<GadgetExportFormat[]>;
+  getExportFormats(gadget: GadgetExportCapability<Gadget>): Promise<GadgetExportFormat[]>;
 
   /**
    * Produces the server-side format identified by an id returned from
@@ -77,23 +89,5 @@ export interface GadgetExportEntrypoint<Gadget extends DurableObject = DurableOb
    * title and the format's `fileExtension`; the handler does not control the
    * base filename.
    */
-  export(gadget: Fetcher<Gadget>, id: string): Promise<ReadableStream<Uint8Array>>;
-}
-
-// Export API exposed to the Workshop UI:
-
-/**
- * Export methods that will be added directly to `GadgetClient`, rather than
- * exposed as a separate RPC capability. These methods replace the existing
- * `GadgetClient.exportPdf()` method when implemented.
- */
-export interface GadgetClientExportMethods {
-  /**
-   * Lists supported export formats, including default formats if the Gadget
-   * does not implement ExportHandler.
-   */
-  getExportFormats(chatId?: number): Promise<GadgetExportFormat[]>;
-
-  /** Exports the format with the given ID. */
-  export(id: string, chatId?: number): Promise<ReadableStream<Uint8Array>>;
+  export(gadget: GadgetExportCapability<Gadget>, id: string): Promise<ReadableStream<Uint8Array>>;
 }
