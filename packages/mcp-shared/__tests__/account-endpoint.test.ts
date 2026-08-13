@@ -178,6 +178,32 @@ describe("connect initiation nonce", () => {
     await expect(repoint).rejects.toThrow("stop test probe");
   });
 
+  it("keeps an observed-public account usable while an OAuth-configured reconnect probes", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://portal.example/mcp"), auth: "none" as const };
+    context.storage.kv.put("server", connected);
+    const account = new InterleavingAccount(context as never, {});
+    const credentialsExpired = vi.fn(async () => undefined);
+    const nonce = "1".repeat(64);
+    await account.setCallback({ credentialsExpired } as never, nonce);
+
+    const reconnect = account.beginConnect(nonce, {
+      ...connected,
+      auth: "oauth",
+    });
+
+    await expect(account.getConnection(connected.endpoint))
+      .resolves.toMatchObject({ authorization: null });
+    expect(credentialsExpired).not.toHaveBeenCalled();
+    expect(context.storage.kv.get<ConnectedServer>("server")).toEqual(connected);
+
+    account.failProbe();
+    await expect(reconnect).rejects.toThrow("stop test probe");
+    await expect(account.getConnection(connected.endpoint))
+      .resolves.toMatchObject({ authorization: null });
+    expect(context.storage.kv.get<ConnectedServer>("server")).toEqual(connected);
+  });
+
   it("ignores a transport session written by an operation from before repoint", async () => {
     const context = fakeContext();
     const old = { ...server("https://old.example/mcp"), auth: "none" as const };

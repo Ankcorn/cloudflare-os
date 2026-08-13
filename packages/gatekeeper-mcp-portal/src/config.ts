@@ -187,7 +187,7 @@ export function portalServer(config: PortalConfig): ConnectedServer {
 export function portalAuthRequiresReconnect(
   connected: ServerAuthKind, configured: ServerAuthKind,
 ): boolean {
-  return (connected === "token") !== (configured === "token");
+  return configured === "oauth" ? connected === "token" : connected !== configured;
 }
 
 /**
