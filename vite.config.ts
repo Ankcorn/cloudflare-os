@@ -1,8 +1,10 @@
 import { defineConfig } from 'vite-plus'
 
-// Repo-wide toolchain config. Today this is the lint ruleset, moved here from `.oxlintrc.json` so
-// there is one place to look: `vp lint` reads it, and `vp check` runs lint without the format step
-// because the tree is not oxfmt-clean.
+/**
+ * Repo-wide toolchain config. Today this is the lint ruleset, moved here from `.oxlintrc.json` so
+ * there is one place to look: `vp lint` reads it, and `vp check` runs lint without the format step
+ * because the tree is not oxfmt-clean.
+ */
 export default defineConfig({
   check: {
     // The repo has never been formatted with oxfmt, so `vp check` would report every file. Left off
@@ -15,6 +17,7 @@ export default defineConfig({
       suspicious: 'error',
     },
     plugins: ['typescript', 'unicorn', 'oxc', 'import'],
+    jsPlugins: ['./scripts/oxlint-plugin.mjs'],
     options: {
       // Note: type-aware linting is intentionally not enabled. The type-aware engine
       // uses tsgo (TypeScript 7), and three packages do not type-check under it:
@@ -27,6 +30,10 @@ export default defineConfig({
       es2024: true,
     },
     rules: {
+      // Exported API declaration documentation is surfaced by TypeScript in IDE
+      // hovers only when it uses JSDoc syntax. Ordinary implementation comments stay `//`.
+      'gadgets/prefer-jsdoc': 'error',
+
       // False positives: gatekeepers import `.txt` files as bundled text assets,
       // which the import resolver reports as "no default export".
       'import/default': 'off',
