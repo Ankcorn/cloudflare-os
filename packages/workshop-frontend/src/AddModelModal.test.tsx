@@ -141,8 +141,32 @@ describe('AddModelModal OpenAI-compatible provider', () => {
         apiUrl: 'https://models.example.com/v1/chat/completions/',
         contextWindow: 128_000,
         outputLimit: 8_192,
-        compatibilityProfile: 'conservative',
       },
+    )
+  })
+
+  it('derives limits for a model recognized by base URL and ID', async () => {
+    render({ enabled: false })
+
+    select('other-openai-compatible')
+    change('Model ID', 'gemma-4-31b')
+    change('Display Name', 'Gemma 4')
+    change('API Token', 'secret')
+    change('Base URL', 'https://api.cerebras.ai/v1')
+
+    expect(container.querySelector('[aria-label="Context Window"]')).toBeNull()
+    expect(container.querySelector('[aria-label="Maximum Output Tokens"]')).toBeNull()
+
+    await submit()
+    expect(addModel).toHaveBeenCalledWith(
+      { type: 'agent', id: 'gemma-4-31b', name: 'Gemma 4' },
+      expect.objectContaining({
+        provider: 'openai-compatible',
+        model: 'gemma-4-31b',
+        apiUrl: 'https://api.cerebras.ai/v1',
+        contextWindow: 131_072,
+        outputLimit: 40_960,
+      }),
     )
   })
 
@@ -155,7 +179,6 @@ describe('AddModelModal OpenAI-compatible provider', () => {
     { baseUrl: 'http://models.example.com/v1', contextWindow: '128000', outputLimit: '8192' },
     { baseUrl: 'https://models.example.com/v1?route=chat', contextWindow: '128000', outputLimit: '8192' },
     { baseUrl: 'https://models.example.com/v1', contextWindow: '8192', outputLimit: '8192' },
-    { baseUrl: 'https://models.example.com/v1', contextWindow: '2000001', outputLimit: '8192' },
   ])('does not submit invalid endpoint settings', async ({ baseUrl, contextWindow, outputLimit }) => {
     render({ enabled: false })
     select('other-openai-compatible')

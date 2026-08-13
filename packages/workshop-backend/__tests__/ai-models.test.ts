@@ -111,6 +111,17 @@ describe("getModel AI Gateway routing", () => {
     });
   }, 15000);
 
+  it("clamps the default output allowance to the remaining context", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR);
+    const expectedMaxTokens = 1_234;
+    const promptTokens = handle.model.contextWindow - 4_096 - expectedMaxTokens;
+    const request = await captureRequest(handle, {
+      messages: [{role: "user", content: "x".repeat(promptTokens * 4), timestamp: 0}],
+    });
+
+    expect(JSON.parse(request.body).max_tokens).toBe(expectedMaxTokens);
+  }, 15000);
+
   it("routes Google through the gateway's google-ai-studio passthrough", () => {
     // The @google/genai SDK sends its API key as `x-goog-api-key`, which AI Gateway forwards to
     // the provider verbatim (taking precedence over the gateway's stored keys), so the documented
@@ -510,15 +521,12 @@ describe("getModel direct routing (no gateway)", () => {
     }
   });
 
-  it("uses a conservative OpenAI-compatible Chat Completions profile", async () => {
+  it("uses Pi compatibility for a recognized OpenAI-compatible model", async () => {
     const handle = getModel(env({ CF_AI_GATEWAY: undefined }), {
       provider: "openai-compatible",
-      model: "provider/model",
+      model: "gemma-4-31b",
       apiToken: "custom-token",
-      apiUrl: "https://models.example.com/api/v1",
-      contextWindow: 128_000,
-      outputLimit: 8_192,
-      compatibilityProfile: "conservative",
+      apiUrl: "https://api.cerebras.ai/v1",
     }, INITIATOR, {
       userGateway: { accountId: "user-account-id", apiKey: "user-token" },
     });
@@ -526,11 +534,11 @@ describe("getModel direct routing (no gateway)", () => {
     expect(handle.model).toMatchObject({
       api: "openai-completions",
       provider: "openai-compatible",
-      baseUrl: "https://models.example.com/api/v1",
+      baseUrl: "https://api.cerebras.ai/v1",
       reasoning: false,
       input: ["text"],
-      contextWindow: 128_000,
-      maxTokens: 8_192,
+      contextWindow: 131_072,
+      maxTokens: 40_960,
     });
     expect(handle.aiGatewayLogRoute).toBeUndefined();
 
@@ -541,13 +549,13 @@ describe("getModel direct routing (no gateway)", () => {
     }, { maxTokens: 2_048 });
     const body = JSON.parse(request.body);
 
-    expect(request.url).toBe("https://models.example.com/api/v1/chat/completions");
+    expect(request.url).toBe("https://api.cerebras.ai/v1/chat/completions");
     expect(request.headers.get("authorization")).toBe("Bearer custom-token");
     expect(body.messages[0]).toEqual({ role: "system", content: "System instructions" });
-    expect(body.max_tokens).toBe(2_048);
-    expect(body.tools[0].function).not.toHaveProperty("strict");
+    expect(body.max_completion_tokens).toBe(2_048);
+    expect(body.tools[0].function).toHaveProperty("strict", false);
     expect(body).not.toHaveProperty("store");
-    expect(body).not.toHaveProperty("stream_options");
+    expect(body.stream_options).toEqual({include_usage: true});
     expect(body).not.toHaveProperty("reasoning_effort");
     expect(body).not.toHaveProperty("reasoning");
     expect(body).not.toHaveProperty("thinking");

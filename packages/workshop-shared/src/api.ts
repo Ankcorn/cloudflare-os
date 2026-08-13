@@ -1136,11 +1136,11 @@ export type CloudflareAccountOption = {
   accountName: string;
 };
 
-/** Supported AI providers. "openai-compatible" names the Chat Completions protocol, not a vendor. */
+// Supported AI providers. "openai-compatible" names the Chat Completions protocol, not a vendor.
 export type AiModelProvider =
     "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "openai-compatible";
 
-/** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
+// Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`.
 export type AiGatewayInfo = {
   enabled: true;
   enabledProviders: AiModelProvider[];
@@ -1148,7 +1148,7 @@ export type AiGatewayInfo = {
   enabled: false;
 };
 
-/** Configuration specifying how to connect to an AI model provider. */
+// Configuration specifying how to connect to an AI model provider.
 export type AiModelConfig = {
   /** Which AI provider hosts the model? */
   provider: AiModelProvider;
@@ -1177,13 +1177,7 @@ export type AiModelConfig = {
 
   // Maximum tokens generated in one response. Required for OpenAI-compatible models.
   outputLimit?: number;
-
-  // Request behavior for an OpenAI-compatible endpoint. Defaults to "conservative".
-  compatibilityProfile?: "conservative";
 };
-
-/** Largest custom context window accepted for compaction and inference. */
-export const MAX_CUSTOM_MODEL_CONTEXT_WINDOW = 2_000_000;
 
 /**
  * Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the

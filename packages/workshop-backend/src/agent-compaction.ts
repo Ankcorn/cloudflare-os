@@ -1,6 +1,4 @@
-import {MAX_CUSTOM_MODEL_CONTEXT_WINDOW, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT,
-  type AiChatMessage, type AiModelConfig}
-  from "@gadgets/workshop-shared/api";
+import type {AiChatMessage} from "@gadgets/workshop-shared/api";
 import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import type {ChatBindingEntry, CompactionCheckpoint} from "./agent";
@@ -17,32 +15,16 @@ const COMPACTION_TRIGGER_RATIO = 0.85;
 // the turns that follow.
 const COMPACTION_TARGET_RATIO = 0.3;
 
-// Assumed window for a model that SUGGESTED_MODELS doesn't list. A model whose real window is
-// smaller still fails at the provider before compaction triggers.
-const DEFAULT_CONTEXT_WINDOW = 128_000;
+// An endpoint may advertise a larger window, but replaying more than this before compaction is an
+// application resource risk. This does not reject or alter the saved provider configuration.
+const MAX_COMPACTION_CONTEXT_WINDOW = 2_000_000;
 
 /**
- * How the turn divides the model's window. The reserved response capacity is both withheld from the
- * prompt's budget and sent as the request's response cap. A Cloudflare model configured by hand has
- * no SUGGESTED_MODELS entry to declare its reservation, so the provider's applies.
+ * The prompt budget used for compaction. Pi clamps each request's output against its estimated
+ * prompt, so compaction does not guess whether a provider publishes combined or separate limits.
  */
-export function getModelTokenLimits(config: AiModelConfig):
-    {inputBudget: number, maxOutputTokens?: number} {
-  if (config.provider === "openai-compatible") {
-    let contextWindow = Math.min(config.contextWindow!, MAX_CUSTOM_MODEL_CONTEXT_WINDOW);
-    let maxOutputTokens = Math.min(config.outputLimit!, contextWindow - 1);
-    return {
-      inputBudget: contextWindow - maxOutputTokens,
-      maxOutputTokens,
-    };
-  }
-  let model = SUGGESTED_MODELS[config.provider][config.model];
-  let maxOutputTokens = model?.outputLimit ??
-      (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined);
-  return {
-    inputBudget: (model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW) - (maxOutputTokens ?? 0),
-    maxOutputTokens,
-  };
+export function getModelTokenLimits({model}: {model: Model<Api>}): {inputBudget: number} {
+  return {inputBudget: Math.min(model.contextWindow, MAX_COMPACTION_CONTEXT_WINDOW)};
 }
 
 /**

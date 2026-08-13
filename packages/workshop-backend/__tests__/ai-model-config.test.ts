@@ -17,8 +17,44 @@ describe("normalizeAiModelConfig", () => {
       model: "provider/model",
       apiToken: "secret",
       apiUrl: "https://example.com/api/v1",
-      compatibilityProfile: "conservative",
     });
+  });
+
+  it("uses Pi metadata for a recognized endpoint and model", () => {
+    expect(normalizeAiModelConfig({
+      ...config,
+      model: "gemma-4-31b",
+      apiUrl: "https://api.cerebras.ai/v1/chat/completions",
+      contextWindow: undefined,
+      outputLimit: undefined,
+    })).toMatchObject({
+      apiUrl: "https://api.cerebras.ai/v1",
+      contextWindow: 131_072,
+      outputLimit: 40_960,
+    });
+  });
+
+  it("accepts equal context and output maxima published by Pi", () => {
+    expect(normalizeAiModelConfig({
+      ...config,
+      model: "grok-build-0.1",
+      apiUrl: "https://api.x.ai/v1",
+      contextWindow: undefined,
+      outputLimit: undefined,
+    })).toMatchObject({contextWindow: 256_000, outputLimit: 256_000});
+  });
+
+  it.each([
+    "http://localhost:8080/v1",
+    "http://127.42.0.1:8080/v1",
+    "http://[::1]:8080/v1",
+  ])("allows loopback HTTP endpoints (%s)", (apiUrl) => {
+    expect(normalizeAiModelConfig({...config, apiUrl}).apiUrl).toBe(apiUrl);
+  });
+
+  it("does not impose an arbitrary maximum context window", () => {
+    expect(normalizeAiModelConfig({...config, contextWindow: 2_000_001}).contextWindow)
+        .toBe(2_000_001);
   });
 
   it("normalizes a pasted Chat Completions endpoint to its base URL", () => {
@@ -38,21 +74,11 @@ describe("normalizeAiModelConfig", () => {
     { name: "URL query", overrides: { apiUrl: "https://example.com/v1?route=chat" }, error: "query" },
     { name: "URL fragment", overrides: { apiUrl: "https://example.com/v1#chat" }, error: "fragment" },
     { name: "zero context window", overrides: { contextWindow: 0 }, error: "context window" },
-    {
-      name: "excessive context window",
-      overrides: { contextWindow: 2_000_001 },
-      error: "at most 2000000",
-    },
     { name: "fractional output limit", overrides: { outputLimit: 1.5 }, error: "output limit" },
     {
       name: "output equal to context",
       overrides: { outputLimit: 128_000 },
       error: "less than",
-    },
-    {
-      name: "unknown compatibility profile",
-      overrides: { compatibilityProfile: "experimental" },
-      error: "compatibility profile",
     },
   ])("rejects an invalid $name", ({ overrides, error }) => {
     expect(() => normalizeAiModelConfig({ ...config, ...overrides })).toThrow(error);

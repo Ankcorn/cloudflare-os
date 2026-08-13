@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Dialog, Button, Input, Select, SensitiveInput, Collapsible, useKumoToastManager } from '@cloudflare/kumo'
-import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, MAX_CUSTOM_MODEL_CONTEXT_WINDOW, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import { AiChatAuthorInfo, AiModelConfig, AiModelProvider, AiGatewayInfo, SUGGESTED_MODELS } from '@gadgets/workshop-shared/api'
+import { findOpenAiCompatibleModel } from '@gadgets/workshop-shared/openai-compatible-models'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 
@@ -32,20 +33,21 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
-  'openai-compatible': 'sk-...',
+  'openai-compatible': 'Bearer token',
 }
 
-// Example used in the custom-model placeholders for providers that have no suggested models
-// (currently Ollama, which serves whatever the user has pulled locally).
-const FALLBACK_EXAMPLE_MODEL = { modelId: 'gemma4:31b', name: 'Gemma 4 31B' }
+const CUSTOM_MODEL_EXAMPLES: Record<AiModelProvider, { modelId: string, name: string }> = {
+  anthropic: { modelId: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+  openai: { modelId: 'gpt-5.6-sol', name: 'GPT 5.6 Sol' },
+  google: { modelId: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
+  cloudflare: { modelId: '@cf/moonshotai/kimi-k2.7-code', name: 'Kimi K2.7 Code' },
+  ollama: { modelId: 'gemma4:31b', name: 'Gemma 4 31B' },
+  'openai-compatible': { modelId: 'provider/model-name', name: 'My Model' },
+}
 
-// Pick an example model to show in the custom-model placeholders for the given provider.
-function exampleModel(provider: AiModelProvider): { modelId: string, name: string } {
-  if (provider === 'openai-compatible') {
-    return { modelId: 'provider/model-name', name: 'My Model' }
-  }
-  const first = Object.entries(SUGGESTED_MODELS[provider])[0]
-  return first ? { modelId: first[0], name: first[1].name } : FALLBACK_EXAMPLE_MODEL
+function isLoopback(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '[::1]' || hostname === '::1' ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
 }
 
 // Encode a selection into a string value for the Select component.
@@ -123,6 +125,13 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const enabledProviders: Set<string> | null = gatewayMode
     ? new Set(aiConfig.enabledProviders)
     : null
+  const isOllama = selection?.provider === 'ollama'
+  const isCloudflare = selection?.provider === 'cloudflare'
+  const isOpenAiCompatible = selection?.provider === 'openai-compatible'
+  const showCredentials = !gatewayMode
+  const catalogModel = isOpenAiCompatible
+    ? findOpenAiCompatibleModel(apiUrl, modelId)
+    : undefined
 
   // Reset all state when dialog closes
   useEffect(() => {
@@ -173,11 +182,6 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       if (!displayName.trim()) newErrors.displayName = 'Please enter a display name'
     }
 
-    const isOllama = selection?.provider === 'ollama'
-    const isCloudflare = selection?.provider === 'cloudflare'
-    const isOpenAiCompatible = selection?.provider === 'openai-compatible'
-    const showCredentials = !gatewayMode
-
     if (showCredentials && selection && !isOllama && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
     }
@@ -196,31 +200,31 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
       } else {
         try {
           const url = new URL(apiUrl.trim())
-          if (url.protocol !== 'https:') {
-            newErrors.apiUrl = 'Base URL must use HTTPS'
+          if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+            newErrors.apiUrl = 'Base URL must use HTTPS or loopback HTTP'
           } else if (url.username || url.password) {
             newErrors.apiUrl = 'Base URL must not contain credentials'
           } else if (url.search || url.hash) {
             newErrors.apiUrl = 'Base URL must not contain a query string or fragment'
           }
         } catch {
-          newErrors.apiUrl = 'Please enter a valid HTTPS URL'
+          newErrors.apiUrl = 'Please enter a valid HTTPS or loopback HTTP URL'
         }
       }
 
-      const parsedContextWindow = Number(contextWindow)
-      const parsedOutputLimit = Number(outputLimit)
-      if (!contextWindow.trim() || !Number.isSafeInteger(parsedContextWindow) ||
-          parsedContextWindow <= 0) {
-        newErrors.contextWindow = 'Context window must be a positive integer'
-      } else if (parsedContextWindow > MAX_CUSTOM_MODEL_CONTEXT_WINDOW) {
-        newErrors.contextWindow = `Context window must be at most ${MAX_CUSTOM_MODEL_CONTEXT_WINDOW}`
-      }
-      if (!outputLimit.trim() || !Number.isSafeInteger(parsedOutputLimit) ||
-          parsedOutputLimit <= 0) {
-        newErrors.outputLimit = 'Maximum output tokens must be a positive integer'
-      } else if (!newErrors.contextWindow && parsedOutputLimit >= parsedContextWindow) {
-        newErrors.outputLimit = 'Maximum output tokens must be less than the context window'
+      if (!catalogModel) {
+        const parsedContextWindow = Number(contextWindow)
+        const parsedOutputLimit = Number(outputLimit)
+        if (!contextWindow.trim() || !Number.isSafeInteger(parsedContextWindow) ||
+            parsedContextWindow <= 0) {
+          newErrors.contextWindow = 'Context window must be a positive integer'
+        }
+        if (!outputLimit.trim() || !Number.isSafeInteger(parsedOutputLimit) ||
+            parsedOutputLimit <= 0) {
+          newErrors.outputLimit = 'Maximum output tokens must be a positive integer'
+        } else if (!newErrors.contextWindow && parsedOutputLimit >= parsedContextWindow) {
+          newErrors.outputLimit = 'Maximum output tokens must be less than the context window'
+        }
       }
     }
 
@@ -250,9 +254,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
         ...(!gatewayMode && accountId.trim() && { accountId: accountId.trim() }),
         ...(!gatewayMode && apiUrl.trim() && { apiUrl: apiUrl.trim() }),
         ...(selection!.provider === 'openai-compatible' && {
-          contextWindow: Number(contextWindow),
-          outputLimit: Number(outputLimit),
-          compatibilityProfile: 'conservative' as const,
+          contextWindow: catalogModel?.contextWindow ?? Number(contextWindow),
+          outputLimit: catalogModel?.outputLimit ?? Number(outputLimit),
         }),
       }
 
@@ -269,11 +272,7 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
 
   const options = buildOptions(gatewayMode, enabledProviders)
   const showCustomFields = selection?.type === 'custom'
-  const example = selection ? exampleModel(selection.provider) : null
-  const isOllama = selection?.provider === 'ollama'
-  const isCloudflare = selection?.provider === 'cloudflare'
-  const isOpenAiCompatible = selection?.provider === 'openai-compatible'
-  const showCredentials = !gatewayMode
+  const example = selection ? CUSTOM_MODEL_EXAMPLES[selection.provider] : null
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []
@@ -401,43 +400,46 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
               <Input
                 label="Base URL"
                 placeholder="https://openrouter.ai/api/v1"
-                description="HTTPS API root; /chat/completions is added automatically"
+                description="API root; /chat/completions is added automatically"
                 value={apiUrl}
                 onChange={(e) => { setApiUrl(e.target.value); setErrors(prev => ({ ...prev, apiUrl: '' })) }}
                 error={errors.apiUrl}
                 variant={errors.apiUrl ? 'error' : 'default'}
               />
-              <Input
-                label="Context Window"
-                type="number"
-                min={1}
-                max={MAX_CUSTOM_MODEL_CONTEXT_WINDOW}
-                step={1}
-                placeholder="128000"
-                description="Maximum total tokens accepted by the model"
-                value={contextWindow}
-                onChange={(e) => {
-                  setContextWindow(e.target.value)
-                  setErrors(prev => ({ ...prev, contextWindow: '' }))
-                }}
-                error={errors.contextWindow}
-                variant={errors.contextWindow ? 'error' : 'default'}
-              />
-              <Input
-                label="Maximum Output Tokens"
-                type="number"
-                min={1}
-                step={1}
-                placeholder="8192"
-                description="Maximum tokens generated in one response"
-                value={outputLimit}
-                onChange={(e) => {
-                  setOutputLimit(e.target.value)
-                  setErrors(prev => ({ ...prev, outputLimit: '' }))
-                }}
-                error={errors.outputLimit}
-                variant={errors.outputLimit ? 'error' : 'default'}
-              />
+              {!catalogModel && (
+                <>
+                  <Input
+                    label="Context Window"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="128000"
+                    description="Maximum total tokens accepted by the model"
+                    value={contextWindow}
+                    onChange={(e) => {
+                      setContextWindow(e.target.value)
+                      setErrors(prev => ({ ...prev, contextWindow: '' }))
+                    }}
+                    error={errors.contextWindow}
+                    variant={errors.contextWindow ? 'error' : 'default'}
+                  />
+                  <Input
+                    label="Maximum Output Tokens"
+                    type="number"
+                    min={1}
+                    step={1}
+                    placeholder="8192"
+                    description="Maximum tokens generated in one response"
+                    value={outputLimit}
+                    onChange={(e) => {
+                      setOutputLimit(e.target.value)
+                      setErrors(prev => ({ ...prev, outputLimit: '' }))
+                    }}
+                    error={errors.outputLimit}
+                    variant={errors.outputLimit ? 'error' : 'default'}
+                  />
+                </>
+              )}
             </>
           )}
 

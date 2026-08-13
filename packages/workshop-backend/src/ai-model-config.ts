@@ -1,6 +1,12 @@
-import {MAX_CUSTOM_MODEL_CONTEXT_WINDOW, type AiModelConfig} from "@gadgets/workshop-shared/api";
+import type {AiModelConfig} from "@gadgets/workshop-shared/api";
+import {findOpenAiCompatibleModel} from "@gadgets/workshop-shared/openai-compatible-models";
 
 const CHAT_COMPLETIONS_PATH = "/chat/completions";
+
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "[::1]" || hostname === "::1" ||
+      /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
 
 // Validate and normalize fields owned by the OpenAI-compatible provider.
 export function normalizeAiModelConfig(config: AiModelConfig): AiModelConfig {
@@ -19,8 +25,8 @@ export function normalizeAiModelConfig(config: AiModelConfig): AiModelConfig {
   } catch {
     throw new Error("OpenAI-compatible base URL must be a valid HTTPS URL.");
   }
-  if (apiUrl.protocol !== "https:") {
-    throw new Error("OpenAI-compatible base URL must be a valid HTTPS URL.");
+  if (apiUrl.protocol !== "https:" && !(apiUrl.protocol === "http:" && isLoopback(apiUrl.hostname))) {
+    throw new Error("OpenAI-compatible base URL must be a valid HTTPS URL (or loopback HTTP URL).");
   }
   if (apiUrl.username || apiUrl.password) {
     throw new Error("OpenAI-compatible base URL must not contain credentials.");
@@ -33,30 +39,27 @@ export function normalizeAiModelConfig(config: AiModelConfig): AiModelConfig {
     ? pathname.slice(0, -CHAT_COMPLETIONS_PATH.length) || "/"
     : pathname || "/";
 
-  if (!Number.isSafeInteger(config.contextWindow) || config.contextWindow! <= 0) {
+  const normalizedUrl = apiUrl.toString().replace(/\/$/, "");
+  const catalog = findOpenAiCompatibleModel(normalizedUrl, model);
+  const contextWindow = catalog?.contextWindow ?? config.contextWindow;
+  const outputLimit = catalog?.outputLimit ?? config.outputLimit;
+
+  if (!Number.isSafeInteger(contextWindow) || contextWindow! <= 0) {
     throw new Error("OpenAI-compatible context window must be a positive integer.");
   }
-  if (config.contextWindow! > MAX_CUSTOM_MODEL_CONTEXT_WINDOW) {
-    throw new Error(
-        `OpenAI-compatible context window must be at most ${MAX_CUSTOM_MODEL_CONTEXT_WINDOW}.`);
-  }
-  if (!Number.isSafeInteger(config.outputLimit) || config.outputLimit! <= 0) {
+  if (!Number.isSafeInteger(outputLimit) || outputLimit! <= 0) {
     throw new Error("OpenAI-compatible output limit must be a positive integer.");
   }
-  if (config.outputLimit! >= config.contextWindow!) {
+  if (!catalog && outputLimit! >= contextWindow!) {
     throw new Error("OpenAI-compatible output limit must be less than the context window.");
-  }
-
-  const compatibilityProfile = config.compatibilityProfile ?? "conservative";
-  if (compatibilityProfile !== "conservative") {
-    throw new Error(`Unknown OpenAI-compatible compatibility profile "${compatibilityProfile}".`);
   }
 
   return {
     ...config,
     model,
     apiToken,
-    apiUrl: apiUrl.toString().replace(/\/$/, ""),
-    compatibilityProfile,
+    apiUrl: normalizedUrl,
+    contextWindow,
+    outputLimit,
   };
 }

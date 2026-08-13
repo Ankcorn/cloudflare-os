@@ -8,6 +8,7 @@ import { stream as anthropicMessagesStream } from "@earendil-works/pi-ai/api/ant
 import { stream as googleGenerativeAiStream } from "@earendil-works/pi-ai/api/google-generative-ai";
 import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
@@ -21,6 +22,7 @@ import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./a
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
 import { normalizeAiModelConfig } from "./ai-model-config.js";
+import {findOpenAiCompatibleCompat} from "./generated/openai-compatible-compat.js";
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -165,21 +167,6 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
     sendSessionAffinityHeaders: true,
   };
 }
-
-const OPENAI_COMPATIBLE_PROFILES = {
-  conservative: {
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    supportsReasoningEffort: false,
-    supportsUsageInStreaming: false,
-    maxTokensField: "max_tokens",
-    supportsStrictMode: false,
-    supportsLongCacheRetention: false,
-  },
-} satisfies Record<
-  NonNullable<AiModelConfig["compatibilityProfile"]>,
-  OpenAICompletionsCompat
->;
 
 // Build the pi model descriptor for reaching a provider's own native API through an AI Gateway
 // (the platform's or a user's). `gatewayUrl` is a gateway root -- over HTTPS
@@ -340,6 +327,9 @@ function makeHandle(args: HandleArgs): ModelHandle {
             : args.model.api === "anthropic-messages" ? { thinkingEnabled: false } : {}),
         ...(args.fetch !== undefined ? { fetch: args.fetch } : {}),
         ...options,
+        // We use Pi's low-level streams to preserve our API-specific options, so apply the same
+        // context-aware output clamp that its streamSimple() wrappers normally provide.
+        maxTokens: clampMaxTokensToContext(model, context, options.maxTokens ?? model.maxTokens),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
@@ -546,7 +536,7 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
           cost: ZERO_COST,
           contextWindow: config.contextWindow!,
           maxTokens: config.outputLimit!,
-          compat: OPENAI_COMPATIBLE_PROFILES[config.compatibilityProfile ?? "conservative"],
+          compat: findOpenAiCompatibleCompat(config.apiUrl!, config.model),
         },
         apiKey: config.apiToken,
         sessionAffinity,
