@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { after, before, describe, it } from "node:test";
-import ts from "typescript";
+import ts from "typescript6"; // JS compiler API (decodeMappings); see build-gatekeeper-configurator.mjs
 
 const execFileAsync = promisify(execFile);
 const builder = resolve("scripts/build-gatekeeper-configurator.mjs");

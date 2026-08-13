@@ -19,10 +19,10 @@ export default defineConfig({
     plugins: ['typescript', 'unicorn', 'oxc', 'import'],
     jsPlugins: ['./scripts/oxlint-plugin.mjs'],
     options: {
-      // Note: type-aware linting is intentionally not enabled. The type-aware engine
-      // uses tsgo (TypeScript 7), and three packages do not type-check under it:
-      // workshop-frontend, integration-tests and workshop-backend blow past tsgo's
-      // instantiation depth on capnweb's recursive Stub/Stubify types (TS2321/TS2589).
+      // Note: type-aware linting is intentionally not enabled yet.
+      // Enabling them is its own change: triage the first run's findings, decide a `no-floating-promises` policy (RPC promise
+      // pipelining deliberately leaves promises unawaited, so the default rule flags idiomatic
+      // code), and budget for the tsgo pass every lint run would add on top of today's ~1s.
       // Full type safety is still enforced by `tsc` via the `build` script.
       typeAware: false,
     },
@@ -59,6 +59,24 @@ export default defineConfig({
           caughtErrors: 'none',
           varsIgnorePattern: '^_',
           ignoreRestSiblings: true,
+        },
+      ],
+
+      // TypeScript 7 (tsgo) type-checks only; it currently ships no JS compiler API. The build-time
+      // transpilers that need one import the `typescript6` alias instead. Bare `typescript`
+      // resolves to 7.x, where the missing API is a runtime failure on whichever code path
+      // reaches it rather than anything the type check or the build would catch.
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'typescript',
+              message:
+                'TypeScript 7 (tsgo) currently ships no JS compiler API. Import the `typescript6` alias for transpileModule/createProgram. `import type` is fine.',
+              allowTypeImports: true,
+            },
+          ],
         },
       ],
 
@@ -133,6 +151,8 @@ export default defineConfig({
         // restricted to rpc-client.ts, which wraps stub minting in stubFor().
         files: ['packages/integration-tests/**/*.ts'],
         rules: {
+          // Overrides replace this rule's options rather than merging them, so the repo-wide
+          // `typescript` restriction has to be repeated alongside the capnweb one to survive here.
           'no-restricted-imports': [
             'error',
             {
@@ -141,6 +161,12 @@ export default defineConfig({
                   name: 'capnweb',
                   message:
                     'Mint stubs via stubFor() from rpc-client: a consumer repo can hold two capnweb copies, and a stub from the wrong one fails to serialise. `import type` is fine.',
+                  allowTypeImports: true,
+                },
+                {
+                  name: 'typescript',
+                  message:
+                    'TypeScript 7 (tsgo) currently ships no JS compiler API. Import the `typescript6` alias for transpileModule/createProgram. `import type` is fine.',
                   allowTypeImports: true,
                 },
               ],

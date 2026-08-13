@@ -9268,7 +9268,8 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 
   async exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>> {
-    let browser = this.impl.env.BROWSER;
+    // Read as possibly-undefined: self-hosted deployments may omit the binding (see env.d.ts).
+    let browser: BrowserRun | undefined = this.impl.env.BROWSER;
     if (!browser) throw new Error("Gadget export is not configured for this deployment.");
     let bundle = await this.getUiBundle(chatId);
     if (!bundle) throw new Error("This Gadget does not have a UI to export.");
@@ -9523,7 +9524,8 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   async exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>> {
     if (chatId !== undefined) this.#deny();
-    let browser = this.impl.env.BROWSER;
+    // Read as possibly-undefined: self-hosted deployments may omit the binding (see env.d.ts).
+    let browser: BrowserRun | undefined = this.impl.env.BROWSER;
     if (!browser) throw new Error("Gadget export is not configured for this deployment.");
     let bundle = await this.getUiBundle();
     if (!bundle) throw new Error("This Gadget does not have a UI to export.");

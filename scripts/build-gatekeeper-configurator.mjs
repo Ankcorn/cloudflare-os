@@ -1,7 +1,10 @@
 import { watch } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import ts from "typescript";
+// typescript6 = npm:typescript@6.0.3. The transpileModule compiler API this script relies on is not
+// shipped by the TypeScript 7 package (it only exports version metadata); type-checking uses
+// the workspace "typescript" (7.x, tsgo), build-time transpilers stay on the JS-based 6.x line.
+import ts from "typescript6";
 import { loadEnv } from "vite";
 
 const packageDir = resolve(process.argv[2] ?? ".");
