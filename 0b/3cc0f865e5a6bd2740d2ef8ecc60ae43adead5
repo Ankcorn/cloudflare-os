@@ -8,6 +8,7 @@ packages/mcp-shared/src/client.ts
   s_e25e29d8ebebad::t_8c0056c99a7b26 481
   s_e25e29d8ebebad::t_e51b1320eb1b5a 17,133-140,176,308,339,345,353-375,381,387,392-395,404,471-480
   s_e25e29d8ebebad::t_10a335af6ad641 17
+  s_e25e29d8ebebad::t_cc1dfd8e1fc620 307
 packages/mcp-shared/src/schema-to-ts.ts
   s_e25e29d8ebebad::t_24cc37753e394c 346
   s_e25e29d8ebebad::t_03c69314cd73d9 347-348
@@ -32,11 +33,13 @@ packages/mcp-shared/__tests__/schema-to-ts.test.ts
 packages/mcp-shared/src/fetch.ts
   s_e25e29d8ebebad::t_49de64696f44b0 154-162
   s_e25e29d8ebebad::t_e0bf4fcad647a4 15-16,21,23,25,27-28,36-43,104-108,110,146,165-167,207
+  s_e25e29d8ebebad::t_bb79a679b8df38 20,22,24,26
 packages/mcp-shared/src/session.ts
   s_e25e29d8ebebad::t_24cc37753e394c 159-161
 packages/mcp-shared/src/account.ts
   s_e25e29d8ebebad::t_24cc37753e394c 313
   s_e25e29d8ebebad::t_e0bf4fcad647a4 312,579,683-691,820-824,827-829,832
+  s_e25e29d8ebebad::t_09bca857550bc7 814-817
 packages/workshop-backend/src/overseer.ts
   s_e25e29d8ebebad::t_22fac969972f72 4
 ---
