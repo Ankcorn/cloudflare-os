@@ -75,9 +75,9 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true) {
       sanitizedInIsolatedRealm = true;
       htmlSanitized = typeof args[0] === "string" &&
         args[0].includes("script-src 'none'") &&
-        fn.toString().includes("DOMParser") &&
-        fn.toString().includes("charset") &&
-        fn.toString().includes("http-equiv") && fn.toString().includes("refresh");
+        fn.toString().includes("ownerDocument") &&
+        !fn.toString().includes("DOMParser") &&
+        fn.toString().includes("charset");
       return Promise.resolve("<!DOCTYPE html>\n<html><head></head><body>Snapshot</body></html>");
     }
     // The RPC transport polls this; the fake page never has a message to deliver.

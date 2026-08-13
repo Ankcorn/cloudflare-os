@@ -10,7 +10,7 @@ declare global {
   /** Settles when the Gadget client module has finished loading. */
   var __workshopExportModulePromise: Promise<Record<string, unknown>>;
   /** Sanitizes a complete HTML document inside Puppeteer's isolated realm. */
-  var __workshopExportSanitizeHtml: (html: string) => string;
+  var __workshopExportSanitizeHtml: (html: string) => HTMLHtmlElement;
 }
 
 /** Delivers one Cap'n Web RPC message to the browser-side session. */
@@ -57,18 +57,15 @@ export function setDocumentTitle(title: string): void {
 
 /** Creates an inert, self-contained HTML snapshot of the rendered Gadget. */
 export function createStaticHtmlSnapshot(csp: string): string {
-  const html = globalThis.__workshopExportSanitizeHtml(
+  const sanitized = globalThis.__workshopExportSanitizeHtml(
     `<!DOCTYPE html>\n${document.documentElement.outerHTML}`,
   );
-  const sanitized = new DOMParser().parseFromString(html, "text/html");
-  for (const refresh of sanitized.querySelectorAll('meta[http-equiv="refresh" i]')) {
-    refresh.remove();
-  }
-  const policy = sanitized.createElement("meta");
+  const ownerDocument = sanitized.ownerDocument;
+  const policy = ownerDocument.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = csp;
-  const charset = sanitized.createElement("meta");
+  const charset = ownerDocument.createElement("meta");
   charset.setAttribute("charset", "utf-8");
-  sanitized.head.prepend(charset, policy);
-  return `<!DOCTYPE html>\n${sanitized.documentElement.outerHTML}`;
+  ownerDocument.head!.prepend(charset, policy);
+  return `<!DOCTYPE html>\n${sanitized.outerHTML}`;
 }

@@ -87,6 +87,15 @@ describe("bundled format blueprints", () => {
     }
   });
 
+  it("renders document HTML and PDF exports without the editor chrome", async () => {
+    let entry = FORMAT_BLUEPRINTS.find(blueprint => blueprint.blueprintId === "format.document")!;
+    let client = await readBlueprintFile(entry, "client.js");
+
+    expect(client).toContain('["html", "pdf"].includes(globalThis.gadgetExportFormatId)');
+    expect(client).toContain('document.documentElement.classList.add("document-export")');
+    expect(client).toContain("app.replaceChildren(canvas)");
+  });
+
   it("declares the intended export formats for every standard output format", async () => {
     let expectedFormats: Record<string, string[]> = {
       "format.document": [

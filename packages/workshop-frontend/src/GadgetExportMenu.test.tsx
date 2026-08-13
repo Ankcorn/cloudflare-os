@@ -27,7 +27,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@cloudflare/kumo', () => {
   const DropdownMenu = Object.assign(
-    ({ children }: { children: ReactNode }) => <div>{children}</div>,
+    ({ children, onOpenChange }: {
+      children: ReactNode
+      onOpenChange?: (open: boolean) => void
+    }) => (
+      <div>
+        <button type="button" onClick={() => onOpenChange?.(true)}>open export menu</button>
+        {children}
+      </div>
+    ),
     {
       Trigger: ({ render }: { render: ReactElement }) => render,
       Content: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -150,6 +158,44 @@ describe('GadgetExportMenu', () => {
       root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" revision={2} />)
     })
 
+    expect(getExportFormats).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads formats with a loading state whenever the menu opens', async () => {
+    let resolveRefreshed!: (formats: GadgetExportFormat[]) => void
+    const refreshed = new Promise<GadgetExportFormat[]>(resolve => { resolveRefreshed = resolve })
+    const initial: GadgetExportFormat[] = [{
+      id: 'csv:first', label: 'First sheet', mode: 'server',
+      contentType: 'text/csv', fileExtension: '.csv',
+    }]
+    const getExportFormats = vi.fn<(chatId?: number) => Promise<GadgetExportFormat[]>>()
+      .mockResolvedValueOnce(initial)
+      .mockReturnValueOnce(refreshed)
+    const client = gadget({ getExportFormats })
+
+    await act(async () => {
+      root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" />)
+    })
+    const open = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent === 'open export menu')
+    await act(async () => { open?.click() })
+
+    expect(container.querySelector('[role="status"][aria-label="Loading export formats"]')).not.toBeNull()
+    expect(container.textContent).not.toContain('First sheet')
+
+    await act(async () => {
+      resolveRefreshed([
+        ...initial,
+        {
+          id: 'csv:second', label: 'Second sheet', mode: 'server',
+          contentType: 'text/csv', fileExtension: '.csv',
+        },
+      ])
+      await refreshed
+    })
+
+    expect(container.textContent).toContain('First sheet')
+    expect(container.textContent).toContain('Second sheet')
     expect(getExportFormats).toHaveBeenCalledTimes(2)
   })
 })
