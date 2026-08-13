@@ -18,13 +18,14 @@ type Harness = {
   exportDocumentCsp: () => string | undefined;
   blobRequestAborted: () => boolean;
   htmlSanitized: () => boolean;
+  sanitizerInstalled: () => boolean;
   sanitizedInIsolatedRealm: () => boolean;
   mediaType: () => string | undefined;
   screenshotType: () => string | undefined;
   screenshotFullPage: () => boolean | undefined;
 };
 
-function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true, sanitizerSupported = true) {
+function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true) {
   let browserClosed = false;
   let clientInitialized = false;
   let documentTitle: string | undefined;
@@ -35,6 +36,7 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true, sanitizerSupport
   let exportDocumentCsp: string | undefined;
   let blobRequestAborted = false;
   let htmlSanitized = false;
+  let sanitizerInstalled = false;
   let sanitizedInIsolatedRealm = false;
   let mediaType: string | undefined;
   let screenshotType: string | undefined;
@@ -43,9 +45,14 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true, sanitizerSupport
   let requestHandler: ((request: unknown) => void) | undefined;
   const evaluate = (
     isolated: boolean,
-    fn: (...args: never[]) => unknown,
+    fn: ((...args: never[]) => unknown) | string,
     ...args: unknown[]
   ) => {
+    if (typeof fn === "string") {
+      if (!isolated) throw new Error("HTML sanitizer was installed in the main world.");
+      sanitizerInstalled = true;
+      return Promise.resolve();
+    }
     if (fn.toString().includes("__workshopExportModulePromise")) {
       if (isolated) throw new Error("Client module was awaited outside the main world.");
       clientInitialized = true;
@@ -62,14 +69,14 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true, sanitizerSupport
       documentTitle = typeof args[0] === "string" ? args[0] : undefined;
       return Promise.resolve();
     }
-    if (fn.toString().includes('Reflect.get(Document, "parseHTML")')) {
+    if (fn.toString().includes("__workshopExportSanitizeHtml")) {
       if (!isolated) throw new Error("Main-world sanitizer was invoked.");
+      expect(sanitizerInstalled).toBe(true);
       sanitizedInIsolatedRealm = true;
-      if (!sanitizerSupported) {
-        return Promise.reject(new Error("HTML export requires the browser Sanitizer API."));
-      }
       htmlSanitized = typeof args[0] === "string" &&
         args[0].includes("script-src 'none'") &&
+        fn.toString().includes("DOMParser") &&
+        fn.toString().includes("charset") &&
         fn.toString().includes("http-equiv") && fn.toString().includes("refresh");
       return Promise.resolve("<!DOCTYPE html>\n<html><head></head><body>Snapshot</body></html>");
     }
@@ -155,6 +162,7 @@ function makeHarness(pdfChunks = ["%PDF-1.4"], closePdf = true, sanitizerSupport
     exportDocumentCsp: () => exportDocumentCsp,
     blobRequestAborted: () => blobRequestAborted,
     htmlSanitized: () => htmlSanitized,
+    sanitizerInstalled: () => sanitizerInstalled,
     sanitizedInIsolatedRealm: () => sanitizedInIsolatedRealm,
     mediaType: () => mediaType,
     screenshotType: () => screenshotType,
@@ -167,9 +175,8 @@ function render(
   pdfChunks?: string[],
   closePdf = true,
   contentType = "application/pdf",
-  sanitizerSupported = true,
 ) {
-  let { gadget, harness } = makeHarness(pdfChunks, closePdf, sanitizerSupported);
+  let { gadget, harness } = makeHarness(pdfChunks, closePdf);
   let stream = renderGadgetInBrowser(
     {} as BrowserRun,
     "export default {}",
@@ -288,19 +295,13 @@ describe("renderGadgetInBrowser", () => {
     expect(harness.blobRequestAborted()).toBe(true);
   });
 
-  it("exports an inert snapshot of the settled HTML", async () => {
+  it("exports an inert snapshot with locally bundled DOMPurify", async () => {
     let { stream, harness } = render(undefined, true, "text/html");
 
     expect(await collect(await stream)).toContain("Snapshot");
     expect(harness.htmlSanitized()).toBe(true);
+    expect(harness.sanitizerInstalled()).toBe(true);
     expect(harness.sanitizedInIsolatedRealm()).toBe(true);
-    expect(harness.browserClosed()).toBe(true);
-  });
-
-  it("rejects HTML export when the browser Sanitizer API is unavailable", async () => {
-    let { stream, harness } = render(undefined, true, "text/html", false);
-
-    await expect(stream).rejects.toThrow("HTML export requires the browser Sanitizer API.");
     expect(harness.browserClosed()).toBe(true);
   });
 

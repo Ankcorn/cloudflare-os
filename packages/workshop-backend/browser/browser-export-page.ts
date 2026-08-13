@@ -9,6 +9,8 @@ declare global {
   var __workshopExportReceiveFromBrowser: () => Promise<string>;
   /** Settles when the Gadget client module has finished loading. */
   var __workshopExportModulePromise: Promise<Record<string, unknown>>;
+  /** Sanitizes a complete HTML document inside Puppeteer's isolated realm. */
+  var __workshopExportSanitizeHtml: (html: string) => string;
 }
 
 /** Delivers one Cap'n Web RPC message to the browser-side session. */
@@ -55,23 +57,18 @@ export function setDocumentTitle(title: string): void {
 
 /** Creates an inert, self-contained HTML snapshot of the rendered Gadget. */
 export function createStaticHtmlSnapshot(csp: string): string {
-  const parseHTML = Reflect.get(Document, "parseHTML");
-  if (typeof parseHTML !== "function") {
-    throw new Error("HTML export requires the browser Sanitizer API.");
-  }
-
-  // A remove configuration preserves ordinary Gadget markup while parseHTML() still applies the
-  // browser's mandatory XSS-safe baseline.
-  const sanitized = Reflect.apply(parseHTML, Document, [
+  const html = globalThis.__workshopExportSanitizeHtml(
     `<!DOCTYPE html>\n${document.documentElement.outerHTML}`,
-    {sanitizer: {removeElements: [], removeAttributes: []}},
-  ]) as Document;
+  );
+  const sanitized = new DOMParser().parseFromString(html, "text/html");
   for (const refresh of sanitized.querySelectorAll('meta[http-equiv="refresh" i]')) {
     refresh.remove();
   }
   const policy = sanitized.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = csp;
-  sanitized.head.prepend(policy);
+  const charset = sanitized.createElement("meta");
+  charset.setAttribute("charset", "utf-8");
+  sanitized.head.prepend(charset, policy);
   return `<!DOCTYPE html>\n${sanitized.documentElement.outerHTML}`;
 }

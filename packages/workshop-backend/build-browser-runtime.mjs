@@ -5,6 +5,7 @@ import { build } from "esbuild";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
 const runtimeOutputFile = resolve(packageDir, "src/generated/browser-export-runtime.txt");
+const sanitizerOutputFile = resolve(packageDir, "src/generated/html-sanitizer-runtime.txt");
 const pageOutputFile = resolve(packageDir, "src/generated/browser-export-page.js");
 
 const runtimeResult = await build({
@@ -24,8 +25,18 @@ const pageResult = await build({
   target: "es2025",
   write: false,
 });
+const sanitizerResult = await build({
+  entryPoints: [resolve(packageDir, "browser/html-sanitizer-runtime.ts")],
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2025",
+  minify: true,
+  write: false,
+});
 
 writeIfChanged(runtimeOutputFile, runtimeResult.outputFiles[0].contents);
+writeIfChanged(sanitizerOutputFile, sanitizerResult.outputFiles[0].contents);
 writeIfChanged(pageOutputFile, pageResult.outputFiles[0].contents);
 
 function writeIfChanged(outputFile, bytes) {

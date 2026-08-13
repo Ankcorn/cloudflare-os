@@ -3,6 +3,7 @@ import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/export";
 import BROWSER_EXPORT_RUNTIME from "./generated/browser-export-runtime.txt";
+import HTML_SANITIZER_RUNTIME from "./generated/html-sanitizer-runtime.txt";
 import {
   createStaticHtmlSnapshot,
   receiveFromBrowser,
@@ -235,6 +236,7 @@ export async function renderGadgetInBrowser(
             waitForFonts: true,
           });
         case "text/html": {
+          await isolatedRealm.evaluate(HTML_SANITIZER_RUNTIME);
           const html = await isolatedRealm.evaluate(createStaticHtmlSnapshot, STATIC_HTML_CSP);
           return streamBytes(new TextEncoder().encode(html));
         }
