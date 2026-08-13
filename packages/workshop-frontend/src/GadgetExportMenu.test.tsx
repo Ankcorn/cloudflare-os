@@ -33,6 +33,7 @@ vi.mock('@cloudflare/kumo', () => {
     }) => (
       <div>
         <button type="button" onClick={() => onOpenChange?.(true)}>open export menu</button>
+        <button type="button" onClick={() => onOpenChange?.(false)}>close export menu</button>
         {children}
       </div>
     ),
@@ -88,8 +89,13 @@ function gadget(overrides: Partial<GadgetClient>): RpcStub<GadgetClient> {
   return overrides as RpcStub<GadgetClient>
 }
 
+function button(label: string): HTMLButtonElement | undefined {
+  return Array.from(container.querySelectorAll('button'))
+    .find(candidate => candidate.textContent === label)
+}
+
 describe('GadgetExportMenu', () => {
-  it('lists formats and exports the selected one with its metadata', async () => {
+  it('loads formats on open and exports the selected one with its metadata', async () => {
     const exportFormat = vi.fn<(
       id: string,
       chatId?: number,
@@ -116,11 +122,10 @@ describe('GadgetExportMenu', () => {
     await act(async () => {
       root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" chatId={7} />)
     })
+    expect(client.getExportFormats).not.toHaveBeenCalled()
 
-    const csv = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent?.includes('CSV'))
-    expect(csv).toBeDefined()
-    await act(async () => { csv?.click() })
+    await act(async () => { button('open export menu')?.click() })
+    await act(async () => { button('CSV')?.click() })
 
     expect(client.getExportFormats).toHaveBeenCalledWith(7)
     expect(exportFormat).toHaveBeenCalledWith('csv', 7)
@@ -131,7 +136,7 @@ describe('GadgetExportMenu', () => {
     )
   })
 
-  it('hides export controls when the Gadget disables exports', async () => {
+  it('shows an empty state without hiding or disabling the export button', async () => {
     const client = gadget({
       getExportFormats: vi.fn<(chatId?: number) => Promise<GadgetExportFormat[]>>(
         async () => [],
@@ -141,61 +146,88 @@ describe('GadgetExportMenu', () => {
     await act(async () => {
       root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" />)
     })
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Export Gadget"]')
+    expect(trigger).not.toBeNull()
+    expect(trigger?.disabled).toBe(false)
+
+    await act(async () => { button('open export menu')?.click() })
+
+    expect(container.textContent).toContain('This Gadget does not support exports.')
+    expect(container.querySelector('[aria-label="Export Gadget"]')).not.toBeNull()
+  })
+
+  it('does not render the control without a selected Gadget', async () => {
+    await act(async () => {
+      root.render(<GadgetExportMenu gadget={null} gadgetTitle="Gadget" />)
+    })
 
     expect(container.querySelector('[aria-label="Export Gadget"]')).toBeNull()
   })
 
-  it('reloads formats when the preview revision changes', async () => {
-    const getExportFormats = vi.fn<(chatId?: number) => Promise<GadgetExportFormat[]>>(
-      async () => [],
-    )
-    const client = gadget({ getExportFormats })
-
-    await act(async () => {
-      root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" revision={1} />)
-    })
-    await act(async () => {
-      root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" revision={2} />)
-    })
-
-    expect(getExportFormats).toHaveBeenCalledTimes(2)
-  })
-
-  it('reloads formats with a loading state whenever the menu opens', async () => {
-    let resolveRefreshed!: (formats: GadgetExportFormat[]) => void
-    const refreshed = new Promise<GadgetExportFormat[]>(resolve => { resolveRefreshed = resolve })
-    const initial: GadgetExportFormat[] = [{
-      id: 'csv:first', label: 'First sheet', mode: 'server',
+  it('loads fresh formats on every open and ignores a response after close', async () => {
+    let resolveFirst!: (formats: GadgetExportFormat[]) => void
+    const first = new Promise<GadgetExportFormat[]>(resolve => { resolveFirst = resolve })
+    const second: GadgetExportFormat[] = [{
+      id: 'csv:second', label: 'Second sheet', mode: 'server',
       contentType: 'text/csv', fileExtension: '.csv',
     }]
     const getExportFormats = vi.fn<(chatId?: number) => Promise<GadgetExportFormat[]>>()
-      .mockResolvedValueOnce(initial)
-      .mockReturnValueOnce(refreshed)
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce(second)
     const client = gadget({ getExportFormats })
 
     await act(async () => {
       root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" />)
     })
-    const open = Array.from(container.querySelectorAll('button'))
-      .find(button => button.textContent === 'open export menu')
-    await act(async () => { open?.click() })
+    await act(async () => { button('open export menu')?.click() })
 
     expect(container.querySelector('[role="status"][aria-label="Loading export formats"]')).not.toBeNull()
-    expect(container.textContent).not.toContain('First sheet')
+    await act(async () => { button('close export menu')?.click() })
+    expect(container.querySelector('[role="status"][aria-label="Loading export formats"]')).toBeNull()
+
+    await act(async () => { button('open export menu')?.click() })
+    expect(container.textContent).toContain('Second sheet')
 
     await act(async () => {
-      resolveRefreshed([
-        ...initial,
-        {
-          id: 'csv:second', label: 'Second sheet', mode: 'server',
-          contentType: 'text/csv', fileExtension: '.csv',
-        },
-      ])
-      await refreshed
+      resolveFirst([{
+        id: 'csv:first', label: 'First sheet', mode: 'server',
+        contentType: 'text/csv', fileExtension: '.csv',
+      }])
+      await first
     })
 
-    expect(container.textContent).toContain('First sheet')
+    expect(container.textContent).not.toContain('First sheet')
     expect(container.textContent).toContain('Second sheet')
     expect(getExportFormats).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows an inline error and retries format discovery', async () => {
+    const format: GadgetExportFormat = {
+      id: 'html', label: 'HTML', mode: 'browser',
+      contentType: 'text/html', fileExtension: '.html',
+    }
+    const getExportFormats = vi.fn<(chatId?: number) => Promise<GadgetExportFormat[]>>()
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce([format])
+    const client = gadget({ getExportFormats })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      await act(async () => {
+        root.render(<GadgetExportMenu gadget={client} gadgetTitle="Report" />)
+      })
+      await act(async () => { button('open export menu')?.click() })
+
+      expect(container.textContent).toContain('Export formats could not be loaded.')
+      expect(button('Try again')).toBeDefined()
+
+      await act(async () => { button('Try again')?.click() })
+
+      expect(button('HTML')).toBeDefined()
+      expect(getExportFormats).toHaveBeenCalledTimes(2)
+      expect(mocks.toast).not.toHaveBeenCalled()
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 })

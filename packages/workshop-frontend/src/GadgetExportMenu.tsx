@@ -11,51 +11,50 @@ type Props = {
   gadget: RpcStub<GadgetClient> | null
   gadgetTitle: string
   chatId?: number
-  revision?: number
-  disabled?: boolean
 }
 
-export default function GadgetExportMenu({ gadget, gadgetTitle, chatId, revision, disabled }: Props) {
+export default function GadgetExportMenu({ gadget, gadgetTitle, chatId }: Props) {
   const [formats, setFormats] = useState<GadgetExportFormat[] | null>(null)
-  const [refreshing, setRefreshing] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [exportingId, setExportingId] = useState<string | null>(null)
   const formatRequest = useRef(0)
   const toasts = useKumoToastManager()
 
   useEffect(() => {
+    ++formatRequest.current
+    setFormats(null)
+    setLoading(false)
+    setLoadFailed(false)
+  }, [gadget, chatId])
+
+  const loadFormats = () => {
+    if (!gadget) return
     const request = ++formatRequest.current
     setFormats(null)
-    setRefreshing(false)
-    if (!gadget) return
-
-    void gadget.getExportFormats(chatId).then(result => {
-      if (formatRequest.current === request) setFormats(result)
-    }, error => {
-      if (formatRequest.current !== request) return
-      console.error('Failed to list Gadget export formats:', error)
-      setFormats([])
-      toasts.add({ title: 'Failed to load export formats', variant: 'error' })
-    })
-
-    return () => {
-      if (formatRequest.current === request) ++formatRequest.current
-    }
-  }, [gadget, chatId, revision])
-
-  const refreshFormats = () => {
-    if (!gadget) return
-    const request = ++formatRequest.current
-    setRefreshing(true)
+    setLoading(true)
+    setLoadFailed(false)
     void gadget.getExportFormats(chatId).then(result => {
       if (formatRequest.current !== request) return
       setFormats(result)
-      setRefreshing(false)
+      setLoading(false)
     }, error => {
       if (formatRequest.current !== request) return
-      console.error('Failed to refresh Gadget export formats:', error)
-      setRefreshing(false)
-      toasts.add({ title: 'Failed to load export formats', variant: 'error' })
+      console.error('Failed to list Gadget export formats:', error)
+      setLoading(false)
+      setLoadFailed(true)
     })
+  }
+
+  const handleOpenChange = (open: boolean) => {
+    if (open) {
+      loadFormats()
+    } else {
+      ++formatRequest.current
+      setFormats(null)
+      setLoading(false)
+      setLoadFailed(false)
+    }
   }
 
   const download = async (format: GadgetExportFormat) => {
@@ -80,7 +79,7 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId, revision
     }
   }
 
-  if (formats?.length === 0) return null
+  if (!gadget) return null
 
   const exportingFormat = formats?.find(format => format.id === exportingId)
   const tooltip = exportingFormat ? `Exporting to ${exportingFormat.label}` : 'Export Gadget'
@@ -88,19 +87,18 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId, revision
   return (
     <Tooltip content={tooltip} asChild>
       <span className="relative inline-flex">
-        <DropdownMenu onOpenChange={open => { if (open) refreshFormats() }}>
+        <DropdownMenu onOpenChange={handleOpenChange}>
           <DropdownMenu.Trigger
             render={(
               <WorkshopIconButton
                 aria-label="Export Gadget"
-                disabled={disabled || !gadget || formats === null || exportingId !== null}
               >
                 <DownloadSimple size={17} />
               </WorkshopIconButton>
             )}
           />
           <DropdownMenu.Content className="themed-floating-shadow !z-[1100] !min-w-[144px] rounded-lg border border-kumo-line bg-kumo-base p-1">
-            {refreshing ? (
+            {loading ? (
               <div role="status" aria-label="Loading export formats" className="space-y-1 py-0.5">
                 {['w-20', 'w-14'].map(width => (
                   <div key={width} className="flex h-7 items-center gap-2 px-2.5">
@@ -109,6 +107,21 @@ export default function GadgetExportMenu({ gadget, gadgetTitle, chatId, revision
                   </div>
                 ))}
               </div>
+            ) : loadFailed ? (
+              <div className="px-2.5 py-2 text-[12px] leading-4 text-kumo-subtle">
+                <p>Export formats could not be loaded.</p>
+                <button
+                  type="button"
+                  onClick={loadFormats}
+                  className="mt-1 font-medium text-kumo-default hover:underline"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : formats?.length === 0 ? (
+              <p className="px-2.5 py-2 text-[12px] leading-4 text-kumo-subtle">
+                This Gadget does not support exports.
+              </p>
             ) : formats?.map(format => (
               <DropdownMenu.Item
                 key={format.id}
