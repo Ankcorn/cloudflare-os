@@ -133,6 +133,7 @@ packages/mcp-shared/src/portal.ts
   s_e25e29d8ebebad::t_d85055b439a98d 66-67
   s_e25e29d8ebebad::t_780b09ad0f734b 11,61-64,68-70,73-76
   s_e25e29d8ebebad::t_fa501c1ced5c2a 120-122,167-171,174-175,177-178,180-185,189,194-196,198,200-203,206-209,216,219,226,237,239,241-249,251
+  s_e25e29d8ebebad::t_db78a69b8b3f8d 220-225,228-231
 packages/mcp-shared/src/scope.ts
   s_e25e29d8ebebad::t_af37f086b24dc2 18,94-97,103,114-116,173-175
   s_e25e29d8ebebad::t_10a335af6ad641 18,94-97,103,114-116,173-175
@@ -208,8 +209,10 @@ packages/gatekeeper-mcp-portal/__tests__/configurator-ui.test.ts
   s_e25e29d8ebebad::t_0f789a696f66fa 91,102,105-107
 packages/gatekeeper-mcp-portal/src/config.ts
   s_e25e29d8ebebad::t_51e11cbff5db75 9,11,15-16,95-97,104-140,174
+  s_e25e29d8ebebad::t_1b1659c150e1f8 92-93
 packages/gatekeeper-mcp-portal/src/configurator/server-configurator-types.d.ts
   s_e25e29d8ebebad::t_0ef6cefbae7c50 38
+  s_e25e29d8ebebad::t_3543d4825e6d9d 31-33,35-36
 packages/gatekeeper-mcp-portal/src/configurator/server-configurator-ui.tsx
   s_e25e29d8ebebad::t_6104ca7be0d255 50,72,86-99,142-143
 ---
