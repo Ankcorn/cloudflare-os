@@ -1,17 +1,26 @@
 // These functions run in the remote browser via Puppeteer's page.evaluate().
 // While they are imported by the Worker, they never run in the Worker, and are
-// typed for the browser environment.
+// typed for the browser environment. Functions that need to interact directly
+// with client.js run in the main world. Everything else runs in an isolated
+// realm.
 
 declare global {
+  // Globals set in the main world:
+
   /** Sends a Cap'n Web RPC message from the Worker to the browser-side session. */
   var __workshopExportSendToBrowser: (message: string) => void;
   /** Receives the next Cap'n Web RPC message from the browser-side session. */
   var __workshopExportReceiveFromBrowser: () => Promise<string>;
   /** Settles when the Gadget client module has finished loading. */
   var __workshopExportModulePromise: Promise<Record<string, unknown>>;
+
+  // Globals set in the isolated realm:
+
   /** Sanitizes a complete HTML document inside Puppeteer's isolated realm. */
   var __workshopExportSanitizeHtml: (html: string) => HTMLHtmlElement;
 }
+
+// Functions that run in the main world:
 
 /** Delivers one Cap'n Web RPC message to the browser-side session. */
 export function sendToBrowser(message: string): void {
@@ -27,6 +36,8 @@ export function receiveFromBrowser(): Promise<string> {
 export async function waitForClientModule(): Promise<void> {
   await globalThis.__workshopExportModulePromise;
 }
+
+// Functions that run in the isolated realm:
 
 /** Waits until the rendered DOM has remained unchanged for the requested interval. */
 export function waitForDomSettled(quietMs: number): Promise<void> {
