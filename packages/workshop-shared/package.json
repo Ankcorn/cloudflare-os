@@ -15,10 +15,6 @@
       "types": "./src/gatekeeper.ts",
       "import": "./src/gatekeeper.ts"
     },
-    "./export": {
-      "types": "./src/export.ts",
-      "import": "./src/export.ts"
-    },
     "./cloudflare-gatekeeper": {
       "types": "./src/cloudflare-gatekeeper.ts",
       "import": "./src/cloudflare-gatekeeper.ts"

@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { GadgetClient } from '@gadgets/workshop-shared/api'
-import type { GadgetExportFormat } from '@gadgets/workshop-shared/export'
+import type { GadgetExportFormat } from '@gadgets/workshop-shared/api'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT

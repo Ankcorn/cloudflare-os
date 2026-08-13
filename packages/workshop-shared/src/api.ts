@@ -26,7 +26,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
-import type { GadgetExportFormat } from "./export.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -2745,6 +2744,24 @@ export interface WorkpieceClient extends RpcTarget {
   // one gadget (GadgetClient.unbind()).
   remove(): Promise<void>;
 }
+
+/** Describes a file export format supported by a Gadget. */
+export type GadgetExportFormat = {
+  /** Unique, non-empty identifier for this format. */
+  id: string;
+
+  /** User-facing label for the format. */
+  label: string;
+
+  /** Whether the Workshop captures a browser or invokes a server-side handler. */
+  mode: "browser" | "server";
+
+  /** Media type of the exported file. */
+  contentType: string;
+
+  /** File extension, including the leading dot. */
+  fileExtension: string;
+};
 
 // Capability representing one gadget workpiece within a workspace. Obtained from
 // Overseer.createGadget() or Overseer.getGadget(). Workspace-level concerns (code sync, chats,

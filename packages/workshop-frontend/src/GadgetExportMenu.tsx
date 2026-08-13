@@ -3,7 +3,7 @@ import { DropdownMenu, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { DownloadSimple } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { GadgetClient } from '@gadgets/workshop-shared/api'
-import type { GadgetExportFormat } from '@gadgets/workshop-shared/export'
+import type { GadgetExportFormat } from '@gadgets/workshop-shared/api'
 import { WorkshopIconButton } from './components/WorkshopControls'
 import { makeExportFilename, saveStreamToFile } from './fileTransfers'
 

@@ -1,9 +1,23 @@
-import {
-  GADGET_EXPORT_ENTRYPOINT,
-  type GadgetExportFormat,
-} from "@gadgets/workshop-shared/export";
+import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 import { createExportDeadline, limitExportStream } from "./export-limits";
+
+/** Name of the optional Gadget export handler entrypoint. */
+export const GADGET_EXPORT_ENTRYPOINT = "ExportHandler";
+
+type GadgetExportCapability<Gadget extends DurableObject = DurableObject> =
+  RpcStub<RpcTarget & Pick<Gadget, keyof Gadget>>;
+
+/** Optional Worker entrypoint exported by a Gadget to customize file exports. */
+export interface GadgetExportEntrypoint<Gadget extends DurableObject = DurableObject>
+    extends WorkerEntrypoint {
+  /** Lists all export formats supported by the Gadget. */
+  getExportFormats(gadget: GadgetExportCapability<Gadget>): Promise<GadgetExportFormat[]>;
+
+  /** Produces the content for a server-mode export format. */
+  export(gadget: GadgetExportCapability<Gadget>, id: string): Promise<ReadableStream<Uint8Array>>;
+}
 
 const MAX_EXPORT_FORMATS = 32;
 const MAX_EXPORT_ID_LENGTH = 128;

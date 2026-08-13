@@ -40,11 +40,7 @@ import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import {
-  GADGET_EXPORT_ENTRYPOINT,
-  type GadgetExportEntrypoint,
-  type GadgetExportFormat,
-} from "@gadgets/workshop-shared/export";
+import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -54,6 +50,8 @@ import { renderGadgetInBrowser } from "./browser-export";
 import {
   defaultExportFormats,
   exportServerFormat,
+  GADGET_EXPORT_ENTRYPOINT,
+  type GadgetExportEntrypoint,
   readCustomExportFormats,
 } from "./gadget-export";
 
