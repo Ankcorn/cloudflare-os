@@ -14,6 +14,7 @@ packages/mcp-shared/src/client.ts
   s_e25e29d8ebebad::t_b642f552f4700b 401-403
   s_e25e29d8ebebad::t_2178eaa15bb1dc 48,57,357,359
   s_e25e29d8ebebad::t_d85055b439a98d 18,49-52,53-54,55-56,58-70,86-88,91-95,110-112,167-174,210,236,251-254,289,303,321-340,353-356,358,360-368,383,385-387,424-425,430-446,452,458,463-466,470-477,481,491,493-495,507,516-520,556-560,562-566,573-576,577-603,606-612,615-616,618-625,627-628,633,636,640-645
+  s_e25e29d8ebebad::t_890b904e8efc70 568-571
 packages/mcp-shared/src/schema-to-ts.ts
   s_e25e29d8ebebad::t_24cc37753e394c 348
   s_e25e29d8ebebad::t_03c69314cd73d9 349-350
@@ -58,6 +59,7 @@ packages/mcp-shared/src/session.ts
   s_e25e29d8ebebad::t_10a335af6ad641 11-16,18-33,51,53,55,84,88-92,95-98,103-107,112-120,140-182,184,186-190,192-200,204,211-213,225-231,237
   s_e25e29d8ebebad::t_036792a8ebf161 86
   s_e25e29d8ebebad::t_d85055b439a98d 16,18-33,51,53,55,84,88-92,95-98,103-107,112-120,140-182,184,186-190,192-200,204,211-213,237
+  s_e25e29d8ebebad::t_da8a0343b298f3 50,52,54,67,81,83,85,87,94
 packages/mcp-shared/src/account.ts
   s_e25e29d8ebebad::t_24cc37753e394c 313
   s_e25e29d8ebebad::t_e0bf4fcad647a4 312,579,683-691,820-824,827-829,832
@@ -122,16 +124,19 @@ packages/mcp-shared/src/base-types.ts
   s_e25e29d8ebebad::t_93ab4292efe2e1 14-15,87,89-90,92-94
   s_e25e29d8ebebad::t_10a335af6ad641 14-15,87,89-90,92-94
   s_e25e29d8ebebad::t_d85055b439a98d 14-15,87,89-90,92-94
+  s_e25e29d8ebebad::t_419fdc8a259fc3 84,88,91
 packages/mcp-shared/src/catalog.ts
   s_e25e29d8ebebad::t_f0a491e7a3273b 1-3,9,11,14-20,61-62,64,66,68-78,85-91,125-233
   s_e25e29d8ebebad::t_10a335af6ad641 1-3,9,11,14-20,61-62,64,66,68-78,85-91,125-200,201-208,210-231,233
   s_e25e29d8ebebad::t_c7f7d6d025aae3 209,232
   s_e25e29d8ebebad::t_d85055b439a98d 1-3,9,11,14-20,61-62,64,66,68-78,85-91,125-200,201-208,210-231,233
+  s_e25e29d8ebebad::t_bcb45c5bb08e12 63,65,67
 packages/mcp-shared/src/portal.ts
   s_e25e29d8ebebad::t_b0b21688e44d49 58-68,70-71,73-76
   s_e25e29d8ebebad::t_10a335af6ad641 58-68,70-71,73-76
   s_e25e29d8ebebad::t_d85055b439a98d 66-67
   s_e25e29d8ebebad::t_780b09ad0f734b 11,61-64,68-70,73-76
+  s_e25e29d8ebebad::t_866655f9fcee2a 49,52-56
 packages/mcp-shared/src/scope.ts
   s_e25e29d8ebebad::t_af37f086b24dc2 18,94-97,103,114-116,173-175
   s_e25e29d8ebebad::t_10a335af6ad641 18,94-97,103,114-116,173-175
@@ -144,10 +149,12 @@ packages/mcp-shared/src/tools.ts
   s_e25e29d8ebebad::t_64da82fe529d55 5-12,44,57,59-61,64-65,79-84,88-89,101-104,117-128,146,152-156,216-221,230,233-236
   s_e25e29d8ebebad::t_10a335af6ad641 5-12,44,57,59-61,64-65,79-84,88-89,101-104,117-128,146,152-156,216-221,230,233-236
   s_e25e29d8ebebad::t_d85055b439a98d 5-12,44,57,59-61,64-65,79-84,88-89,101-104,117-128,146,152-156,216-221,230,233-236
+  s_e25e29d8ebebad::t_b0b8b85c20c7ec 43,56,58,99,105,130-131
 packages/mcp-shared/src/types.d.ts
   s_e25e29d8ebebad::t_ff19d6c67624e7 4-5,77,79-80,82-84
   s_e25e29d8ebebad::t_10a335af6ad641 4-5,77,79-80,82-84
   s_e25e29d8ebebad::t_d85055b439a98d 4-5,77,79-80,82-84
+  s_e25e29d8ebebad::t_419fdc8a259fc3 74,78,81
 packages/mcp-shared/__tests__/facet.test.ts
   s_e25e29d8ebebad::t_10a335af6ad641 1,5-9,23,25-34,45-65,68,70,86,96-155,158-167,169-189
   s_e25e29d8ebebad::t_036792a8ebf161 156-157,168
@@ -182,6 +189,7 @@ packages/mcp-shared/__tests__/action-store.test.ts
   s_e25e29d8ebebad::t_d85055b439a98d 4,5-8,18,36-52,54,63-86
 packages/workshop-shared/src/gatekeeper.ts
   s_e25e29d8ebebad::t_d969e2ca36a3f8 818
+  s_e25e29d8ebebad::t_5564c23c7c59ac 810-813
 packages/workshop-frontend/src/Activity.tsx
   s_e25e29d8ebebad::t_82b80102c032a0 102-103
   s_e25e29d8ebebad::t_3a3161c9c8f6f8 101
@@ -190,6 +198,7 @@ packages/workshop-frontend/src/ChatInterface.tsx
   s_e25e29d8ebebad::t_b0c42ccfd3b227 5884
 packages/workshop-shared/src/api.ts
   s_e25e29d8ebebad::t_d969e2ca36a3f8 1473,1508-1511
+  s_e25e29d8ebebad::t_5564c23c7c59ac 1471
 packages/workshop-frontend/src/useResolveAction.ts
   s_e25e29d8ebebad::t_dce1a83891a2c9 1,4
 packages/workshop-backend/__tests__/auto-approval.test.ts
