@@ -782,7 +782,7 @@ export class NotionItemGatekeeperImpl extends DurableObject<Env, NotionItemGatek
     await applyStoredAction(this.#store(), action);
   }
 
-  async rejectAction(action: number): Promise<void | { restart?: boolean }> {
+  async rejectAction(action: number): Promise<void | { restart?: boolean; rejectActions?: number[] }> {
     return rejectStoredAction(this.#store(), action);
   }
 
@@ -944,7 +944,7 @@ export class NotionWorkspaceGatekeeperImpl
     await applyStoredAction(this.#store(), action);
   }
 
-  async rejectAction(action: number): Promise<void | { restart?: boolean }> {
+  async rejectAction(action: number): Promise<void | { restart?: boolean; rejectActions?: number[] }> {
     return rejectStoredAction(this.#store(), action);
   }
 

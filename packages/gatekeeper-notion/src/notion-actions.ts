@@ -1032,15 +1032,17 @@ export async function applyStoredAction(store: NotionStore, id: number): Promise
   await applyNotionAction(store, record);
 }
 
-export function rejectStoredAction(store: NotionStore, id: number): void | { restart?: boolean } {
+export function rejectStoredAction(store: NotionStore, id: number)
+    : void | { restart?: boolean; rejectActions?: number[] } {
   const record = store.getAction(id);
   if (!record) return;
   store.deleteAction(id);
 
   // Rejecting a page creation invalidates every pending action that targeted that provisional page
   // (they could never be applied — the page won't exist), including sub-pages created under it and
-  // their edits, transitively. Cascade-delete them all so the overseer never tries to apply an
-  // orphan, and request a restart since the Gadget already observed simulated state built on them.
+  // their edits, transitively. Cascade-delete them all, report their IDs so the overseer rejects
+  // the matching approval records, and request a restart since the Gadget already observed
+  // simulated state built on them.
   if (record.action.type === "createPage") {
     // Snapshot the pending set once — deleting actions below would otherwise change it under us.
     const pending = store.pendingActions();
@@ -1059,15 +1061,15 @@ export function rejectStoredAction(store: NotionStore, id: number): void | { res
       }
       if (!added) break;
     }
-    let deleted = false;
+    const rejected: number[] = [];
     for (const r of pending) {
       const t = actionPageId(r.action);
       if (t !== null && purge.has(t)) {
         store.deleteAction(r.id);
-        deleted = true;
+        rejected.push(r.id);
       }
     }
-    if (deleted) return { restart: true };
+    if (rejected.length > 0) return { restart: true, rejectActions: rejected };
     return;
   }
 

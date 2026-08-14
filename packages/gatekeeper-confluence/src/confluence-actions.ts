@@ -568,7 +568,8 @@ export async function applyStoredAction(store: ConfluenceStore, id: number): Pro
   await applyAction(store, record);
 }
 
-export function rejectStoredAction(store: ConfluenceStore, id: number): void | { restart?: boolean } {
+export function rejectStoredAction(store: ConfluenceStore, id: number)
+    : void | { restart?: boolean; rejectActions?: number[] } {
   const record = store.getAction(id);
   if (!record) return;
   store.deleteAction(id);
@@ -589,15 +590,17 @@ export function rejectStoredAction(store: ConfluenceStore, id: number): void | {
       }
       if (!added) break;
     }
-    let deleted = false;
+    const rejected: number[] = [];
     for (const r of pending) {
       const t = actionContentId(r.action);
       if (t !== null && purge.has(t)) {
         store.deleteAction(r.id);
-        deleted = true;
+        rejected.push(r.id);
       }
     }
-    return deleted ? { restart: true } : undefined;
+    // Report the cascade-deleted action IDs so the overseer marks their approval records rejected
+    // too, instead of leaving orphans that would later fail as "unknown action".
+    return rejected.length > 0 ? { restart: true, rejectActions: rejected } : undefined;
   }
 
   const target = actionContentId(record.action);
