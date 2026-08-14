@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
   rejectPendingAction, ActionRejectionStorage, GatekeeperRejectResult, RejectWithGatekeeperFn,
-} from "../src/action-rejection.js";
+} from "../src/overseer.js";
 import type { ActionRecord } from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import { makeMockStorage } from "./mock-storage.js";
