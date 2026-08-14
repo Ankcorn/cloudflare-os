@@ -821,8 +821,16 @@ export interface Gatekeeper<Session> extends DurableObject {
    * This is sometimes needed by gatekeepers that simulate actions as if they had been approved --
    * the session may be in a state that is difficult to roll back without confusing the Gadget.
    * The Overseer will take care of the restart, possibly after rejecting other actions.
+   *
+   * `rejectActions` lists the gatekeeper's OWN action IDs (the same integers it passed to
+   * `ApprovalQueue.submitAction()`) that became impossible to apply as a consequence of this
+   * rejection -- e.g. edits to a page whose pending creation was just rejected. The Overseer
+   * marks the corresponding approval records rejected (attributed to the same resolver) WITHOUT
+   * calling back into `rejectAction()` for them: by returning them here, the gatekeeper asserts
+   * it has already cleaned them up locally. The cascade is restricted to records of the same
+   * gatekeeper; action IDs are only unique per gatekeeper.
    */
-  rejectAction(action: number): Promise<void | {restart?: boolean}>;
+  rejectAction(action: number): Promise<void | {restart?: boolean, rejectActions?: number[]}>;
 
   /**
    * Attempts to revert an action that was already applied.

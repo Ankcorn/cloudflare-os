@@ -1501,9 +1501,17 @@ export type ActionLogEntry = {
 
   /**
    * True when the action was applied automatically by an auto-approval rule rather than by a human
-   * clicking Approve. Only ever set alongside state "approved" (there is no automatic rejection).
+   * clicking Approve. Only ever set alongside state "approved" (cascaded rejections are recorded
+   * via `cascadedFrom`, not this flag).
    */
   autoApproved?: boolean;
+
+  /**
+   * Set when this action was rejected as a cascade of another rejection: the value is the log ID
+   * of the rejection that made this action impossible to apply (e.g. rejecting a page creation
+   * cascades onto pending edits of that page). Only ever set alongside state "rejected".
+   */
+  cascadedFrom?: number;
 } | {
   type: "observation";
   description: ObservationDescription;
