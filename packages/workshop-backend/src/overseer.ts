@@ -36,6 +36,7 @@ import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-cat
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
+import { rejectPendingAction } from "./action-rejection";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { wrapDoStubForTelemetry } from "./do-telemetry";
@@ -443,6 +444,7 @@ export type ActionRecord = {
   description: ActionDescription;
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
+  cascadedFrom?: number;          // log id of the rejection that cascaded onto this record
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -651,6 +653,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         description: record.description,
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
+        cascadedFrom: record.cascadedFrom,
       };
     case "bindHook":
       return {
@@ -2504,6 +2507,18 @@ class OverseerImpl implements AgentHooks {
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     await gatekeeper.applyAction(record.action);
+
+    // The apply succeeded, so "approved" is the truthful record state and the write below stands
+    // regardless of what raced in during the await: world wins. A conforming gatekeeper can't
+    // cascade-reject an action it just applied, so a raced record here fingers a nonconforming
+    // gatekeeper -- detect and log it rather than silently overwriting.
+    let fresh = this.storage.actions.get(record.id);
+    if (!fresh || fresh.type !== "action" || fresh.state !== "pending") {
+      logger.error("action raced to a non-pending state while its apply was in flight", {
+        event: "action.apply.raced", actionId: record.id, gatekeeperId: record.gatekeeperId,
+      });
+    }
+
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -7776,15 +7791,39 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
-    await gatekeeper.rejectAction(action.action);
+    // If the gatekeeper asks for a restart, only a gadget caller has something to restart (agent
+    // turns end on rejection by design). Records persisted before multi-gadget support have no
+    // gadgetId and belong to the default gadget; if there is none, restart is a logged no-op.
+    let restartGadget: (() => void) | undefined;
+    if (action.caller.from === "gadget") {
+      let gadgetId = action.caller.gadgetId ?? this.impl.defaultGadgetId;
+      if (gadgetId !== undefined) {
+        let target = gadgetId;
+        restartGadget = () => this.impl.ctx.facets.abort(
+            this.impl.gadgetFacetName(target),
+            new Error("Gadget restarted because a pending action it depends on was rejected."));
+      }
+    }
 
-    action.state = "rejected";
-    action.appliedAt = new Date();
-    action.resolvedBy = profile;
-    this.impl.storage.actions.put(action);
+    let result = await rejectPendingAction(
+        this.impl.storage, action, profile,
+        (actionKey) => gatekeeper.rejectAction(actionKey), restartGadget);
 
     // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
     // sibling approval from resuming this turn.
+
+    // Rejecting a manual gate (or cascading over several) may unblock later auto-eligible pending
+    // actions on the same gatekeeper, so drain once the rejection is fully applied (one drain
+    // suffices: the cascade is same-gatekeeper by construction). Skipping the eager drain after a
+    // restart is only a timing choice, not a correctness gate: an already-in-flight drain may
+    // still finish its pass, and restart-surviving auto-eligible actions will auto-apply at the
+    // next trigger (submit/approve/rule-enable, or the restarted gadget re-submitting) anyway.
+    // Never applying an invalidated action is enforced elsewhere -- the gatekeeper's cascade
+    // deletes it on its side (a later apply throws "Unknown action" and stops the drainer), and
+    // the drainer re-gets each record before applying.
+    if (!result?.restart) {
+      this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
+    }
   }
 
   // Enable auto-approval of actions carrying `actionKind` on the given gatekeeper. Stores the
