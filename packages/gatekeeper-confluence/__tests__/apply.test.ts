@@ -3,6 +3,7 @@ import {
   ConfluenceStore,
   applyStoredAction,
   revertStoredAction,
+  rejectStoredAction,
   type ConfluenceAction,
 } from "../src/confluence-actions";
 import type { ConfluenceApi } from "../src/confluence-api";
@@ -136,5 +137,61 @@ describe("revertStoredAction", () => {
 
     expect(result).toMatchObject({ message: expect.any(String) });
     expect(store.getAction(id)?.state).toBe("applied");
+  });
+});
+
+describe("rejectStoredAction", () => {
+  it("deletes a pending action", () => {
+    const { api } = makeApi();
+    const store = storeWith(api);
+    const id = stage(store, { type: "setTitle", contentId: "123", title: "New", previousTitle: "Old" });
+
+    const result = rejectStoredAction(store, id);
+
+    expect(result).toBeUndefined();
+    expect(store.getAction(id)).toBeUndefined();
+  });
+
+  it("cascade-deletes pending actions on a rejected creation and reports them", () => {
+    const { api } = makeApi();
+    const store = storeWith(api);
+    const creation = stage(store, { type: "createContent", provisionalId: "~1", kind: "page", parent: { type: "space", spaceKey: "ENG" }, title: "New Page", status: "current" });
+    const child = stage(store, { type: "setContent", contentId: "~1", markdown: "body", previousMarkdown: "" });
+
+    const result = rejectStoredAction(store, creation);
+
+    expect(result).toEqual({ restart: true, rejectActions: [child] });
+    expect(store.getAction(child)).toBeUndefined();
+  });
+
+  it("no-ops on an applied action, preserving it for revert", async () => {
+    const { api } = makeApi();
+    const store = storeWith(api);
+    const id = stage(store, { type: "setTitle", contentId: "123", title: "New", previousTitle: "Old" });
+    await applyStoredAction(store, id);
+
+    // A reject that lost a race against a concurrent apply: the side effect already happened, so
+    // the applied record must stay intact.
+    const result = rejectStoredAction(store, id);
+
+    expect(result).toBeUndefined();
+    expect(store.getAction(id)?.state).toBe("applied");
+
+    await revertStoredAction(store, id);
+    expect(store.getAction(id)?.state).toBe("reverted");
+  });
+
+  it("does not cascade an applied creation's pending children", () => {
+    const { api } = makeApi();
+    const store = storeWith(api);
+    const creation = stage(store, { type: "createContent", provisionalId: "~1", kind: "page", parent: { type: "space", spaceKey: "ENG" }, title: "New Page", status: "current" });
+    const child = stage(store, { type: "setContent", contentId: "~1", markdown: "body", previousMarkdown: "" });
+    store.putAction({ ...store.getAction(creation)!, state: "applied" });
+
+    const result = rejectStoredAction(store, creation);
+
+    expect(result).toBeUndefined();
+    expect(store.getAction(creation)?.state).toBe("applied");
+    expect(store.getAction(child)?.state).toBe("pending");
   });
 });

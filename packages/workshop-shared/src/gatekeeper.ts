@@ -815,7 +815,9 @@ export interface Gatekeeper<Session> extends DurableObject {
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
-   * associated storage.
+   * associated storage. Rejecting an action that is no longer pending (already applied or
+   * reverted, or unknown) MUST be a no-op: the reject may have lost a race against a concurrent
+   * approval, and an applied record must survive for revert.
    *
    * If the returned `restart` flag is true, rejecting this action requires restarting the Gadget.
    * This is sometimes needed by gatekeepers that simulate actions as if they had been approved --

@@ -571,7 +571,10 @@ export async function applyStoredAction(store: ConfluenceStore, id: number): Pro
 export function rejectStoredAction(store: ConfluenceStore, id: number)
     : void | { restart?: boolean; rejectActions?: number[] } {
   const record = store.getAction(id);
-  if (!record) return;
+  // Only pending actions are rejectable. A missing record is a benign double-reject; an applied
+  // or reverted record means this reject lost a race against a concurrent apply, and must survive
+  // so the audit trail stays intact and a later revert can still find it.
+  if (!record || record.state !== "pending") return;
   store.deleteAction(id);
 
   // Rejecting a creation invalidates any pending actions on that (now-nonexistent) content,
