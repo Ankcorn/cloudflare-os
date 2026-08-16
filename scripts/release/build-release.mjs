@@ -93,8 +93,18 @@ function main() {
   mkdirSync(join(args.out, "modules"), { recursive: true });
   mkdirSync(join(args.out, "assets"), { recursive: true });
 
-  // 1. Frontend first: the router's wrangler.jsonc points its assets directory at
-  //    workshop-frontend/dist, so it must exist before the router's dry-run.
+  // 0. Codegen. Several workers import files that are gitignored build output — workshop-backend
+  //    imports src/generated/format-blueprints.ts, and each gatekeeper with a management UI
+  //    imports src/generated/app.txt — so on the clean checkout a release job gets, their bundles
+  //    would fail to resolve. `wrangler deploy` runs only each package's own `build.command` (the
+  //    capnweb transform), not the tasks that produce these, so the workspace build has to come
+  //    first. Vite+ replays it from the task cache when nothing changed.
+  run("pnpm", ["run", "build"]);
+
+  // 1. Frontend next: the router's wrangler.jsonc points its assets directory at
+  //    workshop-frontend/dist, so it must exist before the router's dry-run. Rebuilt here rather
+  //    than reused from step 0, because a release ships the Access-mode variant — and since the
+  //    frontend's `build` task fingerprints VITE_*, that is a cache miss rather than a stale replay.
   const assetVariants = {
     access: buildFrontend(),
   };

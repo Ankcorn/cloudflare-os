@@ -1,0 +1,166 @@
+name: Release trigger
+
+# Fires the internal release pipeline that builds, e2e-verifies and publishes a release for a
+# commit on `main`. This repository holds no R2 credential and knows nothing about the internal
+# build: it POSTs a commit SHA to an endpoint held in a secret, and the pipeline behind that
+# endpoint checks this repo out at that SHA, runs `scripts/release/build-release.mjs`, uploads a
+# *candidate*, runs the deploy-wizard e2e suite against it, and only then promotes the manifest
+# into `releases/`. That split is the point: the only credential that can publish a release lives
+# on the internal side, so no GitHub secret is sufficient to ship one.
+#
+# The endpoint is a secret rather than a variable so the internal host never appears in this
+# public repository, nor in a workflow log — which is also why the steps below report a status
+# code and a content type, never a response body or a URL.
+#
+# SECURITY — this is a *safe* use of `workflow_run`, and the distinction matters.
+#
+# `workflow_run` runs privileged, with secrets, on the default branch's copy of this file. That
+# is dangerous when the job checks out the triggering head, or reads attacker-influenced data —
+# the classic sink is reading a PR number out of an artifact the unprivileged half named, which
+# is why workers-sdk deleted exactly that pattern. This job does neither: it never checks out any
+# head, and the only value it reads is `github.event.workflow_run.head_sha`, which GitHub
+# populates itself and no contributor can forge. The `if:` additionally requires the CI run to
+# have been a push to `main` on this repository, so a fork's CI run cannot reach it.
+#
+# Gating on CI rather than on `push` avoids spending a 45-minute e2e run on a red `main`.
+#
+# Repository secrets a maintainer has to set:
+#
+#   RELEASE_TRIGGER_URL       The internal pipeline's trigger endpoint, as a complete URL. The
+#                             POST body carries `token`, `ref` and `variables[PUBLIC_SHA]`.
+#   RELEASE_TRIGGER_TOKEN     A *pipeline trigger* token, never a CI job token. The pipeline's
+#                             gate jobs match on the pipeline source, and a job token produces a
+#                             different source that would silently skip every one of them.
+#   RELEASE_TRIGGER_ACCESS_CLIENT_ID      Only if the endpoint sits behind Cloudflare Access from
+#   RELEASE_TRIGGER_ACCESS_CLIENT_SECRET  a GitHub runner. The requests below send the service
+#                                         token when set and omit it when not; run this workflow
+#                                         with workflow_dispatch + probe_only to find out which
+#                                         case applies.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit on main to release (defaults to the current main)"
+        required: false
+        type: string
+      probe_only:
+        description: "Only check that the trigger endpoint is reachable; fire no pipeline"
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  trigger:
+    name: Trigger the internal release pipeline
+    if: >-
+      github.repository == 'cloudflare/cloudflare-os' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-trigger
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # The endpoint is on an internal host. Whether that host answers a GitHub-hosted runner
+      # directly, or fronts it with Cloudflare Access, decides whether the service-token headers
+      # are needed. Rather than depend on the answer, every request carries them when the secrets
+      # exist and omits them when they don't — and this step reports which case a given runner is
+      # in, so `workflow_dispatch` with probe_only doubles as the check.
+      #
+      # A GET on a POST-only trigger endpoint is rejected by the API itself, and the rejection is
+      # JSON. An Access interstitial is HTML instead, so the content type separates "the API
+      # answered" from "something in front of it answered" without inspecting either body.
+      - name: Probe the trigger endpoint
+        env:
+          TRIGGER_URL: ${{ secrets.RELEASE_TRIGGER_URL }}
+          ACCESS_CLIENT_ID: ${{ secrets.RELEASE_TRIGGER_ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.RELEASE_TRIGGER_ACCESS_CLIENT_SECRET }}
+        run: |
+          if [[ -z "$TRIGGER_URL" ]]; then
+            echo "::error::RELEASE_TRIGGER_URL is not set."
+            exit 1
+          fi
+
+          args=()
+          if [[ -n "$ACCESS_CLIENT_ID" ]]; then
+            echo "Sending Cloudflare Access service-token headers."
+            args+=(-H "CF-Access-Client-Id: $ACCESS_CLIENT_ID")
+            args+=(-H "CF-Access-Client-Secret: $ACCESS_CLIENT_SECRET")
+          else
+            echo "No Access service token configured; sending a plain request."
+          fi
+
+          # Status and content type only. The body and the URL stay out of the log: GitHub masks
+          # a secret's exact value, but not a hostname appearing as a substring of something else.
+          read -r status content_type < <(curl -sS -o /dev/null \
+            -w '%{http_code} %{content_type}\n' --max-time 30 "${args[@]}" "$TRIGGER_URL")
+          echo "GET <trigger endpoint> -> $status ($content_type)"
+
+          if [[ "$content_type" != *json* ]]; then
+            echo "::error::The trigger endpoint did not answer with JSON, so the request most" \
+              "likely never reached the API. If an Access application is in front of it, mint a" \
+              "service token and set the RELEASE_TRIGGER_ACCESS_CLIENT_ID and" \
+              "RELEASE_TRIGGER_ACCESS_CLIENT_SECRET repository secrets."
+            exit 1
+          fi
+
+      - name: Fire the pipeline
+        if: ${{ !inputs.probe_only }}
+        env:
+          TRIGGER_URL: ${{ secrets.RELEASE_TRIGGER_URL }}
+          TRIGGER_TOKEN: ${{ secrets.RELEASE_TRIGGER_TOKEN }}
+          ACCESS_CLIENT_ID: ${{ secrets.RELEASE_TRIGGER_ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.RELEASE_TRIGGER_ACCESS_CLIENT_SECRET }}
+          # GitHub-provided metadata, not contributor input. Empty on workflow_dispatch without
+          # an explicit sha, which makes the pipeline resolve `main` itself.
+          PUBLIC_SHA: ${{ inputs.sha || github.event.workflow_run.head_sha }}
+        run: |
+          if [[ -z "$TRIGGER_TOKEN" ]]; then
+            echo "::error::RELEASE_TRIGGER_TOKEN is not set. It must be a *pipeline trigger*" \
+              "token, not a CI job token: the gate jobs match on the pipeline source, and a job" \
+              "token produces a source that would silently skip every one of them."
+            exit 1
+          fi
+
+          args=()
+          if [[ -n "$ACCESS_CLIENT_ID" ]]; then
+            args+=(-H "CF-Access-Client-Id: $ACCESS_CLIENT_ID")
+            args+=(-H "CF-Access-Client-Secret: $ACCESS_CLIENT_SECRET")
+          fi
+
+          # No --fail-with-body: an error body from the internal API could name the host, and this
+          # log is public. Failures are reported as a status code and nothing else.
+          status=$(curl -sS -o /tmp/pipeline.json -w '%{http_code}' --max-time 60 \
+            -X POST "${args[@]}" \
+            -F "token=$TRIGGER_TOKEN" \
+            -F "ref=main" \
+            -F "variables[PUBLIC_SHA]=$PUBLIC_SHA" \
+            "$TRIGGER_URL")
+          if [[ "$status" != 2* ]]; then
+            echo "::error::The trigger endpoint returned $status. Check the internal pipeline's" \
+              "trigger-token settings; the response body is withheld because this log is public."
+            exit 1
+          fi
+
+          # The run summary of a public repository is public, so the response's `web_url` cannot go
+          # here — it names the internal host. The pipeline id is enough to find the run from
+          # inside, and is not itself sensitive.
+          pipeline_id=$(jq -r '.id // empty' < /tmp/pipeline.json)
+          {
+            echo "### Release pipeline triggered"
+            echo
+            echo "Public commit: \`$PUBLIC_SHA\`"
+            echo "Internal pipeline: \`${pipeline_id:-unknown}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
