@@ -11,9 +11,8 @@ import type { ActionRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 /**
- * The production schema over mock storage, so the action suites (auto-approval drain, pending
- * history query) exercise the shipped actions collection and pendingByGatekeeper index rather
- * than a copy.
+ * The production schema over mock storage, so action-sync and history-query tests exercise the
+ * shipped actions collection and its indexes rather than a copy.
  */
 export function makeActionStorage(mockStorage = makeMockStorage()) {
   return makeOverseerStorage(mockStorage);
