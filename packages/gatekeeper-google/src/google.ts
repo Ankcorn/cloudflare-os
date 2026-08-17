@@ -1963,8 +1963,8 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
    * personal to extend to any non-owner observer (a Gmail mailbox has no per-recipient ACL we could
    * verify an observer against — the mailing-list decomposition discussed in the plan is explicitly
    * out of scope). So no non-owner observer may ever observe Gmail data: addObserver always throws.
-   * (This is enforced here in addition to any containsRestrictedData usage, so the lockdown holds
-   * even when sharing is otherwise permitted.) removeObserver is a no-op since none is ever
+   * (This is enforced here in addition to any containsRestrictedData usage, so the restriction
+   * holds even when sharing is otherwise permitted.) removeObserver is a no-op since none is ever
    * recorded.
    */
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
