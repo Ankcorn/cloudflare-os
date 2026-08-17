@@ -2,14 +2,14 @@ name: Bonk PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, unlabeled]
+    types: [opened, synchronize]
   issue_comment:
     types: [created]
 
 jobs:
   # Break-glass invariants:
   # - The main ruleset requires `bonk` from GitHub Actions app 15368.
-  # - Labeled PRs run a successful step so future head SHAs also pass `bonk`.
+  # - This job updates that check on the current head SHA.
   # - Authorized users may bypass Bonk even for changes to this workflow.
   break-glass:
     if: >-
@@ -23,8 +23,7 @@ jobs:
     permissions:
       actions: write
       checks: write
-      issues: write
-      pull-requests: write
+      pull-requests: read
     steps:
       - name: Skip Bonk review
         env:
@@ -47,13 +46,6 @@ jobs:
             echo "Bonk reviews do not run on fork pull requests."
             exit 1
           fi
-
-          gh label create bonk-break-glass \
-            --color B60205 \
-            --description "Skip automatic Bonk PR review" \
-            --force
-          gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
-            -f 'labels[]=bonk-break-glass'
 
           runs=$(gh api \
             "repos/$GH_REPO/actions/workflows/bonk-pr.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100")
@@ -78,42 +70,50 @@ jobs:
             }
           done
 
-          gh api --method POST "repos/$GH_REPO/check-runs" \
-            -f name=bonk \
-            -f head_sha="$head_sha" \
-            -f status=completed \
-            -f conclusion=success \
-            -f "details_url=$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" \
-            -f 'output[title]=Bonk review bypassed' \
-            -f 'output[summary]=An authorized collaborator used the break-glass command.'
+          check_ids=$(gh api \
+            "repos/$GH_REPO/commits/$head_sha/check-runs?per_page=100" \
+            --jq '.check_runs[] | select(.name == "bonk" and .app.id == 15368) | .id')
+
+          if [[ -z "$check_ids" ]]; then
+            gh api --method POST "repos/$GH_REPO/check-runs" \
+              -f name=bonk \
+              -f head_sha="$head_sha" \
+              -f status=completed \
+              -f conclusion=success \
+              -f "details_url=$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" \
+              -f 'output[title]=Bonk review bypassed' \
+              -f 'output[summary]=An authorized collaborator used the break-glass command.'
+          else
+            for check_id in $check_ids; do
+              gh api --method PATCH "repos/$GH_REPO/check-runs/$check_id" \
+                -f status=completed \
+                -f conclusion=success \
+                -f "details_url=$GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID" \
+                -f 'output[title]=Bonk review bypassed' \
+                -f 'output[summary]=An authorized collaborator used the break-glass command.'
+            done
+          fi
 
   bonk:
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id &&
-      (github.event.sender.type != 'Bot' ||
-      contains(github.event.pull_request.labels.*.name, 'bonk-break-glass'))
+      github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: ${{ contains(github.event.pull_request.labels.*.name, 'bonk-break-glass') }}
+      cancel-in-progress: false
     permissions:
       id-token: write
       contents: read
       issues: write
       pull-requests: write
     steps:
-      - name: Break glass active
-        if: contains(github.event.pull_request.labels.*.name, 'bonk-break-glass')
-        run: echo "Skipping Bonk review because the bonk-break-glass label is set."
-
       - name: Checkout repository
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'bonk-break-glass') }}
         uses: actions/checkout@v7.0.1
 
       - name: Run Bonk
-        if: ${{ !contains(github.event.pull_request.labels.*.name, 'bonk-break-glass') }}
         uses: ask-bonk/ask-bonk/github@d00cbcf581a5463f7adc2d81e470234b1727f8dd
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
