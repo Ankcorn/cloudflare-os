@@ -179,6 +179,7 @@ packages/workshop-backend/src/overseer.ts
   s_e25e29d8ebebad::t_3702773cfbf424 38,2676-2678
   s_e25e29d8ebebad::t_1c0a97ae7112fd 531-536,745,2665-2666,2668-2669,2671-2675,2679-2687,2693,7857-7858,7974
   s_e25e29d8ebebad::t_035e27d6cbdf38 2670
+  s_e25e29d8ebebad::t_cfc4a80592c2d5 4
 packages/workshop-shared/src/gatekeeper.ts
   s_e25e29d8ebebad::t_b238b44d8d73ce 21-49,843-847
 packages/workshop-frontend/src/Activity.test.tsx
