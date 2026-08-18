@@ -37,6 +37,9 @@ importers:
 
   .:
     devDependencies:
+      '@gadgets/workshop-agent-cli':
+        specifier: workspace:*
+        version: link:packages/workshop-agent-cli
       aws4fetch:
         specifier: ^1.0.20
         version: 1.0.20
@@ -675,6 +678,9 @@ importers:
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
+      yjs:
+        specifier: ^13.6.31
+        version: 13.6.31
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -750,6 +756,34 @@ importers:
         specifier: 'catalog:'
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
 
+  packages/workshop-agent-cli:
+    dependencies:
+      '@gadgets/integration-tests':
+        specifier: workspace:*
+        version: link:../integration-tests
+      wrangler:
+        specifier: 'catalog:'
+        version: 4.120.0(@cloudflare/workers-types@5.20260808.1)
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260808.1
+        version: 5.20260808.1
+      '@types/node':
+        specifier: 26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite:
+        specifier: 7.3.6
+        version: 7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0)
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.2.8(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(esbuild@0.28.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@10.2.2))(terser@5.49.2)(typescript@7.0.2)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))(yaml@2.9.0)
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
+
   packages/workshop-backend:
     dependencies:
       '@cloudflare/puppeteer':
@@ -804,6 +838,40 @@ importers:
       wrangler:
         specifier: 'catalog:'
         version: 4.120.0(@cloudflare/workers-types@5.20260808.1)
+
+  packages/workshop-evals:
+    dependencies:
+      '@gadgets/integration-tests':
+        specifier: workspace:*
+        version: link:../integration-tests
+      '@gadgets/workshop-shared':
+        specifier: workspace:*
+        version: link:../workshop-shared
+      '@vitest-evals/core':
+        specifier: 0.16.1
+        version: 0.16.1
+      tinyrainbow:
+        specifier: ^3.0.3
+        version: 3.1.1
+      vitest-evals:
+        specifier: 0.16.1
+        version: 0.16.1(tinyrainbow@3.1.1)(vitest@4.1.10)(zod@4.4.3)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260808.1
+        version: 5.20260808.1
+      '@types/node':
+        specifier: 26.1.0
+        version: 26.1.0
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
 
   packages/workshop-frontend:
     dependencies:
@@ -2656,6 +2724,12 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     peerDependencies:
       vite: 7.3.6
+
+  '@vitest-evals/core@0.16.1':
+    resolution: {integrity: sha512-e4BfGirm4HOP2HfoYvE61iWp7K389tYwUOdPj+CS8lCI1D2efIlLptClU1knhDocLVaU6F/9ty2+p7u1tDkaIg==}
+
+  '@vitest-evals/report-ui@0.16.1':
+    resolution: {integrity: sha512-3oHbMntbksRWQB1Nu1j8UXIy8+we6iUng24wAKxhSli7vjIgkaX02JjjfXgK4CWG4DhgOQkwJqw+wNaOMduY5A==}
 
   '@vitest/browser-preview@4.1.10':
     resolution: {integrity: sha512-14MJrL59ZFkqXLjwfSk6RzTDy5Czf9UG4+8q8L6Gxjs2aPjEce/cVNYV14bXAc2BvMjUNu904+ZEZA1Xc1wtvQ==}
@@ -4758,6 +4832,20 @@ packages:
       yaml:
         optional: true
 
+  vitest-evals@0.16.1:
+    resolution: {integrity: sha512-MuPVetClAOn55ewgajxGxZcQDFWUftrQ19/rZQn8zXvaxHri+ElgEb5W0OIMRQwSvF5TBYIsE5rWdQB/qrWJkg==}
+    hasBin: true
+    peerDependencies:
+      ai: '>=4 <7'
+      tinyrainbow: '>=2 <4'
+      vitest: '>=4 <5'
+      zod: '>=3 <5'
+    peerDependenciesMeta:
+      ai:
+        optional: true
+      zod:
+        optional: true
+
   vitest@4.1.10:
     resolution: {integrity: sha512-R9jUTe5S4Qb0HCd4TNqpC7oGcrMssMRGXLW80ubjWsW9VH5GF8y1Y0SFLY9AbqSk6nt0PnOx4H4WNJYZ13GUPw==}
     engines: {node: ^20.0.0 || ^22.0.0 || >=24.0.0}
@@ -6600,6 +6688,14 @@ snapshots:
       vite: 7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0)
     transitivePeerDependencies:
       - supports-color
+
+  '@vitest-evals/core@0.16.1':
+    dependencies:
+      zod: 4.4.3
+
+  '@vitest-evals/report-ui@0.16.1':
+    dependencies:
+      '@vitest-evals/core': 0.16.1
 
   '@vitest/browser-preview@4.1.10(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))(vitest@4.1.10)':
     dependencies:
@@ -8928,6 +9024,15 @@ snapshots:
       lightningcss: 1.33.0
       terser: 5.49.2
       yaml: 2.9.0
+
+  vitest-evals@0.16.1(tinyrainbow@3.1.1)(vitest@4.1.10)(zod@4.4.3):
+    dependencies:
+      '@vitest-evals/core': 0.16.1
+      '@vitest-evals/report-ui': 0.16.1
+      tinyrainbow: 3.1.1
+      vitest: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
+    optionalDependencies:
+      zod: 4.4.3
 
   vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@26.1.0)(@vitest/browser-preview@4.1.10)(jsdom@26.1.0(supports-color@10.2.2))(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0)):
     dependencies:

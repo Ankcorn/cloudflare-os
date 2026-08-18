@@ -1,0 +1,27 @@
+{
+  "name": "@gadgets/workshop-agent-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "workshop-agent": "./dist/workshop-agent.js"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && vp run --cache build:bin",
+    "clean": "rm -rf dist",
+    "test:run": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@gadgets/integration-tests": "workspace:*",
+    "wrangler": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260808.1",
+    "@types/node": "^26.1.0",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:"
+  }
+}

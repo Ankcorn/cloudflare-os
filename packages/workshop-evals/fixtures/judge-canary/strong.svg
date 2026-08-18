@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400">
+  <rect width="640" height="400" fill="#f5f1e8"/>
+  <rect x="24" y="20" width="592" height="52" rx="12" fill="#16324f"/>
+  <text x="48" y="53" fill="#fff" font-family="Arial" font-size="22" font-weight="700">Atlas Projects</text>
+  <rect x="24" y="92" width="376" height="284" rx="16" fill="#fff"/>
+  <text x="48" y="126" fill="#16324f" font-family="Arial" font-size="15" font-weight="700">ACTIVE PROJECTS</text>
+  <rect x="48" y="148" width="328" height="54" rx="9" fill="#e8f3ef"/>
+  <text x="66" y="180" fill="#183b34" font-family="Arial" font-size="16">Website launch</text>
+  <text x="328" y="180" fill="#287a63" font-family="Arial" font-size="13">82%</text>
+  <rect x="48" y="216" width="328" height="54" rx="9" fill="#eef1f7"/>
+  <text x="66" y="248" fill="#253750" font-family="Arial" font-size="16">Research sprint</text>
+  <text x="328" y="248" fill="#526a91" font-family="Arial" font-size="13">64%</text>
+  <rect x="48" y="284" width="328" height="54" rx="9" fill="#f8eee5"/>
+  <text x="66" y="316" fill="#563921" font-family="Arial" font-size="16">Brand refresh</text>
+  <text x="328" y="316" fill="#a15d25" font-family="Arial" font-size="13">41%</text>
+  <rect x="420" y="92" width="196" height="132" rx="16" fill="#d96c3f"/>
+  <text x="442" y="128" fill="#fff" font-family="Arial" font-size="14">THIS WEEK</text>
+  <text x="442" y="178" fill="#fff" font-family="Arial" font-size="44" font-weight="700">12</text>
+  <text x="500" y="178" fill="#ffe4d8" font-family="Arial" font-size="14">tasks done</text>
+  <rect x="420" y="244" width="196" height="132" rx="16" fill="#fff"/>
+  <text x="442" y="280" fill="#16324f" font-family="Arial" font-size="14" font-weight="700">NEXT MILESTONE</text>
+  <text x="442" y="316" fill="#26384a" font-family="Arial" font-size="17">Prototype review</text>
+  <text x="442" y="344" fill="#647383" font-family="Arial" font-size="13">Friday, 10:00 AM</text>
+</svg>

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400">
+  <rect width="640" height="400" fill="#eceff3"/>
+  <rect x="18" y="16" width="604" height="58" fill="#40546d"/>
+  <text x="34" y="51" fill="#fff" font-family="Arial" font-size="21">Team Tasks Dashboard</text>
+  <rect x="18" y="88" width="190" height="294" fill="#fff"/>
+  <text x="34" y="119" fill="#34495e" font-family="Arial" font-size="15" font-weight="700">Navigation</text>
+  <text x="34" y="151" fill="#576879" font-family="Arial" font-size="14">Overview</text>
+  <text x="34" y="181" fill="#576879" font-family="Arial" font-size="14">All tasks</text>
+  <text x="34" y="211" fill="#576879" font-family="Arial" font-size="14">Reports</text>
+  <rect x="222" y="88" width="400" height="76" fill="#fff"/>
+  <text x="238" y="119" fill="#34495e" font-family="Arial" font-size="14">Tasks completed</text>
+  <text x="238" y="150" fill="#34495e" font-family="Arial" font-size="25">18 / 30</text>
+  <rect x="222" y="178" width="400" height="204" fill="#fff"/>
+  <text x="238" y="208" fill="#34495e" font-family="Arial" font-size="15" font-weight="700">Recent tasks</text>
+  <line x1="238" y1="226" x2="602" y2="226" stroke="#d7dce2"/>
+  <text x="238" y="254" fill="#4c5c6b" font-family="Arial" font-size="13">Update landing page</text>
+  <text x="520" y="254" fill="#4c5c6b" font-family="Arial" font-size="13">In progress</text>
+  <line x1="238" y1="270" x2="602" y2="270" stroke="#d7dce2"/>
+  <text x="238" y="298" fill="#4c5c6b" font-family="Arial" font-size="13">Review analytics</text>
+  <text x="542" y="298" fill="#4c5c6b" font-family="Arial" font-size="13">Done</text>
+  <line x1="238" y1="314" x2="602" y2="314" stroke="#d7dce2"/>
+  <rect x="512" y="337" width="90" height="28" fill="#587ca3"/>
+  <text x="532" y="356" fill="#fff" font-family="Arial" font-size="12">Add task</text>
+</svg>

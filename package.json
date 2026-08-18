@@ -15,9 +15,12 @@
     "lint:fix": "vp lint --fix",
     "types:check": "pnpm run build",
     "lint": "pnpm run lint:check && pnpm run types:check",
-    "types:generate": "node scripts/generate-worker-types.mjs"
+    "types:generate": "node scripts/generate-worker-types.mjs",
+    "eval:workshop": "pnpm --filter @gadgets/workshop-evals eval:all",
+    "workshop-agent": "vp run -F @gadgets/workshop-agent-cli --cache build && workshop-agent"
   },
   "devDependencies": {
+    "@gadgets/workshop-agent-cli": "workspace:*",
     "aws4fetch": "^1.0.20",
     "jsonc-parser": "^3.3.1",
     "typescript": "catalog:",
