@@ -1,0 +1,190 @@
+name: Workshop evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Optional comma-separated agent model override
+        required: false
+        type: string
+      trials:
+        description: Optional positive trial count override
+        required: false
+        type: string
+  schedule:
+    - cron: "17 6 * * *"
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24.19.0"
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  WORKSHOP_EVAL_GATEWAY_ID: ${{ secrets.WORKSHOP_EVAL_GATEWAY_ID }}
+  WORKSHOP_EVAL_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  canary:
+    # Require the eval label on this same-repo SHA before exposing repository secrets.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id &&
+      github.event.label.name == 'run-workshop-evals')
+    name: Judge canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      models: ${{ steps.matrix.outputs.models }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Check eval credentials
+        shell: bash
+        run: |
+          missing=()
+          for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN WORKSHOP_EVAL_GATEWAY_ID; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing required repository secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Configure eval matrix
+        id: matrix
+        env:
+          MODELS: ${{ inputs.models }}
+          TRIALS: ${{ inputs.trials }}
+        run: |
+          if [[ -n "$TRIALS" && ! "$TRIALS" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'trials must be a positive integer\n' >&2
+            exit 1
+          fi
+
+          if [[ -n "$MODELS" ]]; then
+            models=$(jq -cen --arg models "$MODELS" '
+              $models | split(",") | map(gsub("^\\s+|\\s+$"; "")) |
+              if any(.[]; . == "") then error("models must not contain empty entries") else . end |
+              if (unique | length) != length then error("models must not contain duplicates") else . end |
+              to_entries | map({id: ("model-" + ((.key + 1) | tostring)), value: .value})
+            ')
+          else
+            models='[{"id":"glm-5-2","value":"@cf/zai-org/glm-5.2"},{"id":"kimi-k2-7","value":"@cf/moonshotai/kimi-k2.7-code"}]'
+          fi
+          printf 'models=%s\n' "$models" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build canary dependencies
+        run: pnpm --filter @gadgets/workshop-evals... build
+
+      - name: Run judge canary
+        run: pnpm --filter @gadgets/workshop-evals eval:canary
+
+  evals:
+    name: ${{ matrix.suite }} - ${{ matrix.model.value }}
+    needs: canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [required, frontier]
+        model: ${{ fromJSON(needs.canary.outputs.models) }}
+    env:
+      WORKSHOP_EVAL_MODELS: ${{ matrix.model.value }}
+      WORKSHOP_EVAL_TRIALS: ${{ github.event_name == 'workflow_dispatch' && (inputs.trials || '10') || (github.event_name == 'schedule' && '10' || '1') }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build eval dependencies
+        run: >-
+          pnpm --filter @gadgets/workshop-backend...
+          --filter @gadgets/workshop-evals... build
+
+      - name: Run ${{ matrix.suite }} evals
+        id: eval
+        run: pnpm --filter @gadgets/workshop-evals eval:${{ matrix.suite }}
+
+      - name: Summarize ${{ matrix.suite }} evals
+        id: eval_summary
+        if: always() && steps.eval.outcome != 'skipped'
+        run: |
+          pnpm --filter @gadgets/workshop-evals eval:summary -- \
+            .wrangler/evals/${{ matrix.suite }}-results.json ${{ matrix.suite }}-summary
+          cat packages/workshop-evals/.wrangler/evals/${{ matrix.suite }}-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Scores and pass rates are advisory; malformed or missing reports still fail this step.
+      - name: Publish required eval report
+        if: >-
+          always() && matrix.suite == 'required' &&
+          steps.eval_summary.outcome == 'success'
+        uses: getsentry/vitest-evals@abea6a519955e5df56ecb2a2d83bae9c821561e1 # v0.16.1 (v0)
+        with:
+          results: packages/workshop-evals/.wrangler/evals/required-results.json
+          publish-summary: true
+          publish-check: true
+          check-name: Workshop evals - required - ${{ matrix.model.value }}
+          fail-on-failures: false
+
+      - name: Publish frontier eval report
+        if: >-
+          always() && matrix.suite == 'frontier' &&
+          steps.eval_summary.outcome == 'success'
+        uses: getsentry/vitest-evals@abea6a519955e5df56ecb2a2d83bae9c821561e1 # v0.16.1 (v0)
+        with:
+          results: packages/workshop-evals/.wrangler/evals/frontier-results.json
+          publish-summary: true
+          publish-check: false
+          fail-on-failures: false
+
+      - name: Upload eval results and artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: workshop-evals-${{ matrix.suite }}-${{ matrix.model.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            packages/workshop-evals/.wrangler/evals/*.json
+            packages/workshop-evals/.wrangler/evals/*.md
+            packages/workshop-evals/.wrangler/evals/artifacts/**
+          if-no-files-found: warn
+          retention-days: 30
