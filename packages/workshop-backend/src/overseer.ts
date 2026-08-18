@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetScreenshotOptions, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -45,7 +45,7 @@ import {
   isAllowedChatAttachmentImageMimeType,
   validateChatAttachmentUpload,
 } from "./chat-attachment-validation";
-import { renderGadgetPdf } from "./browser-export";
+import { renderGadgetPdf, renderGadgetScreenshot } from "./browser-export";
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
@@ -9277,6 +9277,16 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
   }
 
+  async exportScreenshot(options: GadgetScreenshotOptions, chatId?: number): Promise<Uint8Array> {
+    // Read as possibly-undefined: self-hosted deployments may omit the binding (see env.d.ts).
+    let browser: BrowserRun | undefined = this.impl.env.BROWSER;
+    if (!browser) throw new Error("Gadget export is not configured for this deployment.");
+    let bundle = await this.getUiBundle(chatId);
+    if (!bundle) throw new Error("This Gadget does not have a UI to export.");
+    let gadget = await this.impl.getGadgetFacet(this.id, chatId);
+    return renderGadgetScreenshot(browser, bundle.jsCode, gadget, options);
+  }
+
   async listBindings(chatId?: number): Promise<GadgetBindingInfo[]> {
     let record = this.impl.getGadgetRecord(this.id);
     // Edges pending in other chats are those chats' unaccepted proposals, so they aren't listed.
@@ -9531,6 +9541,17 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     let gadget = await this.impl.getGadgetFacet(this.id);
     let title = this.impl.getGadgetRecord(this.id).title;
     return renderGadgetPdf(browser, bundle.jsCode, title, gadget);
+  }
+
+  async exportScreenshot(options: GadgetScreenshotOptions, chatId?: number): Promise<Uint8Array> {
+    if (chatId !== undefined) this.#deny();
+    // Read as possibly-undefined: self-hosted deployments may omit the binding (see env.d.ts).
+    let browser: BrowserRun | undefined = this.impl.env.BROWSER;
+    if (!browser) throw new Error("Gadget export is not configured for this deployment.");
+    let bundle = await this.getUiBundle();
+    if (!bundle) throw new Error("This Gadget does not have a UI to export.");
+    let gadget = await this.impl.getGadgetFacet(this.id);
+    return renderGadgetScreenshot(browser, bundle.jsCode, gadget, options);
   }
 
   // --- Denied methods (build-only) ---

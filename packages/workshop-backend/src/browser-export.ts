@@ -1,6 +1,7 @@
 import { launch, type Page } from "@cloudflare/puppeteer";
-import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
+import { RpcSession, type RpcTransport } from "capnweb";
 import { createLogger } from "@gadgets/backend-utils/logger";
+import type { GadgetScreenshotOptions } from "@gadgets/workshop-shared/api";
 import BROWSER_EXPORT_RUNTIME from "./generated/browser-export-runtime.txt";
 
 type BrowserExportLogFields = {
@@ -14,6 +15,8 @@ const logger = createLogger<BrowserExportLogFields>({ component: "workshop.brows
 const MAX_EXPORT_DURATION_MS = 30_000;
 /** Largest export the Workshop will stream. Enforced while streaming, never buffered in full. */
 const MAX_EXPORT_BYTES = 100 * 1024 * 1024;
+/** Largest PNG returned in memory by a screenshot export. */
+const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
 /** Quiet period indicating that the client has finished its initial DOM updates. */
 const DOM_SETTLE_MS = 250;
 /** Budget for releasing the browser session once an export has settled. */
@@ -153,6 +156,96 @@ delete globalThis.__workshopExportRuntime;
 </html>`;
 }
 
+type ExportSession = {
+  page: Page;
+  deadline: ReturnType<typeof createDeadline>;
+  release(): Promise<void>;
+};
+
+async function initializeExport(
+  browserBinding: BrowserRun,
+  clientCode: string,
+  gadget: Disposable,
+  viewport?: GadgetScreenshotOptions,
+): Promise<ExportSession> {
+  let deadline = createDeadline(MAX_EXPORT_DURATION_MS, "Browser export timed out.");
+  let launchPromise = launch(browserBinding);
+  let browser: Awaited<ReturnType<typeof launch>>;
+  try {
+    browser = await deadline.race(launchPromise);
+  } catch (error) {
+    deadline.clear();
+    gadget[Symbol.dispose]();
+    // A timed-out launch cannot be cancelled. Close it if it eventually produces a browser.
+    void launchPromise.then(closeBrowser, () => {});
+    logger.warn("failed to launch browser for gadget export", {
+      event: "gadget.export.browser.launch.failed",
+      error,
+    });
+    throw error;
+  }
+
+  let sessionCloser: Disposable | undefined;
+  let releasePromise: Promise<void> | undefined;
+  let release = () => {
+    if (!releasePromise) {
+      releasePromise = (async () => {
+        deadline.clear();
+        if (sessionCloser) {
+          sessionCloser[Symbol.dispose]();
+        } else {
+          // RpcSession takes ownership of its local main object. Before it exists, ownership remains
+          // here and setup failures must release the stub directly.
+          gadget[Symbol.dispose]();
+        }
+        await closeBrowser(browser);
+      })();
+    }
+    return releasePromise;
+  };
+  deadline.onExpire(release);
+
+  try {
+    let page = await deadline.race((async () => {
+      let newPage = await browser.newPage();
+      if (viewport) {
+        await newPage.setViewport({...viewport, deviceScaleFactor: 1});
+      }
+      await newPage.setRequestInterception(true);
+      newPage.on("request", (request) => {
+        let url = request.url();
+        if (url === EXPORT_DOCUMENT_URL && request.isNavigationRequest() &&
+            request.frame() === newPage.mainFrame()) {
+          void request.respond({
+            status: 200,
+            contentType: "text/html",
+            headers: {"Content-Security-Policy": EXPORT_DOCUMENT_CSP},
+            body: makeExportHtml(clientCode),
+          });
+        } else if (url === "about:blank" || url.startsWith("data:") || url.startsWith("blob:")) {
+          void request.continue();
+        } else {
+          void request.abort();
+        }
+      });
+      await newPage.goto(EXPORT_DOCUMENT_URL, { waitUntil: "load" });
+      let transport = new BrowserRpcTransport(newPage);
+      newPage.on("close", () => transport.abort(new Error("Browser page closed.")));
+      let rpcSession = new RpcSession(transport, gadget);
+      sessionCloser = rpcSession.getRemoteMain();
+      await waitForDomSettled(newPage);
+      return newPage;
+    })());
+    return {page, deadline, release};
+  } catch (error) {
+    // Deliberately omits the caught value: failures here can carry Gadget-authored exception text,
+    // which must not reach logs or the external issue Reporter.
+    logger.warn("failed to render gadget export", { event: "gadget.export.render.failed" });
+    await release();
+    throw error;
+  }
+}
+
 /** Limits the size of the exported file streamed back to the client. */
 export function limitStream(
   source: ReadableStream<Uint8Array>,
@@ -233,6 +326,33 @@ async function waitForDomSettled(page: Page): Promise<void> {
       timer = setTimeout(finish, quietMs);
     });
   }, DOM_SETTLE_MS);
+  await page.evaluate(async () => {
+    const browser = globalThis as unknown as {
+      document: {
+        fonts?: { ready: Promise<void> };
+        querySelectorAll(selectors: string): ArrayLike<{
+          complete: boolean;
+          addEventListener(type: string, listener: () => void, options: { once: boolean }): void;
+          decode?: () => Promise<void>;
+        }>;
+      };
+    };
+    let images = Array.from(browser.document.querySelectorAll("img"));
+    await Promise.all([
+      browser.document.fonts?.ready ?? Promise.resolve(),
+      ...images.map(async image => {
+        if (!image.complete) {
+          await new Promise<void>(resolve => {
+            image.addEventListener("load", resolve, {once: true});
+            image.addEventListener("error", resolve, {once: true});
+            // Avoid missing an event if the image completed while listeners were attached.
+            if (image.complete) resolve();
+          });
+        }
+        await image.decode?.().catch(() => {});
+      }),
+    ]);
+  });
 }
 
 /**
@@ -246,72 +366,12 @@ export async function renderGadgetPdf(
   browserBinding: BrowserRun,
   clientCode: string,
   documentTitle: string,
-  gadget: RpcStub<any>,
+  gadget: Disposable,
 ): Promise<ReadableStream<Uint8Array>> {
-  let deadline = createDeadline(MAX_EXPORT_DURATION_MS, "Browser export timed out.");
-
-  let launchPromise = launch(browserBinding);
-  let browser: Awaited<ReturnType<typeof launch>>;
-  try {
-    browser = await deadline.race(launchPromise);
-  } catch (error) {
-    deadline.clear();
-    gadget[Symbol.dispose]();
-    // A timed-out launch cannot be cancelled. Close it if it eventually produces a browser.
-    void launchPromise.then(closeBrowser, () => {});
-    logger.warn("failed to launch browser for gadget export", {
-      event: "gadget.export.browser.launch.failed",
-      error,
-    });
-    throw error;
-  }
-
-  let sessionCloser: RpcStub<any> | undefined;
-  let releasePromise: Promise<void> | undefined;
-  let release = () => {
-    if (!releasePromise) {
-      releasePromise = (async () => {
-        deadline.clear();
-        if (sessionCloser) {
-          sessionCloser[Symbol.dispose]();
-        } else {
-          // RpcSession takes ownership of its local main object. Before it exists, ownership remains
-          // here and setup failures must release the stub directly.
-          gadget[Symbol.dispose]();
-        }
-        await closeBrowser(browser);
-      })();
-    }
-    return releasePromise;
-  };
-  deadline.onExpire(release);
+  let {page, deadline, release} = await initializeExport(browserBinding, clientCode, gadget);
 
   try {
     let source = await deadline.race((async () => {
-      let page = await browser.newPage();
-      await page.setRequestInterception(true);
-      page.on("request", (request) => {
-        let url = request.url();
-        if (url === EXPORT_DOCUMENT_URL && request.isNavigationRequest() &&
-            request.frame() === page.mainFrame()) {
-          void request.respond({
-            status: 200,
-            contentType: "text/html",
-            headers: {"Content-Security-Policy": EXPORT_DOCUMENT_CSP},
-            body: makeExportHtml(clientCode),
-          });
-        } else if (url === "about:blank" || url.startsWith("data:") || url.startsWith("blob:")) {
-          void request.continue();
-        } else {
-          void request.abort();
-        }
-      });
-      await page.goto(EXPORT_DOCUMENT_URL, { waitUntil: "load" });
-      let transport = new BrowserRpcTransport(page);
-      page.on("close", () => transport.abort(new Error("Browser page closed.")));
-      let rpcSession = new RpcSession(transport, gadget);
-      sessionCloser = rpcSession.getRemoteMain();
-      await waitForDomSettled(page);
       await page.emulateMediaType("print");
       await page.evaluate(title => {
         let browser = globalThis as unknown as { document: { title: string } };
@@ -330,5 +390,44 @@ export async function renderGadgetPdf(
     logger.warn("failed to render gadget export", { event: "gadget.export.render.failed" });
     await release();
     throw error;
+  }
+}
+
+function validateScreenshotOptions(options: GadgetScreenshotOptions): void {
+  if (!Number.isInteger(options.width) || options.width < 1 || options.width > 1440 ||
+      !Number.isInteger(options.height) || options.height < 1 || options.height > 900) {
+    throw new Error("Screenshot width must be an integer between 1 and 1440 pixels and height " +
+        "between 1 and 900 pixels to limit remote browser memory use.");
+  }
+}
+
+/** Renders a Gadget's settled visible viewport as a bounded in-memory PNG. */
+export async function renderGadgetScreenshot(
+  browserBinding: BrowserRun,
+  clientCode: string,
+  gadget: Disposable,
+  options: GadgetScreenshotOptions,
+): Promise<Uint8Array> {
+  try {
+    validateScreenshotOptions(options);
+  } catch (error) {
+    gadget[Symbol.dispose]();
+    throw error;
+  }
+
+  let {page, deadline, release} = await initializeExport(
+      browserBinding, clientCode, gadget, options);
+  try {
+    let png = await deadline.race(page.screenshot({type: "png", fullPage: false}));
+    if (png.byteLength > MAX_SCREENSHOT_BYTES) {
+      throw new Error(`Screenshot PNG may not exceed ${MAX_SCREENSHOT_BYTES} bytes.`);
+    }
+    return new Uint8Array(png);
+  } catch (error) {
+    // Deliberately omits Gadget-authored exception text from logs.
+    logger.warn("failed to render gadget export", { event: "gadget.export.render.failed" });
+    throw error;
+  } finally {
+    await release();
   }
 }

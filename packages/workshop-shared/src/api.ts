@@ -3312,6 +3312,18 @@ export interface WorkpieceClient extends RpcTarget {
 }
 
 /**
+ * Viewport used to render a Gadget screenshot. Width must be an integer from 1 through 1440 pixels
+ * and height from 1 through 900 pixels; the bounds limit memory use in the remote browser while
+ * covering common phone and desktop viewports.
+ */
+export type GadgetScreenshotOptions = {
+  /** Viewport width in CSS pixels, from 1 through 1440. */
+  width: number;
+  /** Viewport height in CSS pixels, from 1 through 900. */
+  height: number;
+};
+
+/**
  * Capability representing one gadget workpiece within a workspace. Obtained from
  * Overseer.createGadget() or Overseer.getGadget(). Workspace-level concerns (code sync, chats,
  * sharing, actions, blueprint listing) stay on Overseer; this covers the per-gadget surface.
@@ -3340,6 +3352,13 @@ export interface GadgetClient extends WorkpieceClient {
    * proposed in that chat.
    */
   exportPdf(chatId?: number): Promise<ReadableStream<Uint8Array>>;
+
+  /**
+   * Renders the Gadget's visible viewport as PNG bytes at device scale factor 1. If `chatId` is
+   * specified, the screenshot includes changes currently proposed in that chat. The viewport is
+   * bounded as documented by `GadgetScreenshotOptions` to limit remote-browser memory use.
+   */
+  exportScreenshot(options: GadgetScreenshotOptions, chatId?: number): Promise<Uint8Array>;
 
   // --- Binding management ---
   //
@@ -3438,7 +3457,7 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
  * - "build": full access -- edit code, use and participate in chats, manage bindings, etc. (the
  *   same access the owner has, modulo the owner-only exceptions documented in sharing.md).
  * - "use": may only render, interact with, and export the gadget's deployed UI (getUiBundle(),
- *   connectToGadget(), and exportPdf()), plus read basic metadata.
+ *   connectToGadget(), exportPdf(), and exportScreenshot()), plus read basic metadata.
  *
  * Roles are ordered build > use. A collaborator's effective role is the maximum role reachable
  * from the owner through their valid permission edges, where each edge grants
