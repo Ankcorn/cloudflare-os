@@ -20,9 +20,11 @@
     "types:check": "pnpm run build",
     "types:scripts": "tsc -p scripts/tsconfig.json",
     "lint": "pnpm run lint:check && pnpm run types:scripts && pnpm run types:check",
-    "types:generate": "node scripts/generate-worker-types.ts"
+    "types:generate": "node scripts/generate-worker-types.ts",
+    "workshop-agent": "vp run -F @gadgets/workshop-agent-cli --cache build && workshop-agent"
   },
   "devDependencies": {
+    "@gadgets/workshop-agent-cli": "workspace:*",
     "@types/node": "26.1.0",
     "aws4fetch": "^1.0.20",
     "jsonc-parser": "^3.3.1",
