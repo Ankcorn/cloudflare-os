@@ -8,9 +8,11 @@ const TASKS_DIR = dirname(fileURLToPath(import.meta.url));
 
 describe("task registry", () => {
   it("lists every task file", async () => {
+    // `<id>.task.ts` is the task-file convention, so a shared helper module beside them is not
+    // mistaken for an unregistered task.
     const files = (await readdir(TASKS_DIR))
-        .filter(name => name.endsWith(".ts") && name !== "index.ts" && !name.endsWith(".test.ts"))
-        .map(name => name.replace(/\.ts$/, ""))
+        .filter(name => name.endsWith(".task.ts"))
+        .map(name => name.replace(/\.task\.ts$/, ""))
         .toSorted();
     expect(evalTasks.map(task => task.id).toSorted()).toEqual(files);
   });

@@ -269,17 +269,24 @@ export function formatSummaryMarkdown(summary: EvalSummary): string {
   ].join("\n");
 }
 
-/** Reads a Vitest JSON report and writes `summary.json`, `summary.md`, and the terminal table. */
+/** Reads a Vitest JSON report and writes `<name>.json`, `<name>.md`, and the terminal table. */
 export async function writeEvalSummary(
     reportPath = resolve(EVAL_OUTPUT_DIR, "results.json"),
     name = "summary"): Promise<EvalSummary> {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
     throw new Error("Workshop eval summary name must be lowercase alphanumeric with hyphens");
   }
+  const jsonPath = resolve(EVAL_OUTPUT_DIR, `${name}.json`);
+  // `eval:required` writes `required.json`, so summarising it under the name `required` would
+  // destroy the report on the way out and leave nothing to re-reduce.
+  if (jsonPath === resolve(reportPath)) {
+    throw new Error(
+        `Refusing to overwrite the report being summarized (${reportPath}); choose another name`);
+  }
   const summary = summarizeVitestReport(await readVitestJsonReportFile(reportPath));
   await mkdir(EVAL_OUTPUT_DIR, { recursive: true });
   await Promise.all([
-    writeFile(resolve(EVAL_OUTPUT_DIR, `${name}.json`), `${JSON.stringify(summary, null, 2)}\n`),
+    writeFile(jsonPath, `${JSON.stringify(summary, null, 2)}\n`),
     writeFile(resolve(EVAL_OUTPUT_DIR, `${name}.md`), formatSummaryMarkdown(summary)),
   ]);
   return summary;

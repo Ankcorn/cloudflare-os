@@ -14,6 +14,18 @@ export const ChecksScorer = createJudge<EvalRunInput, EvalRunOutput>("checks", (
   if (checks.length === 0) {
     return { score: null, metadata: { rationale: `task ${output.taskId} recorded no checks` } };
   }
+  // An agent that errored without ever calling a tool never got going -- an expired token, a
+  // provider outage. Scoring that as zero would blame the agent for infrastructure and quietly
+  // drag down the pass rate; an unscored trial is counted as invalid instead.
+  if (output.diagnostics.toolCalls === 0 && output.diagnostics.agentErrors.length > 0) {
+    return {
+      score: null,
+      metadata: {
+        rationale: "the agent made no tool calls and reported an error, so it never ran",
+        agentErrors: output.diagnostics.agentErrors,
+      },
+    };
+  }
   const failed = checks.filter(check => !check.pass);
   return {
     score: (checks.length - failed.length) / checks.length,

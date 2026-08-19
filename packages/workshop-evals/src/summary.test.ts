@@ -1,6 +1,10 @@
 import type { HarnessRun, VitestJsonReport } from "@vitest-evals/core";
 import { describe, expect, it } from "vitest";
-import { formatSummaryMarkdown, formatSummaryTable, summarizeVitestReport } from "./summary.js";
+import { resolve } from "node:path";
+import { EVAL_OUTPUT_DIR } from "./artifacts.js";
+import {
+  formatSummaryMarkdown, formatSummaryTable, summarizeVitestReport, writeEvalSummary,
+} from "./summary.js";
 
 type Overrides = {
   runId?: string;
@@ -179,6 +183,13 @@ describe("summarizeVitestReport", () => {
       assertion(runOutput({ runId: "r" }), 1),
     ]));
     expect(summary.groups.map(group => group.expectation)).toEqual(["frontier", "required"]);
+  });
+});
+
+describe("writeEvalSummary", () => {
+  it("refuses to overwrite the report it is summarizing", async () => {
+    await expect(writeEvalSummary(resolve(EVAL_OUTPUT_DIR, "required.json"), "required"))
+        .rejects.toThrow("Refusing to overwrite");
   });
 });
 

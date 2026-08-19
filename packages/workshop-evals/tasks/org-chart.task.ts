@@ -34,13 +34,13 @@ Ines Duarte,Dana Whitfield
 Wei Zhang,Ines Duarte`;
 
 /**
- * Frontier: tolerant parsing of three shapes people actually paste, reduced to one hierarchy.
+ * Tolerant parsing of three shapes people actually paste, reduced to one hierarchy.
  * The same six-person org is expressed three ways, so every format must produce identical answers.
  */
 export default defineEvalTask({
   id: "org-chart",
   title: "Org chart from pasted text",
-  expectation: "frontier",
+  expectation: "required",
   turns: [{
     prompt: `Build a Gadget named exactly "Chart" that turns pasted team information into an org
 chart. People paste wildly different things, so accept all of these and treat them as equivalent:

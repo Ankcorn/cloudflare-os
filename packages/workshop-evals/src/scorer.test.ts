@@ -82,6 +82,20 @@ describe("ChecksScorer", () => {
     expect(result.score).toBeCloseTo(2 / 3, 10);
   });
 
+  it("declines to score a run whose agent never made a tool call", async () => {
+    const value = output([{ id: "a", pass: false }]);
+    value.diagnostics = { toolCalls: 0, toolErrors: [], agentErrors: ["401"], harnessWarnings: [] };
+    const result = await assess(value);
+    expect(result.score).toBeNull();
+    expect(result.metadata?.rationale).toContain("never ran");
+  });
+
+  it("still scores a run that errored after doing work", async () => {
+    const value = output([{ id: "a", pass: false }]);
+    value.diagnostics = { toolCalls: 4, toolErrors: [], agentErrors: ["gave up"], harnessWarnings: [] };
+    expect((await assess(value)).score).toBe(0);
+  });
+
   it("declines to score a task that recorded nothing", async () => {
     const result = await assess(output([]));
     expect(result.score).toBeNull();

@@ -97,6 +97,11 @@ What makes a task work:
 `frontier` records the score and never fails, which is how a task for capability the agent does not
 have yet lives in the suite without turning the build permanently red.
 
+Tier from measurement, never from a guess. A task belongs in `required` once it has passed every
+trial that actually ran, and drops to `frontier` when it does not — with the observed failure written
+into its doc comment, so the next person knows what to look for rather than re-deriving it. Every
+tier here was set this way; §Baseline records the evidence.
+
 Multi-turn tasks take more than one entry in `turns`, sharing one workspace and one chat. The
 interesting thing to assert in a later turn is that the *earlier* turn's contract still holds —
 see `tasks/reading-list.ts`, where building tagging must not break finishing a book.
@@ -116,15 +121,43 @@ Reading list      @cf/zai-org/glm-5.2          2/3   [21, 94]  0.83   61.7k     
 - **95% CI** is a Wilson interval. At three trials it is very wide; that is honest, not a defect.
   Raise `WORKSHOP_EVAL_TRIALS` to say anything firm about a difference between two models.
 - **Tool fail** is the fraction of trials with a failed tool call. It never affects pass or score —
-  an agent that recovered still delivered — but a rate that climbs is usually a platform bug.
+  an agent that recovered still delivered — but a rate that climbs is usually a platform bug. The
+  baseline run surfaced one this way: `executeCode` importing `node:assert`, which the sandbox has
+  no module for.
 - **Invalid** counts trials that produced no usable result. They are excluded from every rate above,
-  so infrastructure trouble reads as missing data rather than as a bad model. Trouble *after* the
+  so infrastructure trouble reads as missing data rather than as a bad model. A run whose agent
+  errored without ever calling a tool — an expired token, a provider outage — is unscored for the
+  same reason, rather than counted as a zero. Trouble *after* the
   last check — a Gateway hiccup, a failed source write — does not invalidate a trial whose verdict
   was already known; it lands in `diagnostics.harnessWarnings` and, for telemetry, drops that trial
   out of the token/time/cost columns.
 
 Each trial also leaves `.wrangler/evals/runs/<task>/<model>/trial-<n>/` holding the canonical
 transcript and the accepted source of every Gadget, which is where to look when a check fails.
+
+## Baseline
+
+One trial per task against `@cf/zai-org/glm-5.2`, in local direct mode, at the commit that added
+them. Thin evidence — enough to tier honestly, not enough to compare models.
+
+| Task | Trials | Result |
+| --- | ---: | --- |
+| `expense-ledger` | 1 | passes (2 turns, 23 tool calls, ~7 min) |
+| `pantry-kitchen` | 1 | passes (24 tool calls, ~7 min) |
+| `appointment-desk` | 1 | passes — no overselling under 10 concurrent bookings |
+| `spaced-repetition` | 1 | passes — full SM-2 trace including the 1.3 ease floor |
+| `org-chart` | 2 | passes |
+| `time-tracker` | 3 | **1 of 3.** Closed instead of half-open intervals; duplicate id accepted |
+
+Two things worth knowing about how that baseline was reached, because both shaped the design:
+
+- The `appointment-desk` pass came from a technique nobody prescribed: the agent made the capacity
+  check and the insert one synchronous SQL sequence with no `await` between them, then added a
+  `BEFORE INSERT` trigger as a second line of defence. A check that asserted *how* to serialize
+  would have failed a correct answer. This is why nothing here inspects the agent's method.
+- The one `expense-ledger` failure in the first run was a bug in the *task*, not the agent: a
+  redundant relational assertion whose algebra was simply wrong, sitting next to correct constants.
+  A task's arithmetic deserves its own reference check before it is believed.
 
 ## What this does not do
 

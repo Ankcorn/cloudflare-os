@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   evals:
-    name: ${{ matrix.expectation }} (shard ${{ matrix.shard }}/4)
+    name: ${{ matrix.expectation }} (shard ${{ matrix.shard }}/6)
     # A fork's pull request cannot reach the secrets, and would spend this repository's inference
     # budget if it could. Same guard as bonk-pr.yml.
     if: >-
@@ -49,7 +49,10 @@ jobs:
       fail-fast: false
       matrix:
         expectation: [required, frontier]
-        shard: [1, 2, 3, 4]
+        # A trial builds a whole application, so it costs minutes, not seconds: the tasks in this
+        # suite run 3-7 minutes each. Six shards keeps a nightly run of ten trials inside the job
+        # timeout with room to spare.
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,7 +84,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.WORKSHOP_EVAL_API_TOKEN }}
           WORKSHOP_EVAL_GATEWAY_ID: ${{ secrets.WORKSHOP_EVAL_GATEWAY_ID }}
           WORKSHOP_EVAL_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-          WORKSHOP_EVAL_SHARD: ${{ matrix.shard }}/4
+          WORKSHOP_EVAL_SHARD: ${{ matrix.shard }}/6
         run: pnpm run eval:${{ matrix.expectation }}
 
       - name: Upload results
