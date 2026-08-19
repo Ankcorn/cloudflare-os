@@ -7,6 +7,14 @@ toolkit those tests are built from. Part of `pnpm test`, so CI runs it like any 
 pnpm --filter @gadgets/integration-tests test:run
 ```
 
+**This is not the only multi-module suite.** `workshop-backend/__integration__` runs *in-process* under
+`@cloudflare/vitest-pool-workers`, which is the only place `cloudflare:test` helpers exist — so a test
+that needs to abort a specific Durable Object, or to assert on a native RPC boundary, belongs there and
+cannot be written here. `packages/workshop-evals` builds on this toolkit but adds a live model, so
+anything requiring inference belongs there instead of here.
+[`docs/integration-testing.md`](../../docs/integration-testing.md) has the full comparison; read it
+before starting a suite or adding a capability, so you do not rebuild one that already exists.
+
 ## The toolkit
 
 Four source-only entry points, consumed both by the tests here and by per-vendor suites in repos that

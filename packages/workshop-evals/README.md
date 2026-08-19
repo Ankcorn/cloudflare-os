@@ -32,6 +32,12 @@ the second.
 Evals are never part of `pnpm test`: they cost real inference and take minutes per trial. Only the
 unit tests in `src/` and `tasks/` run there.
 
+This package owns the model-in-the-loop layer and nothing below it. The harness, the RPC client, and
+the agent-session driver all come from `packages/integration-tests`; anything that can be pinned
+*without* a model belongs there (or, if it needs Durable Object internals, in
+`workshop-backend/__integration__`) where it is deterministic and runs on every commit.
+[`docs/integration-testing.md`](../../docs/integration-testing.md) compares all four suites.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WORKSHOP_EVAL_MODELS` | GLM 5.2, Kimi K2.7 Code | Comma-separated agent models |

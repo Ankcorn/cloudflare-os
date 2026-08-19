@@ -3,6 +3,13 @@ import { AgentSession } from "../src/agent-session.js";
 import { startHarness, type Harness, type WorkerConfig } from "../src/harness.js";
 import { DURABLE_NOTES_SERVER, OVERSELLING_DESK_SERVER } from "../fixtures/seeded-gadgets.js";
 
+// Scope: a *Gadget facet* restarting, which is what happens on every code change, and whether an
+// application's own state survives it. The neighbouring concern -- a whole Durable Object resetting
+// under the platform, and whether an API session recovers -- is covered in
+// `workshop-backend/__integration__`, which runs in-process and can therefore abort a specific object
+// through `cloudflare:test`. Neither mechanism is reachable from the other's runtime, so the split is
+// deliberate rather than duplication.
+
 // Seeded gadgets never call a model, but AgentSession.create() selects one from listModels(), which
 // is empty unless the Workshop believes a gateway is configured. These values are never dialled.
 function offlineModelConfig(config: WorkerConfig): void {
