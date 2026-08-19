@@ -7,7 +7,10 @@ import {
 } from "@gadgets/mcp-shared/account";
 import { McpAccount } from "../src/portal.js";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("McpAccount configuration revision", () => {
   it("records the current revision before handing an OAuth attempt to its callback", async () => {
@@ -128,5 +131,44 @@ describe("McpAccount configuration revision", () => {
     env.MCP_PORTAL_AUTH = "oauth";
     env.MCP_PORTAL_URL = "https://replacement.example.com/mcp";
     expect(account.allowsOAuthCallback(oauthServer)).toBe(false);
+  });
+
+  it("rejects and cleans an OAuth callback after the deployment repoints the portal", async () => {
+    const nonce = "n".repeat(64);
+    const values = new Map<string, unknown>([
+      ["nonce", { value: nonce, expiresAt: Date.now() + 60_000, stage: "oauth" }],
+      ["pendingAuth", { generation: 1 }],
+      ["oauthVerifier", "verifier"],
+      ["server", {
+        endpoint: "https://old.example.com/mcp",
+        serverId: "portal",
+        serverName: "Portal",
+        provenance: "deployment",
+        auth: "oauth",
+      } satisfies ConnectedServer],
+    ]);
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    vi.stubGlobal("fetch", fetch);
+    const account = new McpAccount({
+      id: { toString: () => "account" },
+      storage: {
+        kv: {
+          get: (key: string) => values.get(key),
+          put: (key: string, value: unknown) => values.set(key, value),
+          delete: (key: string) => values.delete(key),
+        },
+      },
+      exports: {},
+    } as never, {
+      MCP_PORTAL_URL: "https://new.example.com/mcp",
+      MCP_PORTAL_AUTH: "oauth",
+    } as never);
+
+    await expect(account.acceptAuthCode("code", nonce)).resolves.toBe(false);
+
+    expect(values.has("nonce")).toBe(false);
+    expect(values.has("pendingAuth")).toBe(false);
+    expect(values.has("oauthVerifier")).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });
