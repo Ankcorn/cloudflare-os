@@ -5462,9 +5462,21 @@ function ChatInterface({
     };
   }, [overseer]);
 
-  // Patch cached chat messages on action upserts.
+  const [autoApprovalInvalidations, setAutoApprovalInvalidations] =
+    useState<ReadonlyMap<number, number>>(new Map());
+
+  // Patch cached chat messages and reconcile auto-approval state on workspace-wide action upserts.
   useActionEntries(overseer, (record) => {
     if (applyActionLogUpdateToCachedMessages(record)) scheduleUpdate();
+    if (record.type === "action" && record.invalidationReason && record.gatekeeperId !== undefined) {
+      const gatekeeperId = record.gatekeeperId;
+      setAutoApprovalInvalidations(previous => {
+        if (record.id <= (previous.get(gatekeeperId) ?? -1)) return previous;
+        const next = new Map(previous);
+        next.set(gatekeeperId, record.id);
+        return next;
+      });
+    }
   });
 
   // Reset per-chat UI state when selectedChatId changes
@@ -5874,21 +5886,6 @@ function ChatInterface({
     { actionId: number; gatekeeperId: number; resourceTitle: string;
       actionKind: ActionKind; actionLabel: string } | null
   >(null);
-
-  const autoApprovalInvalidations = useMemo(() => {
-    const invalidations = new Map<number, number>();
-    for (const message of currentMessages ?? []) {
-      const log = message.type === "action" ? message.actionLog : undefined;
-      if (log?.type !== "action" || !log.invalidationReason || log.gatekeeperId === undefined) {
-        continue;
-      }
-      invalidations.set(
-        log.gatekeeperId,
-        Math.max(message.actionId, invalidations.get(log.gatekeeperId) ?? -1),
-      );
-    }
-    return invalidations;
-  }, [currentMessages]);
 
   // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
   // server applies the now-eligible pending action(s) via its drain, and the action state flips to
