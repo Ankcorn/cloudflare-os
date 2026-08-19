@@ -3,7 +3,9 @@ import appointmentDesk from "./appointment-desk.task.js";
 import expenseLedger from "./expense-ledger.task.js";
 import orgChart from "./org-chart.task.js";
 import pantryKitchen from "./pantry-kitchen.task.js";
+import projectDoc from "./project-doc.task.js";
 import spacedRepetition from "./spaced-repetition.task.js";
+import stockLedger from "./stock-ledger.task.js";
 import timeTracker from "./time-tracker.task.js";
 
 /**
@@ -18,7 +20,9 @@ export const evalTasks: readonly EvalTask[] = [
   expenseLedger,
   orgChart,
   pantryKitchen,
+  projectDoc,
   spacedRepetition,
+  stockLedger,
   timeTracker,
 ];
 

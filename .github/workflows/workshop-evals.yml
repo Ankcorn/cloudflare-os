@@ -47,6 +47,11 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
+      # Workers AI rate-limits per account, and every shard runs an agent that makes many model
+      # calls per turn. Running all twelve jobs at once earns a wall of 429s, which the scorer
+      # correctly leaves unscored -- so the run completes having measured almost nothing. Cap the
+      # concurrency instead; raise it only against a measured limit for the account in use.
+      max-parallel: 4
       matrix:
         expectation: [required, frontier]
         # A trial builds a whole application, so it costs minutes, not seconds: the tasks in this

@@ -82,17 +82,28 @@ describe("ChecksScorer", () => {
     expect(result.score).toBeCloseTo(2 / 3, 10);
   });
 
-  it("declines to score a run whose agent never made a tool call", async () => {
-    const value = output([{ id: "a", pass: false }]);
-    value.diagnostics = { toolCalls: 0, toolErrors: [], agentErrors: ["401"], harnessWarnings: [] };
+  it("declines to score a failing run whose turn ended with an error", async () => {
+    const value = output([{ id: "a", pass: true }, { id: "b", pass: false }]);
+    value.diagnostics = {
+      toolCalls: 12, toolErrors: [],
+      agentErrors: ["Stream ended without finish_reason"], harnessWarnings: [],
+    };
     const result = await assess(value);
     expect(result.score).toBeNull();
-    expect(result.metadata?.rationale).toContain("never ran");
+    expect(result.metadata?.rationale).toContain("cannot be attributed");
   });
 
-  it("still scores a run that errored after doing work", async () => {
+  it("scores a run that hit a transient error and still delivered", async () => {
+    const value = output([{ id: "a", pass: true }]);
+    value.diagnostics = {
+      toolCalls: 9, toolErrors: [], agentErrors: ["500 status code (no body)"], harnessWarnings: [],
+    };
+    expect((await assess(value)).score).toBe(1);
+  });
+
+  it("scores a failing run that ended cleanly, which is a real capability failure", async () => {
     const value = output([{ id: "a", pass: false }]);
-    value.diagnostics = { toolCalls: 4, toolErrors: [], agentErrors: ["gave up"], harnessWarnings: [] };
+    value.diagnostics = { toolCalls: 9, toolErrors: [], agentErrors: [], harnessWarnings: [] };
     expect((await assess(value)).score).toBe(0);
   });
 

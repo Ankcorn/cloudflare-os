@@ -1,7 +1,7 @@
 import type { RpcCompatible, RpcStub } from "capnweb";
 import type {
   AiChatMessage, AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiChatAuthorInfo,
-  AuthenticatedApi, CodeSubscriber, CodeUpdate, GadgetClient, Overseer, PublicApi,
+  AuthenticatedApi, CodeSubscriber, CodeUpdate, GadgetClient, OutputFormatOffer, Overseer, PublicApi,
   WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
 import * as Y from "yjs";
@@ -9,7 +9,7 @@ import {
   AgentTurnCompletion, buildSourceSnapshot, loadAllChatHistory,
 } from "./agent-session-internals.js";
 import type { SourceSnapshot } from "./agent-session-internals.js";
-import { RpcTarget, connect, nextUsernames, signUp, stubFor } from "./rpc-client.js";
+import { RpcTarget, connect, nextUsernames, signUp, stubFor, waitFor } from "./rpc-client.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_SETTLE_DEBOUNCE_MS = 500;
@@ -271,6 +271,99 @@ export class AgentSession implements Disposable {
       throw new Error("The session has no chat branch yet");
     }
     return connectTyped<Session>(gadget, branch === "chat" ? this.#chatId : undefined);
+  }
+
+  /**
+   * Wait until the deployment's standard output formats are installed.
+   *
+   * Installation is fire-and-forget on the first `/api` request — the same request that opens this
+   * session — so a turn started immediately can race it and get a system prompt with no formats
+   * section, silently changing what the agent is told it can instantiate.
+   */
+  async waitForOutputFormats(): Promise<OutputFormatOffer[]> {
+    this.#assertUsable();
+    return waitFor(
+        "the output formats to install (is workshop-backend built? see its README)", async () => {
+      const offers = await this.#authenticatedApi.listOutputFormats();
+      return offers.length > 0 ? offers : null;
+    });
+  }
+
+  /**
+   * Create a gadget with hand-written source, bypassing the agent entirely.
+   *
+   * For tests that need a known implementation — a deliberately broken one to prove an assertion
+   * can fail, or a deliberately correct one to measure the platform rather than the model. The
+   * gadget is permanent rather than provisional to a chat, so connect to it on the accepted branch.
+   *
+   * `files` must contain `server.js` exporting a Durable Object class named `Gadget`; only `.js`
+   * entries become worker modules.
+   */
+  async seedGadget(spec: {
+    title: string;
+    bindingName: string;
+    files: Record<string, string>;
+  }): Promise<WorkpieceId> {
+    this.#assertUsable();
+    using gadget = await this.#overseer.createGadget(spec.title, undefined, spec.bindingName);
+    const id = await gadget.getId();
+    // The server owns the files root, so read it back rather than re-deriving the naming rule.
+    const filesRoot = await waitFor(`workpiece ${id} to publish its files root`, async () =>
+      this.#workpieceSubscriber.entries.get(id)?.filesRoot ?? null);
+
+    const doc = new Y.Doc();
+    const subscriber = new SourceSubscriber(doc);
+    using subscriberStub = stubFor(subscriber);
+    let subscription: RpcStub<{}> | undefined;
+    const updates: Uint8Array[] = [];
+    const collect = (update: Uint8Array) => { updates.push(update); };
+    try {
+      // Sync the doc before writing. A write from an unsynced doc is a concurrent Y.Map set that
+      // resolves by client ID, i.e. a coin flip; a write from a synced one carries a causal delete
+      // of the existing entry and deterministically wins.
+      subscription = await this.#overseer.subscribeToCode(subscriberStub);
+      await subscriber.readyPromise;
+      doc.on("updateV2", collect);
+      doc.transact(() => {
+        const root = doc.getMap<Y.Text>(filesRoot);
+        for (const [name, content] of Object.entries(spec.files)) {
+          const text = new Y.Text();
+          text.insert(0, content);
+          root.set(name, text);
+        }
+      });
+      doc.off("updateV2", collect);
+      if (updates.length === 0) throw new Error("Seeding a gadget produced no code update");
+      // updateCode bumps the workspace code version, which both aborts the facet and changes the
+      // Worker Loader cache key, so the next connect loads exactly what was just written.
+      await this.#overseer.updateCode(Y.mergeUpdatesV2(updates));
+      return id;
+    } finally {
+      doc.off("updateV2", collect);
+      subscription?.[Symbol.dispose]();
+      doc.destroy();
+    }
+  }
+
+  /**
+   * Abruptly restart every Gadget server in this workspace, as the platform itself does whenever
+   * code changes. Storage is preserved; in-memory state is discarded.
+   *
+   * Existing gadget stubs are invalidated and throw on their next call, so callers must reconnect —
+   * which is also how a caller proves the restart really happened rather than silently no-opping.
+   *
+   * Implemented as an empty update to the mainline code, which advances the workspace's code
+   * version. That is what forces the restart, and it is also why this must not be called *between*
+   * turns of a multi-turn conversation: the agent stamps the code version it observed onto its
+   * history and rejects an inconsistent one on replay. Call it within the final turn, or in a
+   * single-turn task.
+   */
+  async restartGadgets(): Promise<void> {
+    this.#assertUsable();
+    if (this.#turn !== undefined) {
+      throw new Error("Cannot restart gadgets while an agent turn is running");
+    }
+    await this.#overseer.updateCode(Y.encodeStateAsUpdateV2(new Y.Doc()));
   }
 
   /** Merge the current provisional chat branch and return its accepted source snapshot. */

@@ -40,6 +40,11 @@ unit tests in `src/` and `tasks/` run there.
 | `WORKSHOP_EVAL_SHARD` | unset | `2/4` to run one quarter of the runs, for CI fan-out |
 | `WORKSHOP_EVAL_WAI_DIRECT` | unset | `true` bypasses Gateway routing for a local smoke run |
 
+Workers AI rate-limits per account, and one trial makes many model calls. Runs back to back, or many
+shards at once, earn `429`s; the CI workflow caps shard concurrency for this reason. A rate-limited
+trial is left unscored rather than counted as a failure, so it shows up in the summary's **Invalid**
+column — if that column is high, the run measured less than it appears to.
+
 `WORKSHOP_EVAL_WAI_DIRECT=true` lets a Wrangler OAuth token drive a run without Gateway permissions.
 It also gives up log collection, so token, time, and cost come back marked incomplete and the
 summary says so rather than reporting zeros as though they were measurements.
@@ -97,10 +102,11 @@ What makes a task work:
 `frontier` records the score and never fails, which is how a task for capability the agent does not
 have yet lives in the suite without turning the build permanently red.
 
-Tier from measurement, never from a guess. A task belongs in `required` once it has passed every
-trial that actually ran, and drops to `frontier` when it does not — with the observed failure written
-into its doc comment, so the next person knows what to look for rather than re-deriving it. Every
-tier here was set this way; §Baseline records the evidence.
+Tier from measurement, never from a guess. A new task starts in `frontier`, because nothing is known
+about it yet and an unmeasured task must not be able to break the build. It is promoted once a
+baseline shows it passing, and demoted again if it stops — with the observed failure written into its
+doc comment, so the next person knows what to look for rather than re-deriving it. Every tier here
+was set this way; §Baseline records the evidence.
 
 Multi-turn tasks take more than one entry in `turns`, sharing one workspace and one chat. The
 interesting thing to assert in a later turn is that the *earlier* turn's contract still holds —
@@ -125,9 +131,13 @@ Reading list      @cf/zai-org/glm-5.2          2/3   [21, 94]  0.83   61.7k     
   baseline run surfaced one this way: `executeCode` importing `node:assert`, which the sandbox has
   no module for.
 - **Invalid** counts trials that produced no usable result. They are excluded from every rate above,
-  so infrastructure trouble reads as missing data rather than as a bad model. A run whose agent
-  errored without ever calling a tool — an expired token, a provider outage — is unscored for the
-  same reason, rather than counted as a zero. Trouble *after* the
+  so infrastructure trouble reads as missing data rather than as a bad model. A *failing* trial
+  whose turn ended with an error is unscored for the same reason: the platform posts an error when
+  the turn dies — a cut stream, a rate limit, a restart mid-turn — and never for running out of
+  turns or giving up, so it is almost always infrastructure, and its failures cannot be pinned on the
+  agent. A trial that passed despite an error is scored normally, since the agent evidently
+  delivered. Watch `agentErrorRate` alongside **Invalid**: both climbing means the run measured less
+  than it looks like it did. Trouble *after* the
   last check — a Gateway hiccup, a failed source write — does not invalidate a trial whose verdict
   was already known; it lands in `diagnostics.harnessWarnings` and, for telemetry, drops that trial
   out of the token/time/cost columns.
@@ -148,6 +158,8 @@ them. Thin evidence — enough to tier honestly, not enough to compare models.
 | `spaced-repetition` | 1 | passes — full SM-2 trace including the 1.3 ease floor |
 | `org-chart` | 2 | passes |
 | `time-tracker` | 3 | **1 of 3.** Closed instead of half-open intervals; duplicate id accepted |
+| `stock-ledger` | 0 | not yet measured — added with the durability checks |
+| `project-doc` | 0 | not yet measured — added with the standard-format path |
 
 Two things worth knowing about how that baseline was reached, because both shaped the design:
 
@@ -158,6 +170,28 @@ Two things worth knowing about how that baseline was reached, because both shape
 - The one `expense-ledger` failure in the first run was a bug in the *task*, not the agent: a
   redundant relational assertion whose algebra was simply wrong, sitting next to correct constants.
   A task's arithmetic deserves its own reference check before it is believed.
+
+## Durability
+
+`verifier.restart()` abruptly restarts every Gadget server in the workspace, exactly as the platform
+does whenever code changes — which is to say, constantly, not only when something goes wrong. Storage
+survives; memory does not. `tasks/stock-ledger.task.ts` uses it to ask whether an app's state was
+really persisted, restarting between appends, immediately after one, and in the middle of an
+unfinished write.
+
+The mechanism is worth understanding before relying on it:
+
+- **A restart invalidates every existing stub.** Reconnect after calling it; a task that holds a stub
+  across the call will see the next method throw. That is also the only honest way to prove a restart
+  happened, which is why `stock-ledger` checks it explicitly before the durability checks that depend
+  on it — a restart that silently did nothing would make all of them pass for free.
+- **Only call it from a task's final turn.** It advances the workspace code version, and an agent
+  replaying its history in a later turn rejects a version it did not observe.
+- The same behaviour is pinned deterministically, with no model involved, in
+  `packages/integration-tests/__tests__/gadget-durability.test.ts`, which seeds a Gadget with
+  hand-written source through `AgentSession.seedGadget()`. That file also pins the premise
+  `appointment-desk` depends on: a deliberately naive check-then-write booking implementation really
+  does oversell under concurrent calls here, so the overselling check can fail.
 
 ## What this does not do
 

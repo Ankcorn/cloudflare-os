@@ -101,6 +101,10 @@ export function createWorkshopHarness(task: EvalTask) {
           timeoutMs: agentTurnTimeoutMs(task.turns.length),
         });
         disposable = session;
+        // Before the first prompt, so the agent's system prompt reliably carries the deployment's
+        // standard output formats rather than racing their fire-and-forget install.
+        await session.waitForOutputFormats();
+
         const turns: EvalTurnResult[] = [];
         let history: readonly AiChatMessage[] = [];
         let workpieces: readonly WorkpieceSummary[] = [];

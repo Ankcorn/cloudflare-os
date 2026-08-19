@@ -14,19 +14,24 @@ export const ChecksScorer = createJudge<EvalRunInput, EvalRunOutput>("checks", (
   if (checks.length === 0) {
     return { score: null, metadata: { rationale: `task ${output.taskId} recorded no checks` } };
   }
-  // An agent that errored without ever calling a tool never got going -- an expired token, a
-  // provider outage. Scoring that as zero would blame the agent for infrastructure and quietly
-  // drag down the pass rate; an unscored trial is counted as invalid instead.
-  if (output.diagnostics.toolCalls === 0 && output.diagnostics.agentErrors.length > 0) {
+  const failed = checks.filter(check => !check.pass);
+  // An error posted into chat history means the turn died rather than finishing: the model stream
+  // was cut, the provider refused, the server restarted mid-turn. The platform does not post one for
+  // running out of turns or for giving up, so these are almost always infrastructure.
+  //
+  // It only confounds the result when the trial also failed, because then it is impossible to say
+  // whether the agent or the outage caused it — so that trial is left unscored, and shows up as
+  // invalid. A trial that passed regardless is scored normally: the agent evidently delivered.
+  if (failed.length > 0 && output.diagnostics.agentErrors.length > 0) {
     return {
       score: null,
       metadata: {
-        rationale: "the agent made no tool calls and reported an error, so it never ran",
+        rationale: "the turn ended with an error, so its failures cannot be attributed to the agent",
         agentErrors: output.diagnostics.agentErrors,
+        failed: failed.map(check => check.id),
       },
     };
   }
-  const failed = checks.filter(check => !check.pass);
   return {
     score: (checks.length - failed.length) / checks.length,
     metadata: {
