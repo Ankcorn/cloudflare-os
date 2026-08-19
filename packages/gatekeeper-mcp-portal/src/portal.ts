@@ -315,7 +315,7 @@ export class McpAccount extends McpAccountBase<Env> {
       return outcome;
     } finally {
       if (revision !== undefined) {
-        const remaining = (this.#connectingRevisions.get(revision) ?? 1) - 1;
+        const remaining = this.#connectingRevisions.get(revision)! - 1;
         if (remaining === 0) this.#connectingRevisions.delete(revision);
         else this.#connectingRevisions.set(revision, remaining);
       }
@@ -332,16 +332,11 @@ export class McpAccount extends McpAccountBase<Env> {
     const revision = await this.#configurationRevision(config);
     const previous = this.ctx.storage.kv.get<string>("portalConfigRevision");
     const reconnectingToCurrentRevision = this.#connectingRevisions.has(revision);
-    if (previous === undefined) {
+    if (!reconnectingToCurrentRevision && previous !== revision) {
       // Existing token accounts predate the revision marker. Their cached session may have been
       // minted under a different configured token, so invalidate it once before establishing the
       // current revision as the baseline. New connects record the revision in `beginConnect()`.
-      if (!reconnectingToCurrentRevision) {
-        if (server.auth === "token") this.invalidateConnectionState();
-        this.ctx.storage.kv.put("portalConfigRevision", revision);
-      }
-    } else if (previous !== revision && !reconnectingToCurrentRevision) {
-      this.invalidateConnectionState();
+      if (previous !== undefined || server.auth === "token") this.invalidateConnectionState();
       this.ctx.storage.kv.put("portalConfigRevision", revision);
     }
     return super.getConnection(endpoint);

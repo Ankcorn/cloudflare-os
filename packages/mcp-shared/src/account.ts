@@ -327,9 +327,8 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     const generation = this.advanceConnectionGeneration();
     if (existing) this.ctx.storage.kv.delete("mcpSessionId");
     const endpointChanged = existing !== undefined && existing.endpoint !== server.endpoint;
-    const credentialAuthorityChanged = existing !== undefined && existing.auth !== server.auth &&
-      (existing.auth === "token" || server.auth === "token" ||
-        (existing.auth === "oauth" && server.auth === "none"));
+    const clearCredentialsOnCommit = existing !== undefined && !endpointChanged &&
+      existing.auth !== server.auth && !(existing.auth === "none" && server.auth === "oauth");
     const clearCredentials = () => {
       for (const key of [
         "tokens", "oauthClient", "oauthDiscovery", "oauthVerifier", "pendingAuth",
@@ -381,7 +380,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       // token from every later request. Only an endpoint that answered with no credential at all is.
       const connected: ConnectedServer =
         server.auth === "token" ? server : { ...server, auth: "none" };
-      if (credentialAuthorityChanged && !endpointChanged) clearCredentials();
+      if (clearCredentialsOnCommit) clearCredentials();
       this.ctx.storage.kv.put("server", connected);
       await this.complete(connected, info, generation);
       log.info("connected without authorization", { event: "connect.completed" });
@@ -415,7 +414,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       // mode because `getAuthorization()` uses it to decide whether to read the tokens the callback
       // stores.
       const oauthServer: ConnectedServer = { ...server, auth: "oauth" };
-      if (credentialAuthorityChanged && !endpointChanged) clearCredentials();
+      if (clearCredentialsOnCommit) clearCredentials();
       this.ctx.storage.kv.put("server", oauthServer);
       try {
         return await this.beginOAuth(oauthServer, err.resourceMetadataUrl, generation);

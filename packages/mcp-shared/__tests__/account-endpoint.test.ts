@@ -34,12 +34,8 @@ class InterleavingAccount extends McpAccountBase<AccountEnv> {
     return await new Promise<never>((_resolve, reject) => { this.#rejectProbe = reject; });
   }
 
-  failProbe(): void {
-    this.#rejectProbe?.(new Error("stop test probe"));
-  }
-
-  challengeProbe(): void {
-    this.#rejectProbe?.(new McpAuthRequiredError("authorization required", null));
+  rejectProbe(reason = new Error("stop test probe")): void {
+    this.#rejectProbe?.(reason);
   }
 
   isWaiting(nonce: string): boolean {
@@ -150,7 +146,7 @@ describe("connect initiation nonce", () => {
     await expect(account.beginConnect(nonce, server("https://a.example/mcp")))
       .resolves.toEqual({ kind: "invalid" });
 
-    account.failProbe();
+    account.rejectProbe();
     await expect(first).rejects.toThrow("stop test probe");
     // The request still owns the claim, so a transient failure reopens the already-rendered form.
     expect(account.isWaiting(nonce)).toBe(true);
@@ -186,7 +182,7 @@ describe("connect initiation nonce", () => {
     await expect(account.getConnection("https://old.example/mcp"))
       .rejects.toThrow(/account is now connected to new\.example/);
 
-    account.failProbe();
+    account.rejectProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
   });
 
@@ -209,7 +205,7 @@ describe("connect initiation nonce", () => {
     expect(credentialsExpired).not.toHaveBeenCalled();
     expect(context.storage.kv.get<ConnectedServer>("server")).toEqual(connected);
 
-    account.failProbe();
+    account.rejectProbe();
     await expect(reconnect).rejects.toThrow("stop test probe");
     await expect(account.getConnection(connected.endpoint))
       .resolves.toMatchObject({ authorization: null });
@@ -295,7 +291,7 @@ describe("connect initiation nonce", () => {
     const pendingAuth = { generation: 3 };
     context.storage.kv.put("pendingAuth", pendingAuth);
     context.storage.kv.put("oauthVerifier", "new-verifier");
-    account.challengeProbe();
+    account.rejectProbe(new McpAuthRequiredError("authorization required", null));
 
     await expect(first).rejects.toThrow(/replaced by a newer/);
     expect(context.storage.kv.get("server")).toEqual(connected);
@@ -319,7 +315,7 @@ describe("connect initiation nonce", () => {
       old.endpoint, connection.generation, connection.sessionId, "old-session");
     expect(context.storage.kv.get("mcpSessionId")).toBeUndefined();
 
-    account.failProbe();
+    account.rejectProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
   });
 
@@ -382,7 +378,7 @@ describe("connect initiation nonce", () => {
     await expect(refreshing).rejects.toThrow(/previous MCP connection|connection changed/);
     expect(context.storage.kv.get("tokens")).toBeUndefined();
 
-    account.failProbe();
+    account.rejectProbe();
     await expect(repoint).rejects.toThrow("stop test probe");
   });
 
