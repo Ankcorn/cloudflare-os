@@ -2,10 +2,8 @@
 // database; claims are persisted before external I/O so an interrupted write is never replayed.
 
 import {
-  ACTION_INVALIDATED_ERROR_CODE,
-  createActionInvalidatedError,
-  createActionRestageRequiredError,
-  getActionRestageRequiredReason,
+  createActionDispatchStoppedError,
+  getActionDispatchStopped,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { callMayHaveTakenEffect, type McpClient, type McpToolCallResult } from "./client.js";
 import type { McpLog } from "./log.js";
@@ -26,7 +24,6 @@ type ActionRow = {
   submitted_at: number;
   policy_fingerprint: string | null;
   connection_generation: number | null;
-  dispatched: number | null;
   claimed_at: number | null;
   retryable: number | null;
   result_json: string | null;
@@ -42,7 +39,6 @@ function fromRow(row: ActionRow): StoredAction {
     submittedAt: row.submitted_at,
     policyFingerprint: row.policy_fingerprint ?? undefined,
     connectionGeneration: row.connection_generation ?? undefined,
-    dispatched: row.dispatched === null ? undefined : row.dispatched === 1,
     claimedAt: row.claimed_at ?? undefined,
     retryable: row.retryable === null ? undefined : row.retryable === 1,
     result: row.result_json
@@ -57,19 +53,8 @@ export const APPLY_OUTCOME_UNKNOWN_MESSAGE =
   "This call was interrupted after it had been sent, so it may or may not have taken effect. " +
   "Check the server before trying it again.";
 
-/** The approved tool or account policy changed before dispatch, so the action must be restaged. */
-export class ActionInvalidatedError extends Error {
-  /** Stable code retained when this error crosses the gatekeeper RPC boundary. */
-  readonly errorCode = ACTION_INVALIDATED_ERROR_CODE;
-  /** Human-readable reason stored separately from the serialized discriminator. */
-  readonly reason: string;
-
-  constructor(reason: string) {
-    super(createActionInvalidatedError(reason).message);
-    this.name = "ActionInvalidatedError";
-    this.reason = reason;
-  }
-}
+const APPLY_NOT_DISPATCHED_MESSAGE =
+  "This call was interrupted before it was sent. Try applying it again.";
 
 /** Stores queued MCP actions in one facet-local SQLite table. */
 export class ActionStore {
@@ -85,7 +70,6 @@ export class ActionStore {
       submitted_at INTEGER NOT NULL,
       policy_fingerprint TEXT,
       connection_generation INTEGER,
-      dispatched INTEGER CHECK (dispatched IS NULL OR dispatched IN (0, 1)),
       claimed_at INTEGER,
       retryable INTEGER CHECK (retryable IS NULL OR retryable IN (0, 1)),
       result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
@@ -102,21 +86,45 @@ export class ActionStore {
     if (!columns.has("connection_generation")) {
       sql.exec("ALTER TABLE mcp_actions ADD COLUMN connection_generation INTEGER");
     }
-    if (!columns.has("dispatched")) {
-      sql.exec("ALTER TABLE mcp_actions ADD COLUMN dispatched INTEGER");
-    }
+    sql.exec(`CREATE TABLE IF NOT EXISTS mcp_action_store_meta (
+      version INTEGER NOT NULL
+    ) STRICT`);
+    const version = sql.exec<{ version: number }>(
+      "SELECT version FROM mcp_action_store_meta LIMIT 1").toArray()[0]?.version ?? 0;
     // A fresh store means a fresh Durable Object activation. Any persisted claim belonged to an
     // interrupted prior activation and must never be replayed because the write may have landed.
-    sql.exec(
-      `UPDATE mcp_actions SET state = 'failed', retryable = 0, error = ?
-       WHERE state = 'applying' AND dispatched IS NOT 0`,
-      APPLY_OUTCOME_UNKNOWN_MESSAGE,
-    );
-    sql.exec(
-      `UPDATE mcp_actions SET state = 'failed', retryable = 1,
-         error = 'This call was interrupted before it was sent. Try applying it again.'
-       WHERE state = 'applying' AND dispatched = 0`,
-    );
+    if (version === 0) {
+      if (columns.has("dispatched")) {
+        sql.exec(
+          `UPDATE mcp_actions SET state = 'failed', retryable = 0, error = ?
+           WHERE state = 'applying' AND dispatched IS NOT 0`,
+          APPLY_OUTCOME_UNKNOWN_MESSAGE,
+        );
+        sql.exec(
+          `UPDATE mcp_actions SET state = 'failed', retryable = 1, error = ?
+           WHERE state = 'applying' AND dispatched = 0`,
+          APPLY_NOT_DISPATCHED_MESSAGE,
+        );
+      } else {
+        sql.exec(
+          `UPDATE mcp_actions SET state = 'failed', retryable = 0, error = ?
+           WHERE state = 'applying'`,
+          APPLY_OUTCOME_UNKNOWN_MESSAGE,
+        );
+      }
+      sql.exec("INSERT INTO mcp_action_store_meta (version) VALUES (1)");
+    } else {
+      sql.exec(
+        `UPDATE mcp_actions SET state = 'failed', retryable = 0, error = ?
+         WHERE state = 'applying' AND retryable IS NOT 1`,
+        APPLY_OUTCOME_UNKNOWN_MESSAGE,
+      );
+      sql.exec(
+        `UPDATE mcp_actions SET state = 'failed', retryable = 1, error = ?
+         WHERE state = 'applying' AND retryable = 1`,
+        APPLY_NOT_DISPATCHED_MESSAGE,
+      );
+    }
     this.#prune();
   }
 
@@ -128,15 +136,13 @@ export class ActionStore {
 
   #save(action: StoredAction): void {
     this.#sql.exec(
-      `UPDATE mcp_actions SET state = ?, claimed_at = ?, retryable = ?, result_json = ?, error = ?,
-         dispatched = ?
+      `UPDATE mcp_actions SET state = ?, claimed_at = ?, retryable = ?, result_json = ?, error = ?
        WHERE id = ?`,
       action.state,
       action.claimedAt ?? null,
       action.retryable === undefined ? null : Number(action.retryable),
       action.result === undefined ? null : JSON.stringify(action.result),
       action.error ?? null,
-      action.dispatched === undefined ? null : Number(action.dispatched),
       action.id,
     );
   }
@@ -189,9 +195,8 @@ export class ActionStore {
     stored.state = "failed";
     stored.claimedAt = undefined;
     stored.retryable = false;
-    stored.dispatched = false;
     stored.result = undefined;
-    stored.error = createActionRestageRequiredError(reason).message;
+    stored.error = createActionDispatchStoppedError("restage", reason).message;
     this.#save(stored);
     this.#prune();
   }
@@ -206,12 +211,8 @@ export class ActionStore {
     if (stored.state === "applied") return;
     if (stored.state === "rejected") throw new Error(`MCP action ${id} was already rejected.`);
     if (stored.state === "failed" && stored.retryable === false) {
-      if (stored.dispatched === false) {
-        const restageReason = getActionRestageRequiredReason(new Error(stored.error ?? ""));
-        if (restageReason !== undefined) throw createActionRestageRequiredError(restageReason);
-        throw new ActionInvalidatedError(
-          stored.error ?? "This MCP action became invalid before dispatch.");
-      }
+      const stopped = getActionDispatchStopped(stored.error ?? "");
+      if (stopped) throw createActionDispatchStoppedError(stopped.kind, stopped.reason);
       throw new Error(stored.error ?? `MCP action ${id} cannot be retried.`);
     }
     if (stored.state === "applying") {
@@ -220,34 +221,34 @@ export class ActionStore {
 
     stored.state = "applying";
     stored.claimedAt = Date.now();
-    stored.dispatched = false;
+    stored.retryable = true;
     stored.error = undefined;
     stored.result = undefined;
     this.#save(stored);
 
     let result: McpToolCallResult;
-    let dispatched = false;
+    let crossedDispatchBoundary = false;
     try {
       result = await call(client => {
-        dispatched = true;
-        stored.dispatched = true;
+        crossedDispatchBoundary = true;
+        stored.retryable = false;
         this.#save(stored);
         return client.callTool(stored.toolName, stored.args);
       });
     } catch (err) {
-      if (err instanceof ActionInvalidatedError) {
+      const stopped = getActionDispatchStopped(err);
+      if (stopped) {
         stored.state = "failed";
         stored.retryable = false;
-        stored.dispatched = false;
-        stored.error = err.reason;
+        stored.error = createActionDispatchStoppedError(stopped.kind, stopped.reason).message;
         this.#save(stored);
         this.#prune();
-        log.warn("tool call invalidated before dispatch", {
-          event: "action.apply.invalidated", actionId: id, toolName: stored.toolName, error: err,
+        log.warn("tool call stopped before dispatch", {
+          event: "action.apply.stopped", actionId: id, toolName: stored.toolName, error: err,
         });
-        throw err;
+        throw createActionDispatchStoppedError(stopped.kind, stopped.reason);
       }
-      const mayHaveLanded = dispatched && callMayHaveTakenEffect(err);
+      const mayHaveLanded = crossedDispatchBoundary && callMayHaveTakenEffect(err);
       stored.state = "failed";
       stored.retryable = !mayHaveLanded;
       stored.error = mayHaveLanded

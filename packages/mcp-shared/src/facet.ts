@@ -3,7 +3,7 @@
 
 import { DurableObject, type RpcStub } from "cloudflare:workers";
 import {
-  createActionRestageRequiredError,
+  createActionDispatchStoppedError,
   type ActionKind,
   type ApprovalQueue,
   type Gatekeeper,
@@ -11,11 +11,7 @@ import {
   type ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
-import {
-  ActionInvalidatedError,
-  ActionStore,
-  REVERT_UNSUPPORTED_MESSAGE,
-} from "./action-store.js";
+import { ActionStore, REVERT_UNSUPPORTED_MESSAGE } from "./action-store.js";
 import {
   CATALOG_TTL_MS,
   HydratedTools,
@@ -338,7 +334,7 @@ export abstract class McpFacetBase<
       const reason =
         "This MCP action predates current approval policy checks. Stage the call again.";
       this.#actions().markRestageRequired(action, reason);
-      throw createActionRestageRequiredError(reason);
+      throw createActionDispatchStoppedError("restage", reason);
     }
     return this.#actions().apply(
       action,
@@ -347,16 +343,16 @@ export abstract class McpFacetBase<
           const catalog = await this.catalog(deadline);
           if (stored.connectionGeneration === undefined || stored.policyFingerprint === undefined
               || connectionGeneration !== stored.connectionGeneration) {
-            throw new ActionInvalidatedError(
+            throw createActionDispatchStoppedError("invalidated",
               "This MCP connection changed after approval was requested. Stage the call again.");
           }
           if (!scopeAllows(this.scope, stored.toolName, catalog.isPortal)) {
-            throw new ActionInvalidatedError(
+            throw createActionDispatchStoppedError("invalidated",
               "This MCP tool is no longer allowed by the binding. Stage the call again.");
           }
           const tool = await this.#freshTool(client, stored.toolName, catalog, deadline);
           if (!tool || toolPolicyFingerprint(tool, this.trust) !== stored.policyFingerprint) {
-            throw new ActionInvalidatedError(
+            throw createActionDispatchStoppedError("invalidated",
               "This MCP tool's approval policy changed. Review and stage the call again.");
           }
           return () => fn(client);
@@ -364,7 +360,7 @@ export abstract class McpFacetBase<
         return dispatch();
       }, { retryOnExpiry: false }).catch(error => {
         if (error instanceof McpConnectionChangedError) {
-          throw new ActionInvalidatedError(
+          throw createActionDispatchStoppedError("invalidated",
             "This MCP connection changed after approval was requested. Stage the call again.");
         }
         throw error;

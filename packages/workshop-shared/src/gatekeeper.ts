@@ -18,57 +18,36 @@
 
 import type { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 
-/** Stable RPC error code thrown when an approved action became invalid before dispatch. */
-export const ACTION_INVALIDATED_ERROR_CODE = "GATEKEEPER_ACTION_INVALIDATED";
+/** Why an approved action stopped before dispatch. */
+export type ActionDispatchStopped = {
+  /** Whether current authority changed or an older action lacks the snapshot needed to prove it. */
+  kind: "invalidated" | "restage";
+  /** Human-readable explanation shown to the user. */
+  reason: string;
+};
 
-const ACTION_INVALIDATED_ERROR_PREFIX = `${ACTION_INVALIDATED_ERROR_CODE}: `;
+const ACTION_DISPATCH_STOPPED_PREFIX = "GATEKEEPER_ACTION_DISPATCH_STOPPED:";
 
-function codedActionErrorReason(
-    error: unknown, code: string, prefix: string): string | undefined {
-  const candidate = typeof error === "object" && error !== null && "errorCode" in error
-    ? error.errorCode
-    : undefined;
-  const message = typeof error === "object" && error !== null && "message" in error
-      && typeof error.message === "string"
-    ? error.message
-    : undefined;
-  return message?.startsWith(prefix) ? message.slice(prefix.length)
-    : candidate === code ? message : undefined;
+/** Creates a dispatch-stopped error whose kind survives Workers RPC error serialization. */
+export function createActionDispatchStoppedError(
+    kind: ActionDispatchStopped["kind"], reason: string): Error {
+  return new Error(`${ACTION_DISPATCH_STOPPED_PREFIX}${kind}: ${reason}`);
 }
 
-/** Creates an invalidation error whose discriminator survives Workers RPC error serialization. */
-export function createActionInvalidatedError(reason: string): Error & {
-  errorCode: typeof ACTION_INVALIDATED_ERROR_CODE;
-} {
-  return Object.assign(new Error(`${ACTION_INVALIDATED_ERROR_PREFIX}${reason}`), {
-    errorCode: ACTION_INVALIDATED_ERROR_CODE,
-  } as const);
-}
-
-/** Reads an invalidation reason from a local coded error or its message-only RPC representation. */
-export function getActionInvalidationReason(error: unknown): string | undefined {
-  return codedActionErrorReason(
-    error, ACTION_INVALIDATED_ERROR_CODE, ACTION_INVALIDATED_ERROR_PREFIX);
-}
-
-/** Stable RPC error code thrown when an old queued action lacks an approval-policy snapshot. */
-export const ACTION_RESTAGE_REQUIRED_ERROR_CODE = "GATEKEEPER_ACTION_RESTAGE_REQUIRED";
-
-const ACTION_RESTAGE_REQUIRED_ERROR_PREFIX = `${ACTION_RESTAGE_REQUIRED_ERROR_CODE}: `;
-
-/** Creates a restage-required error whose discriminator survives Workers RPC serialization. */
-export function createActionRestageRequiredError(reason: string): Error & {
-  errorCode: typeof ACTION_RESTAGE_REQUIRED_ERROR_CODE;
-} {
-  return Object.assign(new Error(`${ACTION_RESTAGE_REQUIRED_ERROR_PREFIX}${reason}`), {
-    errorCode: ACTION_RESTAGE_REQUIRED_ERROR_CODE,
-  } as const);
-}
-
-/** Reads a restage-required reason from a local coded error or its message-only RPC form. */
-export function getActionRestageRequiredReason(error: unknown): string | undefined {
-  return codedActionErrorReason(
-    error, ACTION_RESTAGE_REQUIRED_ERROR_CODE, ACTION_RESTAGE_REQUIRED_ERROR_PREFIX);
+/** Reads a dispatch-stopped result from a local error, RPC error, or persisted message. */
+export function getActionDispatchStopped(error: unknown): ActionDispatchStopped | undefined {
+  const message = typeof error === "string" ? error
+    : typeof error === "object" && error !== null && "message" in error
+        && typeof error.message === "string"
+      ? error.message
+      : undefined;
+  if (!message?.startsWith(ACTION_DISPATCH_STOPPED_PREFIX)) return undefined;
+  const encoded = message.slice(ACTION_DISPATCH_STOPPED_PREFIX.length);
+  const separator = encoded.indexOf(": ");
+  if (separator < 0) return undefined;
+  const kind = encoded.slice(0, separator);
+  if (kind !== "invalidated" && kind !== "restage") return undefined;
+  return { kind, reason: encoded.slice(separator + 2) };
 }
 
 /**
@@ -864,10 +843,12 @@ export interface Gatekeeper<Session> extends DurableObject {
    * If this throws an exception, the user will be informed that the action failed and given the
    * opportunity to retry or discard.
    *
-   * If policy or authority changed after approval but before dispatch, throw an error created by
-   * `createActionInvalidatedError()`. New Workshop versions record that distinct terminal outcome;
-   * old versions leave the action pending rather than recording a write that was never dispatched
-   * as approved.
+   * If policy or authority changed after approval but before dispatch, throw an `"invalidated"`
+   * error created by `createActionDispatchStoppedError()`. New Workshop versions record that
+   * distinct terminal outcome; old versions leave the action pending rather than recording a write
+   * that was never dispatched as approved. `"restage"` is reserved for an older queued action that
+   * lacks the snapshot needed for current validation. Both stop the current drain, but only
+   * `"invalidated"` clears auto-approval rules whose authority may have changed.
    *
    * Depending on policy conditions, an action may be approved and applied automatically. However,
    * the gatekeeper is nevertheless expected to submit all actions for approval; there is no mode

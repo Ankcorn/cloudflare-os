@@ -6,8 +6,7 @@
 import type { Collection } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import {
-  getActionInvalidationReason,
-  getActionRestageRequiredReason,
+  getActionDispatchStopped,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import type { ActionRecord, AutoApproveTagRecord } from "./overseer.js";
@@ -47,12 +46,11 @@ export function handleActionApplyFailure(
     storage: Pick<AutoApprovalStorage, "autoApproveTags">,
     gatekeeperId: number,
     error: unknown): string | undefined {
-  const invalidationReason = getActionInvalidationReason(error);
-  if (invalidationReason !== undefined) {
+  const stopped = getActionDispatchStopped(error);
+  if (stopped?.kind === "invalidated") {
     clearAutoApprovalRules(storage, gatekeeperId);
-    return invalidationReason;
   }
-  return getActionRestageRequiredReason(error);
+  return stopped?.reason;
 }
 
 export class AutoApprovalDrainer {

@@ -6,7 +6,7 @@
 
 import { RpcTarget, type RpcStub } from "cloudflare:workers";
 import {
-  getActionRestageRequiredReason,
+  getActionDispatchStopped,
   type ActionDescription,
   type ActionKind,
   type ApprovalQueue,
@@ -55,8 +55,6 @@ export type StoredAction = {
   policyFingerprint?: string;
   /** Account connection generation the user approved, absent on actions staged by older code. */
   connectionGeneration?: number;
-  /** Set immediately before `tools/call`; false proves a failure preceded dispatch. */
-  dispatched?: boolean;
   /** When the in-flight apply was claimed, for recovering a claim whose Durable Object died mid-call. */
   claimedAt?: number;
   /**
@@ -291,8 +289,7 @@ export class McpSessionBase extends RpcTarget {
       case "failed":
         return {
           status: "failed",
-          message: (stored.error && getActionRestageRequiredReason(new Error(stored.error)))
-            ?? stored.error
+          message: (stored.error && getActionDispatchStopped(stored.error)?.reason) ?? stored.error
             ?? `Calling "${stored.toolName}" on ${host.serverName} failed.`,
         };
       case "applied": {

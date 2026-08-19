@@ -10,8 +10,7 @@ import {
 import type { ActionRecord, AutoApproveTagRecord } from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import {
-  createActionInvalidatedError,
-  createActionRestageRequiredError,
+  createActionDispatchStoppedError,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -361,7 +360,7 @@ describe("handleActionApplyFailure", () => {
     expect(handleActionApplyFailure(
       storage,
       GK,
-      createActionRestageRequiredError("Stage the call again."),
+      createActionDispatchStoppedError("restage", "Stage the call again."),
     )).toBe("Stage the call again.");
     expect([...storage.autoApproveTags.list()].map(rule => rule.actionKind.tag).toSorted())
       .toEqual(["delete", "edit"]);
@@ -375,7 +374,7 @@ describe("handleActionApplyFailure", () => {
     expect(handleActionApplyFailure(
       storage,
       GK,
-      createActionInvalidatedError("The connection changed."),
+      createActionDispatchStoppedError("invalidated", "The connection changed."),
     )).toBe("The connection changed.");
     expect([...storage.autoApproveTags.list()]).toEqual([]);
   });

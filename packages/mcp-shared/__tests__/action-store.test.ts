@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
-import { ActionInvalidatedError, ActionStore } from "../src/action-store.js";
+import { ActionStore } from "../src/action-store.js";
 import {
-  ACTION_INVALIDATED_ERROR_CODE,
-  getActionInvalidationReason,
+  createActionDispatchStoppedError,
+  getActionDispatchStopped,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   McpProtocolError,
@@ -57,38 +57,26 @@ describe("ActionStore", () => {
     const store = new ActionStore(fakeSql());
     const staged = stage(store, {});
 
-    await expect(store.apply(staged.id, async () => {
-      throw new ActionInvalidatedError("Policy changed. Stage the call again.");
-    }, log)).rejects.toMatchObject({
-      errorCode: ACTION_INVALIDATED_ERROR_CODE,
-      message: `${ACTION_INVALIDATED_ERROR_CODE}: Policy changed. Stage the call again.`,
-    });
-    await expect(store.apply(staged.id, async () => {
+    const first = await store.apply(staged.id, async () => {
+      throw createActionDispatchStoppedError(
+        "invalidated", "Policy changed. Stage the call again.");
+    }, log).catch((caught: unknown) => caught);
+    const replay = await store.apply(staged.id, async () => {
       throw new Error("must not dispatch again");
-    }, log)).rejects.toMatchObject({
-      errorCode: ACTION_INVALIDATED_ERROR_CODE,
-      message: `${ACTION_INVALIDATED_ERROR_CODE}: Policy changed. Stage the call again.`,
-    });
-
-    expect(store.get(staged.id)).toMatchObject({
-      state: "failed",
-      retryable: false,
-      error: "Policy changed. Stage the call again.",
-    });
-  });
-
-  it("retains the invalidation discriminator in the serialized error message", async () => {
-    const store = new ActionStore(fakeSql());
-    const staged = stage(store, {});
-
-    const error = await store.apply(staged.id, async () => {
-      throw new ActionInvalidatedError("Policy changed.");
     }, log).catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain(ACTION_INVALIDATED_ERROR_CODE);
-    expect(getActionInvalidationReason(new Error((error as Error).message)))
-      .toBe("Policy changed.");
+    expect(getActionDispatchStopped(first)).toEqual({
+      kind: "invalidated",
+      reason: "Policy changed. Stage the call again.",
+    });
+    expect(getActionDispatchStopped(replay)).toEqual(getActionDispatchStopped(first));
+
+    const stored = store.get(staged.id);
+    expect(stored).toMatchObject({
+      state: "failed",
+      retryable: false,
+    });
+    expect(getActionDispatchStopped(stored?.error)).toEqual(getActionDispatchStopped(first));
   });
 
   it("keeps validation failures retryable when tools/call was never reached", async () => {
@@ -103,7 +91,6 @@ describe("ActionStore", () => {
       state: "failed",
       retryable: true,
       error: "validation failed",
-      dispatched: false,
     });
   });
 
@@ -335,6 +322,80 @@ describe("ActionStore", () => {
 
     expect(calls).toBe(0);
     expect(recovered.get(staged.id)?.state).toBe("failed");
+  });
+
+  it("keeps a claim retryable when interruption preceded the dispatch boundary", async () => {
+    const sql = fakeSql();
+    const store = new ActionStore(sql);
+    const staged = stage(store, {});
+    sql.exec(
+      "UPDATE mcp_actions SET state = 'applying', retryable = 1 WHERE id = ?",
+      staged.id,
+    );
+    const recovered = new ActionStore(sql);
+
+    await recovered.apply(staged.id, fn => fn({ callTool: ok } as never), log);
+
+    expect(recovered.get(staged.id)?.state).toBe("applied");
+  });
+
+  it("conservatively closes interrupted claims when migrating the main-era schema", () => {
+    const sql = fakeSql();
+    sql.exec(`CREATE TABLE mcp_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_name TEXT NOT NULL,
+      args_json TEXT NOT NULL,
+      state TEXT NOT NULL,
+      submitted_at INTEGER NOT NULL,
+      claimed_at INTEGER,
+      retryable INTEGER,
+      result_json TEXT,
+      error TEXT
+    ) STRICT`);
+    sql.exec(
+      `INSERT INTO mcp_actions (
+         tool_name, args_json, state, submitted_at, retryable
+       ) VALUES ('send', '{}', 'applying', 1, 1)`,
+    );
+
+    const migrated = new ActionStore(sql);
+
+    expect(migrated.get(1)).toMatchObject({ state: "failed", retryable: false });
+  });
+
+  it("uses the prior dispatch marker once when migrating interrupted claims", async () => {
+    const sql = fakeSql();
+    sql.exec(`CREATE TABLE mcp_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool_name TEXT NOT NULL,
+      args_json TEXT NOT NULL,
+      state TEXT NOT NULL,
+      submitted_at INTEGER NOT NULL,
+      policy_fingerprint TEXT,
+      connection_generation INTEGER,
+      dispatched INTEGER,
+      claimed_at INTEGER,
+      retryable INTEGER,
+      result_json TEXT,
+      error TEXT
+    ) STRICT`);
+    sql.exec(
+      `INSERT INTO mcp_actions (
+         id, tool_name, args_json, state, submitted_at, policy_fingerprint,
+         connection_generation, dispatched, retryable
+       ) VALUES
+         (1, 'send', '{}', 'applying', 1, 'action:manual', 1, 1, 1),
+         (2, 'send', '{}', 'applying', 1, 'action:manual', 1, 0, 1)`,
+    );
+
+    const migrated = new ActionStore(sql);
+
+    expect(migrated.get(1)).toMatchObject({ state: "failed", retryable: false });
+    expect(migrated.get(2)).toMatchObject({ state: "failed", retryable: true });
+    await expect(migrated.apply(1, fn => fn({ callTool: ok } as never), log))
+      .rejects.toThrow(/may or may not have taken effect/);
+    await migrated.apply(2, fn => fn({ callTool: ok } as never), log);
+    expect(migrated.get(2)?.state).toBe("applied");
   });
 
   it("does not let claims nobody will settle consume the queue permanently", async () => {

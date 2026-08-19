@@ -13,10 +13,7 @@ import {
   type WithClientOptions,
 } from "../src/connection.js";
 import {
-  ACTION_INVALIDATED_ERROR_CODE,
-  ACTION_RESTAGE_REQUIRED_ERROR_CODE,
-  getActionInvalidationReason,
-  getActionRestageRequiredReason,
+  getActionDispatchStopped,
   type ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
@@ -128,15 +125,15 @@ class TestFacet extends McpFacetBase<object, {
   }
   markActionOutcomeUnknown(action: number) {
     this.ctx.storage.sql.exec(
-      `UPDATE mcp_actions SET state = 'failed', retryable = 0, dispatched = NULL,
+      `UPDATE mcp_actions SET state = 'failed', retryable = 0,
          error = 'This call may or may not have taken effect.' WHERE id = ?`,
       action,
     );
   }
   markActionLegacyRetryableFailure(action: number) {
     this.ctx.storage.sql.exec(
-      `UPDATE mcp_actions SET state = 'failed', retryable = NULL, dispatched = NULL,
-         error = 'Temporary failure.' WHERE id = ?`,
+      `UPDATE mcp_actions SET state = 'failed', retryable = NULL, error = 'Temporary failure.'
+       WHERE id = ?`,
       action,
     );
   }
@@ -375,17 +372,18 @@ it("requires a legacy action to be restaged without misreporting a connection ch
 
   const error = await subject.applyAction(action.id).catch((caught: unknown) => caught);
 
-  expect(error).toMatchObject({ errorCode: ACTION_RESTAGE_REQUIRED_ERROR_CODE });
-  expect(getActionRestageRequiredReason(new Error((error as Error).message)))
-    .toMatch(/predates current approval policy checks/i);
-  expect(subject.lookupAction(action.id)).toMatchObject({
+  expect(getActionDispatchStopped(error)).toMatchObject({
+    kind: "restage",
+    reason: expect.stringMatching(/predates current approval policy checks/i),
+  });
+  const stored = subject.lookupAction(action.id);
+  expect(stored).toMatchObject({
     state: "failed",
     retryable: false,
-    dispatched: false,
     error: expect.stringMatching(/predates current approval policy checks/i),
   });
-  await expect(subject.applyAction(action.id))
-    .rejects.toMatchObject({ errorCode: ACTION_RESTAGE_REQUIRED_ERROR_CODE });
+  const replay = await subject.applyAction(action.id).catch((caught: unknown) => caught);
+  expect(getActionDispatchStopped(replay)).toEqual(getActionDispatchStopped(stored?.error));
   const session = await subject.startSession(queue as never);
   await expect(session.getActionResult(action.id)).resolves.toMatchObject({
     status: "failed",
@@ -420,12 +418,11 @@ it("restages a legacy failed action whose absent retryable flag means retryable"
   subject.removeActionSnapshot(action.id);
   subject.markActionLegacyRetryableFailure(action.id);
 
-  await expect(subject.applyAction(action.id))
-    .rejects.toMatchObject({ errorCode: ACTION_RESTAGE_REQUIRED_ERROR_CODE });
+  const error = await subject.applyAction(action.id).catch((caught: unknown) => caught);
+  expect(getActionDispatchStopped(error)?.kind).toBe("restage");
   expect(subject.lookupAction(action.id)).toMatchObject({
     state: "failed",
     retryable: false,
-    dispatched: false,
     error: expect.stringMatching(/predates current approval policy checks/i),
   });
 });
@@ -455,13 +452,13 @@ it("invalidates an action when the connection changes before a client opens", as
 
   const error = await subject.applyAction(action.id).catch((caught: unknown) => caught);
 
-  expect(error).toMatchObject({ errorCode: ACTION_INVALIDATED_ERROR_CODE });
-  expect(getActionInvalidationReason(new Error((error as Error).message)))
-    .toMatch(/connection changed/i);
+  expect(getActionDispatchStopped(error)).toMatchObject({
+    kind: "invalidated",
+    reason: expect.stringMatching(/connection changed/i),
+  });
   expect(subject.lookupAction(action.id)).toMatchObject({
     state: "failed",
     retryable: false,
-    dispatched: false,
   });
   expect(subject.toolCalls).toBe(0);
 });
@@ -476,15 +473,14 @@ it("replays an assert-time connection invalidation as not dispatched", async () 
   });
   subject.toolCallFailure = new McpConnectionChangedError("The account was repointed.");
 
-  await expect(subject.applyAction(action.id))
-    .rejects.toMatchObject({ errorCode: ACTION_INVALIDATED_ERROR_CODE });
+  const first = await subject.applyAction(action.id).catch((caught: unknown) => caught);
+  expect(getActionDispatchStopped(first)?.kind).toBe("invalidated");
   expect(subject.lookupAction(action.id)).toMatchObject({
     state: "failed",
     retryable: false,
-    dispatched: false,
   });
-  await expect(subject.applyAction(action.id))
-    .rejects.toMatchObject({ errorCode: ACTION_INVALIDATED_ERROR_CODE });
+  const replay = await subject.applyAction(action.id).catch((caught: unknown) => caught);
+  expect(getActionDispatchStopped(replay)).toEqual(getActionDispatchStopped(first));
   expect(subject.toolCalls).toBe(0);
 });
 
