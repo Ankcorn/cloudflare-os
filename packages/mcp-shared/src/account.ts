@@ -407,6 +407,9 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
           "configured for unauthenticated access.",
           { cause: err });
       }
+      if (generation !== this.connectionGeneration()) {
+        throw new Error("This connection attempt was replaced by a newer one.", { cause: err });
+      }
       // The endpoint answered with an authorization challenge, so OAuth is now the observed auth
       // mode even if deployment configuration optimistically called the portal public. Persist that
       // mode because `getAuthorization()` uses it to decide whether to read the tokens the callback

@@ -38,6 +38,10 @@ class InterleavingAccount extends McpAccountBase<AccountEnv> {
     this.#rejectProbe?.(new Error("stop test probe"));
   }
 
+  challengeProbe(): void {
+    this.#rejectProbe?.(new McpAuthRequiredError("authorization required", null));
+  }
+
   isWaiting(nonce: string): boolean {
     return this.awaitingSelection(nonce);
   }
@@ -271,6 +275,32 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get("server")).toEqual(connected);
     expect(context.storage.kv.get("tokens")).toEqual(tokens);
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("does not let a superseded OAuth fallback clear a newer attempt's state", async () => {
+    const context = fakeContext();
+    const connected = {
+      ...server("https://portal.example/mcp"),
+      auth: "token" as const,
+      provenance: "deployment" as const,
+    };
+    context.storage.kv.put("server", connected);
+    const account = new InterleavingAccount(context as never, {});
+    const firstNonce = "4".repeat(64);
+    await account.prepareReconnect(firstNonce);
+    const first = account.beginConnect(firstNonce, { ...connected, auth: "oauth" });
+
+    const secondNonce = "5".repeat(64);
+    await account.prepareReconnect(secondNonce);
+    const pendingAuth = { generation: 3 };
+    context.storage.kv.put("pendingAuth", pendingAuth);
+    context.storage.kv.put("oauthVerifier", "new-verifier");
+    account.challengeProbe();
+
+    await expect(first).rejects.toThrow(/replaced by a newer/);
+    expect(context.storage.kv.get("server")).toEqual(connected);
+    expect(context.storage.kv.get("pendingAuth")).toEqual(pendingAuth);
+    expect(context.storage.kv.get("oauthVerifier")).toBe("new-verifier");
   });
 
   it("ignores a transport session written by an operation from before repoint", async () => {

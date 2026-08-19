@@ -136,6 +136,7 @@ describe("portalServer", () => {
 
 describe("portalAuthRequiresReconnect", () => {
   it("requires reconnecting when token authority changes", () => {
+    expect(portalAuthRequiresReconnect("token", "token")).toBe(false);
     expect(portalAuthRequiresReconnect("none", "token")).toBe(true);
     expect(portalAuthRequiresReconnect("oauth", "token")).toBe(true);
     expect(portalAuthRequiresReconnect("token", "none")).toBe(true);
