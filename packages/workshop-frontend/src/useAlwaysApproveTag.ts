@@ -1,4 +1,4 @@
-import { useCallback, useState, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { Overseer } from '@gadgets/workshop-shared/api'
@@ -14,9 +14,30 @@ export function useAlwaysApproveTag(
     setProcessingActions: Dispatch<SetStateAction<Set<number>>>,
     // Invoked after a rule is successfully enabled, so other views (e.g. the Connections rule list)
     // can refresh without waiting to be re-opened.
-    onEnabled?: () => void) {
+    onEnabled?: () => void,
+    latestInvalidations?: ReadonlyMap<number, number>) {
   const toasts = useKumoToastManager()
   const [enabledTags, setEnabledTags] = useState<Set<string>>(new Set())
+  const seenInvalidations = useRef(new Map<number, number>())
+
+  useEffect(() => {
+    if (!latestInvalidations) return
+    const changedGatekeepers = new Set<number>()
+    for (const [gatekeeperId, actionId] of latestInvalidations) {
+      if (actionId > (seenInvalidations.current.get(gatekeeperId) ?? -1)) {
+        changedGatekeepers.add(gatekeeperId)
+        seenInvalidations.current.set(gatekeeperId, actionId)
+      }
+    }
+    if (changedGatekeepers.size === 0) return
+    setEnabledTags(previous => {
+      const next = new Set([...previous].filter(key => {
+        const separator = key.indexOf(':')
+        return !changedGatekeepers.has(Number(key.slice(0, separator)))
+      }))
+      return next.size === previous.size ? previous : next
+    })
+  }, [latestInvalidations])
 
   // Enable auto-approval for the action's class. Returns true on success, false on failure (the
   // error is surfaced via a toast) so the caller can decide whether to dismiss a confirm dialog.

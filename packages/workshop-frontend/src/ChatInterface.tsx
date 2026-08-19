@@ -5875,11 +5875,31 @@ function ChatInterface({
       actionKind: ActionKind; actionLabel: string } | null
   >(null);
 
+  const autoApprovalInvalidations = useMemo(() => {
+    const invalidations = new Map<number, number>();
+    for (const message of currentMessages ?? []) {
+      const log = message.type === "action" ? message.actionLog : undefined;
+      if (log?.type !== "action" || !log.invalidationReason || log.gatekeeperId === undefined) {
+        continue;
+      }
+      invalidations.set(
+        log.gatekeeperId,
+        Math.max(message.actionId, invalidations.get(log.gatekeeperId) ?? -1),
+      );
+    }
+    return invalidations;
+  }, [currentMessages]);
+
   // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
   // server applies the now-eligible pending action(s) via its drain, and the action state flips to
   // "approved" through the actions subscription -- so we don't optimistically mutate it here.
   const { alwaysApproveTag, isTagAutoApproved } =
-    useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);
+    useAlwaysApproveTag(
+      overseer,
+      setProcessingActions,
+      onAutoApproveChange,
+      autoApprovalInvalidations,
+    );
 
   const resolveAction = useResolveAction(overseer, setProcessingActions);
 
