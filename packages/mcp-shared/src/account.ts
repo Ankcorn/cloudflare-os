@@ -330,22 +330,23 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     const credentialAuthorityChanged = existing !== undefined && existing.auth !== server.auth &&
       (existing.auth === "token" || server.auth === "token" ||
         (existing.auth === "oauth" && server.auth === "none"));
-    // `none` -> `oauth` is only configuration's guess until the probe challenges us. Publishing the
-    // guess here would make a previously public account look credentialed while it has no tokens.
-    if (endpointChanged || credentialAuthorityChanged) {
-      this.ctx.storage.kv.put("server", server);
+    const clearCredentials = () => {
       for (const key of [
         "tokens", "oauthClient", "oauthDiscovery", "oauthVerifier", "pendingAuth",
       ]) {
         this.ctx.storage.kv.delete(key);
       }
       this.ctx.storage.kv.put("expiredNotified", false);
-      if (endpointChanged) {
-        this.log().info("portal repointed", {
-          event: "connect.repointed",
-          serverHost: hostOf(server.endpoint),
-        });
-      }
+    };
+    // `none` -> `oauth` is only configuration's guess until the probe challenges us. Publishing the
+    // guess here would make a previously public account look credentialed while it has no tokens.
+    if (endpointChanged) {
+      this.ctx.storage.kv.put("server", server);
+      clearCredentials();
+      this.log().info("portal repointed", {
+        event: "connect.repointed",
+        serverHost: hostOf(server.endpoint),
+      });
     }
 
     const log = this.log().with({
@@ -380,6 +381,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       // token from every later request. Only an endpoint that answered with no credential at all is.
       const connected: ConnectedServer =
         server.auth === "token" ? server : { ...server, auth: "none" };
+      if (credentialAuthorityChanged && !endpointChanged) clearCredentials();
       this.ctx.storage.kv.put("server", connected);
       await this.complete(connected, info, generation);
       log.info("connected without authorization", { event: "connect.completed" });
@@ -410,6 +412,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       // mode because `getAuthorization()` uses it to decide whether to read the tokens the callback
       // stores.
       const oauthServer: ConnectedServer = { ...server, auth: "oauth" };
+      if (credentialAuthorityChanged && !endpointChanged) clearCredentials();
       this.ctx.storage.kv.put("server", oauthServer);
       try {
         return await this.beginOAuth(oauthServer, err.resourceMetadataUrl, generation);

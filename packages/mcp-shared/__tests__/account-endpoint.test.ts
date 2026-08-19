@@ -104,6 +104,14 @@ class AuthChallengeAccount extends McpAccountBase<AccountEnv> {
   }
 }
 
+class StrictUnauthenticatedAccount extends AuthChallengeAccount {
+  protected override allowsOAuthFallback(): boolean { return false; }
+
+  isWaiting(nonce: string): boolean {
+    return this.awaitingSelection(nonce);
+  }
+}
+
 class OAuthFlowAccount extends McpAccountBase<AccountEnv> {
   protected baseUrl(): string { return "https://gatekeeper.example"; }
   protected log(): never { return testLog as never; }
@@ -202,6 +210,67 @@ describe("connect initiation nonce", () => {
     await expect(account.getConnection(connected.endpoint))
       .resolves.toMatchObject({ authorization: null });
     expect(context.storage.kv.get<ConnectedServer>("server")).toEqual(connected);
+  });
+
+  it("preserves OAuth state when a same-endpoint token reconnect has no configured token", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://portal.example/mcp"), auth: "oauth" as const };
+    const tokens = {
+      access_token: "access",
+      token_type: "Bearer",
+      refresh_token: "refresh",
+      issuer: "https://auth.example",
+      expiresAt: Date.now() + 60_000,
+    };
+    const oauthClient = { client_id: "client", issuer: "https://auth.example" };
+    const oauthDiscovery = {
+      authorizationServerUrl: "https://auth.example",
+      authorizationServerMetadata: {
+        issuer: "https://auth.example",
+        authorization_endpoint: "https://auth.example/authorize",
+        token_endpoint: "https://auth.example/token",
+      },
+    };
+    context.storage.kv.put("server", connected);
+    context.storage.kv.put("tokens", tokens);
+    context.storage.kv.put("oauthClient", oauthClient);
+    context.storage.kv.put("oauthDiscovery", oauthDiscovery);
+    const account = new UnconfiguredTokenAccount(context as never, {});
+    const nonce = "2".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, {
+      ...connected,
+      auth: "token",
+      provenance: "deployment",
+    })).rejects.toThrow(/No preissued token is configured/);
+
+    expect(context.storage.kv.get("server")).toEqual(connected);
+    expect(context.storage.kv.get("tokens")).toEqual(tokens);
+    expect(context.storage.kv.get("oauthClient")).toEqual(oauthClient);
+    expect(context.storage.kv.get("oauthDiscovery")).toEqual(oauthDiscovery);
+    expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("preserves OAuth state when a same-endpoint unauthenticated reconnect is refused", async () => {
+    const context = fakeContext();
+    const connected = { ...server("https://portal.example/mcp"), auth: "oauth" as const };
+    const tokens = { access_token: "access", token_type: "Bearer" };
+    context.storage.kv.put("server", connected);
+    context.storage.kv.put("tokens", tokens);
+    const account = new StrictUnauthenticatedAccount(context as never, {});
+    const nonce = "3".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, {
+      ...connected,
+      auth: "none",
+      provenance: "deployment",
+    })).rejects.toThrow(/configured for unauthenticated access/);
+
+    expect(context.storage.kv.get("server")).toEqual(connected);
+    expect(context.storage.kv.get("tokens")).toEqual(tokens);
+    expect(account.isWaiting(nonce)).toBe(true);
   });
 
   it("ignores a transport session written by an operation from before repoint", async () => {
