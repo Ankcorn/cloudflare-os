@@ -139,18 +139,8 @@ export default function Activity({
     historyTotal,
     historyShown,
     invalidationCount,
-    autoApprovalInvalidations,
   } = useMemo(() => {
     const records = [...actionsById.values()]
-    const invalidations = new Map<number, number>()
-    for (const record of records) {
-      if (record.type === 'action' && record.invalidationReason && record.gatekeeperId !== undefined) {
-        invalidations.set(
-          record.gatekeeperId,
-          Math.max(record.id, invalidations.get(record.gatekeeperId) ?? -1),
-        )
-      }
-    }
     const pending = records
       .filter(record => record.state === 'pending')
       .toSorted((a, b) => timeValue(a.createdAt) - timeValue(b.createdAt) || a.id - b.id)
@@ -174,7 +164,6 @@ export default function Activity({
       invalidationCount: records.filter(
         record => record.type === 'action' && record.invalidationReason,
       ).length,
-      autoApprovalInvalidations: invalidations,
     }
   }, [actionsById, historyFilter])
 
@@ -198,12 +187,7 @@ export default function Activity({
   }
 
   const { alwaysApproveTag, isTagAutoApproved } =
-    useAlwaysApproveTag(
-      overseer,
-      setProcessingActions,
-      onAutoApproveChange,
-      autoApprovalInvalidations,
-    )
+    useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange)
 
   const toggleExpanded = (id: number) => {
     setExpandedActionId(previous => (previous === id ? null : id))

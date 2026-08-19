@@ -5462,21 +5462,9 @@ function ChatInterface({
     };
   }, [overseer]);
 
-  const [autoApprovalInvalidations, setAutoApprovalInvalidations] =
-    useState<ReadonlyMap<number, number>>(new Map());
-
-  // Patch cached chat messages and reconcile auto-approval state on workspace-wide action upserts.
+  // Patch cached chat messages on action upserts.
   useActionEntries(overseer, (record) => {
     if (applyActionLogUpdateToCachedMessages(record)) scheduleUpdate();
-    if (record.type === "action" && record.invalidationReason && record.gatekeeperId !== undefined) {
-      const gatekeeperId = record.gatekeeperId;
-      setAutoApprovalInvalidations(previous => {
-        if (record.id <= (previous.get(gatekeeperId) ?? -1)) return previous;
-        const next = new Map(previous);
-        next.set(gatekeeperId, record.id);
-        return next;
-      });
-    }
   });
 
   // Reset per-chat UI state when selectedChatId changes
@@ -5891,12 +5879,7 @@ function ChatInterface({
   // server applies the now-eligible pending action(s) via its drain, and the action state flips to
   // "approved" through the actions subscription -- so we don't optimistically mutate it here.
   const { alwaysApproveTag, isTagAutoApproved } =
-    useAlwaysApproveTag(
-      overseer,
-      setProcessingActions,
-      onAutoApproveChange,
-      autoApprovalInvalidations,
-    );
+    useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);
 
   const resolveAction = useResolveAction(overseer, setProcessingActions);
 
