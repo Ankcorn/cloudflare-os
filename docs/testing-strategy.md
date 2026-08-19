@@ -1,163 +1,169 @@
 # Integration tests and agent evaluation
 
-This document gives our approach to tests above the unit level. It covers why we do this work, the
-system we want, the architecture, and the gates.
+This document describes the tests above the unit level: the suites, the runtimes, the scoring rules,
+and the gates. It follows Simplified Technical English (ASD-STE100).
 
-I wrote it in Simplified Technical English (ASD-STE100).
+Read [`integration-testing.md`](integration-testing.md) for the design of the shared toolkit.
 
-## Why we do this
+## Scope
 
-An AI agent writes the applications on this platform. The agent writes the code, and the code runs in
-a sandbox. Unit tests show that our own modules behave correctly. They cannot show that the agent
-delivers an application that works.
+An AI agent writes the applications on this platform, and the code runs in a sandbox. Unit tests show
+that our modules behave correctly. They do not show that the agent delivers an application that works.
 
-Two questions need a different kind of test:
+Two suites answer the first question, and one suite answers the second:
 
-1. Does the platform work when we run all of its parts together?
+1. Does the platform work when all of its parts run together?
 2. Does the agent deliver a working application?
 
-The first question needs integration tests. The second question needs evaluations. We keep the two
-apart, because one is deterministic and the other is not.
+## Suites
 
-## The system we want
+Four suites test more than one module at a time. The runtime of a suite decides what it can reach.
 
-These are the properties of the system we want. Each one is a rule we apply now.
-
-- Each test measures a result. No test measures the method that produced the result.
-- Each deterministic test runs on every commit. It costs no money and it gives the same answer twice.
-- Each test that needs a model runs on a schedule. It never blocks a merge by accident.
-- Each failure names its cause. A reader must not have to guess.
-- We do not count a failure against the agent if we cannot attribute the failure to the agent.
-- The suite shows the limits of the agent. It does not hide them.
-
-The last two properties matter most. A suite that blames the agent for a rate limit is worse than no
-suite, because it reports a regression that did not happen.
-
-## Architecture
-
-Four suites test more than one module at a time. They are not interchangeable.
-
-| Suite | Runtime | Reaches | We use it for |
+| Suite | Runtime | Reaches | Cost |
 |---|---|---|---|
-| `workshop-backend/__integration__` | in-process workerd | Worker and Durable Object internals | resilience of the backend |
-| `packages/integration-tests` | out-of-process workerd | the public RPC API only | Gadget behaviour, gatekeeper flows |
-| a consumer repo suite | out-of-process workerd | one real gatekeeper | an expired credential, end to end |
-| `packages/workshop-evals` | out-of-process workerd, and a live model | the agent, then its Gadget | capability of the agent |
+| `workshop-backend/__integration__` | in-process workerd (`@cloudflare/vitest-pool-workers`) | Worker and Durable Object internals | free |
+| `packages/integration-tests` | out-of-process workerd (`createTestHarness()`) | the public Cap'n Web API | free |
+| a consumer repository suite | out-of-process workerd | one real gatekeeper | free |
+| `packages/workshop-evals` | out-of-process workerd, and a live model | the agent, then its Gadget | inference |
 
-The runtime decides what each suite can reach. This is the most important column in the table.
-
-An in-process suite runs inside workerd. Therefore it can use the `cloudflare:test` helpers. It can
-stop one Durable Object, and it can test a native RPC boundary. No other suite can do this.
+An in-process suite runs inside workerd. Therefore it can import `cloudflare:test` and call
+`abortAllDurableObjects()` or `runInDurableObject(stub, fn)`. It can stop one Durable Object, and it
+can test a native RPC boundary.
 
 An out-of-process suite drives workerd from Node. Therefore it gets a real WebSocket connection,
 several Workers with bindings to each other, and a Worker Loader that runs Gadget code. It reaches the
-platform only through the API that a browser has.
+platform only through the API that a browser has, and `cloudflare:test` does not exist in it.
 
-The two runtimes need different methods for the same test. To restart a server in-process, stop the
-object directly. To restart a server out-of-process, apply an empty code update. The platform does
-the same thing on every code change. Neither method works in the other runtime.
+Neither runtime can use the other's method to restart a server:
 
-### Layers
+- In-process, call `state.abort(reason)` on the object.
+- Out-of-process, call `AgentSession.restartGadgets()`. It applies an empty update to the mainline
+  code. This advances the code version, which aborts every Gadget facet. The platform does the same
+  thing on every code change.
 
-`packages/integration-tests` owns the tools. It holds the harness, the RPC client, and the driver that
-runs an agent session. `packages/workshop-evals` adds the model, and nothing below it. A consumer
-repository uses the same tools against a real gatekeeper.
+## Toolkit
 
-Put a test as low in this stack as it can go. A test that needs no model belongs in an integration
-suite, where it runs on every commit.
+`packages/integration-tests` owns the tools. It has four source-only entry points:
 
-## What we measure
+| Module | Purpose |
+|---|---|
+| `src/harness.ts` | boots `workshop-backend` and a list of gatekeepers as real Workers |
+| `src/rpc-client.ts` | Cap'n Web over a WebSocket to `/api`, sign-up, and the `waitFor` helper |
+| `src/agent-session.ts` | drives one agent session: prompts, history, workpieces, source snapshots |
+| `src/network-interceptor.ts` | patches `fetch` and rejects any request that no handler matched |
 
-We score the result, and we never score the method. A task gives the agent a prompt. The agent builds
-a Gadget. The task then calls the Gadget's own RPC and checks what it answers.
+`AgentSession` also provides two methods for tests that need a known implementation:
 
-One example shows why this rule matters. A task asks for an appointment desk that never sells more
-places than it has. The agent passed it with a method we did not expect: it made the check and the
-write one SQL sequence, and it added a database trigger as a second defence. A check for a specific
-technique would have failed a correct answer.
+- `seedGadget({title, bindingName, files})` writes hand-authored source into the workspace. It creates
+  a Gadget without the agent.
+- `restartGadgets()` restarts every Gadget server. Storage survives, and memory does not.
 
-We record the trajectory as well: the tool calls, the errors, the turns, the tokens, the time, and the
-cost. These numbers explain a result. They never decide it. An agent that recovered from a failed tool
-call still delivered the application.
+`packages/workshop-evals` adds the model, and nothing below it.
+
+## How an evaluation works
+
+A task holds one or more prompts and a verifier. `src/harness.ts` runs one task as follows:
+
+1. Start a workerd Workshop, then create a new account and workspace.
+2. Wait for the output formats to install, so the system prompt is deterministic.
+3. Send each prompt in order, and wait for the agent to settle.
+4. Call the verifier after each prompt.
+5. Write the transcript and the accepted source to `.wrangler/evals/runs/`.
+6. Read the token count, the duration, and the cost from the AI Gateway logs.
+
+The verifier calls the Gadget's own RPC. `EvalVerifier` gives it four methods: `check`, `connect`,
+`restart`, and the `workpieces` list. A throw inside `check` becomes a failed check. A throw outside
+one becomes a single failed check named `verifier.threw`, so the trial keeps the checks it recorded.
+
+### The scoring rule
+
+The score is the fraction of checks that passed. Nothing inspects the method that the agent used.
+
+One example shows why. A task asks for an appointment desk that never sells more places than it has.
+The agent passed it with one synchronous SQL sequence and a database trigger. A check for a mutation
+queue would have failed that correct answer.
+
+The trajectory is a diagnostic, not a score. We record the tool calls, the tool errors, the agent
+errors, the turns, the tokens, the time, and the cost. An agent that recovered from a failed tool call
+still delivered the application.
+
+### Invalid trials
+
+A trial is invalid when we cannot attribute its result to the agent. `src/summary.ts` excludes an
+invalid trial from every rate and counts it in the **Invalid** column.
+
+A trial is invalid in three cases:
+
+- The harness did not start, so the run produced no result.
+- The task recorded no checks.
+- The turn ended with an error, and the trial also failed.
+
+A trial that passed after a transient error stays valid. The agent delivered the application.
+
+Incomplete telemetry is a separate case. It does not make a trial invalid. `src/summary.ts` drops that
+trial from the token, duration, and cost figures only, and reports the fraction that it kept.
+
+The platform posts an error message when a turn dies. It posts none when the agent runs out of turns
+or gives up. Therefore an error almost always means infrastructure, and not capability.
 
 ## Gates
 
-We have two gates, and they are deliberately different.
+| | Gate 1 | Gate 2 |
+|---|---|---|
+| Workflow | `ci.yml` | `workshop-evals.yml` |
+| Trigger | every pull request, and every push to `main` | 05:00 UTC each night, on demand, or the `run-evals` label |
+| Command | `pnpm build`, `pnpm test`, `pnpm lint` | `pnpm eval:required`, `pnpm eval:frontier` |
+| Trials | not applicable | 10 at night, 3 on a pull request |
+| Blocks a merge | yes | only with the label |
 
-**Gate 1: every commit.** `pnpm build`, `pnpm test`, and `pnpm lint` run on every pull request. They
-are deterministic and they cost nothing. This gate blocks a merge. All four integration suites that
-need no model run here.
+Gate 2 runs 6 shards for each task set, and it limits the matrix to 4 jobs at a time. Workers AI
+applies a rate limit for each account, and one trial makes many model calls. More jobs at once return
+HTTP 429, and the run then measures very little.
 
-**Gate 2: on a schedule.** The evaluations run each night, on demand, and on a pull request that
-carries the `run-evals` label. This gate does not block a merge unless somebody asks for it. It costs
-real inference, and one trial takes several minutes.
+Each task carries one of two states:
 
-Inside Gate 2, each task has one of two states:
+- A **required** task fails the job when its score is below 1.
+- A **frontier** task records its score and never fails the job.
 
-- A **required** task blocks the evaluation job when it fails. A failure is a regression.
-- A **frontier** task records its score and never fails the job. It measures a limit of the agent.
-
-We set this state from measurement, and never from an opinion. A new task starts as frontier, because
-we know nothing about it yet. We promote it after a baseline shows that it passes. We return it to
-frontier if it stops passing, and we write the observed failure onto the task.
-
-### Trials that we do not count
-
-A trial is invalid when we cannot attribute its result to the agent. We exclude an invalid trial from
-every rate, and we count it separately.
-
-A trial is invalid in these cases:
-
-- The model provider refused the request, or it cut the response.
-- The turn ended with an error, and the trial also failed.
-- The harness could not start.
-
-A trial that passed after a transient error is still valid. The agent delivered the application, so we
-score it.
-
-Watch the **Invalid** column in the summary. A high number means that the run measured less than it
-appears to measure.
+We set the state from measurement. A new task starts as frontier, because we have no data for it. We
+promote it after a baseline shows that it passes. We return it to frontier if it stops passing, and we
+write the observed failure onto the task.
 
 ## Statistics
 
-One trial proves very little, because the agent is not deterministic. Each task runs several times.
-The summary reports the pass rate, a Wilson 95% interval, the mean score, and the spread of tokens,
-time, and cost.
+The agent is not deterministic, so one trial proves very little. Each task runs several times.
+`src/statistics.ts` then reports these figures for each task and model:
 
-The interval is wide at three trials. This is honest, and it is not a defect. Raise the number of
-trials before you compare two models.
+- the pass rate, and a Wilson 95% interval for it
+- the mean score, and the sample deviation
+- the mean, median, and 90th percentile of the tokens, the duration, and the cost
+
+The interval is wide at three trials. Raise `WORKSHOP_EVAL_TRIALS` before you compare two models.
 
 ## Durability
 
-The server of a Gadget stops and starts often. The platform restarts it on every code change, and not
-only after a fault. Therefore an application must hold its state in storage, and not in memory.
+The platform restarts a Gadget server on every code change, and not only after a fault. Therefore an
+application must hold its state in storage, and not in memory.
 
-We test this in two places. `packages/integration-tests` pins the behaviour of the platform with a
-Gadget that we wrote by hand. `packages/workshop-evals` asks whether the application that the agent
-built survives the same treatment.
+Two suites test this:
 
-A restart makes every open stub invalid. This is inconvenient, but it is also useful: it is the only
-honest proof that a restart occurred. A test that trusts a restart it cannot see can pass for no
-reason.
+- `packages/integration-tests/__tests__/gadget-durability.test.ts` pins the behaviour of the platform
+  with a Gadget that we wrote by hand. It also proves that a naive booking implementation oversells,
+  which is the premise of the `appointment-desk` task.
+- `packages/workshop-evals/tasks/stock-ledger.task.ts` asks whether the application that the agent
+  built survives the same treatment.
 
-## Current state
+A restart makes every open stub invalid. Reconnect after a restart. This is also the only honest proof
+that a restart occurred, so `stock-ledger` asserts it before the checks that depend on it.
 
-We measured each task once against one model. This is enough to set the state of a task. It is not
-enough to compare two models.
+Call `restart()` only in the final turn of a task. It advances the code version, and an agent that
+replays its history in a later turn rejects a version that it did not observe.
 
-- Five tasks pass. We give them the required state.
-- One task passes one trial in three. It keeps the frontier state, and we recorded the two causes.
-- Two tasks have no measurement yet. They keep the frontier state.
+## Known limits
 
-## Next steps
-
-1. Run a baseline with ten trials and two models. Then set each task state again.
-2. Add tasks for the connectors. This needs a fixture gatekeeper with a real session API.
-3. Decide whether we want external benchmarks. This needs a shell tool and a second prompt, so it
-   measures a different agent from the one we ship.
-
-## More information
-
-- [`integration-testing.md`](integration-testing.md) explains the design of the tools, and the traps.
-- [`../packages/workshop-evals/README.md`](../packages/workshop-evals/README.md) explains how to write
-  a task and how to read a result.
+- Two tasks have no live measurement. Both carry the frontier state.
+- One task passes one trial in three. It treats intervals as closed instead of half-open, and it
+  accepts a duplicate identifier.
+- No task uses a gatekeeper. The fixture gatekeeper exposes no session methods, so a connector task
+  needs a new fixture.
+- Part of `workshop-backend/__integration__` carries `describe.skip`, because it timed out in CI.
