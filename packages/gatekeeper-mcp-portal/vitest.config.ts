@@ -10,6 +10,8 @@ export default defineConfig({
     alias: {
       "cloudflare:workers": fileURLToPath(
         new URL("../mcp-shared/__tests__/stubs/cloudflare-workers.ts", import.meta.url)),
+      "./generated/server-configurator-ui.txt": fileURLToPath(
+        new URL("./__tests__/stubs/configurator-html.ts", import.meta.url)),
     },
   },
 });
