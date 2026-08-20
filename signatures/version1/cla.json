@@ -271,6 +271,14 @@
       "created_at": "2026-08-16T09:09:34Z",
       "repoId": 1211925923,
       "pullRequestNo": 228
+    },
+    {
+      "name": "kochizufan",
+      "id": 2221431,
+      "comment_id": 5352774351,
+      "created_at": "2026-08-20T07:27:08Z",
+      "repoId": 1211925923,
+      "pullRequestNo": 279
     }
   ]
 }
