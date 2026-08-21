@@ -1,0 +1,42 @@
+packages/gatekeeper-mcp-portal/wrangler.jsonc
+  s_31cc731268b4f6::t_91944eb70da7ff 54-57
+packages/gatekeeper-mcp-portal/__tests__/configurator-ui.test.ts
+  s_31cc731268b4f6::t_f698a8ec50acd3 121,132-134
+  s_31cc731268b4f6::t_ee48d4906f8f28 118-120,122-123,128,136-137
+  s_31cc731268b4f6::t_8348b1143ac002 69-76,152-153,160-161,170-171,173,194-199
+  s_31cc731268b4f6::t_b52ec4f9fdc1a0 124-127,129-131
+  s_31cc731268b4f6::t_ce93a0dd2378c2 135
+packages/gatekeeper-mcp-portal/__tests__/config.test.ts
+  s_31cc731268b4f6::t_d355fbc8308031 220
+  s_31cc731268b4f6::t_631e9bdae35068 12,210-219,221-227
+  s_31cc731268b4f6::t_12d0520cb3a596 228-230
+packages/gatekeeper-mcp-portal/src/configurator/server-configurator-ui.tsx
+  s_31cc731268b4f6::t_14c80a7d7e23b6 75-83
+  s_31cc731268b4f6::t_8348b1143ac002 36,40-44,48-49
+  s_31cc731268b4f6::t_376df1048a68af 84
+packages/gatekeeper-mcp-portal/src/portal.ts
+  s_31cc731268b4f6::t_a5d2b806baf922 66,74,165,490-491
+  s_31cc731268b4f6::t_dac6f486391aff 492-494
+packages/gatekeeper-mcp-portal/README.md
+  s_31cc731268b4f6::t_91944eb70da7ff 56
+packages/gatekeeper-mcp-portal/src/config.ts
+  s_31cc731268b4f6::t_a5d2b806baf922 50-52,54-61
+  s_31cc731268b4f6::t_39216d18daf468 53
+  s_31cc731268b4f6::t_aa10379410ddbf 47-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "353a27663140461d30198ac4d9ef8a3051053d93",
+  "prompts": {},
+  "sessions": {
+    "s_31cc731268b4f6": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fe01390c3ffez6tdjB5WJ7boFN",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": null
+    }
+  }
+}
