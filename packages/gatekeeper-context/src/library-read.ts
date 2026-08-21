@@ -1,12 +1,9 @@
-// Agent read path over enabled collections. Every returned result is authorized as an observation
-// and attributed to the collections whose metadata or content it reveals.
+// Agent read path over enabled collections. Every returned result is authorized as an observation.
 
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type {
-  ObservationAuthorizer, ObservationDescription,
-} from "@gadgets/workshop-shared/gatekeeper";
+import type { ObservationAuthorizer } from "@gadgets/workshop-shared/gatekeeper";
 import {
   ContextSearchResult, ContextListing, ContextListingEntry, ContextReadResult,
   ContextCollectionVisibility, decodeDocId, encodeDocId, isTextContentType, VENDOR_ID,
@@ -23,16 +20,10 @@ const logger = obsContext.createLogger({
 // Fanout cap for whole-library search/list.
 const MAX_COLLECTION_FANOUT = 8;
 
-type ObserveCollections = (collectionIds: string[]) => Promise<{
-  excludeObservers?: string[];
-  pendingCollections: string[];
-  commit(): void;
-}>;
-
 @validateRpc()
 export class LibraryReadSession extends RpcTarget {
-  // Per-session enabled set. Visibility is retained by the source API, though observer enforcement
-  // uses collection-level access checks rather than the old sticky sharing prohibition.
+  // Per-session enabled set. Visibility is retained by the source API; observers are not verified
+  // per collection (see ContextGatekeeper.addObserver).
   #enabledPromise?: Promise<Map<string, ContextCollectionVisibility>>;
 
   constructor(
@@ -41,7 +32,6 @@ export class LibraryReadSession extends RpcTarget {
     private domain: string,
     private accountId: string,
     private authorizer: NativeRpcStub<ObservationAuthorizer>,
-    private observeCollections: ObserveCollections,
   ) {
     super();
   }
@@ -62,17 +52,6 @@ export class LibraryReadSession extends RpcTarget {
   // Computed once per session; search/list/read share it.
   #enabled(): Promise<Map<string, ContextCollectionVisibility>> {
     return (this.#enabledPromise ??= this.#userLib().getEnabledCollections(this.domain));
-  }
-
-  async #authorize(
-      collectionIds: string[], description: ObservationDescription): Promise<void> {
-    let check = collectionIds.length > 0
-      ? await this.observeCollections(collectionIds)
-      : { pendingCollections: [], commit() {} };
-    await this.authorizer.authorizeObservation({
-      ...description, excludeObservers: check.excludeObservers,
-    });
-    check.commit();
   }
 
   async search(query: string, opts?: {
@@ -116,13 +95,13 @@ export class LibraryReadSession extends RpcTarget {
 
     // Nothing matched → nothing was observed, so don't record an observation (mirrors read()).
     if (results.length === 0) return results;
-    let collectionIds = [...new Set(results.map(r => r.collectionId).filter((id): id is string => !!id))];
+    let collectionCount = new Set(results.map(r => r.collectionId).filter(id => !!id)).size;
     // Authorize after fetching, before returning data.
-    await this.#authorize(collectionIds, {
+    await this.authorizer.authorizeObservation({
       title: `Context search: ${query}`,
       description:
         `Searched the Context Library for \`${query}\`. Returned ${results.length} result(s)` +
-        (collectionIds.length ? ` across ${collectionIds.length} collection(s).` : "."),
+        (collectionCount ? ` across ${collectionCount} collection(s).` : "."),
     });
     return results;
   }
@@ -134,14 +113,7 @@ export class LibraryReadSession extends RpcTarget {
     let listing = await this.#fetchListing(opts);
     // Nothing listed → nothing was observed, so don't record an observation (mirrors read()).
     if (listing.entries.length === 0) return listing;
-    // Both collection contents and top-level collection titles/descriptions reveal collection data.
-    let collectionIds = opts?.collectionId
-      ? [opts.collectionId]
-      : listing.entries
-          .filter((entry): entry is Extract<ContextListingEntry, { type: "collection" }> =>
-            entry.type === "collection")
-          .map(entry => entry.id);
-    await this.#authorize(collectionIds, {
+    await this.authorizer.authorizeObservation({
       title: opts?.collectionId
         ? `Context listing: ${opts.collectionId}${opts.path ? "/" + opts.path : ""}`
         : "Context listing: collections",
@@ -165,7 +137,7 @@ export class LibraryReadSession extends RpcTarget {
     // No document found (missing or inaccessible) → nothing was observed, so don't record one.
     if (!doc) return null;
 
-    await this.#authorize([collectionId], {
+    await this.authorizer.authorizeObservation({
       title: `Context read: ${doc.name}`,
       description: `Read Context Library document \`${docId}\`.`,
     });

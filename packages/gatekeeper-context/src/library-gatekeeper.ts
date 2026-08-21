@@ -14,8 +14,6 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { LibraryReadSession } from "./library-read.js";
 import { ContextApiImpl, loadEnabledContextCollections } from "./context-api.js";
-import { ContextObserverTracker } from "./context-observers.js";
-import type { ContextVerifierApi } from "./context-observers.js";
 import {
   buildAgentSkillCommands, buildAgentSkillMessage, buildContextCatalog, parseSkillManifest,
   type CollectionSkills,
@@ -188,30 +186,21 @@ export class ContextAccount
   }
 
   /**
-   * Mint a verifier tied to this account. ContextGatekeeper uses it to check whether a prospective
-   * observer can independently read each collection the Gadget has observed.
+   * Mint the trivial verifier used by the low-stakes observer policy.
+   *
+   * Skip return validation: proxy-wrapping a WorkerEntrypoint stub breaks Workers serialization.
    */
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
-    return this.ctx.exports.ContextVerifier({ props: this.ctx.props });
+    return this.ctx.exports.ContextVerifier({});
   }
 }
 
 @validateRpc()
 export class ContextVerifier
-    extends WorkerEntrypoint<Cloudflare.Env, ContextAccountProps>
-    implements ContextVerifierApi {
-  async hasCollectionAccess(sharingDomain: string, collectionId: string): Promise<boolean> {
-    if (sharingDomain !== this.ctx.props.sharingDomain) return false;
-    let userLibraries = this.ctx.exports.UserLibraryDurableObject;
-    let registries = this.ctx.exports.LibraryRegistryDurableObject;
-    let [owns, isPublic] = await Promise.all([
-      userLibraries.get(userLibraries.idFromName(
-        domainName(sharingDomain, this.ctx.props.accountId))).hasOwned(collectionId),
-      registries.getByName(sharingDomain).isPublic(collectionId),
-    ]);
-    return owns || isPublic;
-  }
+    extends WorkerEntrypoint<Cloudflare.Env>
+    implements GatekeeperUserVerifier {
+  verify(): void {}
 }
 
 // Gadget-side read path. Read-only: no actions are ever submitted.
@@ -221,9 +210,6 @@ export class ContextGatekeeper
     implements Gatekeeper<LibraryReadSession> {
   #collections() { return this.ctx.exports.ContextCollectionDurableObject; }
   #userLibraries() { return this.ctx.exports.UserLibraryDurableObject; }
-  #observers() {
-    return new ContextObserverTracker(this.ctx.storage.kv, this.ctx.props.sharingDomain);
-  }
 
   async #loadSkills(
       collections: EnabledCollectionInfo[]):
@@ -273,8 +259,7 @@ export class ContextGatekeeper
     try {
       return new LibraryReadSession(
         this.#collections(), this.#userLibraries(),
-        this.ctx.props.sharingDomain, this.ctx.props.accountId, ownedAuthorizer,
-        collectionIds => this.#observers().prepareObservation(collectionIds));
+        this.ctx.props.sharingDomain, this.ctx.props.accountId, ownedAuthorizer);
     } catch (err) {
       ownedAuthorizer[Symbol.dispose]?.();
       throw err;
@@ -323,17 +308,10 @@ export class ContextGatekeeper
     let collections = await loadEnabledContextCollections(this.env, domain, userLibrary);
     let catalog = buildContextCatalog(collections, await this.#loadSkills(collections));
     if (catalog.entries.length > 0) {
-      let collectionIds = [...new Set(catalog.entries.map(entry => {
-        let slash = entry.id.indexOf("/");
-        return slash < 0 ? entry.id : entry.id.slice(0, slash);
-      }))];
-      let check = await this.#observers().prepareObservation(collectionIds);
       await authorizer.authorizeObservation({
         title: "Context catalog",
         description: `Listed ${catalog.entries.length} available Context item(s).`,
-        excludeObservers: check.excludeObservers,
       });
-      check.commit();
     }
     return catalog;
   }
@@ -344,17 +322,16 @@ export class ContextGatekeeper
   }
 
   /**
-   * The Context singleton is a broad binding over public and account-private collections. Track the
-   * collections actually revealed and verify every observer against each one.
+   * Accepts collaborators under the low-stakes observer policy (`docs/observers.md` §9.1 Strategy
+   * D). Context collections hold skills and reference documents rather than secrets, and a private
+   * collection cannot be shared at all — so per-collection verification could never pass for a
+   * collaborator, and only ever blocked sharing a workspace that had read one. Reads are still
+   * recorded as observations.
    */
-  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    await this.#observers().addObserver(
-      id, user as unknown as Fetcher<ContextVerifierApi>);
-  }
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
 
-  async removeObserver(id: string): Promise<void> {
-    this.#observers().removeObserver(id);
-  }
+  /** Removes a collaborator; no observer state is retained. */
+  async removeObserver(_id: string): Promise<void> {}
 
   /** Read-only gatekeeper: no actions are submitted, so these callbacks should never run. */
   applyAction(_action: number): Promise<void> {
