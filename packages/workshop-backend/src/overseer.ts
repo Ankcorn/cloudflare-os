@@ -8398,6 +8398,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let self = this;
     function deliverMessage(record: AiChatMessage) {
+      if (record.type === "action") {
+        let actionRecord = self.impl.storage.actions.get(record.actionId);
+        if (actionRecord) record.actionLog = actionRecordToLog(actionRecord);
+      }
       let delivered = record.type === "message" && record.attachments?.length ?
           self.impl.hydrateChatMessageForClient(record) : record;
       subscriber.message(delivered).catch(unsubscribe);
@@ -8405,13 +8409,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let msgSubscriber = {
       add(record: AiChatMessage) {
-        if (record.type == "action") {
-          let actionRecord = self.impl.storage.actions.get(record.actionId);
-          if (actionRecord) {
-            record.actionLog = actionRecordToLog(actionRecord);
-          }
-        }
-
         deliverMessage(record);
       },
       update(oldRecord: AiChatMessage, newRecord: AiChatMessage): void {
