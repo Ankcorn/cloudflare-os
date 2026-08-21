@@ -1431,6 +1431,7 @@ export default function GadgetEditor() {
             overseer={overseer.stub}
             pendingById={pendingById}
             isChecking={pendingStatus === 'checking'}
+            isError={pendingStatus === 'error'}
             onViewActivity={openActivity}
           />
 
