@@ -777,6 +777,7 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       //       binding-map seeds are derived), and agent-spawner configs hold the new
       //       `env: Record<name, WorkpieceId>` form (old `env?: string[]` allowlists rewritten,
       //       in both the creationSpec and the class stub's baked-in props).
+      //   2 = the actions collection's `pendingByGatekeeper` index exists and is backfilled.
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
@@ -878,7 +879,16 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       }),
 
       actions: collection<ActionRecord>()({
-        primaryKey: "id"
+        primaryKey: "id",
+
+        nonUniqueIndexes: {
+          // Sparse index over just the pending records, keyed by gatekeeper, so the auto-approval
+          // drain and subscribe replay are O(pending) rather than full-log scans. Backfilled by
+          // the version-2 migration.
+          pendingByGatekeeper(record: ActionRecord) {
+            return record.state === "pending" ? record.gatekeeperId : null;
+          }
+        }
       }),
 
       boundHooks: collection<BoundHookRecord>()({
@@ -1477,7 +1487,8 @@ class OverseerImpl implements AgentHooks {
 
   // Migrate storage to the current schema version. Runs synchronously in the constructor.
   #migrateStorage(): void {
-    if (this.storage.version.get() !== 0) return;
+    let version = this.storage.version.get();
+    if (version >= 2) return;
     if (this.ownerId === undefined) {
       // Brand-new (or never-initialized) DO: there is nothing to migrate. We deliberately avoid
       // writing anything here, so that probing a nonexistent DO leaves no storage behind; the
@@ -1490,89 +1501,98 @@ class OverseerImpl implements AgentHooks {
     // workspace half-migrated.
     let startedAt = Date.now();
     this.ctx.storage.transactionSync(() => {
-      // Version 0 -> 1: the workspace predates multi-gadget support. If it has any gadget content
-      // (code beyond the initial empty snapshot, or named bindings), register that content as the
-      // workspace's single gadget and record it as the default gadget; binding names and blueprint
-      // annotations move from the gatekeeper records onto the gadget's binding edges. (The stale
-      // originals are left on the gatekeeper records; see GatekeeperRecord.) A workspace with no
-      // gadget content migrates to zero gadgets.
-      let hasCode = [...this.storage.code.list({limit: 1, start: 2})].length > 0;
-      let allGatekeepers = [...this.storage.gatekeepers.list()];
-      let namedGatekeepers = allGatekeepers.filter(gk => gk.bindingName !== undefined);
+      if (version < 1) this.#migrateToMultiGadget();
 
-      // The legacy flat env's named entries: each named gatekeeper, plus `GADGET -> the legacy
-      // gadget` when one is created below. Used to resolve spawner allowlists further down.
-      // (The workspace default binding list itself needs no migration step: it is derived on
-      // demand from the gadget record created below, whose bindingName and binding edges yield
-      // exactly this map -- so chats in old workspaces keep seeing `env.GADGET` and the same
-      // named bindings they always did.)
-      let legacyEnv: Record<string, WorkpieceId> = {};
-      for (let gk of namedGatekeepers) {
-        legacyEnv[gk.bindingName!] = gk.id;
-      }
+      // Version 1 -> 2: backfill the actions `pendingByGatekeeper` index. Indexes are only
+      // maintained at write time, so over records that predate its declaration the index starts
+      // empty -- and resolving a pre-existing pending action would then throw on the index update.
+      this.storage.actions.pendingByGatekeeper.rebuild();
 
-      if (hasCode || namedGatekeepers.length > 0) {
-        let id = this.allocateWorkpieceId();
-        // Set defaultGadgetId before putting the record so that gadgetRootName() (used by
-        // workpiece subscribers) resolves the legacy names.
-        this.storage.defaultGadgetId.put(id);
-        let bindings: Record<string, BindingRecord> = {};
-        for (let gk of namedGatekeepers) {
-          bindings[gk.bindingName!] = {
-            target: gk.id,
-            ...(gk.blueprintAnnotation ? {blueprintAnnotation: gk.blueprintAnnotation} : {}),
-          };
-        }
-        this.storage.gadgets.put({
-          id,
-          title: this.storage.title.get(),
-          created: new Date(),
-          bindingName: "GADGET",
-          bindings,
-        });
-        legacyEnv["GADGET"] = id;
-      }
-
-      // Rewrite each agent-spawner gatekeeper's config from the old `env?: string[]` binding-name
-      // allowlist to the new `env: Record<name, WorkpieceId>` form (see AgentSpawnerConfig). The
-      // config lives in two places and both must be updated: the record's `creationSpec`, and the
-      // props baked into the record's `class` stub. Props can't be edited in place, so the stub
-      // is recreated the same way newAgentSpawnerGatekeeper() creates it -- except that
-      // `creatorUserId` isn't recoverable from the record, so it is omitted, relying on the
-      // documented legacy fallback to the workspace owner.
-      for (let gk of allGatekeepers) {
-        if (gk.creationSpec?.type !== "agentSpawner") continue;
-        // The stored (pre-migration) shape is derived from the real type, differing only in
-        // `env`; the conflicting `env` types force the cast through `unknown`.
-        let {env: legacyAllowlist, ...restConfig} = gk.creationSpec.config as
-            unknown as Omit<AgentSpawnerConfig, "env"> & {env?: string[]};
-        let env: Record<string, WorkpieceId>;
-        if (legacyAllowlist !== undefined) {
-          // Resolve each allowlisted name against the gatekeepers' binding names, dropping any
-          // that no longer resolve.
-          env = {};
-          for (let name of legacyAllowlist) {
-            if (Object.hasOwn(legacyEnv, name)) env[name] = legacyEnv[name];
-          }
-        } else {
-          // An absent allowlist historically meant "unrestricted": the spawned agent saw every
-          // named binding plus GADGET -- exactly the legacy env map built above.
-          env = {...legacyEnv};
-        }
-        let config: AgentSpawnerConfig = {...restConfig, env};
-        gk.creationSpec = {...gk.creationSpec, config};
-        let props: AgentSpawnerBindingProps = {overseerId: this.ctx.id.toString(), config};
-        gk.class = this.ctx.exports.AgentSpawnerGatekeeper({props});
-        this.storage.gatekeepers.put(gk);
-      }
-
-      this.storage.version.put(1);
+      this.storage.version.put(2);
     });
 
     this.logger.info("migrated workspace storage", {
       event: "storage.migration.completed", durationMs: Date.now() - startedAt,
     });
   }
+
+  // Version 0 -> 1: the workspace predates multi-gadget support. If it has any gadget content
+  // (code beyond the initial empty snapshot, or named bindings), register that content as the
+  // workspace's single gadget and record it as the default gadget; binding names and blueprint
+  // annotations move from the gatekeeper records onto the gadget's binding edges. (The stale
+  // originals are left on the gatekeeper records; see GatekeeperRecord.) A workspace with no
+  // gadget content migrates to zero gadgets.
+  #migrateToMultiGadget(): void {
+    let hasCode = [...this.storage.code.list({limit: 1, start: 2})].length > 0;
+    let allGatekeepers = [...this.storage.gatekeepers.list()];
+    let namedGatekeepers = allGatekeepers.filter(gk => gk.bindingName !== undefined);
+
+    // The legacy flat env's named entries: each named gatekeeper, plus `GADGET -> the legacy
+    // gadget` when one is created below. Used to resolve spawner allowlists further down.
+    // (The workspace default binding list itself needs no migration step: it is derived on
+    // demand from the gadget record created below, whose bindingName and binding edges yield
+    // exactly this map -- so chats in old workspaces keep seeing `env.GADGET` and the same
+    // named bindings they always did.)
+    let legacyEnv: Record<string, WorkpieceId> = {};
+    for (let gk of namedGatekeepers) {
+      legacyEnv[gk.bindingName!] = gk.id;
+    }
+
+    if (hasCode || namedGatekeepers.length > 0) {
+      let id = this.allocateWorkpieceId();
+      // Set defaultGadgetId before putting the record so that gadgetRootName() (used by
+      // workpiece subscribers) resolves the legacy names.
+      this.storage.defaultGadgetId.put(id);
+      let bindings: Record<string, BindingRecord> = {};
+      for (let gk of namedGatekeepers) {
+        bindings[gk.bindingName!] = {
+          target: gk.id,
+          ...(gk.blueprintAnnotation ? {blueprintAnnotation: gk.blueprintAnnotation} : {}),
+        };
+      }
+      this.storage.gadgets.put({
+        id,
+        title: this.storage.title.get(),
+        created: new Date(),
+        bindingName: "GADGET",
+        bindings,
+      });
+      legacyEnv["GADGET"] = id;
+    }
+
+    // Rewrite each agent-spawner gatekeeper's config from the old `env?: string[]` binding-name
+    // allowlist to the new `env: Record<name, WorkpieceId>` form (see AgentSpawnerConfig). The
+    // config lives in two places and both must be updated: the record's `creationSpec`, and the
+    // props baked into the record's `class` stub. Props can't be edited in place, so the stub
+    // is recreated the same way newAgentSpawnerGatekeeper() creates it -- except that
+    // `creatorUserId` isn't recoverable from the record, so it is omitted, relying on the
+    // documented legacy fallback to the workspace owner.
+    for (let gk of allGatekeepers) {
+      if (gk.creationSpec?.type !== "agentSpawner") continue;
+      // The stored (pre-migration) shape is derived from the real type, differing only in
+      // `env`; the conflicting `env` types force the cast through `unknown`.
+      let {env: legacyAllowlist, ...restConfig} = gk.creationSpec.config as
+          unknown as Omit<AgentSpawnerConfig, "env"> & {env?: string[]};
+      let env: Record<string, WorkpieceId>;
+      if (legacyAllowlist !== undefined) {
+        // Resolve each allowlisted name against the gatekeepers' binding names, dropping any
+        // that no longer resolve.
+        env = {};
+        for (let name of legacyAllowlist) {
+          if (Object.hasOwn(legacyEnv, name)) env[name] = legacyEnv[name];
+        }
+      } else {
+        // An absent allowlist historically meant "unrestricted": the spawned agent saw every
+        // named binding plus GADGET -- exactly the legacy env map built above.
+        env = {...legacyEnv};
+      }
+      let config: AgentSpawnerConfig = {...restConfig, env};
+      gk.creationSpec = {...gk.creationSpec, config};
+      let props: AgentSpawnerBindingProps = {overseerId: this.ctx.id.toString(), config};
+      gk.class = this.ctx.exports.AgentSpawnerGatekeeper({props});
+      this.storage.gatekeepers.put(gk);
+    }
+}
 
   // Allocate a workpiece ID from the shared counter. (The counter is named `nextGatekeeperId`
   // for historical reasons; see makeOverseerStorage.)
@@ -6583,7 +6603,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
-    this.impl.storage.version.put(1);
+    this.impl.storage.version.put(2);
   }
 
   /**
@@ -8209,9 +8229,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
     let actions = this.impl.storage.actions;
-    // Pre-deploy clients pass startAfter and build their entire history view from replay; honor
-    // that by replaying everything, not just pendings. The value itself is ignored (see api.ts).
-    let replayAll = startAfter !== undefined;
 
     subscriber = subscriber.dup();  // keep stub after return
     let subscribed = false;
@@ -8240,23 +8257,33 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     actions.subscribe(dbSubscriber);
     subscribed = true;
 
-    // Replay currently-pending records before returning. nextActionId bounds the sweep: records
-    // created past it are delivered by the live subscription registered above. Pages are
-    // synchronous snapshots; the yield between pages keeps a huge log from starving other RPCs.
+    // Replay currently-pending records before returning. nextActionId bounds the replay: records
+    // created past it are delivered by the live subscription registered above.
     try {
       let end = this.impl.storage.nextActionId.get();
-      let cursor: number | undefined;
-      for (;;) {
-        if (disposed) throw new Error("Action subscriber failed during replay");
-        let page = [...actions.list({startAfter: cursor, end, limit: PENDING_SCAN_PAGE_SIZE})];
-        for (let record of page) {
-          if (replayAll || record.state === "pending") {
+      if (startAfter !== undefined) {
+        // Deprecated pre-deploy clients pass startAfter and build their entire history view from
+        // replay; honor that by replaying everything, not just pendings, paging through the full
+        // log with a yield between pages so it doesn't starve other RPCs. The value itself is
+        // ignored (see api.ts). Delete this block once pre-deploy clients are gone.
+        let cursor: number | undefined;
+        for (;;) {
+          if (disposed) throw new Error("Action subscriber failed during replay");
+          let page = [...actions.list({startAfter: cursor, end, limit: PENDING_SCAN_PAGE_SIZE})];
+          for (let record of page) {
             subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
           }
+          if (page.length < PENDING_SCAN_PAGE_SIZE) break;
+          cursor = page.at(-1)!.id;
+          await scheduler.wait(0);
         }
-        if (page.length < PENDING_SCAN_PAGE_SIZE) break;
-        cursor = page.at(-1)!.id;
-        await scheduler.wait(0);
+      } else {
+        // The index lists grouped by gatekeeper; sort by id to preserve the ordered stream.
+        // Awaiting the batch lets a failed delivery reject the subscribe call.
+        let pending = [...actions.pendingByGatekeeper.list()]
+            .filter(record => record.id < end)
+            .sort((a, b) => a.id - b.id);
+        await Promise.all(pending.map(record => subscriber.entry(actionRecordToLog(record))));
       }
     } catch (err) {
       unsubscribe();

@@ -1,78 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import type { RpcStub } from "capnweb";
-import { createTypedStorage, collection } from "@gadgets/typed-storage";
-import type { ActionLogEntry, ActionsSubscriber, Overseer } from "@gadgets/workshop-shared/api";
+import type { ActionLogEntry, ActionsSubscriber } from "@gadgets/workshop-shared/api";
 import {
-  HISTORY_PAGE_DEFAULT_LIMIT, HISTORY_PAGE_SCAN_CAP,
-  OverseerDurableObject, PENDING_SCAN_PAGE_SIZE,
+  HISTORY_PAGE_DEFAULT_LIMIT, HISTORY_PAGE_SCAN_CAP, PENDING_SCAN_PAGE_SIZE,
 } from "../src/overseer.js";
-import type { ActionRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
+import {
+  makeActionStorage, makePreIndexActionStorage, openFakeOverseer, putAction,
+} from "./fixtures.js";
 
 vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
-
-function makeStorage() {
-  return createTypedStorage(makeMockStorage(), {
-    singletons: { nextActionId: 0 },
-    collections: { actions: collection<ActionRecord>()({ primaryKey: "id" }) },
-  });
-}
-
-type TestStorage = ReturnType<typeof makeStorage>;
-
-// Puts a record and keeps nextActionId ahead of it, as the real allocator does.
-function putAction(storage: TestStorage, id: number, opts: {
-    state?: ActionRecord["state"], type?: ActionRecord["type"] } = {}) {
-  let base = {
-    id,
-    gatekeeperId: 1,
-    caller: { from: "agent", chatId: 1 } as const,
-    resourceTitle: `Resource ${id}`,
-    createdAt: new Date(1700000000000 + id),
-    state: opts.state ?? "pending",
-  };
-  let description = { title: `Action ${id}`, description: "test" };
-  let type = opts.type ?? "action";
-  storage.actions.put(
-      type === "action" ? { ...base, type, action: id, description: { ...description, implementsRevert: true } }
-    : type === "observation" ? { ...base, type, description }
-    : { ...base, type, description, enabled: true });
-  if (id >= storage.nextActionId.get()) storage.nextActionId.put(id + 1);
-}
-
-// Forges a client interface over the mock storage via open(), mirroring
-// overseer-hooks.test.ts's makeTargetOverseer. `role` picks the returned interface class.
-async function makeClient(storage: TestStorage, role: "build" | "use" = "build"): Promise<Overseer> {
-  let ownerId = "owner-id";
-  let userId = role === "build" ? ownerId : "viewer-id";
-  let overseer = {
-    open: OverseerDurableObject.prototype.open,
-    impl: {
-      ownerId,
-      ensureAmbientCapsules: async () => {},
-      markOutputsDirty: () => {},
-      joinPresence: () => () => {},
-      joinOutputsFanout: () => () => {},
-      ensureObserver: async () => {},
-      syncOutputsTo: async () => {},
-      getSharingManager: async () => ({ getEffectiveRole: () => role }),
-      ctx: { id: { toString: () => "workspace-id" } },
-      users: {
-        idFromString: (id: string) => id,
-        get: () => ({
-          whoami: async () => ({ id: "profile-id", name: "Test User" }),
-          recordSharedGadgetOpen: async () => {},
-        }),
-      },
-      storage: Object.assign(storage, {
-        prohibitAllSharing: { get: () => false },
-        title: { get: () => "Test Workspace" },
-      }),
-    },
-  } satisfies Pick<OverseerDurableObject, "open"> & { impl: object };
-  return overseer.open(userId, `${userId}-profile`, new NativeRpcStub<() => void>(() => {}));
-}
 
 // Hand-rolled ActionsSubscriber stub. `events` interleaves entry ids with "ready", so tests can
 // assert both content and ordering of the delivered stream.
@@ -90,7 +27,7 @@ function makeSubscriber(entry?: (record: ActionLogEntry) => Promise<void>) {
 
 describe("subscribeToActions", () => {
   it("fires ready immediately on an empty log", async () => {
-    let client = await makeClient(makeStorage());
+    let client = await openFakeOverseer(makeActionStorage());
     let { subscriber, events } = makeSubscriber();
 
     using _sub = await client.subscribeToActions(subscriber);
@@ -98,59 +35,72 @@ describe("subscribeToActions", () => {
   });
 
   it("replays only pending records, of any type, ascending, then ready", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0);                                          // pending action
     putAction(storage, 1, { state: "approved" });
     putAction(storage, 2, { type: "observation", state: "approved" });
     putAction(storage, 3, { type: "bindHook", state: "pending" });  // pending, non-action type
     putAction(storage, 4, { state: "rejected" });
     putAction(storage, 5);
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber();
 
     using _sub = await client.subscribeToActions(subscriber);
     expect(events).toEqual([0, 3, 5, "ready"]);
   });
 
+  it("replays pendings of several gatekeepers in ascending id order", async () => {
+    // The index groups records by gatekeeper; delivery must still be one id-ordered stream.
+    let storage = makeActionStorage();
+    putAction(storage, 0, { gatekeeperId: 2 });
+    putAction(storage, 1, { gatekeeperId: 1 });
+    putAction(storage, 2, { gatekeeperId: 3 });
+    putAction(storage, 3, { gatekeeperId: 1 });
+    let client = await openFakeOverseer(storage);
+    let { subscriber, events } = makeSubscriber();
+
+    using _sub = await client.subscribeToActions(subscriber);
+    expect(events).toEqual([0, 1, 2, 3, "ready"]);
+  });
+
   it("replays every record, resolved included, for the deprecated startAfter", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0);
     putAction(storage, 1, { state: "approved" });
     putAction(storage, 2, { type: "observation", state: "rejected" });
     putAction(storage, 3, { type: "bindHook", state: "pending" });
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber();
 
     using _sub = await client.subscribeToActions(subscriber, new Date(0));
     expect(events).toEqual([0, 1, 2, 3, "ready"]);
   });
 
-  it("sweeps a multi-page log without gaps or duplicates", async () => {
-    let storage = makeStorage();
+  it("replays a large log's pendings without gaps, duplicates, or resolved records", async () => {
+    let storage = makeActionStorage();
     let expected: Array<number | "ready"> = [];
-    for (let id = 0; id < PENDING_SCAN_PAGE_SIZE * 2 + 40; id++) {
+    for (let id = 0; id < 552; id++) {
       let pending = id % 3 !== 0;
       putAction(storage, id, { state: pending ? "pending" : "approved" });
       if (pending) expected.push(id);
     }
     expected.push("ready");
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber();
 
     using _sub = await client.subscribeToActions(subscriber);
     expect(events).toEqual(expected);
   });
 
-  it("delivers a record created mid-sweep live, exactly once", async () => {
-    let storage = makeStorage();
-    // One full page plus one, so the sweep yields between pages.
-    for (let id = 0; id <= PENDING_SCAN_PAGE_SIZE; id++) putAction(storage, id);
-    let client = await makeClient(storage);
+  it("delivers a record created mid-replay live, exactly once", async () => {
+    let storage = makeActionStorage();
+    for (let id = 0; id <= 40; id++) putAction(storage, id);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber();
 
     let pending = client.subscribeToActions(subscriber);
-    let lateId = PENDING_SCAN_PAGE_SIZE + 1;
-    putAction(storage, lateId);  // past the sweep's bound: live subscription only
+    let lateId = 41;
+    putAction(storage, lateId);  // past the replay's bound: live subscription only
     using _sub = await pending;
 
     expect(events.filter(e => e === lateId)).toEqual([lateId]);
@@ -160,21 +110,31 @@ describe("subscribeToActions", () => {
   });
 
   it("rejects the subscribe call when the subscriber fails during replay", async () => {
-    let storage = makeStorage();
-    // More than one page, so the sweep crosses a yield after the entry rejections settle.
-    for (let id = 0; id <= PENDING_SCAN_PAGE_SIZE; id++) putAction(storage, id);
-    let client = await makeClient(storage);
+    let storage = makeActionStorage();
+    putAction(storage, 0);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber(async () => { throw new Error("entry failed"); });
 
-    await expect(client.subscribeToActions(subscriber))
+    await expect(client.subscribeToActions(subscriber)).rejects.toThrow("entry failed");
+    expect(events).not.toContain("ready");
+  });
+
+  it("rejects the deprecated full replay when the subscriber fails mid-sweep", async () => {
+    let storage = makeActionStorage();
+    // More than one page, so the sweep crosses a yield after the entry rejections settle.
+    for (let id = 0; id <= PENDING_SCAN_PAGE_SIZE; id++) putAction(storage, id);
+    let client = await openFakeOverseer(storage);
+    let { subscriber, events } = makeSubscriber(async () => { throw new Error("entry failed"); });
+
+    await expect(client.subscribeToActions(subscriber, new Date(0)))
         .rejects.toThrow("Action subscriber failed during replay");
     expect(events).not.toContain("ready");
   });
 
   it("stops delivering after the subscription is disposed", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0);
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
     let { subscriber, events } = makeSubscriber();
 
     let sub = await client.subscribeToActions(subscriber);
@@ -184,16 +144,40 @@ describe("subscribeToActions", () => {
 
     expect(events).toEqual([0, "ready"]);
   });
+
+  it("sees pendings written before the index existed once a rebuild backfills it", async () => {
+    // Mirrors the version-2 migration: records predate the pendingByGatekeeper declaration, so
+    // the index starts empty until #migrateStorage's rebuild() runs.
+    let mock = makeMockStorage();
+    let legacy = makePreIndexActionStorage(mock);
+    putAction(legacy, 0);
+    putAction(legacy, 1, { state: "approved" });
+    putAction(legacy, 2);
+
+    let storage = makeActionStorage(mock);
+    storage.actions.pendingByGatekeeper.rebuild();
+
+    let client = await openFakeOverseer(storage);
+    let { subscriber, events } = makeSubscriber();
+    using _sub = await client.subscribeToActions(subscriber);
+    expect(events).toEqual([0, 2, "ready"]);
+
+    // Resolving a backfilled record must not throw on the index update, and must be delivered.
+    let record = storage.actions.get(0)!;
+    record.state = "approved";
+    storage.actions.put(record);
+    expect(events).toEqual([0, 2, "ready", 0]);
+  });
 });
 
 describe("listActions", () => {
   it("returns resolved records newest-first, excluding pending", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0, { state: "approved" });
     putAction(storage, 1);  // pending
     putAction(storage, 2, { state: "rejected" });
     putAction(storage, 3, { type: "observation", state: "approved" });
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
 
     let page = await client.listActions();
     expect(page.entries.map(e => e.id)).toEqual([3, 2, 0]);
@@ -201,21 +185,21 @@ describe("listActions", () => {
   });
 
   it("filters by record type", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0, { state: "approved" });
     putAction(storage, 1, { type: "observation", state: "approved" });
     putAction(storage, 2, { type: "bindHook", state: "approved" });
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
 
     let page = await client.listActions({ filter: "observation" });
     expect(page.entries.map(e => e.id)).toEqual([1]);
   });
 
   it("applies the default limit and reports more history", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     let total = HISTORY_PAGE_DEFAULT_LIMIT + 10;
     for (let id = 0; id < total; id++) putAction(storage, id, { state: "approved" });
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
 
     let first = await client.listActions();
     expect(first.entries.length).toBe(HISTORY_PAGE_DEFAULT_LIMIT);
@@ -227,11 +211,11 @@ describe("listActions", () => {
   });
 
   it("caps raw records scanned, returning a short page with a cursor", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     // Old resolved records buried under more than a scan-cap of pending ones.
     for (let id = 0; id < 10; id++) putAction(storage, id, { state: "approved" });
     for (let id = 10; id < 10 + HISTORY_PAGE_SCAN_CAP + 20; id++) putAction(storage, id);
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
 
     let first = await client.listActions();
     expect(first.entries).toEqual([]);
@@ -243,14 +227,14 @@ describe("listActions", () => {
   });
 
   it("pages without overlap or gaps", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     let expected: number[] = [];
     for (let id = 0; id < 130; id++) {
       let resolved = id % 4 !== 0;
       putAction(storage, id, { state: resolved ? "approved" : "pending" });
       if (resolved) expected.unshift(id);
     }
-    let client = await makeClient(storage);
+    let client = await openFakeOverseer(storage);
 
     let ids: number[] = [];
     let beforeId: number | undefined;
@@ -264,7 +248,7 @@ describe("listActions", () => {
   });
 
   it("rejects an invalid beforeId", async () => {
-    let client = await makeClient(makeStorage());
+    let client = await openFakeOverseer(makeActionStorage());
 
     await expect(client.listActions({ beforeId: -1 })).rejects.toThrow("Invalid beforeId");
   });
@@ -272,10 +256,10 @@ describe("listActions", () => {
 
 describe("UseOverseerInterface", () => {
   it("answers listActions with an empty terminal page and the subscription inertly", async () => {
-    let storage = makeStorage();
+    let storage = makeActionStorage();
     putAction(storage, 0);
     putAction(storage, 1, { state: "approved" });
-    let client = await makeClient(storage, "use");
+    let client = await openFakeOverseer(storage, { role: "use" });
     let { subscriber, events } = makeSubscriber();
 
     expect(await client.listActions()).toEqual({ entries: [] });
