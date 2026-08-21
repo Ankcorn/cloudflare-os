@@ -729,7 +729,7 @@ export default function GadgetEditor() {
       ? streamingActiveFile.filename
       : undefined
 
-  const { status: actionsStatus, pendingById, liveById } = useActions(overseer?.stub ?? null)
+  const { status: pendingStatus, pendingById, liveById } = useActions(overseer?.stub ?? null)
   // Hook bindings change once in a while, but `liveById` is a fresh Map on every action-log
   // frame. Track just the bindHook enable states so the refetch isn't driven at animation rate.
   // listHooks() below is the authoritative initial source; live entries only trigger refetches.
@@ -752,8 +752,7 @@ export default function GadgetEditor() {
     // Clear on teardown so a workspace switch never shows the previous workspace's indicators.
     return () => { cancelled = true; setHookedGadgetIds(NO_GADGETS) }
   }, [overseer, hookSignature, metadata !== null, isUseOnly])
-  const pendingActions = useMemo(() => [...pendingById.values()], [pendingById])
-  const pendingActionsCount = pendingActions.length
+  const pendingActionCount = pendingById.size
 
   // Whether the *selected* gadget has code. When no gadget is selected, the code interface is
   // unmounted and raw `hasCode` can't update, but a gadget-less workspace has no code to show.
@@ -1430,8 +1429,8 @@ export default function GadgetEditor() {
 
           <ActivityNotifications
             overseer={overseer.stub}
-            pendingActions={pendingActions}
-            checking={actionsStatus === 'checking'}
+            pendingById={pendingById}
+            isChecking={pendingStatus === 'checking'}
             onViewActivity={openActivity}
           />
 
@@ -1504,14 +1503,14 @@ export default function GadgetEditor() {
         </button>
         <button
           type="button"
-          onClick={() => openActivity(pendingActionsCount > 0 ? 'review' : 'history')}
+          onClick={() => openActivity(pendingActionCount > 0 ? 'review' : 'history')}
           aria-current={paneShowsActivity ? 'page' : undefined}
           className={`relative flex h-9 min-w-0 flex-1 items-center justify-center rounded-lg px-3 text-[14px] font-medium ${
             paneShowsActivity ? 'bg-kumo-tint text-kumo-default' : 'text-kumo-subtle'
           }`}
         >
           Activity
-          {pendingActionsCount > 0 && (
+          {pendingActionCount > 0 && (
             <span className="ml-1.5 h-1.5 w-1.5 rounded-full bg-kumo-brand" />
           )}
         </button>
@@ -1719,7 +1718,7 @@ export default function GadgetEditor() {
                       key={tab.value}
                       active={activityView === tab.value}
                       label={tab.label}
-                      count={tab.value === 'review' ? pendingActionsCount : undefined}
+                      count={tab.value === 'review' ? pendingActionCount : undefined}
                       onClick={() => setActivityView(tab.value)}
                     />
                   ))
@@ -1772,7 +1771,7 @@ export default function GadgetEditor() {
                     key={tab.value}
                     active={activityView === tab.value}
                     label={tab.label}
-                    count={tab.value === 'review' ? pendingActionsCount : undefined}
+                    count={tab.value === 'review' ? pendingActionCount : undefined}
                     onClick={() => setActivityView(tab.value)}
                   />
                 ))}
@@ -1885,8 +1884,8 @@ export default function GadgetEditor() {
               onExpandedChange={handleWorkpieceRailExpandedChange}
               onSelect={handleSelectWorkpiece}
               onRename={handleRenameWorkpiece}
-              pendingActivityCount={pendingActionsCount}
-              onOpenActivity={() => openActivity(pendingActionsCount > 0 ? 'review' : 'history')}
+              pendingActivityCount={pendingActionCount}
+              onOpenActivity={() => openActivity(pendingActionCount > 0 ? 'review' : 'history')}
             />
           </div>
         )}
