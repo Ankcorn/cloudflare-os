@@ -4600,8 +4600,11 @@ class OverseerImpl implements AgentHooks {
       // role. The skip also covers a *formerly*-bound producer (unbinding shrinks use scope
       // live) and a *never*-bound one reachable only through chat bindings, whose restricted
       // data the agent may have persisted with no "use" collaborator ever verified against it
-      // -- both accepted residuals; see docs/observers.md edge case 4. An absent role means
-      // "build" (see CollaboratorInfo), which fails safe here.
+      // -- both accepted residuals; see docs/observers.md edge case 4. A rebind after an unbind
+      // is NOT part of the residual: ensureObserver prunes out-of-scope entries at every open,
+      // so a "use" collaborator whose only opens fell in the unbound window holds no entry here
+      // and blocks until they re-open at the restored scope. An absent role means "build" (see
+      // CollaboratorInfo), which fails safe here.
       if (vendorId && (collaborator.role ?? "build") === "use" && !inUseScope) continue;
       let observer = vendorId ? this.storage.observers.get(collaborator.profile.id) : undefined;
       if (!observer || !(gatekeeperId in observer.accountChoices)) {
@@ -8251,16 +8254,16 @@ class OverseerImpl implements AgentHooks {
     let inScope = this.#inScopeGatekeepers(role);
 
     // 2. Load any existing observer record, and prune every account choice for a gatekeeper now
-    //    outside this collaborator's verification scope. This restores the invariant commit-time
-    //    re-checks (assertCollaboratorStillVerified) rest on: entry present => verified at this
+    //    outside this collaborator's verification scope. This restores the invariant the coverage
+    //    guard (#assertSensitiveObservationCoverage) rests on: entry present => verified at this
     //    collaborator's most recent open. Without the prune, a "use" collaborator opening while a
     //    connection is unbound from every gadget verifies nothing against it, yet their stale
-    //    entry survives to be trusted the moment the connection is rebound (same gatekeeper id --
-    //    only gadget binding edges changed). The prune must run even when the remaining scope is
-    //    empty -- that's exactly the everything-unbound open. The registration itself is left
-    //    with the gatekeeper (no removeObserver): keeping it preserves forward exclusion via
-    //    byObserverId, and the record stays even if its accountChoices empties, since the
-    //    observerId remains referenced.
+    //    entry survives to be trusted by the guard the moment the connection is rebound (same
+    //    gatekeeper id -- only gadget binding edges changed). The prune must run even when the
+    //    remaining scope is empty -- that's exactly the everything-unbound open. The registration
+    //    itself is left with the gatekeeper (no removeObserver): keeping it preserves forward
+    //    exclusion via byObserverId, and the record stays even if its accountChoices empties,
+    //    since the observerId remains referenced.
     let record = this.storage.observers.get(profileId);
     if (record) {
       let inScopeIds = new Set(inScope.map(gk => gk.id));
@@ -8274,8 +8277,9 @@ class OverseerImpl implements AgentHooks {
       if (pruned) this.storage.observers.put(record);
     }
     if (inScope.length === 0) {
-      // Nothing to verify, but this is still a success exit: the caller's commit gate must still
-      // run. Nothing has been minted at this point, so a throw here has no rollback to do.
+      // Nothing to verify, but this is still a success exit: a redemption with an empty scope
+      // must still run its commit gate, or the confirming grant would never be written. Nothing
+      // has been minted at this point, so a throw here has no rollback to do.
       commitGate?.();
       return;
     }
