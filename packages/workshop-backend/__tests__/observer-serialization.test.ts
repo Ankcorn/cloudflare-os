@@ -185,7 +185,7 @@ describe("ensureObserver per-profile serialization", () => {
       // B's failure scrubbed gatekeeper 1 from persisted coverage, and A's success -- which ran
       // strictly before B under the per-profile lock -- cannot have resurrected it. Without the
       // lock, A's final put lands after B's scrub and restores coverage the live check just
-      // refused, which assertCollaboratorStillVerified would then trust.
+      // refused, which the coverage guard would then trust.
       let record = impl.storage.observers.get("alice");
       expect(1 in record.accountChoices).toBe(false);
       expect(record.accountChoices[2]).toBe(20);
