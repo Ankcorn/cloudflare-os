@@ -4492,7 +4492,10 @@ class OverseerImpl implements AgentHooks {
 
   // Enforce an observation's `excludeObservers`. For each named opaque observerId:
   //   - Map it back to a profileId via the byObserverId index. An unknown id is not an active
-  //     observer (e.g. already torn down), so it is ignored.
+  //     observer (e.g. already torn down), so it is ignored -- unless a first-time verification
+  //     registered it with a gatekeeper but has not yet persisted its record
+  //     (#pendingObserverIds), in which case the profile may be admitted moments later and we
+  //     fail closed.
   //   - If that profileId is still authorized in the sharing graph, we cannot guarantee they won't
   //     see the observation (v1 has no per-thread hiding), so we throw to block it.
   //   - If that profileId is no longer authorized, we allow the observation for them and delete
@@ -4504,6 +4507,11 @@ class OverseerImpl implements AgentHooks {
 
     // Observers who are still authorized block the observation outright.
     for (let observerId of observerIds) {
+      if (this.#pendingObserverIds.has(observerId)) {
+        throw new Error(
+            "This observation was blocked because it contains data that a collaborator currently " +
+            "being verified may not be permitted to see.");
+      }
       let observer = this.storage.observers.byObserverId.get(observerId);
       if (!observer) continue;  // not an active observer -> ignore
 
@@ -7794,6 +7802,15 @@ class OverseerImpl implements AgentHooks {
   // verification settles; the map is small (one entry per concurrently-opening collaborator).
   #observerVerification = new Map<string, Promise<void>>();
 
+  // Observer ids a first-time verification has registered with at least one gatekeeper but whose
+  // record is not yet persisted, so byObserverId cannot resolve them (observerId -> profileId).
+  // Consulted by #enforceExcludeObservers, which otherwise reads such an id as "not an active
+  // observer" and lets an excluded observation through -- the collaborator is then admitted
+  // moments later with the data already in chat history. In-memory is the right scope: a DO
+  // restart kills the in-flight open, and its gatekeeper-side registration then references an id
+  // no record will ever carry, so ignoring it is correct.
+  #pendingObserverIds = new Map<string, string>();
+
   // Bring a non-owner `profileId` into compliance as an observer for their `role`, so that they may
   // open the Gadget. May invoke `configureCb` to ask the user to choose connected accounts for
   // gatekeeper bindings they haven't configured yet. Re-runs `addObserver` (re-verification) for
@@ -7854,6 +7871,12 @@ class OverseerImpl implements AgentHooks {
         inScope.filter(gk => gk.id in accountChoices).map(gk => gk.id));
 
     let observerId = record?.observerId ?? crypto.randomUUID();
+    // A freshly minted id becomes visible to gatekeepers at the first addObserver below, but
+    // resolvable via byObserverId only at the step-6 put -- hold it in #pendingObserverIds across
+    // that window so #enforceExcludeObservers can fail closed on it. The put and the finally's
+    // delete run synchronously back-to-back, so there is no gap where neither the map nor the
+    // index resolves the id.
+    if (!record) this.#pendingObserverIds.set(observerId, profileId);
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
 
@@ -7998,16 +8021,18 @@ class OverseerImpl implements AgentHooks {
         // All in-scope bindings verified successfully.
         break;
       }
+
+      // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
+      //    the record is the canonical moment the user becomes a configured observer.
+      this.storage.observers.put({profileId, observerId, accountChoices});
     } catch (err) {
       // Best-effort remove all the observers that were newly-added since we didn't persist the
       // user's observer record.
       await this.#removeObserverFromGatekeepers(observerId, [...newlyAdded]);
       throw err;
+    } finally {
+      if (!record) this.#pendingObserverIds.delete(observerId);
     }
-
-    // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
-    //    the record is the canonical moment the user becomes a configured observer.
-    this.storage.observers.put({profileId, observerId, accountChoices});
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the

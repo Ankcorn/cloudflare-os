@@ -329,7 +329,14 @@ observation proceed is when the named observer has *already lost access* in the 
 For each id in `description.excludeObservers`:
 
 1. Map the opaque `observerId` → `profileId` via the `observers.byObserverId` index. If there is
-   no record, the id is not an active observer → ignore it.
+   no record, the id is not an active observer → ignore it — **unless** the id belongs to a
+   first-time verification still in flight: `ensureObserver` registers a freshly minted id with
+   gatekeepers (`addObserver`) before the record is persisted, and that window spans awaits
+   (sibling verifier RPCs, even the configuration modal). The overseer tracks such ids in an
+   in-memory pending map and **blocks** an observation naming one (fail closed, with a distinct
+   "collaborator currently being verified" message) rather than reading it as unknown — otherwise
+   the observation would proceed and the collaborator be admitted moments later with the data
+   already in chat history.
 2. Check sharing-graph reachability for that `profileId`
    (`SharingManager.getEffectiveRole` / `computeEffectiveRoles`).
    - **Still authorized → throw**, blocking the observation (degrade to per-observation
