@@ -223,11 +223,11 @@ describe("ensureObserver per-profile serialization", () => {
           .rejects.toThrow(/could not confirm/);
 
       // The rejection went through fail(): gatekeeper 1's persisted coverage is scrubbed -- so
-      // assertCollaboratorStillVerified stops admitting this collaborator's older live sessions'
-      // external-message writes -- while gatekeeper 2's survives. The gatekeeper-side
-      // registration is deliberately kept (this was a re-verification of an admitted observer,
-      // not a first open): it preserves forward exclusion for alice's still-live sessions, and
-      // the next successful open's addObserver overwrites it.
+      // the coverage guard stops admitting its restricted reads to this collaborator's older
+      // live sessions -- while gatekeeper 2's survives. The gatekeeper-side registration is
+      // deliberately kept (this was a re-verification of an admitted observer, not a first
+      // open): it preserves forward exclusion for alice's still-live sessions, and the next
+      // successful open's addObserver overwrites it.
       let record = impl.storage.observers.get("alice");
       expect(1 in record.accountChoices).toBe(false);
       expect(record.accountChoices[2]).toBe(20);
@@ -257,10 +257,10 @@ describe("ensureObserver per-profile serialization", () => {
       await expect(impl.ensureObserver("alice", fakeClientUser, "build"))
           .rejects.toThrow(/could not confirm/);
 
-      // Coverage for the refused gatekeeper is scrubbed (assertCollaboratorStillVerified fails
-      // closed on her external-message writes), but the registrations stay put: tearing them
-      // down would drop alice from excludeObservers while her sessions -- which a failed
-      // re-verification does not restart -- keep receiving later observations.
+      // Coverage for the refused gatekeeper is scrubbed (the guard fails closed on its
+      // restricted reads), but the registrations stay put: tearing them down would drop alice
+      // from excludeObservers while her sessions -- which a failed re-verification does not
+      // restart -- keep receiving later non-restricted observations.
       expect(removed).toEqual([]);
       let record = impl.storage.observers.get("alice");
       expect(1 in record.accountChoices).toBe(false);
