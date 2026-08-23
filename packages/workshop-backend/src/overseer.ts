@@ -8346,10 +8346,10 @@ class OverseerImpl implements AgentHooks {
 
           let fail = (reason: string, err?: unknown) => {
             failures.set(gk.id, {accountId, reason});
-            // Commit-time re-checks (assertCollaboratorStillVerified) read the *persisted*
+            // The coverage guard (#assertSensitiveObservationCoverage) reads the *persisted*
             // record from other turns, so until this gatekeeper is scrubbed from it, the record
-            // keeps vouching for the collaborator's still-live sessions -- admitting their
-            // external-message writes -- even though the live check just refused them. Scrub it
+            // keeps admitting this producer's restricted observations to the collaborator's
+            // still-live sessions -- even though the live check just refused them. Scrub it
             // synchronously with the failure determination (the record is re-read because the
             // awaits since load may have let a concurrent open update it; get/put are synchronous
             // in this single-threaded DO, so nothing lands between the check and the write).
