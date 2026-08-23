@@ -7790,14 +7790,49 @@ class OverseerImpl implements AgentHooks {
     return role;
   }
 
+  // In-flight verification per profile (see ensureObserver). Entries are removed when their
+  // verification settles; the map is small (one entry per concurrently-opening collaborator).
+  #observerVerification = new Map<string, Promise<void>>();
+
   // Bring a non-owner `profileId` into compliance as an observer for their `role`, so that they may
   // open the Gadget. May invoke `configureCb` to ask the user to choose connected accounts for
   // gatekeeper bindings they haven't configured yet. Re-runs `addObserver` (re-verification) for
   // already-configured bindings on every open, catching revocation of the user's underlying
   // resource access promptly. Returns when fully verified; throws to deny access.
   //
+  // Serialized per profile: the body loads the observer record, awaits verifier RPCs (and possibly
+  // the configuration modal, which parks on user input indefinitely), and persists the record at
+  // the end. Input gates don't cover those awaits, so two concurrent opens for one profile would
+  // otherwise race -- the second open's final put would resurrect coverage the first open's
+  // failure just scrubbed, and two concurrent *first* opens would each mint their own observerId,
+  // registering the losing id with gatekeepers while the winning record forgets it ever existed.
+  // A promise chain rather than blockConcurrencyWhile, which would freeze the whole DO for the
+  // duration (unbounded, given the modal) -- same pattern as #preparingChatMessages and the
+  // Google gatekeeper's credential lock. Serializing only per profile keeps distinct
+  // collaborators' opens concurrent.
+  //
   // See observers-implementation-plan.md §5 Step 3.
   async ensureObserver(
+      profileId: string,
+      clientUser: DurableObjectStub<UserDurableObject>,
+      role: CollaboratorRole,
+      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+    let previous = this.#observerVerification.get(profileId) ?? Promise.resolve();
+    let release!: () => void;
+    let current = new Promise<void>(resolve => { release = resolve; });
+    this.#observerVerification.set(profileId, current);
+    await previous;
+    try {
+      await this.#ensureObserverLocked(profileId, clientUser, role, configureCb);
+    } finally {
+      release();
+      if (this.#observerVerification.get(profileId) === current) {
+        this.#observerVerification.delete(profileId);
+      }
+    }
+  }
+
+  async #ensureObserverLocked(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
