@@ -4393,11 +4393,12 @@ class OverseerImpl implements AgentHooks {
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
     // House rule (cf. addCollaborator): every check runs in one synchronous block with the writes
-    // it justifies -- the restricted-data latch and the action record. The only await before
-    // that block is the memoized sharing manager. Previously the excluded observers' cross-worker
-    // teardown was awaited between the exclusion check and the action record, so a re-grant
-    // landing in that window admitted an observation naming a collaborator who was authorized
-    // again by the time it was recorded. The one genuinely-async step -- tearing down excluded
+    // it justifies -- the restricted latch and the action record. The only await before that
+    // block is the memoized sharing manager. Awaiting between a check and the latch would open a
+    // window where a concurrent turn adds a collaborator the coverage check never saw
+    // (assertNewSharingAllowed short-circuits on the still-unset latch), removes the producer
+    // (removalBlockedByRestrictedData likewise), or a sibling verification's fail() scrubs
+    // coverage this check already trusted. The one genuinely-async step -- tearing down excluded
     // observers' gatekeeper registrations -- is deferred to after the writes.
     let sharing = await this.getSharingManager();
 
@@ -4413,8 +4414,20 @@ class OverseerImpl implements AgentHooks {
           "just revoked and their sessions have not yet been disconnected.");
     }
 
+    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+
     if (description.containsRestrictedData) {
-      await this.#assertSensitiveObservationCoverage(gatekeeperId);
+      // An in-flight facet RPC can outlive removeGatekeeper, so a restricted observation can
+      // arrive naming a connection this workspace no longer has -- with zero collaborators it
+      // would sail past the coverage check's early return. Latching a missing producer id
+      // permanently bricks sharing (assertNewSharingAllowed's missing-record branch), so refuse
+      // the read instead.
+      if (!gatekeeper) {
+        throw new Error(
+            "This observation was blocked because it contains sensitive data, but the " +
+            "connection it was read through has been removed from this workspace.");
+      }
+      this.#assertSensitiveObservationCoverage(gatekeeperId, sharing);
     }
 
     // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
@@ -4436,8 +4449,6 @@ class OverseerImpl implements AgentHooks {
 
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
-
-    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
     let record: ActionRecord = {
       id: actionId,
@@ -4571,8 +4582,10 @@ class OverseerImpl implements AgentHooks {
   // connection/binding topology changed while its verification was in flight: a redeemer is
   // never confirmed against a scope narrower than what exists at confirm time, so anyone this
   // guard can't see is either denied or was verified against the producer being checked.
-  async #assertSensitiveObservationCoverage(gatekeeperId: number): Promise<void> {
-    let sharing = await this.getSharingManager();
+  //
+  // Deliberately synchronous (the sharing manager is a parameter, not an internal await) so the
+  // caller can check and latch in one synchronous block -- see authorizeObservation.
+  #assertSensitiveObservationCoverage(gatekeeperId: number, sharing: SharingManager): void {
     let collaborators = sharing.listCollaborators();
     if (collaborators.length === 0) return;
 
@@ -4723,7 +4736,7 @@ class OverseerImpl implements AgentHooks {
   //     their record: they are no longer set up to observe, so the caller tears them down
   //     (#tearDownExcludedObservers); if they regain access they reconfigure from scratch (Step 3).
   // Deliberately synchronous (the sharing manager is a parameter) so authorizeObservation can
-  // decide and record in one synchronous block, deferring only the teardown.
+  // decide, latch, and record in one synchronous block, deferring only the teardown.
   #decideExcludeObservers(observerIds: string[], sharing: SharingManager): ObserverRecord[] {
     // No #revocationRestartPending check here: authorizeObservation fails *every* observation
     // closed across the revocation window before this runs, which also covers the unknown-id
