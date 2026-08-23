@@ -1718,6 +1718,10 @@ class OverseerImpl implements AgentHooks {
       remove: () => this.markOutputsDirty(),
     });
 
+    // Track connection/binding topology changes for authorizeCollaborator's mid-verification
+    // scope check (see #scopeGeneration).
+    this.#watchVerificationScope();
+
     if (this.storage.version.get() === 1) {
       // The workspace predates git-backed code storage (version 2, see the `version` singleton):
       // synthesize commits from the legacy code log before anything else runs. This migration
@@ -7978,17 +7982,53 @@ class OverseerImpl implements AgentHooks {
     return boundIds;
   }
 
-  // The raw inputs every role's verification scope is derived from (see #inScopeGatekeepers):
-  // the connection set and the gadget-bound subset, serialized for cheap equality.
-  // authorizeCollaborator compares this across a pending redemption's verification to detect a
-  // scope change mid-flight. Raw inputs rather than #inScopeGatekeepers output: that helper
-  // throws on legacy records, and a removal or bind-change must register just like an addition
-  // -- including of connections no verification could cover.
-  #verificationScopeFingerprint(): string {
-    let connectionIds =
-        [...this.storage.gatekeepers.list()].map(gk => gk.id).toSorted((a, b) => a - b);
-    let boundIds = [...this.#gadgetBoundGatekeeperIds()].toSorted((a, b) => a - b);
-    return JSON.stringify([connectionIds, boundIds]);
+  // Generation counter over the raw inputs every role's verification scope is derived from (see
+  // #inScopeGatekeepers): the connection set and the gadget-bound subset. authorizeCollaborator
+  // compares this across a pending redemption's verification to detect a scope change mid-flight.
+  // A generation rather than a value snapshot because it must register every relevant transition
+  // *including one that restores the previous value*: add-then-remove (or bind-then-unbind) while
+  // a redeemer is parked in the configuration modal leaves the id sets byte-identical, yet the
+  // redemption's verification -- invisible to the coverage guard while the edge is pending --
+  // never ran against the interim topology. Raw inputs rather than #inScopeGatekeepers output:
+  // that helper throws on legacy records, and a removal or bind-change must register just like
+  // an addition -- including of connections no verification could cover. In-memory is
+  // sufficient: a DO restart severs the in-flight open this guards.
+  #scopeGeneration = 0;
+
+  // Installs the storage subscribers that bump #scopeGeneration (called once from the
+  // constructor). Subscribers dispatch synchronously inside transactionSync, *before* the write
+  // lands, so each decision derives from the callback's own old/new records -- recomputing by
+  // listing here would read pre-event state and lag one event behind.
+  #watchVerificationScope(): void {
+    this.storage.gatekeepers.subscribe({
+      // The id set changed; nothing else about a gatekeeper record feeds the scope.
+      add: () => { this.#scopeGeneration++; },
+      // The id is the primary key, so an update can't change the id set.
+      update: () => {},
+      remove: () => { this.#scopeGeneration++; },
+    });
+
+    // A gadget record's contribution to #gadgetBoundGatekeeperIds: nothing while provisional,
+    // else its visible (non-pending) binding targets. Projecting per record means writes that
+    // can't move the scope -- retitling, commitId bumps, chat-provisional edges -- never bump,
+    // so a collaborator parked in the configuration modal isn't spuriously denied by unrelated
+    // activity. The rare over-bump (a projection change that leaves the *union* across gadgets
+    // unchanged, e.g. unbinding a target another gadget still binds) is accepted: it is
+    // fail-closed and the denied open simply retries.
+    let projection = (gadget: GadgetRecord): string => {
+      if (gadget.pending) return "[]";
+      let targets = [...new Set(this.visibleBindings(gadget).map(([, edge]) => edge.target))]
+          .toSorted((a, b) => a - b);
+      return JSON.stringify(targets);
+    };
+    const EMPTY = "[]";
+    this.storage.gadgets.subscribe({
+      add: gadget => { if (projection(gadget) !== EMPTY) this.#scopeGeneration++; },
+      update: (oldRecord, newRecord) => {
+        if (projection(oldRecord) !== projection(newRecord)) this.#scopeGeneration++;
+      },
+      remove: gadget => { if (projection(gadget) !== EMPTY) this.#scopeGeneration++; },
+    });
   }
 
   // Selects the gatekeepers a non-owner observer with the given `role` must be verified against:
@@ -8145,14 +8185,14 @@ class OverseerImpl implements AgentHooks {
     let role = sharing.getEffectiveRole(profileId, opts.pendingLinkId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
 
-    // For a pending redemption, snapshot the verification-scope inputs in the same synchronous
+    // For a pending redemption, capture the verification-scope generation in the same synchronous
     // tick as ensureObserver's own #inScopeGatekeepers snapshot. ensureObserver may park
     // unboundedly on the recipient's configuration modal, and a connection added (or a binding
     // made) in that window would otherwise be invisible to the verification yet covered by the
     // confirmed grant -- an already-confirmed collaborator in the same window is caught by the
-    // coverage guard, but a pending redeemer is invisible to it.
-    let scopeBefore =
-        opts.pendingLinkId !== undefined ? this.#verificationScopeFingerprint() : null;
+    // coverage guard, but a pending redeemer is invisible to it. A generation, not a value
+    // snapshot: a change *reverted* within the window must deny too (see #scopeGeneration).
+    let scopeBefore = opts.pendingLinkId !== undefined ? this.#scopeGeneration : null;
 
     // Hand ensureObserver a commit gate: a live-role re-check run synchronously with the write
     // that persists the observer record. Verification parks across real await windows, in which
@@ -8181,7 +8221,7 @@ class OverseerImpl implements AgentHooks {
       // This check, the confirm, and the role re-derivation below form one synchronous block, so
       // any change landing after it sees the recipient in listCollaborators() and the coverage
       // guard fail-closes -- the same protection ordinary opens have.
-      if (scopeBefore !== this.#verificationScopeFingerprint()) {
+      if (scopeBefore !== this.#scopeGeneration) {
         throw new Error(
             "A connection or binding changed in this workspace while your access was being " +
             "verified. Open the workspace again to retry.");
@@ -8190,10 +8230,10 @@ class OverseerImpl implements AgentHooks {
       // Re-assert the redemption policy in the same synchronous block as the granting write. The
       // gate at redeemShareKey ran with the *pending* write, before this open's await windows
       // (ensureCapsules, ensureObserver); a restricted-data producer removed *before* the
-      // fingerprint snapshot above was taken is absent from both fingerprints -- an unverifiable
-      // producer's remove() skips the share-link guard entirely -- so the scope check cannot catch
-      // it, and confirming would admit a recipient nobody can verify for the restricted data. The
-      // throw lands in open()'s catch, which severs the pending edge.
+      // generation snapshot above was taken doesn't bump it -- an unverifiable producer's
+      // remove() skips the share-link guard entirely -- so the scope check cannot catch it, and
+      // confirming would admit a recipient nobody can verify for the restricted data. The throw
+      // lands in open()'s catch, which severs the pending edge.
       sharing.confirmShareKeyRedemption(
           profileId, opts.pendingLinkId, () => this.assertNewSharingAllowed());
     }
