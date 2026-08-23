@@ -8112,7 +8112,15 @@ class OverseerImpl implements AgentHooks {
             "verified. Open the workspace again to retry.");
       }
 
-      sharing.confirmShareKeyRedemption(profileId, opts.pendingLinkId);
+      // Re-assert the redemption policy in the same synchronous block as the granting write. The
+      // gate at redeemShareKey ran with the *pending* write, before this open's await windows
+      // (ensureCapsules, ensureObserver); a restricted-data producer removed *before* the
+      // fingerprint snapshot above was taken is absent from both fingerprints -- an unverifiable
+      // producer's remove() skips the share-link guard entirely -- so the scope check cannot catch
+      // it, and confirming would admit a recipient nobody can verify for the restricted data. The
+      // throw lands in open()'s catch, which severs the pending edge.
+      sharing.confirmShareKeyRedemption(
+          profileId, opts.pendingLinkId, () => this.assertNewSharingAllowed());
     }
 
     // Re-derive the role from the live graph -- for a redemption, now that the edge is
