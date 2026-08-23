@@ -8502,13 +8502,13 @@ class OverseerImpl implements AgentHooks {
       // was never admitted, has no live session, and once the pending entry is dropped in the
       // finally their minted id would linger unresolvable inside the gatekeepers. For a
       // re-verification failure the registrations are deliberately kept: coverage was already
-      // scrubbed synchronously in fail() (so assertCollaboratorStillVerified fails closed on
-      // their external-message writes), while the registration is what preserves forward
-      // exclusion -- byObserverId keeps resolving the id, so prepareObservation keeps naming
-      // this observer in excludeObservers for their still-live sessions (a failed
-      // re-verification does not end sessions; only scheduleRevocationRestart does). A
-      // kept-but-stale registration is fail-closed (it can only add exclusion names) and
-      // self-heals: the next successful open's addObserver overwrites the verifier.
+      // scrubbed synchronously in fail() (so the coverage guard fails closed on restricted
+      // reads), while the registration is what preserves forward exclusion -- byObserverId keeps
+      // resolving the id, so prepareObservation keeps naming this observer in excludeObservers
+      // for their still-live sessions (a failed re-verification does not end sessions; only
+      // scheduleRevocationRestart does). A kept-but-stale registration is fail-closed (it can
+      // only add exclusion names) and self-heals: the next successful open's addObserver
+      // overwrites the verifier.
       if (!record) {
         await this.#removeObserverFromGatekeepers(
             observerId, [...new Set([...newlyAdded, ...invalidated])]);
