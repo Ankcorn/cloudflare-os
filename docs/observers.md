@@ -379,7 +379,9 @@ excluded observers — whenever a revocation's restart is still pending
 DO abort that actually ends the removed user's live sessions runs only after the awaited teardown
 and listing-refresh phases, and once the teardown's `removeObserver` fan-out de-registers the
 observer, gatekeepers stop naming them in `excludeObservers` at all — so no per-gate check can
-see the removed user, and only blocking everything covers their still-live sessions. See
+see the removed user (the coverage guard's zero-collaborators early return is likewise blind
+when the *last* collaborator was removed), and only blocking everything covers their still-live
+sessions. See
 `OverseerImpl.scheduleRevocationRestart`.
 
 This is the runtime counterpart of `addObserver`: `addObserver` covers observers configured

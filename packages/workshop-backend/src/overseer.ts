@@ -4590,6 +4590,10 @@ class OverseerImpl implements AgentHooks {
   // Deliberately synchronous (the sharing manager is a parameter, not an internal await) so the
   // caller can check and latch in one synchronous block -- see authorizeObservation.
   #assertSensitiveObservationCoverage(gatekeeperId: number, sharing: SharingManager): void {
+    // No #revocationRestartPending check here: authorizeObservation fails *every* observation
+    // closed across the revocation window before this runs, which also covers the
+    // zero-collaborators early return below (removing the *last* collaborator is exactly when
+    // the list reads empty while their session lingers until the restart).
     let collaborators = sharing.listCollaborators();
     if (collaborators.length === 0) return;
 
