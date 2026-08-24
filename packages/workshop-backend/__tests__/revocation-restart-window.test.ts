@@ -3,11 +3,12 @@
 // tearDownLostObservers (serial removeObserver fan-out per collaborator) and
 // refreshAffectedCollaboratorListings (chunked cross-DO round trips) -- a window that scales with
 // collaborator and gatekeeper count, not the ~100ms the abort's own delay suggests. Inside that
-// window the removed user still watches the session fan-out, yet the exclusion gate reads them
-// as gone: #decideExcludeObservers admits an observation naming them (their record was already
-// deleted, so the id is unknown). It must instead fail closed until the restart lands, via the
-// in-memory #revocationRestartPending flag tearDownLostObservers sets synchronously with the
-// sever.
+// window the removed user still watches the session fan-out, yet no per-observation check can
+// see them: their record was already deleted (so an exclusion naming their id reads as "not an
+// active observer"), and once the teardown's removeObserver fan-out completes, gatekeepers stop
+// naming them at all. authorizeObservation must instead fail every observation closed until the
+// restart lands, via the in-memory #revocationRestartPending flag tearDownLostObservers sets
+// synchronously with the sever.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
 // observer-serialization.test.ts); the gatekeeper facet is the fake, and the teardown's
@@ -109,6 +110,31 @@ describe("observation gates during the revocation-restart window", () => {
       // The flag is never cleared: the restart is what ends the window, and if it were somehow
       // lost, staying blocked is the safe direction.
       await expect(impl.authorizeObservation(1, excludedObservation(["obs-b"]), { from: "user" }))
+          .rejects.toThrow(/just revoked/);
+    });
+  });
+
+  it("fails a plain observation (no exclusions) closed until the restart", async () => {
+    let stub = env.TEST_OVERSEER.getByName("revocation-window-plain");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, releaseTeardown } = setup(instance);
+      let teardown = severBob(impl);
+      await tick();
+
+      // No excludeObservers at all: pre-fix only the exclusion gate consulted the flag, so this
+      // observation was admitted into history bob's still-live session watches.
+      await expect(impl.authorizeObservation(
+          1, { title: "Read a thing", description: "The test read a thing." }, { from: "user" }))
+          .rejects.toThrow(/just revoked/);
+
+      releaseTeardown();
+      await teardown;
+
+      // The window the finding names: the teardown's removeObserver fan-out has completed, so the
+      // gatekeeper no longer knows obs-b and subsequent observations arrive with no exclusion
+      // naming bob. Only the every-observation check can cover it.
+      await expect(impl.authorizeObservation(
+          1, { title: "Read a thing", description: "The test read a thing." }, { from: "user" }))
           .rejects.toThrow(/just revoked/);
     });
   });

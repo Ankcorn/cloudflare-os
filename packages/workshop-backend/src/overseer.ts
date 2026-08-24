@@ -4375,6 +4375,18 @@ class OverseerImpl implements AgentHooks {
     // observers' gatekeeper registrations -- is deferred to after the writes.
     let sharing = await this.getSharingManager();
 
+    // A revocation whose restart hasn't landed yet leaves the removed user's sessions live and
+    // watching while their observer record is already gone -- and once the teardown's
+    // removeObserver fan-out completes, gatekeepers no longer know their observer id, so
+    // subsequent observations arrive with no exclusion naming them. No per-observation check can
+    // see the removed user then, so every observation fails closed until the restart. Checked
+    // before the prohibitAllSharing latch: a blocked observation must not latch.
+    if (this.#revocationRestartPending) {
+      throw new Error(
+          "This observation was blocked because a collaborator's access to this workspace was " +
+          "just revoked and their sessions have not yet been disconnected.");
+    }
+
     if (description.prohibitAllSharing) {
       if (sharing.hasAnyShares()) {
         throw new Error(
@@ -4530,15 +4542,9 @@ class OverseerImpl implements AgentHooks {
   // Deliberately synchronous (the sharing manager is a parameter) so authorizeObservation can
   // decide and record in one synchronous block, deferring only the teardown.
   #decideExcludeObservers(observerIds: string[], sharing: SharingManager): ObserverRecord[] {
-    // A revocation whose restart hasn't landed yet leaves the removed user's sessions live while
-    // their record is already gone, so the unknown-id `continue` below would admit an observation
-    // naming exactly them. No per-profile bookkeeping can cover that case (the record carried the
-    // id), so fail closed on the whole window. See #revocationRestartPending.
-    if (this.#revocationRestartPending) {
-      throw new Error(
-          "This observation was blocked because it names a collaborator whose access to this " +
-          "workspace was just revoked and whose sessions have not yet been disconnected.");
-    }
+    // No #revocationRestartPending check here: authorizeObservation fails *every* observation
+    // closed across the revocation window before this runs, which also covers the unknown-id
+    // `continue` below admitting an observation naming a just-torn-down observer.
     let lost: ObserverRecord[] = [];
     // Deduped: the ids cross the RPC boundary from gatekeeper code, so nothing guarantees
     // uniqueness, and a duplicate would push the same record into `lost` twice -- two teardown
@@ -4970,8 +4976,8 @@ class OverseerImpl implements AgentHooks {
   // handlers first await tearDownLostObservers (a serial removeObserver fan-out per lost
   // collaborator) and refreshAffectedCollaboratorListings (chunked cross-DO round trips), so the
   // window scales with collaborator and gatekeeper count. The removed users' sessions stay live
-  // and watching throughout; #revocationRestartPending is what keeps the exclusion gate failing
-  // closed across it.
+  // and watching throughout; #revocationRestartPending is what keeps authorizeObservation
+  // failing closed across it.
   async scheduleRevocationRestart(): Promise<void> {
     await this.ctx.storage.sync();
     await scheduler.wait(100);
@@ -7825,9 +7831,10 @@ class OverseerImpl implements AgentHooks {
   // Whether a sharing change that removed or downgraded someone has happened this DO session:
   // the revocation restart (scheduleRevocationRestart's abort) is coming, but it lands only
   // after the awaited teardown and listing-refresh phases below, so the affected users' live
-  // sessions keep watching the fan-out in the meantime -- while the exclusion gate reads them
-  // as already gone (a deleted record makes their observerId unknown to
-  // #decideExcludeObservers). The gate consults this flag to fail closed across that window.
+  // sessions keep watching the fan-out in the meantime. Once the teardown de-registers the
+  // observer, gatekeepers stop naming them in excludeObservers, so no per-gate check can see the
+  // removed user; authorizeObservation therefore consults this flag for *every* observation and
+  // fails closed across the window.
   // In-memory is the right scope, mirroring #pendingObserverIds: the abort destroys the flag
   // with the DO, and it is deliberately never cleared -- if the restart is somehow lost, staying
   // blocked is the safe direction (the next observation-free reconnect gets a fresh DO anyway).
