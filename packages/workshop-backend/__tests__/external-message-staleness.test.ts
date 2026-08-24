@@ -1,21 +1,18 @@
 // receiveExternalMessage's entry gate (authorizeCollaborator) is separated from the prompt
 // commit by real await windows -- the owner's registration, the caller's context RPC, message
-// preparation -- in which a concurrent verification's fail() can scrub the caller's coverage,
-// a sharing change can sever the caller's role (tearing down their observer record), or a new
-// connection can widen the scope they were never verified against.
-// The agent then runs over the unfiltered chat tail and its reply leaves the Workshop, so the
-// authorization must be re-asserted synchronously with *every* write the submission justifies:
-// newChat runs the registration's assertStillAuthorized as the first statement of the
-// transaction that writes the prompt, and sendChatMessage runs it just before
-// materializeChatChanges (its first write, which has non-transactional side effects and so cannot
-// move inside the transaction; no awaits separate the check from the transaction). A stale caller
-// therefore commits nothing -- no chat, no message (not even a materialized "changes" one), no
+// preparation -- in which a concurrent verification's fail() can scrub the caller's coverage, a
+// sharing change can sever their role, or a new connection can widen the scope they were never
+// verified against. The agent then runs over the unfiltered chat tail and its reply leaves the
+// Workshop, so the authorization must be re-asserted synchronously with the commit: newChat and
+// sendChatMessage run the registration's assertStillAuthorized as the first statement of the
+// transaction that writes the prompt, so a stale caller aborts it -- no chat, no message, no
 // response target, no agent turn.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
-// observer-serialization.test.ts); the gatekeeper facet and the caller's User DO are the fakes.
-// A unit test rather than an integration test because the staleness must land deterministically
-// inside the context-RPC window, which a fake getExternalMessageChatContext controls exactly.
+// restricted-observation-latch.test.ts); the gatekeeper facet and the caller's User DO are the
+// fakes. A unit test rather than an integration test because the scrub must land
+// deterministically inside the context-RPC window, which a fake getExternalMessageChatContext
+// controls exactly.
 
 import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
@@ -174,7 +171,7 @@ describe("receiveExternalMessage's commit-time authorization re-check", () => {
       await tick();
 
       // The re-check recomputes the scope live, so the new connection -- which bob was never
-      // verified against -- fails closed.
+      // verified against -- fails closed, like the redemption scope check.
       seedGatekeeper(state.impl, 2);
 
       state.releaseContext();
@@ -188,20 +185,11 @@ describe("receiveExternalMessage's commit-time authorization re-check", () => {
     let stub = env.TEST_OVERSEER.getByName("external-staleness-existing-chat");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let state = setup(instance);
-      // A prior conversation already exists for this external chat key -- with a live change row,
-      // so that sendChatMessage's materializeChatChanges has something to write. Without the row
-      // this case would pass vacuously: materialization no-ops, which would hide it running
-      // *before* the authorization re-check and durably writing a "changes" message, retiring the
-      // row, and setting hasProposedChanges on a denied submission.
+      // A prior conversation already exists for this external chat key.
       let started = new Date();
       state.impl.storage.chatMeta.put(
           { id: 7, title: "Existing chat", started, lastActive: started });
       state.impl.storage.externalChats.put({ externalChatKey: "ext-existing", chatId: 7 });
-      state.impl.storage.chatChanges.put({
-        chatId: 7, generation: 0, revision: 1, timestamp: started,
-        author: { type: "user", id: "bob", name: "Bob" },
-        change: {}, source: "user",
-      });
 
       let result = instance.receiveExternalMessage(submitInput("existing"));
       await tick();
@@ -213,14 +201,8 @@ describe("receiveExternalMessage's commit-time authorization re-check", () => {
       state.releaseContext();
       await expect(result).resolves.toMatchObject({ accepted: false });
       expect((await result).message).toMatch(/could not be verified/);
-      // The chat survives but gained no message -- not even a materialized "changes" message --
-      // no response target, no agent turn; the change row is still live and the chat's meta
-      // untouched.
+      // The chat survives but gained no message, no response target, no agent turn.
       expect([...state.impl.storage.chats.list()]).toHaveLength(0);
-      let rows = [...state.impl.storage.chatChanges.list()];
-      expect(rows).toHaveLength(1);
-      expect(rows[0].retired).toBeUndefined();
-      expect(state.impl.storage.chatMeta.get(7).hasProposedChanges).toBeUndefined();
       expect(state.registrations).toBe(0);
       expect(state.startAgentCalls).toBe(0);
     });
