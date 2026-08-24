@@ -761,6 +761,16 @@ type ExternalMessageRecord = {
 type ExternalMessageResponseTargetRegistration = {
   idempotencyKey: string;
   chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+  // Re-asserts the submitting caller's authorization, strictly after newChat/sendChatMessage's
+  // internal awaits and synchronously with every write the submission justifies, so a caller
+  // whose access went stale in the window since receiveExternalMessage's entry gate commits
+  // nothing (see assertCollaboratorStillVerified). newChat runs it as the first statement of the
+  // transaction that commits the prompt and registers the response target; sendChatMessage runs
+  // it just before materializeChatChanges -- its first write, which cannot move inside the
+  // transaction (non-transactional side effects) -- with no awaits between the check and the
+  // transaction, so the one check covers the whole synchronous write sequence. Absent for the
+  // owner, whose access cannot go stale.
+  assertStillAuthorized?: () => void;
 };
 
 type ExternalMessageResponseTargetRegistrationDecision =
@@ -5207,6 +5217,11 @@ class OverseerImpl implements AgentHooks {
     let chatId!: number;
     let timestamp = this.getChatTimestamp();
     this.ctx.storage.transactionSync(() => {
+      // Re-assert an external caller's authorization atomically with the writes it justifies:
+      // every await above (message preparation included) was a window in which it may have gone
+      // stale, and a throw here aborts the transaction -- no chat, no message, no response
+      // target -- before startAgent below can run over the chat tail.
+      responseTargetRegistration?.assertStillAuthorized?.();
       chatId = this.nextChatId();
       let meta: AiChatMetadata = {
         id: chatId,
@@ -5285,6 +5300,15 @@ class OverseerImpl implements AgentHooks {
         message, (canonicalAttachments?.length ?? 0) > 0);
 
     let meta = this.assertChatNotActive(chatId, true);
+    // Re-assert an external caller's authorization before *any* write this submission justifies
+    // -- which on this path starts with materializeChatChanges, not the transaction below: the
+    // materialization durably writes a "changes" chat message, retires and prunes change rows,
+    // and sets hasProposedChanges, none of which a stale caller may trigger. It stays outside
+    // the transaction because it has non-transactional side effects (proposedChangesChanged's
+    // facet abort, the TTL prune), so the check is hoisted instead; everything from here through
+    // the transactionSync is one synchronous block (no awaits), so this single check covers the
+    // whole write sequence -- same invariant as newChat, differently shaped.
+    responseTargetRegistration?.assertStillAuthorized?.();
     let result = this.materializeChatChanges(chatId, meta);
     if (result) meta = result.meta;
     meta.lastActive = this.getChatTimestamp();
@@ -7709,6 +7733,32 @@ class OverseerImpl implements AgentHooks {
     return this.#inScopeGatekeepers(role).map(observerBindingNeed);
   }
 
+  // Re-assert, synchronously, what authorizeCollaborator established for `profileId` when it
+  // admitted them: an effective role of at least `requireRole`, and -- when their live
+  // verification scope is nonempty -- a persisted observer record covering every in-scope
+  // gatekeeper. This mirrors ensureObserver's success invariant exactly: on success it persists a
+  // record whose accountChoices cover the whole scope, and an empty scope persists no record at
+  // all (hence the nonempty guard -- no spurious failures). The scope is recomputed live, so a
+  // gatekeeper *added* since the entry gate fails closed. For entry points whose entry gate is
+  // separated from the write it justifies by real await windows (receiveExternalMessage), in
+  // which a sharing change may have severed the caller's role and torn down their observer
+  // record. The sharing manager is a parameter, not an internal await, so the caller can run this
+  // inside the same synchronous block as the write (the house rule -- cf. authorizeObservation).
+  assertCollaboratorStillVerified(
+      profileId: string, requireRole: CollaboratorRole, sharing: SharingManager): void {
+    let role = sharing.getEffectiveRole(profileId);
+    if (!role || roleRank(role) < roleRank(requireRole)) {
+      throw new Error("You no longer have access to this workspace.");
+    }
+    let inScope = this.#inScopeGatekeepers(role);
+    if (inScope.length === 0) return;
+    let record = this.storage.observers.get(profileId);
+    if (!record || inScope.some(gk => !(gk.id in record.accountChoices))) {
+      throw new Error(
+          "Your verification for the data this workspace has read is no longer valid.");
+    }
+  }
+
   // Best-effort `removeObserver(observerId)` across the given gatekeeper ids. Never throws; logs
   // and continues on error. An orphaned observer entry only ever causes superfluous future checks,
   // never a data leak (the leak-relevant gate is authorizeObservation, which keys off the live
@@ -8495,7 +8545,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // accounts here, an unverified caller is sent to open the workspace, which is where
     // verification happens. Requiring "build" up front means a "use" collaborator gets the plain
     // denial below rather than being verified (or told to fix a verification failure) for access
-    // this path can never grant them.
+    // this path can never grant them. The gate is then re-asserted synchronously with the prompt
+    // commit (assertStillAuthorized below): the awaits between here and sendChatMessage/newChat
+    // are windows in which a sharing change can strip the caller's access (or a new connection
+    // widen the scope they were verified against), and the reply must not leave the Workshop on
+    // a check that went stale.
+    let unverifiedDenial = (err: unknown): SubmitExternalMessageResult => ({
+      accepted: false,
+      message: "Your access to the data this workspace has read could not be verified. Open " +
+          "the workspace in your browser to verify your access, then try again. " +
+          `(${stringifyError(err)})`,
+    });
+    let verificationWentStale = false;
+    let assertStillAuthorized: (() => void) | undefined;
     if (ownerId !== callerId) {
       if (this.impl.storage.prohibitAllSharing.get()) {
         return {
@@ -8508,12 +8570,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         role = await this.impl.authorizeCollaborator(
             callerProfile.id, caller, {requireRole: "build"});
       } catch (err) {
-        return {
-          accepted: false,
-          message: "Your access to the data this workspace has read could not be verified. Open " +
-              "the workspace in your browser to verify your access, then try again. " +
-              `(${stringifyError(err)})`,
-        };
+        return unverifiedDenial(err);
       }
       if (role !== "build") {
         return {
@@ -8521,6 +8578,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           message: "You do not have access to interact with this workspace through its agent.",
         };
       }
+      // The manager is resolved here (memoized; authorizeCollaborator just used it) so the
+      // commit-time re-assertion itself is fully synchronous. The flag discriminates the gate's
+      // own throw from ordinary submit errors, so the catch around the submit below can answer
+      // with the verification denial rather than rethrowing.
+      let sharing = await this.impl.getSharingManager();
+      let profileId = callerProfile.id;
+      assertStillAuthorized = () => {
+        try {
+          this.impl.assertCollaboratorStillVerified(profileId, "build", sharing);
+        } catch (err) {
+          verificationWentStale = true;
+          throw err;
+        }
+      };
     }
 
     // Complete pending registration in the owner's UserDO.
@@ -8563,29 +8634,35 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
       idempotencyKey: input.idempotencyKey,
       chatGatewayRpcTarget: input.chatGatewayRpcTarget,
+      assertStillAuthorized,
     };
     let chatId: number;
-    if (externalChat) {
-      await this.impl.sendChatMessage(
-        caller,
-        userContext,
-        externalChat.chatId,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-      );
-      chatId = externalChat.chatId;
-    } else {
-      chatId = await this.impl.newChat(
-        caller,
-        userContext,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-        input.externalChatKey,
-      );
+    try {
+      if (externalChat) {
+        await this.impl.sendChatMessage(
+          caller,
+          userContext,
+          externalChat.chatId,
+          input.prompt,
+          undefined,
+          undefined,
+          responseTargetRegistration,
+        );
+        chatId = externalChat.chatId;
+      } else {
+        chatId = await this.impl.newChat(
+          caller,
+          userContext,
+          input.prompt,
+          undefined,
+          undefined,
+          responseTargetRegistration,
+          input.externalChatKey,
+        );
+      }
+    } catch (err) {
+      if (verificationWentStale) return unverifiedDenial(err);
+      throw err;
     }
 
     return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
