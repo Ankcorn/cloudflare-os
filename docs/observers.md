@@ -275,10 +275,21 @@ Logic:
      **throws** on a mismatch. This server-side check is what guarantees a gatekeeper only receives
      a verifier minted by its own vendor; filtering account choices in the client is only a
      user-interface convenience.
-   - If any `addObserver` **throws** (or `getVerifier` throws on vendor mismatch), the user is not
-     (or no longer) allowed: best-effort `removeObserver(record.observerId)` on the gatekeepers
-     added in *this* pass, do **not** persist the working record, and deny the open with a clear
-     message.
+   - If any `addObserver` **throws** (or `getVerifier` throws on vendor mismatch, or returns null
+     for a disconnected account), the user is not (or no longer) allowed. Every such failure goes
+     through one `fail()` path that synchronously scrubs the failed gatekeeper from the
+     *persisted* record, so commit-time re-checks (`assertCollaboratorStillVerified`) fail closed
+     immediately, and the user is offered a bounded number of re-prompts to repair (e.g.
+     re-authenticate an expired account). On terminal failure the open is denied with a message
+     naming each refused binding, and the registrations are handled by which kind of verification
+     this was: a *first-ever* verification (no record at call start) best-effort-removes the
+     registrations it added or invalidated and persists no record — that collaborator was never
+     admitted and their minted id would otherwise linger unresolvable — while a *re-verification*
+     deliberately keeps them, because the registration is what preserves forward exclusion for
+     the collaborator's still-live sessions (coverage was already scrubbed, so nothing vouches
+     for them; the id keeps resolving so `excludeObservers` keeps naming them). One exception: if
+     a racing teardown deleted the record mid-call, the just-re-asserted registrations reference
+     an id no record resolves, so the full in-scope set is removed.
 
 6. **Persist the observer record** (with merged `accountChoices` and `observerId`) only after all
    `addObserver` calls succeed. Storing/creating the record is the canonical moment the user
@@ -425,7 +436,14 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    can open at all (`overseer.ts:2770`). Observer checks only matter when sharing is allowed.
 5. **Owner adds a new binding after sharing** — existing observers see an incremental modal for
    just the new binding on their next open, and may be denied if they lack access to the new
-   resource (inherent to the security model).
+   resource (inherent to the security model). Until that next open, their already-live sessions
+   watch the new connection's (non-restricted) observations unverified — the accepted residual of
+   verifying at open time. A connection added *while a collaborator's verification is parked* on
+   an await (the modal, verifier RPCs) is part of this same residual, not a bypass: the committed
+   record simply lacks an entry for it, and every consumer fails closed on absence —
+   `assertCollaboratorStillVerified` recomputes the in-scope set live against the persisted
+   record, and the next open re-verifies the uncovered binding — while their live session watches
+   like any other until re-open.
 6. **Performance** — `ensureObserver` does one `getVerifier` + one `addObserver` per in-scope
    gatekeeper per open. Parallelize with `Promise.all` and pipe the verifier promise straight into
    `addObserver`. Expensive gatekeepers cache on their side.
