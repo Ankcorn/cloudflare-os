@@ -266,10 +266,8 @@ export class AgentSession implements Disposable {
 
   /**
    * Wait until the deployment's standard output formats are installed.
-   *
-   * Installation is fire-and-forget on the first `/api` request — the same request that opens this
-   * session — so a turn started immediately can race it and get a system prompt with no formats
-   * section, silently changing what the agent is told it can instantiate.
+   * The first API request starts format installation without waiting for it. Wait here so the first
+   * agent prompt always sees the installed formats.
    */
   async waitForOutputFormats(): Promise<OutputFormatOffer[]> {
     this.#assertUsable();
@@ -289,6 +287,13 @@ export class AgentSession implements Disposable {
     if (result.outcome !== "merged") {
       throw new Error("The chat became stale before its changes could be accepted");
     }
+  }
+
+  /** Delete the isolated workspace and all data created by the session. */
+  async deleteWorkspace(): Promise<void> {
+    this.#assertUsable();
+    if (this.#turn !== undefined) throw new Error("Cannot delete the workspace during an agent turn");
+    await this.#overseer.deleteSelf();
   }
 
   /** Dispose subscriptions, callback targets, RPC capabilities, and the WebSocket session. */
