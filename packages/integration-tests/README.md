@@ -31,8 +31,8 @@ vendor this one as a submodule:
   in, which is what makes it reusable across gatekeepers. `passThroughHosts` exempts a host a suite
   genuinely has to reach; a handler cannot, because it never receives the request body.
 - **`src/rpc-client.ts`** — speaks Cap'n Web over a WebSocket to `/api`, the same transport the
-  browser uses: sign-up, reading connected accounts, and `ObserverConfigRecorder`, which records the
-  overseer's `configure()` calls and answers from a scripted queue.
+  browser uses. Local sessions use in-band password authentication. Preview sessions can attach a
+  Cloudflare Access application JWT to the WebSocket handshake.
 
 ## Writing a test here
 - **No test may assume a clean slate.** Everything in a file shares one harness, `it.concurrent` runs
@@ -65,6 +65,16 @@ const harness = await startHarness({
 using session = await AgentSession.create(harness.url, { modelId: "claude-sonnet-5" });
 const first = await session.run("Build a small status page.");
 const accepted = await session.run("Add an incident timeline.", { acceptChanges: true });
+```
+
+The same driver can use a deployed Access preview. The supplied JWT authenticates the WebSocket and
+the session calls `authenticateFromCfAccess()` instead of creating a password account:
+
+```ts
+using session = await AgentSession.create(new URL(previewUrl), {
+  accessToken,
+  modelId: "@cf/zai-org/glm-5.2",
+});
 ```
 
 `run()` never accepts changes by default. When acceptance is requested it includes the current live

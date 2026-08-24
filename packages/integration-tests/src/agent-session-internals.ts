@@ -19,6 +19,7 @@ export type SourceSnapshot = {
 
 export class AgentTurnCompletion {
   readonly promise: Promise<void>;
+  lastMetadata: AiChatMetadata | undefined;
   #chatId: number | null;
   #resolve: () => void = () => {};
   #reject: (error: Error) => void = () => {};
@@ -78,6 +79,7 @@ export class AgentTurnCompletion {
       return;
     }
     if (chat.id !== this.#chatId) return;
+    this.lastMetadata = chat;
     if (this.#isSettled) {
       if (chat.activeAgent && this.#stopRequested) this.#requestStop();
       return;

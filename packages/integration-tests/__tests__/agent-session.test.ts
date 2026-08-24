@@ -48,6 +48,17 @@ describe("AgentTurnCompletion", () => {
     await expect(completion.promise).resolves.toBeUndefined();
   });
 
+  it("retains the final chat usage metadata", async () => {
+    vi.useFakeTimers();
+    const completion = new AgentTurnCompletion(7, () => Promise.resolve(), 1_000, 25);
+    completion.metadata(metadata(true));
+    completion.metadata({ ...metadata(false), totalTokens: 123, totalCost: 0.45 });
+    await vi.advanceTimersByTimeAsync(25);
+    await completion.promise;
+
+    expect(completion.lastMetadata).toMatchObject({ totalTokens: 123, totalCost: 0.45 });
+  });
+
   it("resets idle settlement when a callback restarts the agent", async () => {
     vi.useFakeTimers();
     const completion = new AgentTurnCompletion(7, () => Promise.resolve(), 1_000, 25);

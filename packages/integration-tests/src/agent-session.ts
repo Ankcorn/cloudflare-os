@@ -58,6 +58,8 @@ export type AgentTurnResult = {
   workpieces: WorkpieceSummary[];
   /** Agent error messages posted during the turn. Empty when the turn completed normally. */
   agentErrors: string[];
+  /** Provider usage available from chat metadata after this turn. */
+  usage: { totalTokens?: number; costUsd?: number };
   /** Present only when `acceptChanges` was requested. */
   source?: AgentSourceSnapshot;
 };
@@ -241,6 +243,12 @@ export class AgentSession implements Disposable {
         history,
         workpieces: this.workpieces(),
         agentErrors: history.flatMap(entry => entry.type === "error" ? [entry.message] : []),
+        usage: {
+          ...(completion.lastMetadata?.totalTokens === undefined
+            ? {} : { totalTokens: completion.lastMetadata.totalTokens }),
+          ...(completion.lastMetadata?.totalCost === undefined
+            ? {} : { costUsd: completion.lastMetadata.totalCost }),
+        },
         ...(source === undefined ? {} : { source }),
       };
     } catch (error) {
