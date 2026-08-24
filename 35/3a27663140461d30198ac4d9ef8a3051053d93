@@ -25,6 +25,8 @@ packages/gatekeeper-mcp-portal/src/config.ts
   s_31cc731268b4f6::t_aa10379410ddbf 47-49
 packages/workshop-frontend/src/useWorkspaceOpen.ts
   s_a726de9bb45000::t_476022519b0d4a 94
+packages/workshop-backend/src/overseer.ts
+  s_10a46ead5b1afa::t_eb0ed053d84c77 9630
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -32,6 +34,30 @@ packages/workshop-frontend/src/useWorkspaceOpen.ts
   "base_commit_sha": "353a27663140461d30198ac4d9ef8a3051053d93",
   "prompts": {},
   "sessions": {
+    "s_07366955d0afe3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bd854532-358f-4c8d-b789-6b2ed4ff47ce",
+        "model": "unknown"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    },
+    "s_0c215fe09756a4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a233bfee-b26a-4d80-ab61-4ef85f896aa0",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    },
+    "s_10a46ead5b1afa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6fdedd0f-322e-477a-a5eb-8ee1caa99628",
+        "model": "unknown"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    },
     "s_31cc731268b4f6": {
       "agent_id": {
         "tool": "opencode",
@@ -85,6 +111,14 @@ packages/workshop-frontend/src/useWorkspaceOpen.ts
         "tool": "claude",
         "id": "0199df34-fb16-4e6e-9e4e-ddb220fc8259",
         "model": "claude-fable-5"
+      },
+      "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
+    },
+    "s_cf9cda7e93fb6f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dbd45cc1-bb9f-4ad8-bd45-3d8db79f288c",
+        "model": "unknown"
       },
       "human_author": "Maximo Guk <62088388+Maximo-Guk@users.noreply.github.com>"
     },
