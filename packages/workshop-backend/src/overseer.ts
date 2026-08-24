@@ -8255,6 +8255,12 @@ class OverseerImpl implements AgentHooks {
       if (!record) {
         await this.#removeObserverFromGatekeepers(
             observerId, [...new Set([...newlyAdded, ...invalidated])]);
+      } else if (this.storage.observers.get(profileId)?.observerId !== observerId) {
+        // A teardown racing this call's parked awaits deleted the record this call anchored on;
+        // the registrations just re-asserted reference an id no record resolves (the kept-
+        // registration rationale above needs byObserverId to keep resolving it), so remove them
+        // all. Issued after step 5 settled, so this cannot lose to an in-flight addObserver.
+        await this.#removeObserverFromGatekeepers(observerId, inScope.map(gk => gk.id));
       }
       throw err;
     } finally {

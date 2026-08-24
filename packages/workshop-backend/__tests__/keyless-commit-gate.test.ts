@@ -46,6 +46,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 function seedParkedReturningBob(instance: OverseerDurableObject): {
   impl: any;
   release: () => void;
+  events: string[];
 } {
   let impl = (instance as unknown as { impl: any }).impl;
   impl.ownerProfileId = OWNER;
@@ -67,12 +68,16 @@ function seedParkedReturningBob(instance: OverseerDurableObject): {
   impl.storage.observers.put(
       { profileId: "bob", observerId: "obs-b", accountChoices: { 1: 10 } });
 
+  // Ordered log of the fake gatekeeper's calls: an addObserver entry is recorded when the call
+  // *completes* (after the park), so the log shows whether a rollback's removeObserver could
+  // have lost to a still-in-flight registration.
+  let events: string[] = [];
   let held = deferred();
   impl.getGatekeeperFacet = () => ({
-    addObserver: async () => { await held.promise; },
-    removeObserver: async () => {},
+    addObserver: async (id: string) => { await held.promise; events.push(`add:${id}`); },
+    removeObserver: async (id: string) => { events.push(`remove:${id}`); },
   });
-  return { impl, release: held.resolve };
+  return { impl, release: held.resolve, events };
 }
 
 // Starts bob's keyless open through authorizeCollaborator directly.
@@ -80,10 +85,11 @@ function startParkedKeylessOpen(instance: OverseerDurableObject): {
   impl: any;
   open: Promise<unknown>;
   release: () => void;
+  events: string[];
 } {
-  let { impl, release } = seedParkedReturningBob(instance);
+  let { impl, release, events } = seedParkedReturningBob(instance);
   let open = impl.authorizeCollaborator("bob", { getVerifier: async () => ({}) } as any, {});
-  return { impl, open, release };
+  return { impl, open, release, events };
 }
 
 // Starts bob's keyless open through the production open() entry point. The parts of open()
@@ -119,7 +125,7 @@ describe("the commit gate on keyless opens", () => {
       async () => {
     let stub = env.TEST_OVERSEER.getByName("keyless-commit-gate-removal");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
-      let { impl, open, release } = startParkedKeylessOpen(instance);
+      let { impl, open, release, events } = startParkedKeylessOpen(instance);
       await tick();
 
       // The owner removes bob while his re-verification is parked: the sever and the observer
@@ -137,6 +143,10 @@ describe("the commit gate on keyless opens", () => {
       // ...and step 6's put resurrected the record the teardown just deleted, coverage a later
       // re-grant would then trust without re-verification.
       expect(impl.storage.observers.get("bob")).toBeUndefined();
+      // The teardown's removeObserver ran while the re-assertion was still parked, so on its own
+      // it left the re-asserted registration behind, orphaned (no record resolves obs-b anymore).
+      // The rollback must issue another removeObserver *after* the parked addObserver completed.
+      expect(events).toEqual(["remove:obs-b", "add:obs-b", "remove:obs-b"]);
     });
   });
 
