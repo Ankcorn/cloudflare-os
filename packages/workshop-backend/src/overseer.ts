@@ -7780,6 +7780,12 @@ class OverseerImpl implements AgentHooks {
   // ensureObserver to prompt for unconfigured account choices; without it, verification is
   // non-interactive and an unconfigured binding denies access.
   //
+  // Verification may park unboundedly (verifier RPCs, the configuration modal), and a removal
+  // landing in that window is otherwise caught only by the revocation restart, which fires after
+  // the awaited teardown/listing phases -- so the effective role is re-checked when the
+  // verification commits (the commit gate below) and re-derived before the capability is
+  // returned.
+  //
   // Today receiveExternalMessage() is the only caller: open() still runs the same role resolution
   // and ensureObserver call inline, interleaved with share-key redemption, and migrating it onto
   // this gate is deliberately left to the redemption rework that has to restructure that path
@@ -7794,8 +7800,41 @@ class OverseerImpl implements AgentHooks {
     let sharing = await this.getSharingManager();
     let role = sharing.getEffectiveRole(profileId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
-    await this.ensureObserver(profileId, clientUser, role, opts.configureCb);
-    return role;
+
+    // Hand ensureObserver a commit gate: a live-role re-check run synchronously with the write
+    // that persists the observer record. Verification parks across real await windows, in which
+    // the caller may be removed: the removal's teardown deletes the caller's observer record, and
+    // without the gate step 6's put would *resurrect* it (record and account choices were loaded
+    // pre-park) -- coverage a later re-grant would trust without re-verification -- and the open
+    // would hand out a full stale-role capability for however long the revocation restart takes
+    // to land. A denial throws *inside* ensureObserver's try, taking the same rollback as any
+    // other verification failure; success runs the gate and the record persist back-to-back
+    // inside the per-profile verification lock.
+    let commitGate = () => {
+      if (!sharing.getEffectiveRole(profileId)) {
+        throw new Error(
+            "Your access to this workspace was revoked while it was being verified.");
+      }
+    };
+
+    await this.ensureObserver(profileId, clientUser, role, opts.configureCb, commitGate);
+
+    // Re-derive the role from the live graph. A revocation landing mid-verification is expected
+    // to be denied by the commit gate above, before anything persists; this re-check is the
+    // residual guard for a change landing in the await gaps *after* the gate ran -- the role
+    // collapses to null and the caller rejects.
+    let confirmed = sharing.getEffectiveRole(profileId);
+    if (!confirmed ||
+        (opts.requireRole && roleRank(confirmed) < roleRank(opts.requireRole))) {
+      return null;
+    }
+    // Decreases pass through (verification at the wider pre-park role covers the narrower live
+    // scope, and the capability handed out must not exceed the live role), but an increase
+    // -- say an owner grant of "build" landing while verification waited on the configuration
+    // modal -- must not ride out on this open: ensureObserver verified the caller at `role`, and
+    // a wider role widens the gatekeeper scope that verification must cover. The raise takes
+    // effect at the caller's next open, which verifies at the wider scope.
+    return roleRank(confirmed) < roleRank(role) ? confirmed : role;
   }
 
   // In-flight verification per profile (see ensureObserver). Entries are removed when their
@@ -7828,19 +7867,28 @@ class OverseerImpl implements AgentHooks {
   // Google gatekeeper's credential lock. Serializing only per profile keeps distinct
   // collaborators' opens concurrent.
   //
+  // `commitGate`, when given, runs synchronously at each success exit -- immediately before the
+  // step-6 record persist, or at the nothing-to-verify early return -- inside the per-profile
+  // lock. A throw denies the verification and takes the same rollback path as any other failure,
+  // so the caller can piggyback its own commit-time checks on the record persist's synchronous
+  // block. Running the gate *inside* the lock matters: a gate invoked after this method returned
+  // would run after the lock's release, so a queued sibling verification for the same profile
+  // would start against no record and mint a second observerId, breaking the shared-id invariant.
+  //
   // See observers-implementation-plan.md §5 Step 3.
   async ensureObserver(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
-      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+      configureCb?: RpcStub<ObserverConfigCallback>,
+      commitGate?: () => void): Promise<void> {
     let previous = this.#observerVerification.get(profileId) ?? Promise.resolve();
     let release!: () => void;
     let current = new Promise<void>(resolve => { release = resolve; });
     this.#observerVerification.set(profileId, current);
     await previous;
     try {
-      await this.#ensureObserverLocked(profileId, clientUser, role, configureCb);
+      await this.#ensureObserverLocked(profileId, clientUser, role, configureCb, commitGate);
     } finally {
       release();
       if (this.#observerVerification.get(profileId) === current) {
@@ -7853,12 +7901,18 @@ class OverseerImpl implements AgentHooks {
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
-      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+      configureCb?: RpcStub<ObserverConfigCallback>,
+      commitGate?: () => void): Promise<void> {
     // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
     //    no observer record is needed (built-in gatekeepers never name observers in
     //    excludeObservers).
     let inScope = this.#inScopeGatekeepers(role);
-    if (inScope.length === 0) return;
+    if (inScope.length === 0) {
+      // Nothing to verify, but this is still a success exit: the caller's commit gate must still
+      // run. Nothing has been minted at this point, so a throw here has no rollback to do.
+      commitGate?.();
+      return;
+    }
 
     // 2. Load any existing observer record, and build a working copy of its account choices.
     let record = this.storage.observers.get(profileId);
@@ -7873,9 +7927,9 @@ class OverseerImpl implements AgentHooks {
     let observerId = record?.observerId ?? crypto.randomUUID();
     // A freshly minted id becomes visible to gatekeepers at the first addObserver below, but
     // resolvable via byObserverId only at the step-6 put -- hold it in #pendingObserverIds across
-    // that window so #enforceExcludeObservers can fail closed on it. The put and the finally's
-    // delete run synchronously back-to-back, so there is no gap where neither the map nor the
-    // index resolves the id.
+    // that window so #enforceExcludeObservers can fail closed on it. The commit gate, the put,
+    // and the finally's delete run synchronously back-to-back (the gate is synchronous by
+    // contract), so there is no gap where neither the map nor the index resolves the id.
     if (!record) this.#pendingObserverIds.set(observerId, profileId);
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
@@ -8022,8 +8076,12 @@ class OverseerImpl implements AgentHooks {
         break;
       }
 
-      // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
-      //    the record is the canonical moment the user becomes a configured observer.
+      // 6. Run the caller's commit gate, then persist the observer record, only after all
+      //    addObserver calls succeed. The two run in one synchronous block: a gate denial throws
+      //    into the catch below and rolls back like any other verification failure, and nothing
+      //    can land between a passing gate and the put. Creating/updating the record is the
+      //    canonical moment the user becomes a configured observer.
+      commitGate?.();
       this.storage.observers.put({profileId, observerId, accountChoices});
     } catch (err) {
       // Best-effort remove all the observers that were newly-added since we didn't persist the
