@@ -1078,8 +1078,11 @@ export type ObservationDescription = {
    *   these observations. Anything that widens what a collaborator must be verified against --
    *   adding a connection, binding one into a gadget -- restarts the workspace, so every live
    *   session re-opens and re-verifies against the new scope.
-   * - Once observed, the gadget enters a restricted mode: no more actions or public-web fetches,
-   *   only observations, so the gadget cannot leak the data through other gatekeepers.
+   * - Once observed, the gadget enters a restricted mode: it may no longer fetch from the
+   *   public web, and it may only perform actions that target a gatekeeper that itself produced
+   *   a sensitive observation (writes-to-self -- sending the data back where it came from
+   *   reveals nothing new), each requiring manual human approval (never auto-approved). This
+   *   prevents the gadget from leaking the data through other gatekeepers.
    *
    * Two limits are worth stating plainly. Verification is held to the collaborator's role scope,
    * so a gatekeeper the agent reads only through a chat binding is in no "use" collaborator's
