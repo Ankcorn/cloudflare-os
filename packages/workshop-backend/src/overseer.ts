@@ -5576,8 +5576,6 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
     }
     this.ctx.storage.transactionSync(() => {
-      // See newChat: a stale external caller must abort before anything commits.
-      responseTargetRegistration?.assertStillAuthorized?.();
       this.storage.chatMeta.put(meta);
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments,
