@@ -7953,10 +7953,33 @@ class OverseerImpl implements AgentHooks {
       role: CollaboratorRole,
       configureCb?: RpcStub<ObserverConfigCallback>,
       commitGate?: () => void): Promise<void> {
-    // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
-    //    no observer record is needed (built-in gatekeepers never name observers in
-    //    excludeObservers).
+    // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify
+    //    (built-in gatekeepers never name observers in excludeObservers).
     let inScope = this.#inScopeGatekeepers(role);
+
+    // 2. Load any existing observer record, and prune every account choice for a gatekeeper now
+    //    outside this collaborator's verification scope. This restores the invariant commit-time
+    //    re-checks (assertCollaboratorStillVerified) rest on: entry present => verified at this
+    //    collaborator's most recent open. Without the prune, a "use" collaborator opening while a
+    //    connection is unbound from every gadget verifies nothing against it, yet their stale
+    //    entry survives to be trusted the moment the connection is rebound (same gatekeeper id --
+    //    only gadget binding edges changed). The prune must run even when the remaining scope is
+    //    empty -- that's exactly the everything-unbound open. The registration itself is left
+    //    with the gatekeeper (no removeObserver): keeping it preserves forward exclusion via
+    //    byObserverId, and the record stays even if its accountChoices empties, since the
+    //    observerId remains referenced.
+    let record = this.storage.observers.get(profileId);
+    if (record) {
+      let inScopeIds = new Set(inScope.map(gk => gk.id));
+      let pruned = false;
+      for (let key of Object.keys(record.accountChoices)) {
+        if (!inScopeIds.has(Number(key))) {
+          delete record.accountChoices[Number(key)];
+          pruned = true;
+        }
+      }
+      if (pruned) this.storage.observers.put(record);
+    }
     if (inScope.length === 0) {
       // Nothing to verify, but this is still a success exit: the caller's commit gate must still
       // run. Nothing has been minted at this point, so a throw here has no rollback to do.
@@ -7964,8 +7987,7 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
-    // 2. Load any existing observer record, and build a working copy of its account choices.
-    let record = this.storage.observers.get(profileId);
+    // Build a working copy of the (pruned) account choices.
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
 
     // Gatekeeper ids whose account choice came from the persisted record (vs. configured during
