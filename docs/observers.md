@@ -435,6 +435,9 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
     opens do not (record covers them) but still re-run `addObserver`.
   - a thrown `addObserver` denies the open and triggers best-effort `removeObserver` rollback on
     bindings added in the same pass, and does not persist the record.
+  - a failure against an *already-covered* binding scrubs that binding from the persisted record,
+    so commit-time re-checks (`assertCollaboratorStillVerified`) fail closed after a revocation
+    (edge case 3) instead of trusting coverage the live check just refused.
   - missing account → binding reported as a need to the callback; callback rejection denies open.
 - **`authorizeObservation` exclusion:** observation naming a still-authorized observer throws;
   observation naming an observer who lost access proceeds and deletes that observer record (+

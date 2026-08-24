@@ -1,7 +1,8 @@
 // receiveExternalMessage's entry gate (authorizeCollaborator) is separated from the prompt
 // commit by real await windows -- the owner's registration, the caller's context RPC, message
-// preparation -- in which a sharing change can sever the caller's role (tearing down their
-// observer record), or a new connection can widen the scope they were never verified against.
+// preparation -- in which a concurrent verification's fail() can scrub the caller's coverage,
+// a sharing change can sever the caller's role (tearing down their observer record), or a new
+// connection can widen the scope they were never verified against.
 // The agent then runs over the unfiltered chat tail and its reply leaves the Workshop, so the
 // authorization must be re-asserted synchronously with *every* write the submission justifies:
 // newChat runs the registration's assertStillAuthorized as the first statement of the
@@ -128,6 +129,27 @@ function expectNothingCommitted(
 }
 
 describe("receiveExternalMessage's commit-time authorization re-check", () => {
+  it("denies when a concurrent verification failure scrubbed coverage mid-flight", async () => {
+    let stub = env.TEST_OVERSEER.getByName("external-staleness-coverage-scrub");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let state = setup(instance);
+      let result = instance.receiveExternalMessage(submitInput("scrub"));
+      await tick();
+
+      // A sibling verification's fail() scrubs the failed gatekeeper from the persisted record,
+      // synchronously, exactly as ensureObserver does.
+      let record = state.impl.storage.observers.get("bob");
+      delete record.accountChoices[1];
+      state.impl.storage.observers.put(record);
+
+      state.releaseContext();
+      await expect(result).resolves.toMatchObject({ accepted: false });
+      expect((await result).message).toMatch(/could not be verified/);
+      // The transaction aborted before anything landed, and the agent never started.
+      expectNothingCommitted(state, "scrub");
+    });
+  });
+
   it("denies when the caller's role was severed mid-flight", async () => {
     let stub = env.TEST_OVERSEER.getByName("external-staleness-role-severed");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
