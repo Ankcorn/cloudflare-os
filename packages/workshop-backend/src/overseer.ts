@@ -7898,10 +7898,10 @@ class OverseerImpl implements AgentHooks {
   // verification commits (the commit gate below) and re-derived before the capability is
   // returned.
   //
-  // Today receiveExternalMessage() is the only caller: open() still runs the same role resolution
-  // and ensureObserver call inline, interleaved with share-key redemption, and migrating it onto
-  // this gate is deliberately left to the redemption rework that has to restructure that path
-  // anyway.
+  // Today receiveExternalMessage() is the only caller: open() still runs the same role
+  // resolution, ensureObserver call, and commit gate inline, interleaved with share-key
+  // redemption, and migrating it onto this gate is deliberately left to the redemption rework
+  // that has to restructure that path anyway.
   async authorizeCollaborator(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
@@ -8585,7 +8585,33 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
       // role is confirmed, so it never reveals gatekeeper or resource metadata to an unauthorized
       // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
-      await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      //
+      // Verification parks unboundedly (verifier RPCs, the configuration modal), and a removal
+      // landing in that window is otherwise caught only by the revocation restart, which fires
+      // after the awaited teardown/listing phases -- so the live role is re-checked when the
+      // verification commits (the same gate authorizeCollaborator uses; without it, step 6's put
+      // would resurrect the observer record the removal's teardown just deleted), and re-derived
+      // below before the capability is selected. redeemShareKey above wrote a live edge before
+      // the role read, so the live-graph re-check is the whole story here.
+      let commitGate = () => {
+        if (!sharing.getEffectiveRole(profileId)) {
+          throw new Error(
+              "Your access to this workspace was revoked while it was being verified.");
+        }
+      };
+      await this.impl.ensureObserver(
+          profileId, clientUser, role, configureObservers, commitGate);
+
+      // Re-derive the role from the live graph: the gate denies a removal that landed before the
+      // record persisted; this covers a change landing in the await gaps after it. A mid-park
+      // downgrade caps the capability handed out (a stale "build" must not yield the full
+      // interface), while an increase must not ride out on this open either -- verification ran
+      // at the narrower scope (cf. authorizeCollaborator).
+      let confirmed = sharing.getEffectiveRole(profileId);
+      if (!confirmed) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
+      role = roleRank(confirmed) < roleRank(role) ? confirmed : role;
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
