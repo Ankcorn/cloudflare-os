@@ -99,6 +99,56 @@ describe("ensureObserver per-profile serialization", () => {
     });
   });
 
+  it("runs a queued open normally after the open ahead of it rejects", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-serialization-rejected-predecessor");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+
+      let registered: string[] = [];
+      impl.getGatekeeperFacet = () => ({
+        addObserver: async (observerId: string) => { registered.push(observerId); },
+        removeObserver: async () => {},
+      });
+
+      // Open A parks in its modal, then the user cancels -- configure throws, so A registers
+      // nothing and persists nothing. Open B is already queued behind it: the chain must hand
+      // over to B anyway (release() runs in a finally and the link is a promise that never
+      // rejects), not stay poisoned or deadlocked by A's failure.
+      let held = deferred();
+      let configureA = {
+        configure: async () => {
+          await held.promise;
+          throw new Error("cancelled");
+        },
+      } as any;
+      let configureB = {
+        configure: async () =>
+          [{ gatekeeperId: 1, accountId: 11 }, { gatekeeperId: 2, accountId: 21 }],
+      } as any;
+
+      let openA = impl.ensureObserver("alice", fakeClientUser, "build", configureA);
+      await tick();
+      let openB = impl.ensureObserver("alice", fakeClientUser, "build", configureB);
+      await tick();
+
+      // B is still parked behind A; nothing has been verified yet.
+      expect(registered).toHaveLength(0);
+
+      held.resolve();
+      await expect(openA).rejects.toThrow();
+      await openB;
+
+      // B ran as an ordinary first open: one fresh id, both gatekeepers registered under it, and
+      // the persisted record carries B's own choices (A never committed any).
+      expect(registered).toHaveLength(2);
+      expect(new Set(registered).size).toBe(1);
+      let record = impl.storage.observers.get("alice");
+      expect(record.observerId).toBe(registered[0]);
+      expect(record.accountChoices).toEqual({ 1: 11, 2: 21 });
+    });
+  });
+
   it("keeps distinct profiles concurrent", async () => {
     let stub = env.TEST_OVERSEER.getByName("observer-serialization-distinct-profiles");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
