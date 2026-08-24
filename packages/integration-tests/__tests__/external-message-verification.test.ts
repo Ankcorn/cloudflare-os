@@ -194,7 +194,9 @@ describe("external-message verification", () => {
       // collaborator agent access, so his role is checked before verification runs: he gets the
       // plain denial, not a verification failure he has no reason to go fix.
       await signUp(publicApi, dave);
-      await overseer.addCollaborator(dave, "use");
+      if (!await overseer.addCollaborator(dave, "use")) {
+        throw new Error(`Failed to share the gadget with ${dave}`);
+      }
       await expect(submitExternalMessage({ callerEmail: dave, gadgetKey, prompt: "hi" }))
           .resolves.toMatchObject({
             accepted: false, message: expect.stringMatching(/do not have access/i) });
