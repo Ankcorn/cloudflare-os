@@ -1,14 +1,11 @@
 import type { RpcCompatible, RpcStub } from "capnweb";
 import type {
   AiChatMessage, AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig,
-  AuthenticatedApi, CodeSubscriber, CodeUpdate, GadgetClient, OutputFormatOffer, Overseer, PublicApi,
-  WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
+  AuthenticatedApi, GadgetClient, OutputFormatOffer, Overseer, PublicApi, WorkpieceId,
+  WorkpieceSummary, WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
-import * as Y from "yjs";
-import {
-  AgentTurnCompletion, buildSourceSnapshot, loadAllChatHistory,
-} from "./agent-session-internals.js";
-import type { SourceSnapshot } from "./agent-session-internals.js";
+import type { CodeChange } from "@gadgets/workshop-shared/code-change";
+import { AgentTurnCompletion, loadAllChatHistory } from "./agent-session-internals.js";
 import { RpcTarget, connect, nextUsernames, signUp, stubFor, waitFor } from "./rpc-client.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -45,8 +42,6 @@ export type AgentTurnOptions = {
 /** The branch a verifier should connect to. */
 export type AgentGadgetBranch = "accepted" | "chat";
 
-/** Sources accepted from a turn, keyed by each `WorkpieceSummary.filesRoot`. */
-export type AgentSourceSnapshot = SourceSnapshot;
 
 /** Authoritative state returned after one agent turn settles. */
 export type AgentTurnResult = {
@@ -60,8 +55,6 @@ export type AgentTurnResult = {
   agentErrors: string[];
   /** Provider usage available from chat metadata after this turn. */
   usage: { totalTokens?: number; costUsd?: number };
-  /** Present only when `acceptChanges` was requested. */
-  source?: AgentSourceSnapshot;
 };
 
 /** Return the final user-visible assistant text from canonical chat history. */
@@ -82,9 +75,9 @@ class ChatSubscriber extends RpcTarget implements AiChatSubscriber {
   metadata(chat: AiChatMetadata): void { this.completion?.metadata(chat); }
   deleted(_chatId: number): void {}
   message(_entry: AiChatMessage): void {}
-  draftUpdate(
-      _chatId: number, _timestamp: Date, _author: AiChatAuthorInfo, _update: Uint8Array): void {}
-  draftCleared(_chatId: number): void {}
+  changeApplied(
+      _chatId: number, _generation: number, _revision: number, _author: AiChatAuthorInfo,
+      _change: CodeChange, _submission?: {clientId: string; seq: number}): void {}
   stream(_chatId: number, _event: AiChatStreamEvent): void {}
 }
 
@@ -103,25 +96,6 @@ class WorkpieceSubscriber extends RpcTarget implements WorkpiecesSubscriber {
   ready(): void { this.#resolveReady(); }
 }
 
-class SourceSubscriber extends RpcTarget implements CodeSubscriber {
-  readonly readyPromise: Promise<void>;
-  version = 0;
-  #doc: Y.Doc;
-  #resolveReady: () => void = () => {};
-
-  constructor(doc: Y.Doc) {
-    super();
-    this.#doc = doc;
-    this.readyPromise = new Promise<void>(resolve => { this.#resolveReady = resolve; });
-  }
-
-  update(update: CodeUpdate): void {
-    Y.applyUpdateV2(this.#doc, update.update);
-    this.version = update.version;
-  }
-
-  ready(): void { this.#resolveReady(); }
-}
 
 /**
  * Drives the production Workshop RPC lifecycle for one fresh user and workspace.
@@ -233,9 +207,8 @@ export class AgentSession implements Disposable {
       await completion.promise;
 
       let history = await this.#loadHistory(this.#chatId);
-      let source: AgentSourceSnapshot | undefined;
       if (options.acceptChanges) {
-        source = await this.#acceptChanges(this.#chatId, history);
+        await this.acceptChanges();
         history = await this.#loadHistory(this.#chatId);
       }
       return {
@@ -249,7 +222,6 @@ export class AgentSession implements Disposable {
           ...(completion.lastMetadata?.totalCost === undefined
             ? {} : { costUsd: completion.lastMetadata.totalCost }),
         },
-        ...(source === undefined ? {} : { source }),
       };
     } catch (error) {
       this.#failed = true;
@@ -308,96 +280,15 @@ export class AgentSession implements Disposable {
     });
   }
 
-  /**
-   * Create a gadget with hand-written source, bypassing the agent entirely.
-   *
-   * For tests that need a known implementation — a deliberately broken one to prove an assertion
-   * can fail, or a deliberately correct one to measure the platform rather than the model. The
-   * gadget is permanent rather than provisional to a chat, so connect to it on the accepted branch.
-   *
-   * `files` must contain `server.js` exporting a Durable Object class named `Gadget`; only `.js`
-   * entries become worker modules.
-   */
-  async seedGadget(spec: {
-    title: string;
-    bindingName: string;
-    files: Record<string, string>;
-  }): Promise<WorkpieceId> {
-    this.#assertUsable();
-    using gadget = await this.#overseer.createGadget(spec.title, undefined, spec.bindingName);
-    const id = await gadget.getId();
-    // The server owns the files root, so read it back rather than re-deriving the naming rule.
-    const filesRoot = await waitFor(`workpiece ${id} to publish its files root`, async () =>
-      this.#workpieceSubscriber.entries.get(id)?.filesRoot ?? null);
-
-    const doc = new Y.Doc();
-    const subscriber = new SourceSubscriber(doc);
-    using subscriberStub = stubFor(subscriber);
-    let subscription: RpcStub<{}> | undefined;
-    const updates: Uint8Array[] = [];
-    const collect = (update: Uint8Array) => { updates.push(update); };
-    try {
-      // Sync the doc before writing. A write from an unsynced doc is a concurrent Y.Map set that
-      // resolves by client ID, i.e. a coin flip; a write from a synced one carries a causal delete
-      // of the existing entry and deterministically wins.
-      subscription = await this.#overseer.subscribeToCode(subscriberStub);
-      await subscriber.readyPromise;
-      doc.on("updateV2", collect);
-      doc.transact(() => {
-        const root = doc.getMap<Y.Text>(filesRoot);
-        for (const [name, content] of Object.entries(spec.files)) {
-          const text = new Y.Text();
-          text.insert(0, content);
-          root.set(name, text);
-        }
-      });
-      doc.off("updateV2", collect);
-      if (updates.length === 0) throw new Error("Seeding a gadget produced no code update");
-      // updateCode bumps the workspace code version, which both aborts the facet and changes the
-      // Worker Loader cache key, so the next connect loads exactly what was just written.
-      await this.#overseer.updateCode(Y.mergeUpdatesV2(updates));
-      return id;
-    } finally {
-      doc.off("updateV2", collect);
-      subscription?.[Symbol.dispose]();
-      doc.destroy();
-    }
-  }
-
-  /**
-   * Abruptly restart every Gadget server in this workspace, as the platform itself does whenever
-   * code changes. Storage is preserved; in-memory state is discarded.
-   *
-   * Existing gadget stubs are invalidated and throw on their next call, so callers must reconnect —
-   * which is also how a caller proves the restart really happened rather than silently no-opping.
-   *
-   * Implemented as an empty update to the mainline code, which advances the workspace's code
-   * version. That is what forces the restart, and it is also why this must not be called *between*
-   * turns of a multi-turn conversation: the agent stamps the code version it observed onto its
-   * history and rejects an inconsistent one on replay. Call it within the final turn, or in a
-   * single-turn task.
-   */
-  async restartGadgets(): Promise<void> {
-    this.#assertUsable();
-    if (this.#turn !== undefined) {
-      throw new Error("Cannot restart gadgets while an agent turn is running");
-    }
-    await this.#overseer.updateCode(Y.encodeStateAsUpdateV2(new Y.Doc()));
-  }
-
-  /** Merge the current provisional chat branch and return its accepted source snapshot. */
-  async acceptChanges(): Promise<AgentSourceSnapshot> {
+  /** Accept every change proposed by the current chat. */
+  async acceptChanges(): Promise<void> {
     this.#assertUsable();
     if (this.#turn !== undefined) throw new Error("Cannot accept changes while an agent turn is running");
     if (this.#chatId === undefined) throw new Error("The session has no chat branch to accept");
-    const history = await this.#loadHistory(this.#chatId);
-    return this.#acceptChanges(this.#chatId, history);
-  }
-
-  async #acceptChanges(chatId: number, history: readonly AiChatMessage[]): Promise<AgentSourceSnapshot> {
-    const mergeThrough = history.at(-1)?.sequence ?? null;
-    await this.#overseer.mergeChanges(chatId, mergeThrough, { includeDraft: true });
-    return this.#readAcceptedSource();
+    const result = await this.#overseer.mergeChanges(this.#chatId);
+    if (result.outcome !== "merged") {
+      throw new Error("The chat became stale before its changes could be accepted");
+    }
   }
 
   /** Dispose subscriptions, callback targets, RPC capabilities, and the WebSocket session. */
@@ -428,20 +319,6 @@ export class AgentSession implements Disposable {
     return loadAllChatHistory(before => this.#overseer.getChatHistory(chatId, before));
   }
 
-  async #readAcceptedSource(): Promise<AgentSourceSnapshot> {
-    const doc = new Y.Doc();
-    const subscriber = new SourceSubscriber(doc);
-    using subscriberStub = stubFor(subscriber);
-    let subscription: RpcStub<{}> | undefined;
-    try {
-      subscription = await this.#overseer.subscribeToCode(subscriberStub);
-      await subscriber.readyPromise;
-      return buildSourceSnapshot(doc, subscriber.version, this.workpieces());
-    } finally {
-      subscription?.[Symbol.dispose]();
-      doc.destroy();
-    }
-  }
 
   #stopCurrentAgent(): Promise<void> {
     if (this.#chatId === undefined) return Promise.resolve();

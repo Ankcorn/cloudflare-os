@@ -1,14 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Doc, Text } from "yjs";
-import type {
-  AiChatAuthorInfo, AiChatHistoryPage, AiChatMessage, AiChatMetadata, WorkpieceSummary,
-} from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, AiChatHistoryPage, AiChatMessage, AiChatMetadata }
+  from "@gadgets/workshop-shared/api";
 import {
   finalAssistantText,
 } from "../src/agent-session.js";
-import {
-  AgentTurnCompletion, buildSourceSnapshot, loadAllChatHistory,
-} from "../src/agent-session-internals.js";
+import { AgentTurnCompletion, loadAllChatHistory } from "../src/agent-session-internals.js";
 
 function metadata(active: boolean): AiChatMetadata {
   return {
@@ -133,22 +129,3 @@ it("returns the final non-empty assistant message from canonical history", () =>
   expect(finalAssistantText(history)).toBe("first");
 });
 
-it("maps Yjs V2 source by each workpiece filesRoot", () => {
-  const doc = new Doc();
-  const legacy = doc.getMap<Text>("");
-  const modern = doc.getMap<Text>("12");
-  legacy.set("client.js", new Text("legacy client"));
-  modern.set("server.js", new Text("modern server"));
-  const workpieces: WorkpieceSummary[] = [
-    { id: 1, type: "gadget", title: "Legacy", filesRoot: "" },
-    { id: 12, type: "gadget", title: "Modern", filesRoot: "12" },
-    { id: 13, type: "gadget", title: "Empty" },
-  ];
-
-  const snapshot = buildSourceSnapshot(doc, 9, workpieces);
-  expect(snapshot.version).toBe(9);
-  expect(snapshot.workpieces.get("")?.summary.id).toBe(1);
-  expect(snapshot.workpieces.get("")?.files.get("client.js")).toBe("legacy client");
-  expect(snapshot.workpieces.get("12")?.files.get("server.js")).toBe("modern server");
-  expect(snapshot.workpieces.size).toBe(2);
-});

@@ -1,21 +1,5 @@
-import type {
-  AiChatHistoryPage, AiChatMessage, AiChatMetadata, WorkpieceSummary,
-} from "@gadgets/workshop-shared/api";
-import * as Y from "yjs";
+import type { AiChatHistoryPage, AiChatMessage, AiChatMetadata } from "@gadgets/workshop-shared/api";
 
-export type SourceWorkpiece = {
-  /** Workpiece whose `filesRoot` keys this entry. */
-  summary: WorkpieceSummary;
-  /** UTF-8 source text keyed by file name. */
-  files: ReadonlyMap<string, string>;
-};
-
-export type SourceSnapshot = {
-  /** Workshop code version included in the snapshot. */
-  version: number;
-  /** Source-bearing workpieces keyed by `WorkpieceSummary.filesRoot`. */
-  workpieces: ReadonlyMap<string, SourceWorkpiece>;
-};
 
 export class AgentTurnCompletion {
   readonly promise: Promise<void>;
@@ -156,16 +140,3 @@ export async function loadAllChatHistory(
   return messages;
 }
 
-export function buildSourceSnapshot(
-    doc: Y.Doc, version: number, summaries: readonly WorkpieceSummary[]): SourceSnapshot {
-  const workpieces = new Map<string, SourceWorkpiece>();
-  for (const summary of summaries) {
-    if (summary.filesRoot === undefined) continue;
-    const files = new Map<string, string>();
-    doc.getMap<Y.Text>(summary.filesRoot).forEach((text, name) => {
-      files.set(name, text.toString());
-    });
-    workpieces.set(summary.filesRoot, { summary, files });
-  }
-  return { version, workpieces };
-}
