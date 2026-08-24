@@ -8937,13 +8937,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         throw err;
       }
       if (!effectiveRole) {
-        // A null role means the redeemed link's creator is currently unreachable in the
-        // permission graph -- or the link itself was revoked while verification was in flight
-        // (authorizeCollaborator re-derives the role after confirming the edge). Withdraw this
-        // open's claim here too: otherwise the recipient persists as an inert collaborator
-        // who springs back -- unverified -- if the creator regains access. In the revoked-link
-        // case the edge was already confirmed, so this is a no-op and the confirmed edge lingers
-        // inert (lazy model).
+        // A null role means the redeemed link's creator became unreachable in the permission
+        // graph -- or the link itself was revoked -- in the narrow window between
+        // authorizeCollaborator's commit gate (which denies either change landing during
+        // verification, before anything persists) and its post-confirm re-derivation. Withdraw
+        // this open's claim here too: otherwise the recipient persists as an inert collaborator
+        // who springs back -- unverified -- if the creator regains access. The edge was already
+        // confirmed in this window, so for it the revert is a no-op and the confirmed edge
+        // lingers inert (lazy model).
         if (redemption) {
           sharing.revertShareKeyRedemption(profileId, redemption.linkId, redemption.attemptId);
         }
