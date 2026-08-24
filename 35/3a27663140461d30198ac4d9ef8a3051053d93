@@ -28,6 +28,7 @@ packages/workshop-frontend/src/useWorkspaceOpen.ts
 packages/workshop-backend/src/overseer.ts
   s_10a46ead5b1afa::t_eb0ed053d84c77 9630
   s_a726de9bb45000::t_81bfa307479021 6773
+  s_a726de9bb45000::t_d97bbc791c90a1 6175-6178,6187-6189
 ---
 {
   "schema_version": "authorship/3.0.0",
