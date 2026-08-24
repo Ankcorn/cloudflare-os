@@ -16,10 +16,14 @@ import {
   startTestGatekeeperHarness, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID, type Harness,
 } from "../src/harness.js";
 import {
-  connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames, ObserverConfigRecorder,
-  signUp, stubFor, waitFor, type ConnectedAccount,
+  accountLabel, connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames,
+  ObserverConfigRecorder, signUp, stubFor, waitFor, type ConnectedAccount,
 } from "../src/rpc-client.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
+
+// Reason text shaped like what a gatekeeper actually reports on a settled denial. Its appearance
+// in the gateway's reply below is what proves a live verification round trip happened.
+const DENIED_REASON = "You do not have access to this thing.";
 
 let harness: Harness;
 let interceptor: NetworkInterceptor;
@@ -75,6 +79,17 @@ async function submitExternalMessage(input: {
     throw new Error(`submit-external-message failed with ${res.status}: ${await res.text()}`);
   }
   return await res.json() as SubmitExternalMessageResult;
+}
+
+/** Tell the gatekeeper what to do the next time it's asked to admit `label` as an observer. */
+async function setVerifyOutcome(
+    label: string, outcome: { allow: true } | { allow: false; reason: string }): Promise<void> {
+  const res = await harness.fetchWorker(
+    TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/verify-outcome",
+    { method: "POST", body: JSON.stringify({ label, ...outcome }) });
+  if (res.status !== 204) {
+    throw new Error(`Setting the verify outcome failed with ${res.status}: ${await res.text()}`);
+  }
 }
 
 /** The workspace id behind an external gadgetKey -- the DO id the gateway derives from it. */
@@ -140,6 +155,17 @@ describe("external-message verification", () => {
       await expect(submitExternalMessage({ callerEmail: bob, gadgetKey, prompt: "hi" }))
           .resolves.toMatchObject({
             accepted: false, message: expect.stringMatching(/AI model/i) });
+
+      // The gatekeeper now revokes Bob's underlying access. His persisted observer record is
+      // untouched, so only a live addObserver re-verification on this submission can notice --
+      // and the gatekeeper's own refusal reason appearing in the reply is the proof that round
+      // trip happened, since nothing persisted in the Workshop contains it. An implementation
+      // that merely checked the record would keep accepting him here.
+      await setVerifyOutcome(accountLabel(bobAccount), { allow: false, reason: DENIED_REASON });
+      const revoked = await submitExternalMessage({ callerEmail: bob, gadgetKey, prompt: "hi" });
+      if (revoked.accepted) throw new Error("The revoked submission was accepted");
+      expect(revoked.message).toMatch(/could not be verified/i);
+      expect(revoked.message).toContain(DENIED_REASON);
     });
   });
 
