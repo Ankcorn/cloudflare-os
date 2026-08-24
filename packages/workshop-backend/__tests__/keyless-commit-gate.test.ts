@@ -1,24 +1,24 @@
 // authorizeCollaborator's commit gate must re-check the caller's live role for *every*
-// verification. A keyless open parks in ensureObserver across real await windows (verifier RPCs,
-// even the configuration modal), and a removal landing there used to be caught only by the
-// revocation restart -- which fires after the teardown/listing phases, so a verification
-// resolving inside that window slipped through: step 6's blind observers.put *resurrected* the
-// record tearDownLostObservers had just deleted (record and account choices were loaded
-// pre-park), leaving a removed user with coverage that a later re-grant would trust without
-// re-verification, and the open returned a full stale-role capability besides. The gate now
-// denies at commit time, and the post-verification role re-derivation caps a mid-park downgrade
-// at the live role.
+// verification, not just share-key redemptions. A keyless open parks in ensureObserver across
+// real await windows (verifier RPCs, even the configuration modal), and a removal landing there
+// used to be caught only by the revocation restart -- which fires after the teardown/listing
+// phases, so a verification resolving inside that window slipped through: step 6's blind
+// observers.put *resurrected* the record tearDownLostObservers had just deleted (record and
+// account choices were loaded pre-park), leaving a removed user with coverage that a later
+// re-grant would trust without re-verification, and the open returned a full stale-role
+// capability besides. The gate now denies at commit time, and the post-verification role
+// re-derivation (previously redemption-only) caps a mid-park downgrade at the live role.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
-// observer-serialization.test.ts); the gatekeeper facet and the client's User DO are the fakes.
-// Bob is a *returning* collaborator (persisted covering record), so the open parks inside step
-// 5's addObserver -- no configuration modal is involved.
+// verification-scope.test.ts); the gatekeeper facet and the client's User DO are the fakes. Bob
+// is a *returning* collaborator (persisted covering record), so the open parks inside step 5's
+// addObserver -- no configuration modal is involved.
 //
 // The first describe drives authorizeCollaborator directly. The second drives the production
-// open() entry point, which carries the same gate inline (it cannot use authorizeCollaborator
-// yet -- see that method's doc comment): a keyless open() must deny a mid-park removal without
-// resurrecting the record, and a mid-park downgrade must hand back the restricted "use"
-// capability rather than the full interface the stale role selected.
+// open() entry point, which reaches the same gate through authorizeCollaborator: a keyless
+// open() must deny a mid-park removal without resurrecting the record, and a mid-park downgrade
+// must hand back the restricted "use" capability rather than the full interface the stale role
+// selected.
 
 import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";

@@ -8176,11 +8176,10 @@ class OverseerImpl implements AgentHooks {
   // role, and only on success is the edge confirmed for real -- via the commit gate below, in the
   // same synchronous step that persists the observer record.
   //
-  // Verification may park unboundedly (verifier RPCs, the configuration modal), and a removal
-  // landing in that window is otherwise caught only by the revocation restart, which fires after
-  // the awaited teardown/listing phases -- so the effective role is re-checked when the
-  // verification commits (the commit gate below) and re-derived before the capability is
-  // returned.
+  // Every caller gets a commit gate and the post-verification role re-derivation, not just
+  // redemptions: verification may park unboundedly (verifier RPCs, the configuration modal), and
+  // a removal landing in that window is otherwise caught only by the revocation restart, which
+  // fires after the awaited teardown/listing phases -- see the gate comment below.
   async authorizeCollaborator(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
@@ -8941,14 +8940,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         throw err;
       }
       if (!effectiveRole) {
-        // A null role means the redeemed link's creator became unreachable in the permission
-        // graph -- or the link itself was revoked -- in the narrow window between
-        // authorizeCollaborator's commit gate (which denies either change landing during
-        // verification, before anything persists) and its post-confirm re-derivation. Withdraw
-        // this open's claim here too: otherwise the recipient persists as an inert collaborator
-        // who springs back -- unverified -- if the creator regains access. The edge was already
-        // confirmed in this window, so for it the revert is a no-op and the confirmed edge
-        // lingers inert (lazy model).
+        // A null role means the caller lost access in the narrow window between
+        // authorizeCollaborator's commit gate (which denies a change landing during
+        // verification) and its post-verification re-derivation: on the keyless path a plain
+        // removal, on the redemption path the redeemed link's creator becoming unreachable in
+        // the permission graph -- or the link itself being revoked -- after the edge was
+        // confirmed. For a redemption, withdraw this open's claim here too: otherwise the
+        // recipient persists as an inert collaborator who springs back -- unverified -- if the
+        // creator regains access. The edge was already confirmed in this window, so for it the
+        // revert is a no-op and the confirmed edge lingers inert (lazy model).
         if (redemption) {
           sharing.revertShareKeyRedemption(profileId, redemption.linkId, redemption.attemptId);
         }
