@@ -1,6 +1,6 @@
 import type { RpcCompatible, RpcStub } from "capnweb";
 import type {
-  AiChatMessage, AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiChatAuthorInfo,
+  AiChatMessage, AiChatMetadata, AiChatStreamEvent, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig,
   AuthenticatedApi, CodeSubscriber, CodeUpdate, GadgetClient, OutputFormatOffer, Overseer, PublicApi,
   WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber,
 } from "@gadgets/workshop-shared/api";
@@ -24,6 +24,10 @@ function connectTyped(gadget: RpcStub<GadgetClient>, chatId?: number) {
 export type AgentSessionOptions = {
   /** Model to use. It must appear in the new workspace's `listModels()` result. Defaults to the first. */
   modelId?: string;
+  /** Access application JWT. When present, authenticate as its Access identity instead of signing up. */
+  accessToken?: string;
+  /** Optional model to add to the fresh local account before its workspace opens. */
+  userModel?: { profile: AiChatAuthorInfo; config: AiModelConfig };
   /** Alphanumeric prefix for the fresh account name. */
   usernamePrefix?: string;
   /** Hard limit for each agent turn. Defaults to two minutes. */
@@ -162,14 +166,21 @@ export class AgentSession implements Disposable {
 
   /** Create a fresh account and workspace, then establish subscriptions before any chat starts. */
   static async create(baseUrl: URL, options: AgentSessionOptions = {}): Promise<AgentSession> {
-    const publicApi = connect(baseUrl);
+    const publicApi = connect(baseUrl, { accessToken: options.accessToken });
     let authenticatedApi: RpcStub<AuthenticatedApi> | undefined;
     let overseer: RpcStub<Overseer> | undefined;
     let session: AgentSession | undefined;
     try {
-      const username = nextUsernames(options.usernamePrefix ?? "agent").at(0);
-      if (username === undefined) throw new Error("Failed to allocate an integration-test username");
-      authenticatedApi = await signUp(publicApi, username);
+      if (options.accessToken === undefined) {
+        const username = nextUsernames(options.usernamePrefix ?? "agent").at(0);
+        if (username === undefined) throw new Error("Failed to allocate an integration-test username");
+        authenticatedApi = await signUp(publicApi, username);
+      } else {
+        authenticatedApi = await publicApi.authenticateFromCfAccess();
+      }
+      if (options.userModel !== undefined) {
+        await authenticatedApi.addModel(options.userModel.profile, options.userModel.config);
+      }
       overseer = await authenticatedApi.newGadget();
       const [metadata, models] = await Promise.all([
         overseer.getMetadata(),

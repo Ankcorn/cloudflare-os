@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
+import NodeWebSocket from "ws";
 import type {
   AuthenticatedApi, ConnectedAccountsSubscriber, ObserverAccountChoice, ObserverBindingNeed,
   ObserverConfigCallback, PublicApi,
@@ -46,11 +47,27 @@ export function nextUsernames(...prefixes: string[]): string[] {
   return prefixes.map(prefix => `${prefix}${n}`);
 }
 
+/** Options for opening the Workshop's Cap'n Web session. */
+export type WorkshopConnectionOptions = {
+  /** Access application JWT, sent as the preview's authorization cookie. */
+  accessToken?: string;
+};
+
 /** Open an RPC session against the Workshop's /api endpoint. */
-export function connect(baseUrl: URL): RpcStub<PublicApi> {
+export function connect(
+    baseUrl: URL, options: WorkshopConnectionOptions = {}): RpcStub<PublicApi> {
   const wsUrl = new URL("/api", baseUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  return newWebSocketRpcSession<PublicApi>(wsUrl.toString());
+  if (options.accessToken === undefined) {
+    return newWebSocketRpcSession<PublicApi>(wsUrl.toString());
+  }
+  const nodeSocket = new NodeWebSocket(wsUrl.toString(), {
+    origin: baseUrl.origin,
+    headers: { Cookie: `CF_Authorization=${options.accessToken}` },
+  });
+  // `ws` implements the standard client protocol Cap'n Web consumes, but its Node declarations add
+  // binary modes and omit Workers-only server methods, so the otherwise-compatible types diverge.
+  return newWebSocketRpcSession<PublicApi>(nodeSocket as unknown as WebSocket);
 }
 
 /**
