@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
+
 import type {
   AuthenticatedApi, ConnectedAccountsSubscriber, ObserverAccountChoice, ObserverBindingNeed,
   ObserverConfigCallback, PublicApi,
@@ -9,6 +10,8 @@ import type {
 import type {
   AccountDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+
+export { RpcTarget };
 
 /**
  * Poll `attempt` until it returns non-null.

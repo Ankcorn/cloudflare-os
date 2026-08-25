@@ -81,6 +81,7 @@ function readWorkerConfig(dir: string): WorkerConfig {
 
 function workshopConfig(
     gatekeepers: { binding: string; name: string }[],
+    enableGadgetExecution: boolean,
     patch?: (config: WorkerConfig) => void): WorkerConfig {
   const config = readWorkerConfig(WORKSHOP_DIR);
 
@@ -96,9 +97,8 @@ function workshopConfig(
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
   config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
 
-  // Gadget code is never executed here (a gatekeeper is in observer scope purely by having a
-  // vendorId), so drop the Worker Loader rather than requiring it to start.
-  delete config.worker_loaders;
+  // Agent E2E tests retain the Worker Loader so executeCode and generated Gadgets can run.
+  if (!enableGadgetExecution) delete config.worker_loaders;
 
   patch?.(config);
   return config;
@@ -122,6 +122,7 @@ export type Harness = {
 };
 
 export async function startHarness(opts: {
+  enableGadgetExecution?: boolean;
   gatekeepers: GatekeeperSpec[];
   patchWorkshop?: (config: WorkerConfig) => void;
   /** Defaults to this repo's root. Override when a gatekeeper lives outside it. */
@@ -139,7 +140,8 @@ export async function startHarness(opts: {
     root: opts.root ?? REPO_ROOT,
     // workshop-backend is primary, so unrouted requests (e.g. /api) go to it.
     workers: [
-      { config: workshopConfig(gatekeepers, opts.patchWorkshop) },
+      { config: workshopConfig(
+          gatekeepers, opts.enableGadgetExecution ?? false, opts.patchWorkshop) },
       ...gatekeepers.map(({ config }) => ({ config })),
     ],
   });

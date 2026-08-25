@@ -18,13 +18,18 @@
 export type Handler =
     (url: URL, method: string, headers: Headers) => Response | null | Promise<Response | null>;
 
+/** Decides whether one outbound request may use the real network. */
+export type AllowRequest = (url: URL) => boolean;
+
 export class NetworkInterceptor {
   readonly #handlers: readonly Handler[];
+  readonly #allow: AllowRequest | undefined;
   #realFetch: typeof globalThis.fetch | null = null;
   #unmockedCalls: string[] = [];
 
-  constructor(handlers: Handler[] = []) {
+  constructor(handlers: Handler[] = [], allow?: AllowRequest) {
     this.#handlers = [...handlers];
+    this.#allow = allow;
   }
 
   install(): void {
@@ -44,6 +49,7 @@ export class NetworkInterceptor {
       if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]") {
         return realFetch(input, init);
       }
+      if (this.#allow?.(url)) return realFetch(input, init);
 
       // Let Request work out how input and init combine into a method and headers. Constructing one
       // can transfer the body's stream, so it has to happen after the loopback return above -- past

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./agent-session": "./src/agent-session.ts",
     "./harness": "./src/harness.ts",
     "./network-interceptor": "./src/network-interceptor.ts",
     "./rpc-client": "./src/rpc-client.ts"

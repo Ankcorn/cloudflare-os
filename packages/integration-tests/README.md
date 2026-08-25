@@ -9,7 +9,7 @@ pnpm --filter @gadgets/integration-tests test:run
 
 ## The toolkit
 
-Three source-only modules, consumed both by the tests here and by per-vendor suites in repos that
+Four source-only modules, consumed both by the tests here and by per-vendor suites in repos that
 vendor this one as a submodule:
 
 - **`src/harness.ts`** — boots `workshop-backend` and any set of gatekeepers as real Workers under
@@ -24,6 +24,8 @@ vendor this one as a submodule:
 - **`src/rpc-client.ts`** — speaks Cap'n Web over a WebSocket to `/api`, the same transport the
   browser uses: sign-up, reading connected accounts, and `ObserverConfigRecorder`, which records the
   overseer's `configure()` calls and answers from a scripted queue.
+- **`src/agent-session.ts`** — creates a fresh local Workshop account and workspace, completes
+  onboarding, sends agent turns, reads canonical history and connects to generated Gadget RPC.
 
 ## Writing a test here
 - **No test may assume a clean slate.** Everything in a file shares one harness, `it.concurrent` runs

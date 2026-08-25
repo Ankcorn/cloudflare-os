@@ -40,6 +40,17 @@ it("passes loopback traffic through to the real fetch untouched", async () => {
   expect(interceptor.getUnmockedCalls()).toEqual([]);
 });
 
+it("passes explicitly allowed traffic through", async () => {
+  const interceptor = new NetworkInterceptor([], url => url.hostname === "model.test");
+  interceptor.install();
+
+  const response = await fetch("https://model.test/infer");
+
+  expect(await response.text()).toBe("from the real fetch");
+  expect(fetchedByReal).toEqual(["https://model.test/infer"]);
+  expect(interceptor.getUnmockedCalls()).toEqual([]);
+});
+
 it("asks handlers in order and takes the first non-null answer", async () => {
   const asked: string[] = [];
   const declines: Handler = url => { asked.push(`declines ${url.host}`); return null; };
