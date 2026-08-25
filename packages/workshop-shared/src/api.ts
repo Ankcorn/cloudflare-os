@@ -1254,8 +1254,10 @@ export type GadgetMetadata = {
   role?: CollaboratorRole;
 
   /**
-   * True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
-   * be shared with additional users or links.
+   * True when the gadget has observed data marked as containing restricted data (see
+   * `ObservationDescription.containsRestrictedData`). Such gadgets can still be shared, but
+   * collaborators must be verified (per gatekeeper) to have access to the same data, and the
+   * workspace can no longer perform actions or fetch from the public web.
    */
   containsRestrictedData?: boolean;
 
@@ -3966,6 +3968,26 @@ export type PermissionEdge = {
    * resolves to this id, so redeeming any of them yields this one edge.
    */
   keyId: string;
+
+  /**
+   * Present while the redeeming open()'s observer verification has not yet succeeded. A pending
+   * edge grants no authority to anyone -- only the open() that performed the redemption counts
+   * it, to compute the role it must verify for. Success confirms the edge; failure severs it
+   * once every concurrent redemption's claim is withdrawn (see `pendingAttempts`). A stale
+   * pending edge left by a crashed open() is inert and settles on the next redemption of the
+   * same link. Edges written before this field existed read as confirmed.
+   */
+  pending?: true;
+
+  /**
+   * One opaque claim per open() currently redeeming this link, set whenever `pending` is.
+   * Concurrent redemptions share this single edge, so a failed attempt withdraws only its own
+   * claim and severs the edge only when none remain -- otherwise it would yank the edge out from
+   * under a sibling still verifying. Confirming clears the claims along with `pending`.
+   * Bookkeeping only, confers no authority; a crashed open()'s stale claim is harmless since
+   * pending edges grant nothing.
+   */
+  pendingAttempts?: string[];
 });
 
 /** Information about a single collaborator, returned by list/add operations. */
