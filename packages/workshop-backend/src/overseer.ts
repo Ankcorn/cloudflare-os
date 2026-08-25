@@ -8167,6 +8167,9 @@ class OverseerImpl implements AgentHooks {
     let observerId = record?.observerId ?? crypto.randomUUID();
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
+    // Gatekeepers that refused (or whose account was gone) during this call -- see fail() below,
+    // which scrubs each from the persisted observer record as the failure is determined.
+    let invalidated = new Set<number>();
 
     // Failures from the previous pass, keyed by gatekeeper id: an already-configured binding whose
     // chosen account was disconnected, or which the gatekeeper refused.
@@ -8257,25 +8260,42 @@ class OverseerImpl implements AgentHooks {
 
           let fail = (reason: string, err?: unknown) => {
             failures.set(gk.id, {accountId, reason});
+            // The coverage guard (#assertSensitiveObservationCoverage) reads the *persisted*
+            // record from other turns, so until this gatekeeper is scrubbed from it, the record
+            // keeps admitting this producer's restricted observations to the collaborator's
+            // still-live sessions. Scrub synchronously with the failure determination,
+            // re-reading the record since the awaits since load may have let a concurrent open
+            // update it. Scoped to the failed gatekeeper: coverage elsewhere stays intact, and a
+            // repaired pass re-persists full coverage at step 6.
+            invalidated.add(gk.id);
+            let persisted = this.storage.observers.get(profileId);
+            if (persisted && gk.id in persisted.accountChoices) {
+              delete persisted.accountChoices[gk.id];
+              this.storage.observers.put(persisted);
+            }
             this.logger.warn("observer verification failed", {
               event: "gatekeeper.observer.verify.failed",
               gatekeeperId: gk.id, vendorId, accountId, observerId, error: err,
             });
           };
 
-          let verifier = await clientUser.getVerifier(accountId, vendorId);
-          if (!verifier) {
-            // Account gone -> the overseer authors the reason. (Wrong vendor throws above.)
-            fail("This account is no longer connected.");
-            return;
-          }
-
           try {
+            let verifier = await clientUser.getVerifier(accountId, vendorId);
+            if (!verifier) {
+              // Account gone -> the overseer authors the reason. (Wrong vendor throws above.)
+              fail("This account is no longer connected.");
+              return;
+            }
             await this.getGatekeeperFacet(gk.id).addObserver(observerId, verifier);
             if (!preConfigured.has(gk.id)) newlyAdded.add(gk.id);
           } catch (err) {
             // Either a settled denial or an operational failure (expired credentials, upstream
-            // outage). Treat every failure as repairable and let the user try again.
+            // outage) -- whether from resolving the verifier or from the gatekeeper's
+            // addObserver. Treat every failure as repairable and let the user try again.
+            // getVerifier sits inside this try so its rejection (the wrong-vendor throw, or a
+            // cross-worker transport failure) scrubs the persisted coverage like any other
+            // refusal -- and so these callbacks never reject, which keeps the terminal catch's
+            // newlyAdded/invalidated snapshot from missing late-finishing siblings.
             fail(stringifyError(err), err);
           }
         }));
@@ -8311,13 +8331,15 @@ class OverseerImpl implements AgentHooks {
       }
     } catch (err) {
       // Best-effort remove all the observers that were newly-added since we didn't persist the
-      // user's observer record.
+      // user's observer record -- and the invalidated ones, whose coverage fail() just scrubbed:
+      // their registrations reference a choice that is no longer persisted anywhere.
       //
       // TODO(observer-verification-fixes): For a *returning* collaborator whose re-verification
       // failed, this rollback removes registrations that preserve forward exclusion -- once
       // de-registered, gatekeepers stop naming the observer in excludeObservers -- so only a
       // first-ever verification should roll back fully.
-      await this.#removeObserverFromGatekeepers(observerId, [...newlyAdded]);
+      await this.#removeObserverFromGatekeepers(
+          observerId, [...new Set([...newlyAdded, ...invalidated])]);
       throw err;
     }
 
