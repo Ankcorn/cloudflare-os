@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, composeCodeChange, diffFiles, transformCodeChange,
   validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -10,6 +10,7 @@ import {
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
+import type { ListOptions } from "@gadgets/typed-storage";
 import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge }
   from "./git-store";
 import { migrateCodeLogToGit } from "./git-migration";
@@ -547,6 +548,14 @@ export type ActionRecord = {
   resourceTitle?: string;   // denormalized to avoid gatekeeper query
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
   createdAt: Date;
+
+  /**
+   * When the record last changed state: an action's approval/rejection, a hook's enable/disable
+   * toggle or deletion. Absent while nothing has happened since creation (and on legacy records
+   * from before it was tracked).
+   */
+  appliedAt?: Date;
+
   state: ActionState;
 
   /**
@@ -556,7 +565,6 @@ export type ActionRecord = {
   bindingName?: string;
 } & ({
   type: "action";
-  appliedAt?: Date;
   action: number;  // action key assigned by the gatekeeper, passed back on apply/reject/revert
   description: ActionDescription;
   resolvedBy?: AiChatAuthorInfo;  // set when resolved (approved/rejected); absent while pending (or legacy)
@@ -865,10 +873,9 @@ async function computeSessionAffinity(gadgetId: string, chatId: number): Promise
 }
 
 function actionRecordToLog(record: ActionRecord): ActionLogEntry {
-  // TODO: ActionRecord and ActionLogEntry are almost identical. The main differences are:
-  // - ActionRecord includes `appliedAt` only when type == "action". ActionLogEntry could match.
-  // - ActionRecord includes `action`, which should NOT be provided to the client.
-  // We could make the two match more -- just `action` needs to be different.
+  // TODO: ActionRecord and ActionLogEntry are almost identical. The main difference is that
+  // ActionRecord includes `action`, which should NOT be provided to the client. We could make
+  // the two match more -- just `action` needs to be different.
 
   // ActionLogEntry omits the gatekeeperId for records that didn't come from a real gatekeeper
   // (built-in agent tools use the BUILTIN_TOOL_GATEKEEPER_ID sentinel).
@@ -907,6 +914,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
         createdAt: record.createdAt,
+        appliedAt: record.appliedAt,
         state: record.state,
         type: "bindHook",
         hookId: record.hookId,
@@ -917,6 +925,25 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       record satisfies never;
       throw new TypeError(`Invalid ActionRecord type: ${(record as ActionRecord).type}`);
   }
+}
+
+// Reflect a hook toggle (or deletion, which also severs the hookId reference) onto the hook's
+// bindHook action record, stamping the state-change time the byLastChanged index keys on.
+function stampBindHookAction(storage: OverseerStorage, actionId: number, enabled: boolean,
+    opts?: {clearHookId?: boolean}): void {
+  let actionRecord = storage.actions.get(actionId);
+  if (actionRecord?.type !== "bindHook") return;
+  actionRecord.enabled = enabled;
+  if (opts?.clearHookId) delete actionRecord.hookId;
+  actionRecord.appliedAt = new Date();
+  storage.actions.put(actionRecord);
+}
+
+// Key of the actions `byLastChanged` index: last state-change time, id-disambiguated because the
+// frozen clock makes same-instant records routine. Every mutation path stamps appliedAt (apply,
+// reject, stampBindHookAction); one that doesn't would be missed by the resume replay.
+function actionLastChangedKey(record: ActionRecord): string {
+  return `${keyString((record.appliedAt ?? record.createdAt).valueOf())}.${keyString(record.id)}`;
 }
 
 /**
@@ -967,6 +994,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       //       and every live chat was converted to the commit-pinned change stream (a
       //       `conversionBoundary` changes message plus a `codeBase`). The `code`/`snapshots`
       //       collections are dead stored data from this version on.
+      //   3 = the actions collection's indexes (pendingByGatekeeper, byHistoryFilter,
+      //       byLastChanged) exist and are backfilled.
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
@@ -1076,7 +1105,29 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       }),
 
       actions: collection<ActionRecord>()({
-        primaryKey: "id"
+        primaryKey: "id",
+
+        // All three indexes are backfilled by the version-3 migration.
+        uniqueIndexes: {
+          // Resume-replay index (see subscribeToActions): keyed by last state-change time so a
+          // reconnect replays only the records changed during the gap.
+          byLastChanged: actionLastChangedKey,
+        },
+
+        nonUniqueIndexes: {
+          // Sparse index over just the pending records, keyed by gatekeeper, so the auto-approval
+          // drain is O(pending on that gatekeeper) rather than a full-log scan.
+          pendingByGatekeeper(record: ActionRecord) {
+            return record.state === "pending" ? record.gatekeeperId : null;
+          },
+
+          // Keyed by the wire ActionHistoryFilter values, in lockstep with
+          // matchesActionHistoryFilter (api.ts), so every listActions() filter is one ranged
+          // read. The "all" filter has no key: it reads the collection itself.
+          byHistoryFilter(record: ActionRecord) {
+            return record.state === "pending" ? ["pending", record.type] : record.type;
+          },
+        }
       }),
 
       boundHooks: collection<BoundHookRecord>()({
@@ -1297,6 +1348,15 @@ const LISTING_REFRESH_BATCH = 16;
 
 // Longest noun accepted on a format reference. Denormalized display data.
 const MAX_FORMAT_REF_NOUN = 128;
+
+/**
+ * Raw records examined per page of subscribeToActions()'s startAfter resume replay. Exported
+ * for tests.
+ */
+export const ACTION_REPLAY_PAGE_SIZE = 256;
+
+/** listActions() entries returned per page. Exported for tests. */
+export const ACTION_HISTORY_PAGE_DEFAULT_LIMIT = 50;
 
 /**
  * Keeps `commandPosition` only if it's a real index into `args`. Anything else becomes undefined,
@@ -1695,9 +1755,12 @@ class OverseerImpl implements AgentHooks {
       // blocked event (including the alarm handler) is delivered. On failure there is nothing
       // to do -- blockConcurrencyWhile has already aborted the DO -- but the rejection must be
       // consumed so it doesn't also surface as an unhandled rejection.
-      this.ctx.blockConcurrencyWhile(() => this.#migrateToGitStorage())
-          .then(() => this.#resumeInterruptedAgents(), () => {});
+      this.ctx.blockConcurrencyWhile(async () => {
+        await this.#migrateToGitStorage();
+        this.#migrateToActionIndexes();
+      }).then(() => this.#resumeInterruptedAgents(), () => {});
     } else {
+      this.#migrateToActionIndexes();
       this.#resumeInterruptedAgents();
     }
   }
@@ -1755,6 +1818,26 @@ class OverseerImpl implements AgentHooks {
     this.logger.info("migrated workspace code to git storage", {
       event: "storage.migration.git.completed",
       durationMs: Date.now() - startedAt, commitCount: commits,
+    });
+  }
+
+  // Version 2 -> 3: backfill the actions indexes. Indexes are only maintained at write time, so
+  // over records that predate their declaration they start empty -- and updating a pre-existing
+  // action would then throw on the index update. Runs synchronously in the constructor (chained
+  // after the git-storage migration when that one is still pending), so nothing can observe
+  // pre-migration state; transactionSync makes rebuilds-plus-stamp atomic, so a crash
+  // mid-rebuild retries whole. The `!== 2` guard keeps never-initialized DOs write-free (they
+  // stamp the current version at first initialization).
+  #migrateToActionIndexes(): void {
+    if (this.storage.version.get() !== 2) return;
+    this.ctx.storage.transactionSync(() => {
+      this.storage.actions.pendingByGatekeeper.rebuild();
+      this.storage.actions.byHistoryFilter.rebuild();
+      this.storage.actions.byLastChanged.rebuild();
+      this.storage.version.put(3);
+    });
+    this.logger.info("backfilled the action-log indexes", {
+      event: "storage.migration.action-indexes.completed",
     });
   }
 
@@ -2273,12 +2356,7 @@ class OverseerImpl implements AgentHooks {
     }
     this.storage.boundHooks.delete(record.id);
 
-    let actionRecord = this.storage.actions.get(record.actionId);
-    if (actionRecord?.type === "bindHook") {
-      actionRecord.enabled = false;
-      delete actionRecord.hookId;
-      this.storage.actions.put(actionRecord);
-    }
+    stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
   }
 
   // Subscribe to the workspace's workpiece list. In v1 only gadget-type workpieces are published.
@@ -8146,7 +8224,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
-    this.impl.storage.version.put(2);
+    this.impl.storage.version.put(3);
   }
 
   /**
@@ -9364,13 +9442,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return result;
   }
 
-  async listActions(): Promise<ActionLogEntry[]> {
-    let result: ActionLogEntry[] = [];
-    for (let record of this.impl.storage.actions.list()) {
-      result.push(actionRecordToLog(record));
+  async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
+      : Promise<ActionHistoryPage> {
+    let {beforeId, filter = "all"} = options ?? {};
+    if (beforeId !== undefined && (!Number.isSafeInteger(beforeId) || beforeId < 0)) {
+      throw new TypeError(`Invalid beforeId: ${beforeId}`);
     }
 
-    return result;
+    // One ranged read -- off the collection itself for "all" (already id-ordered), off
+    // byHistoryFilter otherwise -- so the work is O(page) however sparse the matches. Pages are
+    // full until the last; the +1 record probes whether an older page exists.
+    let actions = this.impl.storage.actions;
+    let range = {end: beforeId, reverse: true, limit: ACTION_HISTORY_PAGE_DEFAULT_LIMIT + 1};
+    let page = [...(filter === "all"
+        ? actions.list(range) : actions.byHistoryFilter.get(filter, range))];
+    let more = page.length > ACTION_HISTORY_PAGE_DEFAULT_LIMIT;
+    if (more) page.pop();
+    return {
+      entries: page.map(actionRecordToLog),
+      nextBeforeId: more ? page.at(-1)!.id : undefined,
+    };
   }
 
   async approveAction(id: number): Promise<void> {
@@ -9451,12 +9542,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       record.enabled = true;
       this.impl.storage.boundHooks.put(record);
-
-      let actionRecord = this.impl.storage.actions.get(record.actionId);
-      if (actionRecord?.type === "bindHook") {
-        actionRecord.enabled = true;
-        this.impl.storage.actions.put(actionRecord);
-      }
+      stampBindHookAction(this.impl.storage, record.actionId, true);
     }
   }
 
@@ -9469,12 +9555,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
       record.enabled = false;
       this.impl.storage.boundHooks.put(record);
-
-      let actionRecord = this.impl.storage.actions.get(record.actionId);
-      if (actionRecord?.type === "bindHook") {
-        actionRecord.enabled = false;
-        this.impl.storage.actions.put(actionRecord);
-      }
+      stampBindHookAction(this.impl.storage, record.actionId, false);
     }
   }
 
@@ -9759,17 +9840,35 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     actions.subscribe(dbSubscriber);
     subscribed = true;
 
-    // Replay actions changed since `startAfter`; resolved actions use `appliedAt`,
-    // pending actions use `createdAt`.
+    // The subscription delivers live deltas only; clients query current pending state via
+    // listActions({filter: "pending"}) after initiating the subscribe (see api.ts).
     if (startAfter !== undefined) {
-      let startAfterTimestamp = startAfter.valueOf();
-      for (let record of actions.list()) {
-        if (disposed) break;
-        let appliedAt = record.type === "action" ? record.appliedAt : undefined;
-        let recordTimestamp = (appliedAt ?? record.createdAt).valueOf();
-        if (recordTimestamp > startAfterTimestamp) {
-          subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
+      // Resubscribe after a disconnect: sweep byLastChanged for everything changed since the
+      // client's last-seen time -- O(changed during the gap), not O(log). The bound is
+      // inclusive: the frozen clock stamps whole batches with one instant, so an exclusive bound
+      // would drop the last-seen record's siblings, while re-delivery is just a harmless upsert.
+      // The end key is fixed up front; a record changing mid-replay re-sorts past it and arrives
+      // via the live subscription instead. Each page's delivery is awaited, so a failure rejects
+      // the subscribe call before ready() and a huge gap can't queue unbounded callbacks.
+      try {
+        let newest = [...actions.byLastChanged.list({reverse: true, limit: 1})].at(0);
+        if (newest !== undefined) {
+          let end = actionLastChangedKey({...newest, id: newest.id + 1});
+          // keyString(t) is a prefix of every key with that timestamp, so `start` is inclusive
+          // of the whole cutoff instant.
+          let from: ListOptions<string> = {start: keyString(startAfter.valueOf())};
+          for (;;) {
+            if (disposed) throw new Error("Action subscriber failed during replay");
+            let page = [...actions.byLastChanged.list(
+                {...from, end, limit: ACTION_REPLAY_PAGE_SIZE})];
+            await Promise.all(page.map(record => subscriber.entry(actionRecordToLog(record))));
+            if (page.length < ACTION_REPLAY_PAGE_SIZE) break;
+            from = {startAfter: actionLastChangedKey(page.at(-1)!)};
+          }
         }
+      } catch (err) {
+        unsubscribe();
+        throw err;  // rejecting the subscribe call is the client's error signal
       }
     }
 
@@ -9858,7 +9957,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       end: beforeSequence === undefined ? undefined : compactionKey(chatId, beforeSequence),
     })];
     return {
-      messages: await Promise.all(result.map((msg) => this.#getChatMessageForClient(msg))),
+      messages: result.map((msg) => this.#getChatMessageForClient(msg)),
       compacted: checkpoint && {
         to: checkpoint.compactedTo,
         summary: checkpoint.summary,
@@ -9872,7 +9971,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return msg && this.#getChatMessageForClient(msg);
   }
 
-  async #getChatMessageForClient(msg: AiChatMessage): Promise<AiChatMessage> {
+  #getChatMessageForClient(msg: AiChatMessage): AiChatMessage {
     if (msg.type === "action") {
       let record = this.impl.storage.actions.get(msg.actionId);
       if (record) {
@@ -9911,18 +10010,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let self = this;
     function deliverMessage(record: AiChatMessage) {
-      subscriber.message(self.impl.hydrateChatMessageForClient(record)).catch(unsubscribe);
+      subscriber.message(self.#getChatMessageForClient(record)).catch(unsubscribe);
     }
 
     let msgSubscriber = {
       add(record: AiChatMessage) {
-        if (record.type == "action") {
-          let actionRecord = self.impl.storage.actions.get(record.actionId);
-          if (actionRecord) {
-            record.actionLog = actionRecordToLog(actionRecord);
-          }
-        }
-
         deliverMessage(record);
       },
       update(oldRecord: AiChatMessage, newRecord: AiChatMessage): void {
@@ -10437,10 +10529,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // subscribeToMetadata(), subscribeToPresence(), subscribeToWorkpieces(), and getGadget()
 // (returning a restricted, mainline-only UseGadgetClientInterface). Presence includes active
 // viewers' names, profile IDs, and roles. Every other
-// method throws "Unauthorized", with two exceptions: subscribeToConsoleLogs() and
-// subscribeToActions() return inert subscriptions (they never deliver data) rather than denying.
-// The editor subscribes to both speculatively from its top-level hooks, before it has switched to
-// the use-only view; an inert subscription lets those calls resolve quietly instead of surfacing
+// method throws "Unauthorized", with a few exceptions: subscribeToConsoleLogs() and
+// subscribeToActions() return inert subscriptions (they never deliver data), and
+// listActions() returns an empty terminal page, rather than denying.
+// The editor calls all of these speculatively from its top-level hooks, before it has switched to
+// the use-only view; an inert result lets those calls resolve quietly instead of surfacing
 // as spurious client-side errors, while still revealing nothing to the "use" collaborator.
 //
 // Default-deny is enforced at compile time: because this class `implements Overseer`, adding any
@@ -10587,7 +10680,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async newAgentSpawnerGatekeeper(_config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
     this.#deny();
   }
-  async listActions(): Promise<ActionLogEntry[]> { this.#deny(); }
+  // Pending actions are queried eagerly for the badge; resolved history is demand-loaded. Return
+  // an empty terminal page so this speculative read does not fail for "use" collaborators.
+  async listActions(_options?: {beforeId?: number, filter?: ActionHistoryFilter})
+      : Promise<ActionHistoryPage> {
+    return {entries: []};
+  }
   async approveAction(_id: number): Promise<void> { this.#deny(); }
   async rejectAction(_id: number): Promise<void> { this.#deny(); }
   async listHooks(): Promise<BoundHookInfo[]> { this.#deny(); }
