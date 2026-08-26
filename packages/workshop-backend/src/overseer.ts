@@ -947,6 +947,15 @@ function actionLastChangedKey(record: ActionRecord): string {
 }
 
 /**
+ * Primary key of the chatChanges collection: a generation's rows list in revision order under one
+ * prefix. Takes the parts rather than a record so range bounds can be built from synthetic
+ * revisions (see listChatChangesSince). Exported for the migration-backfill test fixture.
+ */
+export function chatChangeKey(chatId: number, generation: number, revision: number): string {
+  return `${keyString(chatId)}.${keyString(generation)}.${keyString(revision)}`;
+}
+
+/**
  * One incremental update in the workspace-wide Yjs code log (the `code` and `snapshots`
  * collections). Formerly the public `CodeUpdate` wire type; the git-storage transition removed it
  * from the API along with `subscribeToCode()` (mainline code becomes commits; see git-store.ts),
@@ -1215,8 +1224,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // revision order under one prefix.
       chatChanges: collection<ChatChangeRecord>()({
         primaryKey(record: ChatChangeRecord) {
-          return `${keyString(record.chatId)}.${keyString(record.generation)}.` +
-              keyString(record.revision);
+          return chatChangeKey(record.chatId, record.generation, record.revision);
         },
 
         // Both sparse; backfilled by the version-4 migration.
@@ -1358,12 +1366,12 @@ async function submissionDigest(submission: CodeChangeSubmission): Promise<strin
 // subscribe.
 function sweepRetiredChatChanges(storage: OverseerStorage): void {
   let cutoff = Date.now() - CHAT_CHANGE_RETIRED_TTL_MS;
-  storage.transaction(() => {
-    for (let row of Array.from(storage.chatChanges.retiredByTimestamp.list({end: cutoff}))) {
-      storage.chatChanges.delete(
-          `${keyString(row.chatId)}.${keyString(row.generation)}.${keyString(row.revision)}`);
-    }
-  });
+  // Drain the index to keys before deleting (deletes invalidate the open cursor) -- keys only,
+  // so a large backlog isn't buffered as full rows. Each delete is expendable on its own: a
+  // crash mid-sweep just leaves the rest for the next sweep.
+  let expired = Array.from(storage.chatChanges.retiredByTimestamp.list({end: cutoff}),
+      row => chatChangeKey(row.chatId, row.generation, row.revision));
+  for (let key of expired) storage.chatChanges.delete(key);
 }
 
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
@@ -1859,36 +1867,39 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  // Version 2 -> 3: backfill the actions indexes. Indexes are only maintained at write time, so
-  // over records that predate their declaration they start empty -- and updating a pre-existing
-  // action would then throw on the index update. Runs synchronously in the constructor (chained
-  // after the git-storage migration when that one is still pending), so nothing can observe
-  // pre-migration state; transactionSync makes rebuilds-plus-stamp atomic, so a crash
-  // mid-rebuild retries whole. The `!== 2` guard keeps never-initialized DOs write-free (they
-  // stamp the current version at first initialization).
-  #migrateToActionIndexes(): void {
-    if (this.storage.version.get() !== 2) return;
+  // Version-gated index backfill. Indexes are only maintained at write time, so over records
+  // that predate their declaration they start empty -- and updating a pre-existing record would
+  // then throw on the index update. Runs synchronously in the constructor (chained after the
+  // git-storage migration when that one is still pending), so nothing can observe pre-migration
+  // state; transactionSync makes rebuilds-plus-stamp atomic, so a crash mid-rebuild retries
+  // whole. The `!== fromVersion` guard keeps never-initialized DOs write-free (they stamp the
+  // current version at first initialization).
+  #backfillIndexes(fromVersion: number, message: string, event: string,
+                   rebuild: () => void): void {
+    if (this.storage.version.get() !== fromVersion) return;
     this.ctx.storage.transactionSync(() => {
+      rebuild();
+      this.storage.version.put(fromVersion + 1);
+    });
+    this.logger.info(message, {event});
+  }
+
+  // Version 2 -> 3: backfill the actions indexes.
+  #migrateToActionIndexes(): void {
+    this.#backfillIndexes(2, "backfilled the action-log indexes",
+        "storage.migration.action-indexes.completed", () => {
       this.storage.actions.pendingByGatekeeper.rebuild();
       this.storage.actions.byHistoryFilter.rebuild();
       this.storage.actions.byLastChanged.rebuild();
-      this.storage.version.put(3);
-    });
-    this.logger.info("backfilled the action-log indexes", {
-      event: "storage.migration.action-indexes.completed",
     });
   }
 
-  // Version 3 -> 4: backfill the chatChanges indexes. Same rules as #migrateToActionIndexes.
+  // Version 3 -> 4: backfill the chatChanges indexes.
   #migrateToChatChangeIndexes(): void {
-    if (this.storage.version.get() !== 3) return;
-    this.ctx.storage.transactionSync(() => {
+    this.#backfillIndexes(3, "backfilled the chat-change indexes",
+        "storage.migration.chat-change-indexes.completed", () => {
       this.storage.chatChanges.liveByChat.rebuild();
       this.storage.chatChanges.retiredByTimestamp.rebuild();
-      this.storage.version.put(4);
-    });
-    this.logger.info("backfilled the chat-change indexes", {
-      event: "storage.migration.chat-change-indexes.completed",
     });
   }
 
@@ -2631,8 +2642,8 @@ class OverseerImpl implements AgentHooks {
     if (afterRevision >= throughRevision) return [];
     let rows = [...this.storage.chatChanges.list({
       prefix: `${keyString(chatId)}.${keyString(generation)}.`,
-      startAfter: `${keyString(chatId)}.${keyString(generation)}.${keyString(afterRevision)}`,
-      end: `${keyString(chatId)}.${keyString(generation)}.${keyString(throughRevision + 1)}`,
+      startAfter: chatChangeKey(chatId, generation, afterRevision),
+      end: chatChangeKey(chatId, generation, throughRevision + 1),
     })];
     if (rows.length !== throughRevision - afterRevision ||
         rows[0].revision !== afterRevision + 1) {
@@ -2715,8 +2726,7 @@ class OverseerImpl implements AgentHooks {
   // since a destructively-closed stream is not bridgeable.
   deleteAllChatChanges(chatId: number): void {
     for (let row of Array.from(this.storage.chatChanges.list({prefix: `${keyString(chatId)}.`}))) {
-      this.storage.chatChanges.delete(
-          `${keyString(chatId)}.${keyString(row.generation)}.${keyString(row.revision)}`);
+      this.storage.chatChanges.delete(chatChangeKey(chatId, row.generation, row.revision));
     }
     this.storage.chatChangeBoundaries.delete(chatId);
     this.#chatContentCache.delete(chatId);
@@ -10133,8 +10143,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           replayCount += page.length;
           if (page.length < CHAT_REPLAY_PAGE_SIZE) break;
           let last = page.at(-1)!;
-          from = {startAfter: `${keyString(last.chatId)}.${keyString(last.generation)}.` +
-              keyString(last.revision)};
+          from = {startAfter: chatChangeKey(last.chatId, last.generation, last.revision)};
         }
       }
     } catch (err) {
