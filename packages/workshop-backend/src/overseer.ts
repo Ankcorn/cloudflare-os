@@ -4393,11 +4393,19 @@ class OverseerImpl implements AgentHooks {
     // (removalBlockedByRestrictedData likewise), or a sibling verification's fail() scrubs
     // coverage this check already trusted. The one genuinely-async step -- tearing down excluded
     // observers' gatekeeper registrations -- is deferred to after the writes.
-    //
-    // TODO(observer-verification-fixes): During the revocation window a removed user's observer
-    // record is already gone, so nothing below names them while their session still lives; every
-    // observation must fail closed until the restart.
     let sharing = await this.getSharingManager();
+
+    // A revocation whose restart hasn't landed yet leaves the removed user's sessions live and
+    // watching while their observer record is already gone -- and once the teardown's
+    // removeObserver fan-out completes, gatekeepers no longer know their observer id, so
+    // subsequent observations arrive with no exclusion naming them. No per-observation check can
+    // see the removed user then, so every observation fails closed until the restart. Checked
+    // before the restricted-data latch: a blocked observation must not latch.
+    if (this.#revocationRestartPending) {
+      throw new Error(
+          "This observation was blocked because a collaborator's access to this workspace was " +
+          "just revoked and their sessions have not yet been disconnected.");
+    }
 
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
@@ -4569,10 +4577,10 @@ class OverseerImpl implements AgentHooks {
   // Deliberately synchronous (the sharing manager is a parameter, not an internal await) so the
   // caller can check and latch in one synchronous block -- see authorizeObservation.
   #assertSensitiveObservationCoverage(gatekeeperId: number, sharing: SharingManager): void {
-    // TODO(observer-verification-fixes): This early return trusts the sharing graph inside the
-    // same revocation window as the fail-closed TODO at the top of authorizeObservation:
-    // removing the *last* collaborator is exactly when the list reads empty while their session
-    // lingers until the restart.
+    // No #revocationRestartPending check here: authorizeObservation fails *every* observation
+    // closed across the revocation window before this runs, which also covers the
+    // zero-collaborators early return below (removing the *last* collaborator is exactly when
+    // the list reads empty while their session lingers until the restart).
     let collaborators = sharing.listCollaborators();
     if (collaborators.length === 0) return;
 
@@ -4726,6 +4734,9 @@ class OverseerImpl implements AgentHooks {
   // Deliberately synchronous (the sharing manager is a parameter) so authorizeObservation can
   // decide, latch, and record in one synchronous block, deferring only the teardown.
   #decideExcludeObservers(observerIds: string[], sharing: SharingManager): ObserverRecord[] {
+    // No #revocationRestartPending check here: authorizeObservation fails *every* observation
+    // closed across the revocation window before this runs, which also covers the unknown-id
+    // `continue` below admitting an observation naming a just-torn-down observer.
     let lost: ObserverRecord[] = [];
     // Deduped: the ids cross the RPC boundary from gatekeeper code, so nothing guarantees
     // uniqueness, and a duplicate would push the same record into `lost` twice -- two teardown
@@ -5152,6 +5163,13 @@ class OverseerImpl implements AgentHooks {
   //   the owner, who is also connected and will be disconnected) before their connection drops.
   //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
   //   connection error even though it succeeded.
+  //
+  // Note the abort lands well after the sever, not just this method's own ~100ms delay: the
+  // handlers first await tearDownLostObservers (a serial removeObserver fan-out per lost
+  // collaborator) and refreshAffectedCollaboratorListings (chunked cross-DO round trips), so the
+  // window scales with collaborator and gatekeeper count. The removed users' sessions stay live
+  // and watching throughout; #revocationRestartPending is what keeps authorizeObservation
+  // failing closed across it.
   async scheduleRevocationRestart(): Promise<void> {
     await this.ctx.storage.sync();
     await scheduler.wait(100);
@@ -8030,6 +8048,18 @@ class OverseerImpl implements AgentHooks {
     }));
   }
 
+  // Whether a sharing change that removed or downgraded someone has happened this DO session:
+  // the revocation restart (scheduleRevocationRestart's abort) is coming, but it lands only
+  // after the awaited teardown and listing-refresh phases below, so the affected users' live
+  // sessions keep watching the fan-out in the meantime. Once the teardown de-registers the
+  // observer, gatekeepers stop naming them in excludeObservers, so no per-gate check can see the
+  // removed user; authorizeObservation therefore consults this flag for *every* observation and
+  // fails closed across the window.
+  // In-memory is the right scope, mirroring #pendingObserverIds: the abort destroys the flag
+  // with the DO, and it is deliberately never cleared -- if the restart is somehow lost, staying
+  // blocked is the safe direction (the next observation-free reconnect gets a fresh DO anyway).
+  #revocationRestartPending = false;
+
   // Tear down observer records for collaborators who lost access as a result of a sharing change.
   // For each affected collaborator who is now fully unauthorized (newRole === null) and has an
   // observer record: best-effort removeObserver on all gatekeeper facets, then delete the record.
@@ -8037,6 +8067,10 @@ class OverseerImpl implements AgentHooks {
   // never a data leak (the leak-relevant gate is authorizeObservation, keyed off the live sharing
   // graph). See observers-implementation-plan.md §5 Step 6.
   async tearDownLostObservers(affected: AffectedCollaborator[]): Promise<void> {
+    // Both callers (removeCollaborator, revokeShareLink) enter here synchronously after the
+    // sever, and restart on exactly this predicate (downgrades included -- a downgraded "use"
+    // session must not keep watching at "build" width either).
+    if (affected.length > 0) this.#revocationRestartPending = true;
     let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
     for (let entry of affected) {
       if (entry.newRole !== null) continue;  // downgraded but still has access -> keep record
