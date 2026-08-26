@@ -8384,16 +8384,27 @@ class OverseerImpl implements AgentHooks {
         break;
       }
     } catch (err) {
-      // Best-effort remove all the observers that were newly-added since we didn't persist the
-      // user's observer record -- and the invalidated ones, whose coverage fail() just scrubbed:
-      // their registrations reference a choice that is no longer persisted anywhere.
-      //
-      // TODO(observer-verification-fixes): For a *returning* collaborator whose re-verification
-      // failed, this rollback removes registrations that preserve forward exclusion -- once
-      // de-registered, gatekeepers stop naming the observer in excludeObservers -- so only a
-      // first-ever verification should roll back fully.
-      await this.#removeObserverFromGatekeepers(
-          observerId, [...new Set([...newlyAdded, ...invalidated])]);
+      // Roll back gatekeeper registrations only for a *first-ever* verification (no persisted
+      // record at call start): that collaborator was never admitted, has no live session, and
+      // their minted id would linger unresolvable inside the gatekeepers. For a
+      // re-verification failure the registrations are deliberately kept: coverage was already
+      // scrubbed synchronously in fail() (so the coverage guard fails closed on restricted
+      // reads), while the registration is what preserves forward exclusion -- byObserverId keeps
+      // resolving the id, so prepareObservation keeps naming this observer in excludeObservers
+      // for their still-live sessions (a failed re-verification does not end sessions; only
+      // scheduleRevocationRestart does). A kept-but-stale registration is fail-closed (it can
+      // only add exclusion names) and self-heals: the next successful open's addObserver
+      // overwrites the verifier.
+      if (!record) {
+        await this.#removeObserverFromGatekeepers(
+            observerId, [...new Set([...newlyAdded, ...invalidated])]);
+      } else if (this.storage.observers.get(profileId)?.observerId !== observerId) {
+        // A teardown racing this call's parked awaits deleted the record this call anchored on;
+        // the registrations just re-asserted reference an id no record resolves (the kept-
+        // registration rationale above needs byObserverId to keep resolving it), so remove them
+        // all. Issued after step 5 settled, so this cannot lose to an in-flight addObserver.
+        await this.#removeObserverFromGatekeepers(observerId, inScope.map(gk => gk.id));
+      }
       throw err;
     }
 

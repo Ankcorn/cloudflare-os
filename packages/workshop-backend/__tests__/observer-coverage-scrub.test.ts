@@ -114,13 +114,48 @@ describe("observer coverage scrub on a failed live check", () => {
 
       // The rejection went through fail(): gatekeeper 1's persisted coverage is scrubbed -- so
       // the coverage guard stops admitting its restricted reads to this collaborator's older
-      // live sessions -- while gatekeeper 2's survives. The invalidated registration is also
-      // rolled back (see the TODO in ensureObserver's catch about keeping re-asserted
-      // registrations for admitted observers).
+      // live sessions -- while gatekeeper 2's survives. The gatekeeper-side registration is
+      // deliberately kept (this was a re-verification of an admitted observer, not a first
+      // open): it preserves forward exclusion for alice's still-live sessions, and the next
+      // successful open's addObserver overwrites it.
       let record = impl.storage.observers.get("alice");
       expect(1 in record.accountChoices).toBe(false);
       expect(record.accountChoices[2]).toBe(20);
-      expect(removed).toEqual([1]);
+      expect(removed).toEqual([]);
+    });
+  });
+
+  it("a failed re-verification keeps an admitted observer's gatekeeper registrations", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-coverage-scrub-reverify-keeps");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+      // Alice was admitted by a previous successful open: her record covers both gatekeepers,
+      // and (implicitly) her sessions may still be live.
+      impl.storage.observers.put(
+          { profileId: "alice", observerId: "obs-1", accountChoices: { 1: 10, 2: 20 } });
+
+      let removed: number[] = [];
+      impl.getGatekeeperFacet = (id: number) => ({
+        addObserver: async () => {
+          if (id === 1) throw new Error("access revoked upstream");
+        },
+        removeObserver: async () => { removed.push(id); },
+      });
+
+      // No repair channel, so gatekeeper 1's refusal is terminal.
+      await expect(impl.ensureObserver("alice", fakeClientUser, "build"))
+          .rejects.toThrow(/could not confirm/);
+
+      // Coverage for the refused gatekeeper is scrubbed (the guard fails closed on its
+      // restricted reads), but the registrations stay put: tearing them down would drop alice
+      // from excludeObservers while her sessions -- which a failed re-verification does not
+      // restart -- keep receiving later non-restricted observations.
+      expect(removed).toEqual([]);
+      let record = impl.storage.observers.get("alice");
+      expect(1 in record.accountChoices).toBe(false);
+      expect(record.accountChoices[2]).toBe(20);
+      expect(record.observerId).toBe("obs-1");
     });
   });
 });
