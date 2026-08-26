@@ -3,17 +3,17 @@
 // the redeemer -- invisible to the coverage guard while their edge is pending -- would otherwise
 // be confirmed without ever verifying against the interim topology. The detector is an
 // event-driven generation counter (#scopeGeneration) bumped by typed-storage subscribers, which
-// registers every relevant transition including one that restores the previous value
-// (add-then-remove and bind-then-unbind leave the id sets byte-identical, so a value snapshot
-// could not).
+// registers every relevant transition including one that restores the previous value (a value
+// snapshot would read an add-then-remove or bind-then-unbind as unchanged).
 //
-// The denial's cleanup is not yet airtight: it runs after ensureObserver already persisted the
-// observer record, so a denied redemption leaves the record behind (see the
-// TODO(observer-verification-fixes) in authorizeCollaborator). These cases pin only the
-// detection and the pending edge staying unconfirmed.
+// A denial must also leave nothing behind: the check and the confirming grant run as
+// ensureObserver's commit gate, synchronously with the observer-record persist, so a rejected
+// redemption takes the first-ever-failure rollback (no record, no gatekeeper registration).
+// Persisting the record before the denial would break the !record discriminator for the
+// retry's whole parked window.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
-// observer-coverage-scrub.test.ts); the gatekeeper facet and the client's User DO are the fakes.
+// observer-serialization.test.ts); the gatekeeper facet and the client's User DO are the fakes.
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -115,6 +115,8 @@ describe("verification-scope change detection across a redemption", () => {
       // A value snapshot would read the reverted sets as unchanged and confirm bob.
       await expect(open).rejects.toThrow(/changed in this workspace/);
       expect(impl.storage.collaborators.get("bob").addedBy[0].pending).toBe(true);
+      // The denial ran as ensureObserver's commit gate, so no observer record was left behind.
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
     });
   });
 
@@ -129,7 +131,7 @@ describe("verification-scope change detection across a redemption", () => {
 
       release();
       await expect(open).rejects.toThrow(/changed in this workspace/);
-      expect(impl.storage.collaborators.get("bob").addedBy[0].pending).toBe(true);
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
     });
   });
 
@@ -162,6 +164,60 @@ describe("verification-scope change detection across a redemption", () => {
 
       release();
       await expect(open).rejects.toThrow(/changed in this workspace/);
+    });
+  });
+
+  it("a denied upgrade redemption keeps the existing observer's record and registrations",
+      async () => {
+    let stub = env.TEST_OVERSEER.getByName("verification-scope-upgrade-denied");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.ownerProfileId = OWNER;
+      seedGatekeeper(impl, 1);
+      impl.storage.shareKeys.put({
+        id: "link-1", created: new Date(), createdBy: OWNER, role: "use",
+      });
+      impl.storage.shareKeys.put({
+        id: "link-2", created: new Date(), createdBy: OWNER, role: "build",
+      });
+      // Bob is already an admitted collaborator (confirmed link-1 edge, persisted covering
+      // record); the pending edge on link-2 is the upgrade this open is verifying.
+      impl.storage.collaborators.put({
+        profile: { id: "bob", name: "Bob" },
+        addedBy: [
+          { type: "shareKey", keyId: "link-1", created: new Date(), role: "use" },
+          { type: "shareKey", keyId: "link-2", created: new Date(), role: "build", pending: true },
+        ],
+      });
+      impl.storage.observers.put(
+          { profileId: "bob", observerId: "obs-b", accountChoices: { 1: 10 } });
+
+      // Park the re-verification inside addObserver (the record covers everything, so there is
+      // no configuration modal to park in), then deny on topology.
+      let held = deferred();
+      let removed: string[] = [];
+      impl.getGatekeeperFacet = () => ({
+        addObserver: async () => { await held.promise; },
+        removeObserver: async (id: string) => { removed.push(id); },
+      });
+      let open = impl.authorizeCollaborator(
+          "bob", { getVerifier: async () => ({}) } as any, { pendingLinkId: "link-2" });
+      await tick();
+
+      seedGatekeeper(impl, 2);
+      impl.storage.gatekeepers.delete(2);
+
+      held.resolve();
+      await expect(open).rejects.toThrow(/changed in this workspace/);
+
+      // The commit-gate denial must not roll back what an earlier successful open established:
+      // bob *was* admitted (the !record boundary), so the record and the gatekeeper registration
+      // stay -- they are what the coverage guard and forward exclusion rest on for bob's
+      // still-live sessions -- and only the upgrade edge remains pending.
+      expect(impl.storage.observers.get("bob")).toEqual(
+          { profileId: "bob", observerId: "obs-b", accountChoices: { 1: 10 } });
+      expect(removed).toEqual([]);
+      expect(impl.storage.collaborators.get("bob").addedBy[1].pending).toBe(true);
     });
   });
 });

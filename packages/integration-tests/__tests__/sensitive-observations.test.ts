@@ -524,7 +524,7 @@ describe("sensitive observations", () => {
   });
 
   it.concurrent(
-      "a link revoked mid-verification denies the redeeming open",
+      "a link revoked mid-verification denies the redeeming open and leaves no observer residue",
       async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "mid-revoke");
@@ -538,8 +538,8 @@ describe("sensitive observations", () => {
 
       // Park Dave's keyed open at the configuration prompt; while it waits, Alice revokes the
       // link. Dave's pending edge is invisible to the revocation's affected-set computation, so
-      // no revocation restart aborts him -- authorizeCollaborator's post-verification role
-      // re-derivation is what must deny the open.
+      // no revocation restart aborts him -- the commit gate is what must deny the open, before
+      // any observer state persists.
       let releaseConfig!: () => void;
       const gate = new Promise<void>(resolve => { releaseConfig = resolve; });
       const recorder = new ObserverConfigRecorder()
@@ -563,16 +563,19 @@ describe("sensitive observations", () => {
         releaseConfig();
         const error = await gatedOpen;
         expect(error).not.toBeNull();
-        expect(error!.message).toMatch(/don't have access/i);
+        expect(error!.message).toMatch(/revoked while it was being verified/i);
       } finally {
         callback[Symbol.dispose]();
       }
 
-      // No collaborator persists: the confirmed edge references a revoked link, so it is inert
-      // under the lazy model. (The denied open does leave Dave's *observer record* behind --
-      // residual coverage a later re-grant would trust unverified; see the
-      // TODO(observer-verification-fixes) in authorizeCollaborator.)
+      // The denied redemption was reverted: no collaborator persists.
       await expect(ws.overseer.listCollaborators()).resolves.toEqual([]);
+
+      // And no observer coverage persists either: re-granted, Dave must block restricted reads
+      // until an open re-verifies him, exactly like any other unverified collaborator. Residual
+      // coverage from the denied open would let this read through.
+      await ws.overseer.addCollaborator(dave, "build");
+      await expect(ws.session.readThing(true)).rejects.toThrow(/has not been verified/i);
     });
   });
 

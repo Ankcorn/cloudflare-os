@@ -1,0 +1,216 @@
+// authorizeCollaborator's commit gate must re-check the caller's live role for *every*
+// verification, not just share-key redemptions. A keyless open parks in ensureObserver across
+// real await windows (verifier RPCs, even the configuration modal), and a removal landing there
+// must deny at commit time: the revocation restart alone fires only after the teardown/listing
+// phases, so a verification resolving inside that window would slip through -- step 6's blind
+// observers.put would resurrect the record tearDownLostObservers just deleted (record and
+// account choices were loaded pre-park), leaving a removed user with coverage a later re-grant
+// would trust without re-verification, and the open would return a full stale-role capability
+// besides. The post-verification role re-derivation likewise runs for every caller, capping a
+// mid-park downgrade at the live role.
+//
+// Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
+// verification-scope.test.ts); the gatekeeper facet and the client's User DO are the fakes. Bob
+// is a *returning* collaborator (persisted covering record), so the open parks inside step 5's
+// addObserver -- no configuration modal is involved.
+//
+// The first describe drives authorizeCollaborator directly. The second drives the production
+// open() entry point, which reaches the same gate through authorizeCollaborator: a keyless
+// open() must deny a mid-park removal without resurrecting the record, and a mid-park downgrade
+// must hand back the restricted "use" capability rather than the full interface the stale role
+// selected.
+
+import { describe, expect, it } from "vitest";
+import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import type { OverseerDurableObject } from "../src/overseer.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+  }
+}
+
+const OWNER = "alice";
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  let promise = new Promise<void>(r => { resolve = r; });
+  return { promise, resolve };
+}
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+
+// Seeds bob as a confirmed "build" collaborator with a covering observer record and parks the
+// gatekeeper facet's addObserver on a deferred.
+function seedParkedReturningBob(instance: OverseerDurableObject): {
+  impl: any;
+  release: () => void;
+  events: string[];
+} {
+  let impl = (instance as unknown as { impl: any }).impl;
+  impl.ownerProfileId = OWNER;
+  impl.storage.gatekeepers.put({
+    id: 1,
+    resourceTitle: "Connection 1",
+    class: {} as any,
+    creationSpec: {
+      type: "gatekeeper",
+      vendorId: "testvendor",
+      resourceUrl: "https://example.com/1",
+      typeUrlPattern: "https://*",
+    },
+  });
+  impl.storage.collaborators.put({
+    profile: { id: "bob", name: "Bob" },
+    addedBy: [{ type: "user", sharer: OWNER, created: new Date(), role: "build" }],
+  });
+  impl.storage.observers.put(
+      { profileId: "bob", observerId: "obs-b", accountChoices: { 1: 10 } });
+
+  // Ordered log of the fake gatekeeper's calls: an addObserver entry is recorded when the call
+  // *completes* (after the park), so the log shows whether a rollback's removeObserver could
+  // have lost to a still-in-flight registration.
+  let events: string[] = [];
+  let held = deferred();
+  impl.getGatekeeperFacet = () => ({
+    addObserver: async (id: string) => { await held.promise; events.push(`add:${id}`); },
+    removeObserver: async (id: string) => { events.push(`remove:${id}`); },
+  });
+  return { impl, release: held.resolve, events };
+}
+
+// Starts bob's keyless open through authorizeCollaborator directly.
+function startParkedKeylessOpen(instance: OverseerDurableObject): {
+  impl: any;
+  open: Promise<unknown>;
+  release: () => void;
+  events: string[];
+} {
+  let { impl, release, events } = seedParkedReturningBob(instance);
+  let open = impl.authorizeCollaborator("bob", { getVerifier: async () => ({}) } as any, {});
+  return { impl, open, release, events };
+}
+
+// Starts bob's keyless open through the production open() entry point. The parts of open()
+// that would cross workers are faked: the caller's User DO (whoami/getVerifier/listing writes),
+// ambient capsule reconciliation, and the session fan-outs the returned capability joins.
+function startParkedProductionOpen(instance: OverseerDurableObject): {
+  impl: any;
+  open: Promise<any>;
+  release: () => void;
+} {
+  let { impl, release } = seedParkedReturningBob(instance);
+  impl.ownerId = "owner-do-id";
+  impl.users = {
+    idFromString: (id: string) => id,
+    get: () => ({
+      whoami: async () => ({ id: "bob", name: "Bob" }),
+      getVerifier: async () => ({}),
+      recordSharedGadgetOpen: async () => {},
+    }),
+  };
+  impl.ensureAmbientCapsules = async () => {};
+  impl.syncOutputsTo = async () => {};
+  impl.joinPresence = () => () => {};
+  impl.joinOutputsFanout = () => () => {};
+
+  let notifyClosed = new NativeRpcStub<() => void>(() => {});
+  let open = instance.open("bob-user-id", "bob", notifyClosed);
+  return { impl, open, release };
+}
+
+describe("the commit gate on keyless opens", () => {
+  it("denies a mid-verification removal and does not resurrect the torn-down record",
+      async () => {
+    let stub = env.TEST_OVERSEER.getByName("keyless-commit-gate-removal");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, open, release, events } = startParkedKeylessOpen(instance);
+      await tick();
+
+      // The owner removes bob while his re-verification is parked: the sever and the observer
+      // teardown run exactly as removeCollaborator drives them. The revocation restart would
+      // eventually kill this DO, but the parked verification can resolve before it lands.
+      let record = impl.storage.collaborators.get("bob");
+      impl.storage.collaborators.delete("bob");
+      await impl.tearDownLostObservers(
+          [{ profile: record.profile, addedBy: record.addedBy, oldRole: "build", newRole: null }]);
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
+
+      release();
+      await expect(open).rejects.toThrow(/revoked while it was being verified/);
+      // Step 6's put must not have resurrected the record the teardown just deleted -- coverage
+      // a later re-grant would trust without re-verification.
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
+      // The teardown's removeObserver ran while the re-assertion was still parked, so on its own
+      // it left the re-asserted registration behind, orphaned (no record resolves obs-b anymore).
+      // The rollback must issue another removeObserver *after* the parked addObserver completed.
+      expect(events).toEqual(["remove:obs-b", "add:obs-b", "remove:obs-b"]);
+    });
+  });
+
+  it("caps a mid-verification downgrade at the live role", async () => {
+    let stub = env.TEST_OVERSEER.getByName("keyless-commit-gate-downgrade");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, open, release } = startParkedKeylessOpen(instance);
+      await tick();
+
+      // The owner downgrades bob's edge to "use" while his verification is parked. The gate
+      // passes (his role is still non-null, and verification at the pre-park "build" scope
+      // covers the narrower "use" scope), but the capability handed out must be the live role.
+      let record = impl.storage.collaborators.get("bob");
+      record.addedBy[0].role = "use";
+      impl.storage.collaborators.put(record);
+
+      release();
+      await expect(open).resolves.toBe("use");
+      expect(impl.storage.observers.get("bob")).toBeDefined();
+    });
+  });
+});
+
+describe("the commit gate on production open()", () => {
+  it("denies a mid-verification removal and does not resurrect the torn-down record",
+      async () => {
+    let stub = env.TEST_OVERSEER.getByName("production-open-gate-removal");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, open, release } = startParkedProductionOpen(instance);
+      open.catch(() => {});  // asserted below; don't let the park window reject unhandled
+      await tick();
+
+      // The owner removes bob while his re-verification is parked, exactly as removeCollaborator
+      // drives it.
+      let record = impl.storage.collaborators.get("bob");
+      impl.storage.collaborators.delete("bob");
+      await impl.tearDownLostObservers(
+          [{ profile: record.profile, addedBy: record.addedBy, oldRole: "build", newRole: null }]);
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
+
+      release();
+      await expect(open).rejects.toThrow(/revoked while it was being verified/);
+      // Step 6's put must not have resurrected the record the teardown just deleted.
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
+    });
+  });
+
+  it("hands a mid-verification downgrade the restricted capability", async () => {
+    let stub = env.TEST_OVERSEER.getByName("production-open-gate-downgrade");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, open, release } = startParkedProductionOpen(instance);
+      await tick();
+
+      // The owner downgrades bob to "use" while his verification is parked. The gate passes
+      // (his role is still non-null), but the capability selected must follow the live role
+      // rather than the stale "build".
+      let record = impl.storage.collaborators.get("bob");
+      record.addedBy[0].role = "use";
+      impl.storage.collaborators.put(record);
+
+      release();
+      let client = await open;
+      expect(client.constructor.name).toBe("UseOverseerInterface");
+      expect(impl.storage.observers.get("bob")).toBeDefined();
+      client[Symbol.dispose]();
+    });
+  });
+});

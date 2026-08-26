@@ -8059,12 +8059,13 @@ class OverseerImpl implements AgentHooks {
   // `pendingLinkId` names a share-key redemption this same open() just performed (see
   // redeemShareKey): the redeemed edge is pending -- it grants no authority to anyone -- so the
   // role is computed as though it were confirmed, verification runs against that hypothetical
-  // role, and only on success is the edge confirmed for real.
+  // role, and only on success is the edge confirmed for real -- via the commit gate below, in the
+  // same synchronous step that persists the observer record.
   //
-  // TODO(observer-verification-fixes): A revocation landing while verification parks is caught
-  // here only by the post-verification role re-derivation below, which runs after ensureObserver
-  // already persisted the observer record; the role must be re-checked synchronously with the
-  // write that persists the record.
+  // Every caller gets a commit gate and the post-verification role re-derivation, not just
+  // redemptions: verification may park unboundedly (verifier RPCs, the configuration modal), and
+  // a removal landing in that window is otherwise caught only by the revocation restart, which
+  // fires after the awaited teardown/listing phases -- see the gate comment below.
   async authorizeCollaborator(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
@@ -8077,50 +8078,75 @@ class OverseerImpl implements AgentHooks {
     let role = sharing.getEffectiveRole(profileId, opts.pendingLinkId);
     if (!role || (opts.requireRole && roleRank(role) < roleRank(opts.requireRole))) return null;
 
-    // For a pending redemption, capture the verification-scope generation in the same synchronous
-    // tick as ensureObserver's own #inScopeGatekeepers snapshot: a connection added (or a binding
+    // Hand ensureObserver a commit gate: a live-role re-check for every caller, plus -- for a
+    // pending redemption -- the topology re-check and the confirming grant, all run synchronously
+    // with the write that persists the observer record. The role re-check is universal because
+    // verification parks across real await windows, in which the caller may be removed: for a
+    // redemption, pending edges are invisible to revocation's affected-set teardown, so this gate
+    // is the only place that can deny before anything is persisted; for a keyless open, the
+    // removal's teardown already deleted the caller's observer record, and without the gate
+    // step 6's put would *resurrect* it (record and account choices were loaded pre-park) --
+    // coverage a later re-grant would trust without re-verification -- and the open would hand
+    // out a full stale-role capability for however long the revocation restart takes to land.
+    // A denial throws *inside* ensureObserver's try: for a first-ever verification that takes
+    // the full rollback (no observer record, no lingering gatekeeper registrations -- a rejected
+    // redeemer leaves nothing behind, so the !record discriminator stays truthful on retry);
+    // for a returning collaborator it keeps the step-5 re-registrations, the documented-harmless
+    // orphan (see #removeObserverFromGatekeepers). Success runs the gate and the record persist
+    // back-to-back inside the per-profile verification lock.
+    //
+    // The topology check captures the verification-scope generation in the same synchronous tick
+    // as ensureObserver's own #inScopeGatekeepers snapshot: a connection added (or a binding
     // made) while the recipient sat on the configuration modal would otherwise be invisible to
-    // the verification yet covered by the confirmed grant -- an already-confirmed collaborator in
-    // the same window is caught by the coverage guard, but a pending redeemer is invisible to it.
-    // A generation, not a value snapshot: a change *reverted* within the window must deny too
-    // (see #scopeGeneration). Redemption-only, because for a confirmed collaborator the coverage
-    // guard already owns that hazard.
-    let scopeBefore = opts.pendingLinkId !== undefined ? this.#scopeGeneration : undefined;
-
-    await this.ensureObserver(profileId, clientUser, role, opts.configureCb);
-
-    if (opts.pendingLinkId !== undefined) {
-      // TODO(observer-verification-fixes): This topology check and the confirming grant below
-      // should run inside a commit gate ensureObserver invokes synchronously with the write that
-      // persists the observer record; as is, a denial here leaves the just-persisted record
-      // behind.
-
+    // the verification yet covered by the confirmed grant -- an already-confirmed collaborator
+    // in the same window is caught by the coverage guard, but a pending redeemer is invisible to
+    // it. A generation, not a value snapshot: a change *reverted* within the window must deny
+    // too (see #scopeGeneration). Redemption-only, because for a confirmed collaborator the
+    // coverage guard already owns that hazard.
+    let pendingLinkId = opts.pendingLinkId;
+    let scopeBefore = pendingLinkId !== undefined ? this.#scopeGeneration : undefined;
+    let commitGate = () => {
       // Deny on *any* topology change -- additions, removals, and bind-changes alike -- rather
-      // than re-verifying: the throw lands in open()'s catch, which severs the pending edge, and
-      // the recipient's retained share key makes the retry re-redeem and re-verify against the
-      // full new topology (where the redemption policy gate refuses if a producer is now gone).
-      if (scopeBefore !== this.#scopeGeneration) {
+      // than re-verifying: the throw lands in open()'s catch, which severs the pending edge,
+      // and the recipient's retained share key makes the retry re-redeem and re-verify against
+      // the full new topology (where the redemption policy gate refuses if a producer is now
+      // gone).
+      if (scopeBefore !== undefined && scopeBefore !== this.#scopeGeneration) {
         throw new Error(
             "A connection or binding changed in this workspace while your access was being " +
             "verified. Open the workspace again to retry.");
       }
 
-      // Re-assert the redemption policy in the same synchronous block as the granting write. The
-      // gate at redeemShareKey ran with the *pending* write, before this open's await windows
-      // (ensureCapsules, ensureObserver); a restricted-data producer removed *before* the
-      // generation snapshot above was taken doesn't bump it -- an unverifiable producer's
-      // remove() skips the share-link guard entirely -- so the scope check cannot catch it, and
-      // confirming would admit a recipient nobody can verify for the restricted data. The throw
-      // lands in open()'s catch, which severs the pending edge.
-      sharing.confirmShareKeyRedemption(
-          profileId, opts.pendingLinkId, () => this.assertNewSharingAllowed());
-    }
+      // The caller's access may have been revoked -- or, for a redemption, the link revoked or
+      // its creator's own access lost -- while verification waited (possibly on the
+      // configuration modal). The throw lands in open()'s catch (which, for a redemption,
+      // severs the pending edge).
+      if (!sharing.getEffectiveRole(profileId, pendingLinkId)) {
+        throw new Error(
+            "Your access to this workspace was revoked while it was being verified.");
+      }
+
+      if (pendingLinkId !== undefined) {
+        // Re-assert the redemption policy in the same synchronous block as the granting write.
+        // The gate at redeemShareKey ran with the *pending* write, before this open's await
+        // windows (ensureCapsules, ensureObserver); a restricted-data producer removed *before*
+        // the generation snapshot above was taken doesn't bump it -- an unverifiable producer's
+        // remove() skips the share-link guard entirely -- so the scope check cannot catch it,
+        // and confirming would admit a recipient nobody can verify for the restricted data. The
+        // throw lands in open()'s catch, which severs the pending edge.
+        sharing.confirmShareKeyRedemption(
+            profileId, pendingLinkId, () => this.assertNewSharingAllowed());
+      }
+    };
+
+    await this.ensureObserver(profileId, clientUser, role, opts.configureCb, commitGate);
 
     // Re-derive the role from the live graph -- for a redemption, now that the edge is
-    // confirmed. This is the only guard against a revocation landing while verification parked
-    // (see the TODO above) -- the role collapses to null and the caller rejects. For a redemption
-    // in that window the just-confirmed edge lingers inert, like any edge of a revoked link under
-    // the lazy model.
+    // confirmed. A revocation landing mid-verification is expected to be denied by the commit
+    // gate above, before anything persists; this re-check is the residual guard for a change
+    // landing in the await gaps *after* the gate ran -- the role collapses to null and open()
+    // rejects. For a redemption in that narrow window the just-confirmed edge lingers inert,
+    // like any edge of a revoked link under the lazy model.
     let confirmed = sharing.getEffectiveRole(profileId);
     if (!confirmed ||
         (opts.requireRole && roleRank(confirmed) < roleRank(opts.requireRole))) {
@@ -8156,19 +8182,29 @@ class OverseerImpl implements AgentHooks {
   // Google gatekeeper's credential lock. Serializing only per profile keeps distinct
   // collaborators' opens concurrent.
   //
+  // `commitGate`, when given, runs synchronously at each success exit -- immediately before the
+  // step-6 record persist, or at the nothing-to-verify early return -- inside the per-profile
+  // lock. A throw denies the verification and takes the same rollback path as any other failure,
+  // so the caller can piggyback its own commit-time checks and writes (a redemption's topology
+  // re-check and confirming grant) on the record persist's synchronous block. Running the gate
+  // *inside* the lock matters: a gate invoked after this method returned would run after the
+  // lock's release, so a queued sibling verification for the same profile would start against no
+  // record and mint a second observerId, breaking the shared-id invariant.
+  //
   // See observers-implementation-plan.md §5 Step 3.
   async ensureObserver(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
-      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+      configureCb?: RpcStub<ObserverConfigCallback>,
+      commitGate?: () => void): Promise<void> {
     let previous = this.#observerVerification.get(profileId) ?? Promise.resolve();
     let release!: () => void;
     let current = new Promise<void>(resolve => { release = resolve; });
     this.#observerVerification.set(profileId, current);
     await previous;
     try {
-      await this.#ensureObserverLocked(profileId, clientUser, role, configureCb);
+      await this.#ensureObserverLocked(profileId, clientUser, role, configureCb, commitGate);
     } finally {
       release();
       if (this.#observerVerification.get(profileId) === current) {
@@ -8181,7 +8217,8 @@ class OverseerImpl implements AgentHooks {
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
-      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+      configureCb?: RpcStub<ObserverConfigCallback>,
+      commitGate?: () => void): Promise<void> {
     // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify
     //    (built-in gatekeepers never name observers in excludeObservers).
     let inScope = this.#inScopeGatekeepers(role);
@@ -8207,7 +8244,13 @@ class OverseerImpl implements AgentHooks {
       }
       if (pruned) this.storage.observers.put(record);
     }
-    if (inScope.length === 0) return;
+    if (inScope.length === 0) {
+      // Nothing to verify, but this is still a success exit: a redemption with an empty scope
+      // must still run its commit gate, or the confirming grant would never be written. Nothing
+      // has been minted at this point, so a throw here has no rollback to do.
+      commitGate?.();
+      return;
+    }
 
     // Build a working copy of the (pruned) account choices.
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
@@ -8383,10 +8426,25 @@ class OverseerImpl implements AgentHooks {
         // All in-scope bindings verified successfully.
         break;
       }
+
+      // 6. Run the caller's commit gate, then persist the observer record, only after all
+      //    addObserver calls succeed. The two run in one synchronous block: for a share-key
+      //    redemption the gate is the topology re-check plus the confirming grant, so success
+      //    writes the grant and the record atomically, while a denial throws into the catch
+      //    below and rolls back like any other verification failure. The pair is also
+      //    *crash*-atomic: storage writes in one synchronous block (no intervening await) are
+      //    coalesced into a single atomic commit, so a crash persists both or neither.
+      //    Creating/updating the record is the canonical moment the user becomes a configured
+      //    observer.
+      commitGate?.();
+      this.storage.observers.put({profileId, observerId, accountChoices});
     } catch (err) {
       // Roll back gatekeeper registrations only for a *first-ever* verification (no persisted
       // record at call start): that collaborator was never admitted, has no live session, and
-      // their minted id would linger unresolvable inside the gatekeepers. For a
+      // their minted id would linger unresolvable inside the gatekeepers. A commit-gate denial
+      // (a redemption refused at confirm time) lands here too, which is what keeps the
+      // discriminator truthful: a denied redemption persists nothing, so "no record" still means
+      // "never admitted". For a
       // re-verification failure the registrations are deliberately kept: coverage was already
       // scrubbed synchronously in fail() (so the coverage guard fails closed on restricted
       // reads), while the registration is what preserves forward exclusion -- byObserverId keeps
@@ -8407,10 +8465,6 @@ class OverseerImpl implements AgentHooks {
       }
       throw err;
     }
-
-    // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
-    //    the record is the canonical moment the user becomes a configured observer.
-    this.storage.observers.put({profileId, observerId, accountChoices});
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the
@@ -8752,14 +8806,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         throw err;
       }
       if (!effectiveRole) {
-        // A null role means the caller lost access while verification was in flight: on the
-        // keyless path a plain removal, on the redemption path the redeemed link's creator
-        // becoming unreachable in the permission graph -- or the link itself being revoked --
-        // after the edge was confirmed. For a redemption, withdraw this open's claim here too:
-        // otherwise the recipient persists as an inert collaborator who springs back --
-        // unverified -- if the creator regains access. The edge was already confirmed in this
-        // window, so for it the revert is a no-op and the confirmed edge lingers inert (lazy
-        // model).
+        // A null role means the caller lost access in the narrow window between
+        // authorizeCollaborator's commit gate (which denies a change landing during
+        // verification) and its post-verification re-derivation: on the keyless path a plain
+        // removal, on the redemption path the redeemed link's creator becoming unreachable in
+        // the permission graph -- or the link itself being revoked -- after the edge was
+        // confirmed. For a redemption, withdraw this open's claim here too: otherwise the
+        // recipient persists as an inert collaborator who springs back -- unverified -- if the
+        // creator regains access. The edge was already confirmed in this window, so for it the
+        // revert is a no-op and the confirmed edge lingers inert (lazy model).
         if (redemption) {
           sharing.revertShareKeyRedemption(profileId, redemption.linkId, redemption.attemptId);
         }
@@ -8787,9 +8842,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       })();
     }
 
-    // TODO(observer-verification-fixes): The role selecting the capability below was re-derived
-    // by authorizeCollaborator only *after* ensureObserver persisted the observer record, so a
-    // revocation or downgrade landing while verification parked is caught one write too late.
     if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
       return new UseOverseerInterface(
