@@ -1,13 +1,46 @@
 // subscribeToChat's change-row replay and the retired-row lifecycle, over the production
 // chatChanges collection (liveByChat / retiredByTimestamp indexes) on mock storage.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { RpcStub } from "capnweb";
 import type { Collection } from "@gadgets/typed-storage";
+import type {
+  AiChatMessage, AiChatMetadata, AiChatSubscriber,
+} from "@gadgets/workshop-shared/api";
 import type { ChatChangeRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
 import {
-  FIXTURE_EPOCH, makeActionStorage, makePreIndexChatChangeStorage,
+  FIXTURE_EPOCH, makeActionStorage, makePreIndexChatChangeStorage, openFakeOverseer,
 } from "./fixtures.js";
+
+vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
+
+// Hand-rolled AiChatSubscriber stub. Collects delivered changes and messages; `changeApplied`
+// can be overridden to gate or fail deliveries.
+function makeChatSubscriber(
+    changeApplied?: (chatId: number, generation: number, revision: number) => Promise<void>) {
+  let changes: Array<{ chatId: number, generation: number, revision: number }> = [];
+  let messages: AiChatMessage[] = [];
+  let disposeCount = 0;
+  let subscriber = {
+    streamGeneration: async () => {},
+    metadata: async (_meta: AiChatMetadata) => {},
+    deleted: async () => {},
+    message: async (msg: AiChatMessage) => { messages.push(msg); },
+    changeApplied: changeApplied ?? (async (chatId: number, generation: number,
+                                            revision: number) => {
+      changes.push({ chatId, generation, revision });
+    }),
+    stream: async () => {},
+    dup: () => subscriber,
+    onRpcBroken: () => {},
+    [Symbol.dispose]: () => { ++disposeCount; },
+  };
+  return {
+    subscriber: subscriber as unknown as RpcStub<AiChatSubscriber>,
+    changes, messages, disposeCount: () => disposeCount,
+  };
+}
 
 // Puts one change row; timestamp defaults to FIXTURE_EPOCH + revision.
 function putChange(
@@ -23,6 +56,22 @@ function putChange(
     ...(opts.retired ? { retired: true as const } : {}),
   });
 }
+
+describe("retired-row sweep", () => {
+  it("expires aged retired rows at subscribe entry, keeping fresh retired and live rows",
+      async () => {
+    let storage = makeActionStorage();
+    let aged = new Date(Date.now() - 10 * 60_000);
+    putChange(storage, 1, 0, 1, { retired: true, timestamp: aged });
+    putChange(storage, 1, 0, 2, { retired: true, timestamp: new Date() });
+    putChange(storage, 1, 0, 3, { timestamp: aged });  // live rows never expire
+    let client = await openFakeOverseer(storage);
+    let { subscriber } = makeChatSubscriber();
+
+    using _sub = await client.subscribeToChat(subscriber);
+    expect([...storage.chatChanges.list()].map(r => r.revision)).toEqual([2, 3]);
+  });
+});
 
 describe("chat-change index migration", () => {
   it("serves records written before the indexes existed once a rebuild backfills them", () => {

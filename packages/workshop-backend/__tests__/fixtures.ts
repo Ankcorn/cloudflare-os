@@ -92,6 +92,11 @@ export async function openFakeOverseer(
     open: OverseerDurableObject.prototype.open,
     impl: {
       ownerId,
+      streamGeneration: 1,
+      logger: { debug: () => {}, warn: () => {} },
+      addChatSubscriber: () => {},
+      removeChatSubscriber: () => {},
+      hydrateChatMessageForClient: (msg: unknown) => msg,
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinPresence: () => () => {},

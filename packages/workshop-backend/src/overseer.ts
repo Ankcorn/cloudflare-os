@@ -1352,6 +1352,20 @@ async function submissionDigest(submission: CodeChangeSubmission): Promise<strin
   return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)).toHex();
 }
 
+// Delete retired rows past the retention horizon (see CHAT_CHANGE_RETIRED_TTL_MS): one ranged
+// index read, not a scan. Runs at materialization, epoch close, and subscribeToChat entry, so
+// an idle chat's retired rows can't outlive the horizon by more than the gap to the next
+// subscribe.
+function sweepRetiredChatChanges(storage: OverseerStorage): void {
+  let cutoff = Date.now() - CHAT_CHANGE_RETIRED_TTL_MS;
+  storage.transaction(() => {
+    for (let row of Array.from(storage.chatChanges.retiredByTimestamp.list({end: cutoff}))) {
+      storage.chatChanges.delete(
+          `${keyString(row.chatId)}.${keyString(row.generation)}.${keyString(row.revision)}`);
+    }
+  });
+}
+
 // Common internals that several interfaces implemented by the Overseer need to use. Can't just
 // declare private methods because some of the methods are needed by multiple classes.
 // Most format tokens one message may carry. Only formats picked from the composer menu become
@@ -2691,18 +2705,6 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Lazily expire retired rows past the retention horizon, and drop retired generations that
-  // are no longer bridgeable at all.
-  #pruneRetiredChatChanges(chatId: number): void {
-    let cutoff = Date.now() - CHAT_CHANGE_RETIRED_TTL_MS;
-    for (let row of Array.from(this.storage.chatChanges.list({prefix: `${keyString(chatId)}.`}))) {
-      if (row.retired && row.timestamp.getTime() < cutoff) {
-        this.storage.chatChanges.delete(
-            `${keyString(chatId)}.${keyString(row.generation)}.${keyString(row.revision)}`);
-      }
-    }
-  }
-
   // Erase every change row of the chat (a destructive bump, or chat deletion): retired rows too,
   // since a destructively-closed stream is not bridgeable.
   deleteAllChatChanges(chatId: number): void {
@@ -2979,7 +2981,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     this.#retireChatChanges(rows);
-    this.#pruneRetiredChatChanges(chatId);
+    sweepRetiredChatChanges(this.storage);
     return {sequence, meta: this.getChatMetaOrThrow(chatId)};
   }
 
@@ -3756,7 +3758,7 @@ class OverseerImpl implements AgentHooks {
     // meta so concurrent changes to other fields (e.g. a title rename during the awaits)
     // survive.
     this.#retireChatChanges(this.listLiveChatChanges(chatId, generationToken));
-    this.#pruneRetiredChatChanges(chatId);
+    sweepRetiredChatChanges(this.storage);
     this.storage.chatChangeBoundaries.put(
         {chatId, generation: generationToken, finalRevision: revisionToken, boundaries});
     this.#chatContentCache.delete(chatId);
@@ -10014,6 +10016,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
+    sweepRetiredChatChanges(this.impl.storage);
+
     let chats = this.impl.storage.chats;
     let chatMeta = this.impl.storage.chatMeta;
     let changedChatMetadata: AiChatMetadata[] = [];
