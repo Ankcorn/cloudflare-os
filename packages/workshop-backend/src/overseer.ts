@@ -996,6 +996,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       //       collections are dead stored data from this version on.
       //   3 = the actions collection's indexes (pendingByGatekeeper, byHistoryFilter,
       //       byLastChanged) exist and are backfilled.
+      //   4 = the chatChanges collection's indexes (liveByChat, retiredByTimestamp) exist and
+      //       are backfilled.
       version: 0,
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
@@ -1215,7 +1217,21 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey(record: ChatChangeRecord) {
           return `${keyString(record.chatId)}.${keyString(record.generation)}.` +
               keyString(record.revision);
-        }
+        },
+
+        // Both sparse; backfilled by the version-4 migration.
+        nonUniqueIndexes: {
+          // Live (unretired) rows keyed by chat, so subscribe-replay reads exactly the rows it
+          // delivers, in (generation, revision) order (the primary key's sort).
+          liveByChat(record: ChatChangeRecord) {
+            return record.retired ? null : record.chatId;
+          },
+
+          // Retired rows by row timestamp, so the TTL sweep is one ranged read.
+          retiredByTimestamp(record: ChatChangeRecord) {
+            return record.retired ? record.timestamp.valueOf() : null;
+          },
+        },
       }),
 
       // Per-(user, client session) submission dedupe records (see ChatChangeClientRecord). The
@@ -1758,9 +1774,11 @@ class OverseerImpl implements AgentHooks {
       this.ctx.blockConcurrencyWhile(async () => {
         await this.#migrateToGitStorage();
         this.#migrateToActionIndexes();
+        this.#migrateToChatChangeIndexes();
       }).then(() => this.#resumeInterruptedAgents(), () => {});
     } else {
       this.#migrateToActionIndexes();
+      this.#migrateToChatChangeIndexes();
       this.#resumeInterruptedAgents();
     }
   }
@@ -1838,6 +1856,19 @@ class OverseerImpl implements AgentHooks {
     });
     this.logger.info("backfilled the action-log indexes", {
       event: "storage.migration.action-indexes.completed",
+    });
+  }
+
+  // Version 3 -> 4: backfill the chatChanges indexes. Same rules as #migrateToActionIndexes.
+  #migrateToChatChangeIndexes(): void {
+    if (this.storage.version.get() !== 3) return;
+    this.ctx.storage.transactionSync(() => {
+      this.storage.chatChanges.liveByChat.rebuild();
+      this.storage.chatChanges.retiredByTimestamp.rebuild();
+      this.storage.version.put(4);
+    });
+    this.logger.info("backfilled the chat-change indexes", {
+      event: "storage.migration.chat-change-indexes.completed",
     });
   }
 
@@ -8224,7 +8255,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
-    this.impl.storage.version.put(3);
+    this.impl.storage.version.put(4);
   }
 
   /**

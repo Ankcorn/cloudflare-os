@@ -3,11 +3,11 @@
 // OverseerDurableObject.prototype.open.
 
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
-import { createTypedStorage, collection } from "@gadgets/typed-storage";
+import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
 import type { Overseer } from "@gadgets/workshop-shared/api";
 import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
-import type { ActionRecord } from "../src/overseer.js";
+import type { ActionRecord, ChatChangeRecord } from "../src/overseer.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 /**
@@ -29,6 +29,18 @@ export function makePreIndexActionStorage(mockStorage: DurableObjectStorage) {
   return createTypedStorage(mockStorage, {
     singletons: { nextActionId: 0 },
     collections: { actions: collection<ActionRecord>()({ primaryKey: "id" }) },
+  });
+}
+
+/** Same, for chatChanges records written before the version-4 indexes existed. */
+export function makePreIndexChatChangeStorage(mockStorage: DurableObjectStorage) {
+  return createTypedStorage(mockStorage, {
+    collections: {
+      chatChanges: collection<ChatChangeRecord>()({
+        primaryKey: (r: ChatChangeRecord) =>
+            `${keyString(r.chatId)}.${keyString(r.generation)}.${keyString(r.revision)}`,
+      }),
+    },
   });
 }
 
