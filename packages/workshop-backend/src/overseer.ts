@@ -4385,6 +4385,15 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
+    // House rule (cf. addCollaborator): every check runs in one synchronous block with the writes
+    // it justifies -- the restricted latch and the action record. The only await before that
+    // block is the memoized sharing manager. Awaiting between a check and the latch would open a
+    // window where a concurrent turn adds a collaborator the coverage check never saw
+    // (assertNewSharingAllowed short-circuits on the still-unset latch), removes the producer
+    // (removalBlockedByRestrictedData likewise), or a sibling verification's fail() scrubs
+    // coverage this check already trusted. The one genuinely-async step -- tearing down excluded
+    // observers' gatekeeper registrations -- is deferred to after the writes.
+    //
     // TODO(observer-verification-fixes): During the revocation window a removed user's observer
     // record is already gone, so nothing below names them while their session still lives; every
     // observation must fail closed until the restart.
@@ -4404,25 +4413,23 @@ class OverseerImpl implements AgentHooks {
             "connection it was read through has been removed from this workspace.");
       }
       this.#assertSensitiveObservationCoverage(gatekeeperId, sharing);
-
-      // TODO(observer-verification-fixes): The exclusion gate below is decided after this latch,
-      // so a restricted observation the exclusion then blocks has already latched restricted
-      // mode despite delivering no data.
-      this.storage.prohibitAllSharing.put(true);
     }
 
     // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
     // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
     // observer has already lost access in the sharing graph. If any named observer is still
     // authorized, we cannot prevent them from seeing it, so we block the observation. See
-    // observers-implementation-plan.md §5 Step 5.
-    //
-    // TODO(observer-verification-fixes): The exclusion is decided and the losers' cross-worker
-    // teardown awaited *before* the action record is written, so a re-grant landing in that
-    // window admits an observation naming a collaborator who is authorized again by the time it
-    // is recorded.
+    // observers-implementation-plan.md §5 Step 5. The decision is synchronous; the losers'
+    // teardown is deferred past the writes below.
+    let lostObservers: ObserverRecord[] = [];
     if (description.excludeObservers && description.excludeObservers.length > 0) {
-      await this.#enforceExcludeObservers(description.excludeObservers);
+      lostObservers = this.#decideExcludeObservers(description.excludeObservers, sharing);
+    }
+
+    // Latch restricted mode only once every gate above has passed: a blocked observation delivers
+    // no data, so it must not leave the workspace restricted.
+    if (description.containsRestrictedData) {
+      this.storage.prohibitAllSharing.put(true);
     }
 
     let actionId = this.storage.nextActionId.get();
@@ -4442,6 +4449,11 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
+
+    // Awaited rather than handed to waitUntil: ApprovalQueueImpl returns this promise to the
+    // gatekeeper worker, so an admitted observation implies the excluded observers' teardown ran
+    // before any data flows. It never throws (removeObserver is best-effort).
+    await this.#tearDownExcludedObservers(lostObservers);
   }
 
   async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
@@ -4700,24 +4712,32 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // Enforce an observation's `excludeObservers`. For each named opaque observerId:
+  // Decide an observation's `excludeObservers`. For each named opaque observerId:
   //   - Map it back to a profileId via the byObserverId index. An unknown id is not an active
-  //     observer (e.g. already torn down), so it is ignored.
+  //     observer (e.g. already torn down), so it is ignored -- unless a first-time verification
+  //     registered it with a gatekeeper but has not yet persisted its record
+  //     (#pendingObserverIds), in which case the profile may be admitted moments later and we
+  //     fail closed.
   //   - If that profileId is still authorized in the sharing graph, we cannot guarantee they won't
   //     see the observation (v1 has no per-thread hiding), so we throw to block it.
-  //   - If that profileId is no longer authorized, we allow the observation for them and delete
-  //     their observer record (best-effort removeObserver on all gatekeepers). They are no longer
-  //     set up to observe; if they regain access they reconfigure from scratch (Step 3).
-  // If no named observer is still authorized, the observation is allowed.
-  async #enforceExcludeObservers(observerIds: string[]): Promise<void> {
-    let sharing = await this.getSharingManager();
-
-    // Observers who are still authorized block the observation outright.
-    for (let observerId of observerIds) {
+  //   - If that profileId is no longer authorized, we allow the observation for them and return
+  //     their record: they are no longer set up to observe, so the caller tears them down
+  //     (#tearDownExcludedObservers); if they regain access they reconfigure from scratch (Step 3).
+  // Deliberately synchronous (the sharing manager is a parameter) so authorizeObservation can
+  // decide, latch, and record in one synchronous block, deferring only the teardown.
+  #decideExcludeObservers(observerIds: string[], sharing: SharingManager): ObserverRecord[] {
+    let lost: ObserverRecord[] = [];
+    // Deduped: the ids cross the RPC boundary from gatekeeper code, so nothing guarantees
+    // uniqueness, and a duplicate would push the same record into `lost` twice -- two teardown
+    // iterations for one observer, the second running from a snapshot the first's awaited
+    // fan-out staled (see #tearDownExcludedObservers).
+    for (let observerId of new Set(observerIds)) {
+      if (this.#pendingObserverIds.has(observerId)) {
+        throw new Error(
+            "This observation was blocked because it contains data that a collaborator currently " +
+            "being verified may not be permitted to see.");
+      }
       let observer = this.storage.observers.byObserverId.get(observerId);
-      // TODO(observer-verification-fixes): A mid-registration observer id is not yet resolvable
-      // via byObserverId, so an excluded observation naming it is admitted here -- and the
-      // collaborator it names is admitted moments later with the data already in history.
       if (!observer) continue;  // not an active observer -> ignore
 
       if (sharing.getEffectiveRole(observer.profileId)) {
@@ -4725,20 +4745,28 @@ class OverseerImpl implements AgentHooks {
             "This observation was blocked because it contains data that a current collaborator " +
             "is not permitted to see.");
       }
+      lost.push(observer);
     }
+    return lost;
+  }
 
-    // No still-authorized observer was named. Tear down any named observers who have already lost
-    // access, since they are no longer set up to observe.
+  // Tear down excluded observers #decideExcludeObservers found to have already lost access: delete
+  // each record and best-effort removeObserver on all gatekeepers. Never throws.
+  async #tearDownExcludedObservers(observers: ObserverRecord[]): Promise<void> {
+    if (observers.length === 0) return;
     let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
-    for (let observerId of observerIds) {
-      let observer = this.storage.observers.byObserverId.get(observerId);
-      if (!observer) continue;
-      // TODO(observer-verification-fixes): This deletes by profileId from a snapshot that can go
-      // stale across the awaited removeObserver fan-out, so a re-granted profile's *replacement*
-      // observer record can be deleted here, after which exclusions naming the new id silently
-      // no-op fail-open.
-      this.storage.observers.delete(observer.profileId);
-      await this.#removeObserverFromGatekeepers(observerId, gatekeeperIds);
+    for (let observer of observers) {
+      // Each earlier iteration's awaited fan-out is a yield in which the profile may have been
+      // re-granted and re-verified, minting a replacement record under a new observerId; deleting
+      // by profileId from this method's (snapshotted) list would then remove the *replacement*,
+      // silently no-oping every exclusion that names the new id until the user's next open. So
+      // re-read and delete only the record actually snapshotted; the snapshotted id is still
+      // de-registered unconditionally (removeObserver is idempotent and the id is dead either
+      // way).
+      if (this.storage.observers.get(observer.profileId)?.observerId === observer.observerId) {
+        this.storage.observers.delete(observer.profileId);
+      }
+      await this.#removeObserverFromGatekeepers(observer.observerId, gatekeeperIds);
     }
   }
 
@@ -8165,6 +8193,15 @@ class OverseerImpl implements AgentHooks {
   // verification settles; the map is small (one entry per concurrently-opening collaborator).
   #observerVerification = new Map<string, Promise<void>>();
 
+  // Observer ids a first-time verification has registered with at least one gatekeeper but whose
+  // record is not yet persisted, so byObserverId cannot resolve them (observerId -> profileId).
+  // Consulted by #decideExcludeObservers, which otherwise reads such an id as "not an active
+  // observer" and lets an excluded observation through -- the collaborator is then admitted
+  // moments later with the data already in chat history. In-memory is the right scope: a DO
+  // restart kills the in-flight open, and its gatekeeper-side registration then references an id
+  // no record will ever carry, so ignoring it is correct.
+  #pendingObserverIds = new Map<string, string>();
+
   // Bring a non-owner `profileId` into compliance as an observer for their `role`, so that they may
   // open the Gadget. May invoke `configureCb` to ask the user to choose connected accounts for
   // gatekeeper bindings they haven't configured yet. Re-runs `addObserver` (re-verification) for
@@ -8262,6 +8299,12 @@ class OverseerImpl implements AgentHooks {
         inScope.filter(gk => gk.id in accountChoices).map(gk => gk.id));
 
     let observerId = record?.observerId ?? crypto.randomUUID();
+    // A freshly minted id becomes visible to gatekeepers at the first addObserver below, but
+    // resolvable via byObserverId only at the step-6 put -- hold it in #pendingObserverIds across
+    // that window so #decideExcludeObservers can fail closed on it. The commit gate, the put, and
+    // the finally's delete run synchronously back-to-back (the gate is synchronous by contract),
+    // so there is no gap where neither the map nor the index resolves the id.
+    if (!record) this.#pendingObserverIds.set(observerId, profileId);
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
     // Gatekeepers that refused (or whose account was gone) during this call -- see fail() below,
@@ -8440,19 +8483,18 @@ class OverseerImpl implements AgentHooks {
       this.storage.observers.put({profileId, observerId, accountChoices});
     } catch (err) {
       // Roll back gatekeeper registrations only for a *first-ever* verification (no persisted
-      // record at call start): that collaborator was never admitted, has no live session, and
-      // their minted id would linger unresolvable inside the gatekeepers. A commit-gate denial
-      // (a redemption refused at confirm time) lands here too, which is what keeps the
+      // record at call start -- the same discriminator as #pendingObserverIds): that collaborator
+      // was never admitted, has no live session, and once the pending entry is dropped in the
+      // finally their minted id would linger unresolvable inside the gatekeepers. A commit-gate
+      // denial (a redemption refused at confirm time) lands here too, which is what keeps the
       // discriminator truthful: a denied redemption persists nothing, so "no record" still means
-      // "never admitted". For a
-      // re-verification failure the registrations are deliberately kept: coverage was already
-      // scrubbed synchronously in fail() (so the coverage guard fails closed on restricted
-      // reads), while the registration is what preserves forward exclusion -- byObserverId keeps
-      // resolving the id, so prepareObservation keeps naming this observer in excludeObservers
-      // for their still-live sessions (a failed re-verification does not end sessions; only
-      // scheduleRevocationRestart does). A kept-but-stale registration is fail-closed (it can
-      // only add exclusion names) and self-heals: the next successful open's addObserver
-      // overwrites the verifier.
+      // "never admitted". For a re-verification failure the registrations are deliberately kept:
+      // coverage was already scrubbed synchronously in fail() (so the coverage guard fails
+      // closed on restricted reads), while the registration is what preserves forward exclusion
+      // for the collaborator's still-live sessions -- a failed re-verification does not end
+      // sessions; only scheduleRevocationRestart does. A kept-but-stale registration is
+      // fail-closed (it can only add exclusion names) and self-heals: the next successful open's
+      // addObserver overwrites the verifier.
       if (!record) {
         await this.#removeObserverFromGatekeepers(
             observerId, [...new Set([...newlyAdded, ...invalidated])]);
@@ -8464,6 +8506,8 @@ class OverseerImpl implements AgentHooks {
         await this.#removeObserverFromGatekeepers(observerId, inScope.map(gk => gk.id));
       }
       throw err;
+    } finally {
+      if (!record) this.#pendingObserverIds.delete(observerId);
     }
   }
 

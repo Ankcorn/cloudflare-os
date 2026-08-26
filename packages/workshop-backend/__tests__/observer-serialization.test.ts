@@ -224,3 +224,175 @@ describe("ensureObserver per-profile serialization", () => {
     });
   });
 });
+
+// A first-time verification registers its freshly minted observerId with gatekeepers before the
+// observer record is persisted, so byObserverId cannot resolve the id for the duration of the
+// awaits in between (sibling RPCs, the configuration modal). #decideExcludeObservers must fail
+// closed on such an id (via #pendingObserverIds) rather than read it as "not an active observer"
+// and let an excluded observation through moments before the collaborator is admitted.
+describe("excludeObservers naming a mid-registration observer", () => {
+  const observation = (excludeObservers: string[]) =>
+      ({ title: "t", description: "d", excludeObservers });
+
+  it("blocks while the first-time verification is in flight", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-pending-exclusion-block");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+      impl.ownerProfileId = "owner";
+
+      // Gatekeeper 1 accepts the registration immediately (capturing the minted id); gatekeeper 2
+      // parks, holding the open in the window where the id is gatekeeper-visible but unpersisted.
+      let held = deferred();
+      let captured: string | undefined;
+      impl.getGatekeeperFacet = (id: number) => ({
+        addObserver: async (observerId: string) => {
+          captured = observerId;
+          if (id === 2) await held.promise;
+        },
+      });
+
+      let open = impl.ensureObserver("alice", fakeClientUser, "build", {
+        configure: async () =>
+          [{ gatekeeperId: 1, accountId: 10 }, { gatekeeperId: 2, accountId: 20 }],
+      } as any);
+      await tick();
+      expect(captured).toBeDefined();
+      expect(impl.storage.observers.get("alice")).toBeUndefined();
+
+      // Excluding the mid-registration id fails closed with the distinct message, while a
+      // genuinely unknown id stays inert.
+      await expect(impl.authorizeObservation(1, observation([captured!]), { from: "user" }))
+          .rejects.toThrow(/currently being verified/);
+      await expect(
+          impl.authorizeObservation(1, observation(["not-an-observer"]), { from: "user" }))
+          .resolves.toBeUndefined();
+
+      held.resolve();
+      await open;
+    });
+  });
+
+  it("becomes inert when the verification fails", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-pending-exclusion-failure");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+      impl.ownerProfileId = "owner";
+
+      let captured: string | undefined;
+      let removed: number[] = [];
+      impl.getGatekeeperFacet = (id: number) => ({
+        addObserver: async (observerId: string) => {
+          captured = observerId;
+          if (id === 2) throw new Error("access refused upstream");
+        },
+        removeObserver: async () => { removed.push(id); },
+      });
+
+      // The re-prompt offer after gatekeeper 2's refusal is declined, making the failure terminal.
+      let configured = false;
+      await expect(impl.ensureObserver("alice", fakeClientUser, "build", {
+        configure: async () => {
+          if (configured) throw new Error("cancelled");
+          configured = true;
+          return [{ gatekeeperId: 1, accountId: 10 }, { gatekeeperId: 2, accountId: 20 }];
+        },
+      } as any)).rejects.toThrow();
+
+      // A *first-ever* verification failure rolls back both the accepted registration
+      // (gatekeeper 1, newlyAdded) and the refused one (gatekeeper 2, invalidated): alice was
+      // never admitted, so nothing preserves forward exclusion, and the minted id would linger
+      // unresolvable inside the gatekeepers. This is the boundary of the keep-on-re-verification
+      // rule above, which applies only once a record exists.
+      expect(removed.toSorted()).toEqual([1, 2]);
+
+      // The finally cleaned the pending map and no record was persisted, so the id is
+      // unresolvable and correctly inert: that collaborator was never admitted.
+      expect(captured).toBeDefined();
+      expect(impl.storage.observers.get("alice")).toBeUndefined();
+      await expect(impl.authorizeObservation(1, observation([captured!]), { from: "user" }))
+          .resolves.toBeUndefined();
+    });
+  });
+
+  it("tears down a lost observer by observer id, tolerating duplicate ids and a mid-teardown " +
+      "re-verification", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-excluded-teardown-by-id");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+      impl.ownerProfileId = "owner";
+      // Bob lost access (no collaborator record) but his observer record lingers -- the state
+      // #decideExcludeObservers resolves to "lost" and #tearDownExcludedObservers cleans up.
+      impl.storage.observers.put(
+          { profileId: "bob", observerId: "obs-old", accountChoices: { 1: 10 } });
+
+      // Park the teardown's removeObserver fan-out. The ids cross the RPC boundary from
+      // gatekeeper code, so nothing guarantees uniqueness: the teardown must tolerate a
+      // duplicate whose second iteration runs from a snapshot staled by the first iteration's
+      // await.
+      let held = deferred();
+      let removed: string[] = [];
+      impl.getGatekeeperFacet = () => ({
+        addObserver: async () => {},
+        removeObserver: async (id: string) => { removed.push(id); await held.promise; },
+      });
+      let observing = impl.authorizeObservation(
+          1, observation(["obs-old", "obs-old"]), { from: "user" });
+      await tick();
+
+      // Mid-park, bob is re-granted and a fresh verification completes, minting a replacement
+      // record under a new observerId.
+      impl.storage.collaborators.put({
+        profile: { type: "user", id: "bob", name: "Bob" },
+        addedBy: [{ type: "user", sharer: "owner", created: new Date(), role: "build" }],
+      });
+      impl.storage.observers.put(
+          { profileId: "bob", observerId: "obs-new", accountChoices: { 1: 10 } });
+
+      held.resolve();
+      await expect(observing).resolves.toBeUndefined();
+
+      // The teardown must delete only the record it snapshotted: deleting the replacement by
+      // profileId would silently no-op every exclusion naming obs-new (fail-open) until bob's
+      // next open.
+      expect(impl.storage.observers.get("bob")?.observerId).toBe("obs-new");
+      await expect(impl.authorizeObservation(1, observation(["obs-new"]), { from: "user" }))
+          .rejects.toThrow(/current collaborator/);
+      // The snapshotted id was still de-registered from the gatekeepers, exactly once per
+      // gatekeeper (the duplicate deduped).
+      expect(removed.toSorted()).toEqual(["obs-old", "obs-old"]);
+    });
+  });
+
+  it("hands off seamlessly to the persisted index on success", async () => {
+    let stub = env.TEST_OVERSEER.getByName("observer-pending-exclusion-success");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      seedGatekeepers(impl);
+      impl.ownerProfileId = "owner";
+      // Alice is a reachable collaborator (shared directly by the owner).
+      impl.storage.collaborators.put({
+        profile: { type: "user", id: "alice", name: "Alice" },
+        addedBy: [{ type: "user", sharer: "owner", created: new Date(), role: "build" }],
+      });
+
+      let captured: string | undefined;
+      impl.getGatekeeperFacet = () => ({
+        addObserver: async (observerId: string) => { captured = observerId; },
+      });
+
+      await impl.ensureObserver("alice", fakeClientUser, "build", {
+        configure: async () =>
+          [{ gatekeeperId: 1, accountId: 10 }, { gatekeeperId: 2, accountId: 20 }],
+      } as any);
+
+      // The record now carries the id the gatekeepers saw, and exclusion resolves it through the
+      // index to the still-authorized collaborator -- the pre-existing block, not the pending one.
+      expect(impl.storage.observers.get("alice")?.observerId).toBe(captured);
+      await expect(impl.authorizeObservation(1, observation([captured!]), { from: "user" }))
+          .rejects.toThrow(/current collaborator/);
+    });
+  });
+});

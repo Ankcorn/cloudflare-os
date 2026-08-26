@@ -8,9 +8,10 @@
 //
 // A denial must also leave nothing behind: the check and the confirming grant run as
 // ensureObserver's commit gate, synchronously with the observer-record persist, so a rejected
-// redemption takes the first-ever-failure rollback (no record, no gatekeeper registration).
-// Persisting the record before the denial would break the !record discriminator for the
-// retry's whole parked window.
+// redemption takes the first-ever-failure rollback (no record, no gatekeeper registration, no
+// pending id). Persisting the record before the denial would both let #decideExcludeObservers
+// read the never-admitted redeemer as "lost access" (admitting an excluded observation) and
+// break the !record discriminator for the retry's whole parked window.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
 // observer-serialization.test.ts); the gatekeeper facet and the client's User DO are the fakes.
@@ -164,6 +165,70 @@ describe("verification-scope change detection across a redemption", () => {
 
       release();
       await expect(open).rejects.toThrow(/changed in this workspace/);
+    });
+  });
+
+  it("a denied redemption leaves nothing behind and its retry stays fail-closed", async () => {
+    let stub = env.TEST_OVERSEER.getByName("verification-scope-denied-rollback");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let { impl, open, release, observerCalls } = startParkedRedemption(instance);
+      await tick();
+
+      // Deny via a reverted connection add: the generation counter registers it, but the id sets
+      // end unchanged, so the retry below verifies against the same single connection.
+      seedGatekeeper(impl, 2);
+      impl.storage.gatekeepers.delete(2);
+
+      release();
+      await expect(open).rejects.toThrow(/changed in this workspace/);
+
+      // Nothing left behind: no observer record, the minted id de-registered from the gatekeeper,
+      // and the edge still pending (severing it is open()'s job, not authorizeCollaborator's).
+      expect(impl.storage.observers.get("bob")).toBeUndefined();
+      expect(observerCalls.added).toHaveLength(1);
+      expect(observerCalls.removed).toEqual(observerCalls.added);
+      let oldId = observerCalls.added[0];
+      expect(impl.storage.collaborators.get("bob").addedBy[0].pending).toBe(true);
+
+      // Retry the redemption, parked inside its addObserver: the freshly minted id is registered
+      // with the gatekeeper but its record is not yet persisted -- the #pendingObserverIds window.
+      let held = deferred();
+      let retryAdded: string[] = [];
+      impl.getGatekeeperFacet = () => ({
+        addObserver: async (id: string) => { retryAdded.push(id); await held.promise; },
+      });
+      let configureCb = {
+        configure: async () => [{ gatekeeperId: 1, accountId: 10 }],
+      } as any;
+      let retry = impl.authorizeCollaborator(
+          "bob", { getVerifier: async () => ({}) } as any,
+          { configureCb, pendingLinkId: "link-1" });
+      await tick();
+
+      expect(retryAdded).toHaveLength(1);
+      let newId = retryAdded[0];
+      // The rollback means the retry is a first-ever verification again: a fresh id, not the
+      // rolled-back one (which the gatekeepers no longer hold).
+      expect(newId).not.toBe(oldId);
+
+      // An observation excluding the mid-verification id must fail closed. A leftover record
+      // from the first attempt would make the retry skip the #pendingObserverIds guard (!record
+      // false) and re-use oldId, which resolves to a profile with no effective role -- read as
+      // "lost access", allowing the excluded observation.
+      await expect(impl.authorizeObservation(1, {
+        title: "Read a thing", description: "The test read a thing.",
+        excludeObservers: [newId],
+      }, { from: "user" })).rejects.toThrow(/currently being verified/);
+      // The rolled-back first id is inert: nothing resolves it, so exclusion ignores it.
+      await expect(impl.authorizeObservation(1, {
+        title: "Read a thing", description: "The test read a thing.",
+        excludeObservers: [oldId],
+      }, { from: "user" })).resolves.toBeUndefined();
+
+      held.resolve();
+      await expect(retry).resolves.toBe("build");
+      expect(impl.storage.observers.get("bob")).toBeDefined();
+      expect(impl.storage.collaborators.get("bob").addedBy[0].pending).toBeUndefined();
     });
   });
 
