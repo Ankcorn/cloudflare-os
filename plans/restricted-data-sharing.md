@@ -132,10 +132,15 @@ For a pending redemption it additionally:
   afterwards rather than re-verifying. This is what makes a pending redeemer's
   invisibility to the coverage guard safe. (A generation rather than a value snapshot:
   an add-then-remove reverted within the window must deny too.)
-- re-asserts the redemption policy at the confirm.
+- re-asserts the redemption policy at the confirm, in the granting write's synchronous
+  block.
 - re-derives the role from the live graph after confirming, so a link revoked while
   verification waited collapses the role. Decreases pass through; an *increase* does not
   ride out on this open, since `ensureObserver` verified against the narrower scope.
+
+The topology check, the live-role re-check, and the confirm all run as `ensureObserver`'s
+commit gate — synchronously with the observer-record persist, for every caller — so a
+denial anywhere in it persists nothing.
 
 ### 4. Policy hooks, not policy in `SharingManager`
 
@@ -151,6 +156,14 @@ persisted `accountChoices` synchronously with the failure determination, and the
 terminal catch de-registers invalidated gatekeepers alongside newly-added ones
 (`removeObserver` is idempotent). The scrub is scoped to the failed gatekeeper; a
 repaired pass re-persists full coverage.
+
+`ensureObserver` is serialized per profile (a promise chain, like
+`#preparingChatMessages` -- `blockConcurrencyWhile` would freeze the DO across the
+unbounded modal wait). Its body loads the observer record, awaits verifier RPCs and the
+modal, and persists at the end; input gates don't cover those awaits, so without the
+lock a concurrent open's final put could resurrect coverage a failed check had just
+scrubbed, and two concurrent first opens would each mint their own `observerId`,
+orphaning the loser's id inside the gatekeepers.
 
 ### 6. Frontend
 
@@ -186,12 +199,12 @@ Ordered so the kernel-critical diffs are isolated. Every commit type-checks gree
 This PR is built directly on main and carries the model change alone. The observer
 machinery it builds on has a set of preexisting concurrency races (and this PR's own
 model adds atomicity hardening on top); those fixes are stacked in the
-**observer-verification-fixes** PR, rebased onto this branch. Each deferred fix is
-acknowledged at its site with a `TODO(observer-verification-fixes)` comment; the docs
-collect the same items in their Known-limitations sections. Three fixes are carried here
-rather than deferred, because the model's coverage guard states them as preconditions
-(the scrub and the prune) or because the entry point would otherwise ship unverified
-(the external-message gate).
+**observer-verification-fixes** PR, rebased onto this branch: each is acknowledged at
+its site here with a `TODO(observer-verification-fixes)` comment, which the stacked
+commit implementing it removes. Three fixes are carried here rather than deferred,
+because the model's coverage guard states them as preconditions (the scrub and the
+prune) or because the entry point would otherwise ship unverified (the external-message
+gate).
 
 1. **Refactor — the rename.** Mechanical, no behavior change, spanning
    `workshop-shared`, `workshop-backend`, `workshop-frontend`, `gatekeeper-google`,
@@ -216,29 +229,13 @@ rather than deferred, because the model's coverage guard states them as precondi
 8. **Part 5 — documentation.** `docs/observers.md` coverage rules and residuals;
    `docs/sharing.md` pending redemption; this plan.
 
-The deferred items are collected in the Known-limitations section below. The Share
-modal unblock and the retained-share-key frontend work live in
-`restricted-data-followups`.
-
-## Known limitations (addressed in the stacked observer-verification-fixes PR)
-
-Each item is marked in the code by a matching `TODO(observer-verification-fixes)`
-comment; the stacked PR's worklist is this ledger.
-
-- Observer verification is not serialized per profile, so concurrent opens by one
-  collaborator can overwrite each other's records and registrations.
-- Verification has no commit gate: the redemption topology check and confirm, and the
-  post-verification role re-check, run after the observer record is persisted, so a
-  denial leaves the record behind.
-- Observations are not failed closed across the revocation window (edge severed, restart
-  not yet landed), during which every per-observation check reads the removed user as
-  gone.
-- The exclusion gate fails open on a mid-registration observer id, and its teardown
-  deletes from a snapshot that can go stale across the awaited fan-out.
-- A failed re-verification rolls back registrations that preserve forward exclusion;
-  only a first-ever verification should roll back fully.
-- The external-message entry gate goes stale across the awaits before the chat commit
-  and must be re-asserted synchronously with it.
+The stacked observer-verification-fixes PR then lands the deferred hardening (its
+worklist was this PR's TODO ledger): per-profile verification serialization, the
+verification commit gate (confirm/topology/role re-check atomic with the record
+persist), the first-ever vs. re-verification rollback split, the exclusion-gate
+mid-registration and teardown fixes, the revocation-restart fail-closed window, and the
+external path's commit-time re-assertion (`assertStillAuthorized`). The Share modal
+unblock and the retained-share-key frontend work live in `restricted-data-followups`.
 
 ## Known edge cases / watch-fors
 

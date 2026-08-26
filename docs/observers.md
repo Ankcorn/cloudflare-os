@@ -239,7 +239,14 @@ every non-owner entry point that can surface workspace data runs it — `open()`
 `receiveExternalMessage()` non-interactively (no configuration channel, so an unverified caller is
 told to open the workspace, which is where verification happens). An agent reply on the external
 path can surface anything the workspace already read, so it must not admit a collaborator with
-less verification than `open()` would demand.
+less verification than `open()` would demand. The external path additionally re-asserts the gate
+synchronously with every write its submission justifies (`assertCollaboratorStillVerified`): its
+entry check is separated from the commit by real await windows, and a caller whose coverage was
+scrubbed or role severed in that window must commit nothing before an agent turn can run. On the
+new-chat path the re-check is the first statement of the transaction that writes the prompt; on
+the existing-chat path it runs just before `materializeChatChanges` -- the submission's first
+write, which has non-transactional side effects and so cannot move inside the transaction --
+with no awaits between the check and the transaction.
 
 Add a private helper on `OverseerImpl`, roughly:
 
@@ -287,11 +294,18 @@ Logic:
    - If any `addObserver` **throws** (or `getVerifier` throws on vendor mismatch, or returns null
      for a disconnected account), the user is not (or no longer) allowed. Every such failure goes
      through one `fail()` path that synchronously scrubs the failed gatekeeper from the
-     *persisted* record, so the coverage guard (edge case 4) fails closed immediately, and the
-     user is offered a bounded number of re-prompts to repair (e.g. re-authenticate an expired
-     account). On terminal failure the open is denied with a message naming each refused binding,
-     and the registrations added or invalidated by this call are best-effort-removed while no
-     record is persisted.
+     *persisted* record, so commit-time re-checks (`assertCollaboratorStillVerified`) fail closed
+     immediately, and the user is offered a bounded number of re-prompts to repair (e.g.
+     re-authenticate an expired account). On terminal failure the open is denied with a message
+     naming each refused binding, and the registrations are handled by which kind of verification
+     this was: a *first-ever* verification (no record at call start) best-effort-removes the
+     registrations it added or invalidated and persists no record — that collaborator was never
+     admitted and their minted id would otherwise linger unresolvable — while a *re-verification*
+     deliberately keeps them, because the registration is what preserves forward exclusion for
+     the collaborator's still-live sessions (coverage was already scrubbed, so nothing vouches
+     for them; the id keeps resolving so `excludeObservers` keeps naming them). One exception: if
+     a racing teardown deleted the record mid-call, the just-re-asserted registrations reference
+     an id no record resolves, so the full in-scope set is removed.
 
 6. **Persist the observer record** (with merged `accountChoices` and `observerId`) only after all
    `addObserver` calls succeed. Storing/creating the record is the canonical moment the user
@@ -342,7 +356,16 @@ observation proceed is when the named observer has *already lost access* in the 
 For each id in `description.excludeObservers`:
 
 1. Map the opaque `observerId` → `profileId` via the `observers.byObserverId` index. If there is
-   no record, the id is not an active observer → ignore it.
+   no record, the id is not an active observer → ignore it — **unless** the id belongs to a
+   first-time verification still in flight: `ensureObserver` registers a freshly minted id with
+   gatekeepers (`addObserver`) before the record is persisted, and that window spans awaits
+   (sibling verifier RPCs, even the configuration modal). For a share-key redemption the window
+   runs through the redemption's confirm itself, which executes as `ensureObserver`'s commit
+   gate in the same synchronous step as the record persist. The overseer tracks such ids in an
+   in-memory pending map and **blocks** an observation naming one (fail closed, with a distinct
+   "collaborator currently being verified" message) rather than reading it as unknown — otherwise
+   the observation would proceed and the collaborator be admitted moments later with the data
+   already in chat history.
 2. Check sharing-graph reachability for that `profileId`
    (`SharingManager.getEffectiveRole` / `computeEffectiveRoles`).
    - **Still authorized → throw**, blocking the observation (degrade to per-observation
@@ -352,6 +375,17 @@ For each id in `description.excludeObservers`:
      (and best-effort `removeObserver(observerId)` on all gatekeepers). They are no longer set up
      to observe; if they ever regain access they reconfigure from scratch (Step 3).
 3. If, after evaluating all excluded ids, none are still-authorized, allow the observation.
+
+Additionally, `authorizeObservation` fails **every** observation closed — not just those naming
+excluded observers — whenever a revocation's restart is still pending
+(`#revocationRestartPending`, set synchronously with the sever in `tearDownLostObservers`): the
+DO abort that actually ends the removed user's live sessions runs only after the awaited teardown
+and listing-refresh phases, and once the teardown's `removeObserver` fan-out de-registers the
+observer, gatekeepers stop naming them in `excludeObservers` at all — so no per-gate check can
+see the removed user (the coverage guard's zero-collaborators early return is likewise blind
+when the *last* collaborator was removed), and only blocking everything covers their still-live
+sessions. See
+`OverseerImpl.scheduleRevocationRestart`.
 
 This is the runtime counterpart of `addObserver`: `addObserver` covers observers configured
 *after* data was read; `excludeObservers` covers data read *after* observers were configured.
@@ -371,7 +405,11 @@ downgrades — see the matching methods on `OverseerClientInterface` and `Sharin
 
 - After a mutation, use the returned `AffectedCollaborator[]` to find users who **lost access**.
   For each who is now unreachable, if they have an observer record: delete the observer record,
-  then best-effort `removeObserver(record.observerId)` on **all** gatekeeper facets.
+  then best-effort `removeObserver(record.observerId)` on **all** gatekeeper facets. Any
+  non-empty affected set also sets `#revocationRestartPending` synchronously with the sever, so
+  `authorizeObservation` fails every observation closed until the revocation restart disconnects
+  the affected users' still-live sessions (the awaited fan-out here is part of why that restart
+  is not immediate).
 - For a **`build` → `use` downgrade**, optionally `removeObserver` (and drop the corresponding
   `accountChoices` entries) for the now-out-of-scope bindings (those without a `bindingName`).
   Safe to defer — an over-broad observer set only ever errs toward stricter future checks — but
@@ -379,7 +417,8 @@ downgrades — see the matching methods on `OverseerClientInterface` and `Sharin
 - All these calls are best-effort: log and continue on error. An orphaned observer entry only
   causes superfluous future checks, never a data leak: the leak-relevant gate is
   `authorizeObservation`, which keys off the live sharing graph, and a record is only ever
-  persisted for a party who passed full verification.
+  persisted for a party who passed full verification — a denied share-key redemption persists
+  none, because its denial runs as `ensureObserver`'s commit gate, before the record is written.
 
 > Multi-gatekeeper sequencing/atomicity is an overseer implementation detail, not part of the
 > shared interface. Because `addObserver` is re-run every open and `removeObserver` is idempotent,
@@ -476,9 +515,10 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    new connection's *non-restricted* observations until re-open — is accepted. A connection
    added *while a collaborator's verification is parked* on an await (the modal, verifier RPCs)
    is part of this same residual, not a bypass: the committed record simply lacks an entry for
-   it, and every consumer fails closed on absence — the coverage guard blocks the connection's
-   restricted reads, and the next open re-verifies the uncovered binding — while their live
-   session watches like any other until re-open.
+   it, and every consumer fails closed on absence — `assertCollaboratorStillVerified` recomputes
+   the in-scope set live against the persisted record, the coverage guard blocks the
+   connection's restricted reads, and the next open re-verifies the uncovered binding — while
+   their live session watches like any other until re-open.
 6. **Performance** — `ensureObserver` does one `getVerifier` + one `addObserver` per in-scope
    gatekeeper per open. Parallelize with `Promise.all` and pipe the verifier promise straight into
    `addObserver`. Expensive gatekeepers cache on their side.
@@ -534,7 +574,9 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    *pending* write (`redeemShareKey`), and again in the *confirm's* synchronous block
    (`confirmShareKeyRedemption`, the granting write) — the two are separated by the redeeming
    open()'s await windows, so a producer removed anywhere between redemption and confirm still
-   refuses the grant. Existing grants are untouched: a *confirmed* edge skips both checks, so a
+   refuses the grant. That confirm-side block also persists the observer record: the confirm
+   runs as `ensureObserver`'s commit gate, immediately before the record write, so a refusal
+   persists neither and rolls back the redemption's gatekeeper registrations. Existing grants are untouched: a *confirmed* edge skips both checks, so a
    collaborator re-opening with a retained key stays a no-op. Concurrent redemptions of one link
    share a single pending edge, on which each open() holds its own claim
    (`PermissionEdge.pendingAttempts`): a failed open's revert withdraws only its own claim and
@@ -686,27 +728,3 @@ This is why the broad bindings split the way they do:
   mailing lists the observer belongs to, but that is the out-of-scope "advanced" case, so it stays
   fully private for now.
 
----
-
-## Known limitations
-
-Each item below is addressed in the stacked observer-verification-fixes PR and marked in the code
-by a matching `TODO(observer-verification-fixes)` comment.
-
-- **No fail-closed revocation window.** Between a removal's edge sever and the revocation
-  restart, every per-observation check reads the removed user as gone (their observer record is
-  deleted at the sever, and after the teardown's fan-out gatekeepers stop naming them in
-  `excludeObservers`), so observations are admitted while their sessions are still live.
-- **Verification has no commit gate.** The checks that run after `ensureObserver` persists the
-  observer record -- the redemption topology check and confirm, and the post-verification role
-  re-derivation -- deny the open but leave the just-persisted record behind, coverage a later
-  re-grant would trust without re-verification.
-- **Re-verification rollback is too broad.** A failed re-verification of an admitted observer
-  rolls back gatekeeper registrations that preserve forward exclusion; only a first-ever
-  verification should roll back fully.
-- **Mid-registration observer ids fail open.** An excluded observation naming a freshly minted,
-  not-yet-persisted observer id reads it as unknown and is admitted, moments before the
-  collaborator it names is admitted with the data already in history.
-- **The external-message gate can go stale.** The entry check is separated from the chat commit
-  by real await windows, so a caller whose access was stripped in that window still commits; the
-  gate must be re-asserted synchronously with the writes the submission justifies.

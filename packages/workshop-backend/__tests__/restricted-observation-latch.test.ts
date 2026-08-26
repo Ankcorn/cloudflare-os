@@ -1,12 +1,13 @@
-// authorizeObservation's restricted-data gates: the coverage check and the latch run in one
-// synchronous block, so once restricted data is being delivered, everything keyed on the latch
-// (removalBlockedByRestrictedData, assertNewSharingAllowed) already holds -- including across the
-// excluded observers' awaited cross-worker teardown, during which the producer must not become
-// removable nor new sharing grantable. And a restricted observation arriving through an
-// already-removed connection (an in-flight facet RPC can outlive removeGatekeeper) is refused
-// rather than latched: with zero collaborators it would sail past the coverage check's early
-// return, and latching a missing producer id would permanently brick sharing via
-// assertNewSharingAllowed's missing-record branch.
+// authorizeObservation must check and write in one synchronous block (the house rule -- cf.
+// addCollaborator): the coverage check, the exclusion decision, the restricted latch, and the
+// action record. Awaiting the excluded observers' cross-worker teardown between the checks and
+// the latch would open a window where the workspace has delivered restricted data but
+// removalBlockedByRestrictedData and assertNewSharingAllowed still read the latch as unset -- so
+// the producer could be removed and new sharing granted mid-observation. And a restricted
+// observation arriving through an already-removed connection (an in-flight facet RPC can outlive
+// removeGatekeeper) must be refused rather than latched: with zero collaborators it would sail
+// past the coverage check's early return, and latching a missing producer id would permanently
+// brick sharing via assertNewSharingAllowed's missing-record branch.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
 // restricted-producer-removal.test.ts); the gatekeeper facet is the only fake.
@@ -70,7 +71,8 @@ describe("authorizeObservation's synchronous check-and-latch", () => {
       impl.storage.observers.put(
           { profileId: "mallory", observerId: "obs-m", accountChoices: { 1: 10 } });
 
-      // The cross-worker teardown parks, holding the observation mid-flight after the latch.
+      // The cross-worker teardown parks, holding the observation mid-flight with the checks and
+      // writes already behind it.
       let held = deferred();
       impl.getGatekeeperFacet = () => ({
         removeObserver: async () => { await held.promise; },
