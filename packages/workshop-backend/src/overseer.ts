@@ -1389,6 +1389,12 @@ export const ACTION_REPLAY_PAGE_SIZE = 256;
 export const ACTION_HISTORY_PAGE_DEFAULT_LIMIT = 50;
 
 /**
+ * Change rows delivered per awaited page of subscribeToChat()'s replay. Small because each row
+ * can carry a change of up to MAX_CODE_CHANGE_SIZE. Exported for tests.
+ */
+export const CHAT_REPLAY_PAGE_SIZE = 16;
+
+/**
  * Keeps `commandPosition` only if it's a real index into `args`. Anything else becomes undefined,
  * and the command renders at the front. Display-only, so a bad value isn't worth an error.
  */
@@ -10022,6 +10028,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chatMeta = this.impl.storage.chatMeta;
     let changedChatMetadata: AiChatMetadata[] = [];
     let replayCount = 0;
+    let disposed = false;
 
     subscriber = subscriber.dup();  // keep stub after return
     this.impl.addChatSubscriber(subscriber);
@@ -10064,11 +10071,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
 
     function unsubscribe() {
+      if (disposed) return;
+      disposed = true;
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       self.impl.removeChatSubscriber(subscriber);
       subscriber[Symbol.dispose]();
     };
+
+    // Live subscriptions attach before the catch-ups and replay: the replay below awaits, and a
+    // materialization landing mid-replay appends a "changes" message that must reach the client
+    // (its watermark absorbs the rows it retired). Anything delivered by both a catch-up and the
+    // live stream is idempotent client-side (messages are sequence-indexed, metadata
+    // last-write-wins, rows dedupe by (generation, revision)).
+    chatMeta.subscribe(metaSubscriber);
+    chats.subscribe(msgSubscriber);
 
     if (startAfter !== undefined) {
       // Catch up on metadata changes.
@@ -10090,26 +10107,49 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     }
 
-    // Replay every currently retained (not-yet-materialized) change row so the subscriber can
-    // reconstruct uncommitted chat content without a separate fetch. Rows a "changes" message
-    // has absorbed are not replayed -- the message's watermark covers them -- and the rows are
-    // delivered after the message catch-up above, matching their position in the stream (rows
-    // are strictly newer than every materialized message of their generation). Delivered
-    // unconditionally (no startAfter filtering): the client dedupes by (generation, revision).
-    for (let row of this.impl.storage.chatChanges.list()) {
-      if (row.retired) continue;
-      subscriber.changeApplied(row.chatId, row.generation, row.revision, row.author, row.change,
-                               row.submission).catch(unsubscribe);
-      ++replayCount;
+    // Replay every live (not-yet-materialized) change row so the subscriber can reconstruct
+    // uncommitted chat content without a separate fetch: per chat via the sparse liveByChat
+    // index, in awaited pages, so a large window can't queue unbounded callbacks. Rows a
+    // "changes" message has absorbed are not replayed -- the message's watermark covers them --
+    // and the rows are delivered after the message catch-up above, matching their position in
+    // the stream (rows are strictly newer than every materialized message of their generation).
+    // Delivered unconditionally (no startAfter filtering): the client dedupes by
+    // (generation, revision), which also absorbs rows the live stream delivers mid-replay.
+    let chatChanges = this.impl.storage.chatChanges;
+    try {
+      // hasProposedChanges is set with every row append and cleared only when no live rows
+      // remain, so it's a strict superset of "has live rows".
+      let chatIds = [...chatMeta.list()].filter(m => m.hasProposedChanges).map(m => m.id);
+      outer: for (let chatId of chatIds) {
+        let from: ListOptions<string> = {};
+        for (;;) {
+          if (disposed) break outer;
+          // Materialize each page: a concurrent write invalidates open kv.list() cursors, so
+          // the iterator must not be held across the await.
+          let page = [...chatChanges.liveByChat.get(chatId,
+              {...from, limit: CHAT_REPLAY_PAGE_SIZE})];
+          await Promise.all(page.map(row => subscriber.changeApplied(row.chatId, row.generation,
+              row.revision, row.author, row.change, row.submission)));
+          replayCount += page.length;
+          if (page.length < CHAT_REPLAY_PAGE_SIZE) break;
+          let last = page.at(-1)!;
+          from = {startAfter: `${keyString(last.chatId)}.${keyString(last.generation)}.` +
+              keyString(last.revision)};
+        }
+      }
+    } catch (err) {
+      // Not rethrown: the frontend never awaits subscribeToChat, so a rejection would surface as
+      // an unhandled rejection rather than an error signal.
+      this.impl.logger.warn("chat subscriber failed during replay; unsubscribed", {
+        event: "chat.subscription.replay.failed", error: err,
+      });
+      unsubscribe();
     }
 
     this.impl.logger.debug("chat subscription replay completed", {
       event: "chat.subscription.replay.completed",
       size: replayCount,
     });
-
-    chatMeta.subscribe(metaSubscriber);
-    chats.subscribe(msgSubscriber);
 
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
