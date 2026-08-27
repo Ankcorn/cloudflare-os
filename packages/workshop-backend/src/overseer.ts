@@ -4617,15 +4617,7 @@ class OverseerImpl implements AgentHooks {
   // runs when a collaborator enters (see authorizeCollaborator), but that alone leaves a
   // live-session gap: a collaborator added and opened before this gatekeeper existed (or before
   // it read anything sensitive) may hold a session that was never verified against it, and must
-  // not watch sensitive observations arrive. Coverage is held to each collaborator's own
-  // verification scope (#inScopeGatekeepers of their role): ensureObserver never verifies a "use"
-  // collaborator against a gatekeeper no gadget binds, so demanding coverage there would block the
-  // read permanently and make the error's remedy (re-open the workspace) a lie. An unredeemed
-  // share link blocks nothing (its holder is not a collaborator until they redeem it), but
-  // redemption writes a real edge immediately, so a redeemed-yet-unverified recipient IS a
-  // current collaborator and blocks restricted reads here, fail-closed, until their observer
-  // verification succeeds (or they are removed, or the link is revoked). See the TODO on
-  // `redeemShareKey`.
+  // not watch sensitive observations arrive.
   //
   // Deliberately synchronous (the sharing manager is a parameter, not an internal await) so the
   // caller can check and latch in one synchronous block -- see authorizeObservation.
@@ -4677,16 +4669,9 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // The connection ids through which this workspace has read restricted data -- the producers the
+  // The connection ids through which this workspace has read restricted data the producers the
   // `prohibitAllSharing` latch guards. Derived by scanning the action log for observations whose
-  // description carries `containsRestrictedData` (under either of its names -- see
-  // observationContainsRestrictedData): action records are never deleted, so the set survives the
-  // producer connection's removal, and the latch is written in the same synchronous block that
-  // persists the record (authorizeObservation), so a latched workspace always yields a non-empty
-  // set. Built-in tool observations are skipped: they name no connection, and the
-  // BUILTIN_TOOL_GATEKEEPER_ID sentinel could never match a gatekeeper record (built-ins also
-  // never latch). Cold paths only (connection removal and sharing mutators), so the full scan is
-  // fine.
+  // description carries `containsRestrictedData`
   restrictedProducerIds(): Set<WorkpieceId> {
     let producers = new Set<WorkpieceId>();
     for (let record of this.storage.actions.list()) {
@@ -4723,16 +4708,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Refuse a new sharing grant once the workspace has read restricted data through a connection
-  // that no longer exists -- or one that exists but can never verify a collaborator. A new
-  // collaborator's verification anchors on the producer connection's record (ensureObserver and
-  // the coverage guard); with the record gone, legacy (no creationSpec), or backed by no vendor
-  // account (aiModel/agentSpawner) there is nothing to verify them against, while the restricted
-  // data persists in chat history and storage. Grants that predate the removal are untouched --
-  // this guards only new ones, which includes share-key *redemption* (open() passes this as
-  // redeemShareKey's assertGrantAllowed), so outstanding keys die with the producer rather than
-  // staying redeemable. Removing a producer already requires zero collaborators and zero share
-  // links (see removalBlockedByRestrictedData), so the missing-record branch bites after a
-  // producer was removed while the workspace was unshared.
+  // that no longer exists
   assertNewSharingAllowed(): void {
     if (!this.storage.prohibitAllSharing.get()) return;
     for (let id of this.restrictedProducerIds()) {
@@ -4743,14 +4719,6 @@ class OverseerImpl implements AgentHooks {
             "that has since been removed, so new collaborators can no longer be verified for " +
             "access to that data.");
       }
-      // A producer that exists but can never verify a collaborator refuses the same way. Two
-      // flavors (resolved exactly as the coverage guard does): a legacy record with no
-      // creationSpec (observerVendorId throws), where the grant would succeed only for recipients
-      // to hard-deny at open (#inScopeGatekeepers throws) while the grant itself blocks producer
-      // removal; and an aiModel/agentSpawner producer (vendorId null), which is filtered out of
-      // every verification scope, so recipients would open completely unverified and read the
-      // restricted history in chat. No removal remedy is offered: after removing the producer,
-      // the missing-record branch above throws anyway.
       let vendorId: string | null = null;
       try {
         vendorId = observerVendorId(producer);
@@ -8063,15 +8031,7 @@ class OverseerImpl implements AgentHooks {
   // pass through: resolve the caller's effective role, then verify them as an observer of
   // everything this workspace has read. Returns null for no access; verification failures throw.
   // A caller that requires at least `requireRole` (e.g. receiveExternalMessage needs "build")
-  // passes it so an insufficient role is denied *before* verification runs -- otherwise the caller
-  // would be verified (real addObserver calls, a persisted observer record) only to be turned
-  // away, or worse, told to fix a verification failure that can never grant them access.
-  // `configureCb` is forwarded to ensureObserver to prompt for unconfigured account choices;
-  // without it, verification is non-interactive and an unconfigured binding denies access.
-  // `pendingLinkId` names a share-key redemption this same open() just performed (see
-  // redeemShareKey): the redeemed edge is pending -- it grants no authority to anyone -- so the
-  // role is computed as though it were confirmed, verification runs against that hypothetical
-  // role, and only on success is the edge confirmed for real.
+  // passes it so an insufficient role is denied *before* verification runs
   async authorizeCollaborator(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
@@ -8111,11 +8071,7 @@ class OverseerImpl implements AgentHooks {
     //    outside this collaborator's verification scope, restoring the invariant the coverage
     //    guard rests on: entry present => verified at this collaborator's most recent open
     //    (rebinding a connection keeps its gatekeeper id, so a stale entry from before an unbind
-    //    would otherwise be trusted unverified). The prune must run even when the remaining
-    //    scope is empty -- that's exactly the everything-unbound open. The registration itself
-    //    is left with the gatekeeper (no removeObserver): it preserves forward exclusion via
-    //    byObserverId, and the record stays even if its accountChoices empties, since the
-    //    observerId remains referenced.
+    //    would otherwise be trusted unverified).
     let record = this.storage.observers.get(profileId);
     if (record) {
       let inScopeIds = new Set(inScope.map(gk => gk.id));
@@ -8143,8 +8099,7 @@ class OverseerImpl implements AgentHooks {
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
     // Gatekeepers that refused (or whose account was gone) during this call and have not verified
-    // since -- see fail() below, which scrubs each from the persisted observer record as the
-    // failure is determined.
+    // since
     let invalidated = new Set<number>();
 
     // Failures from the previous pass, keyed by gatekeeper id: an already-configured binding whose
@@ -8272,12 +8227,7 @@ class OverseerImpl implements AgentHooks {
             invalidated.delete(gk.id);
           } catch (err) {
             // Either a settled denial or an operational failure (expired credentials, upstream
-            // outage) -- whether from resolving the verifier or from the gatekeeper's
-            // addObserver. Treat every failure as repairable and let the user try again.
-            // getVerifier sits inside this try so its rejection (the wrong-vendor throw, or a
-            // cross-worker transport failure) scrubs the persisted coverage like any other
-            // refusal -- and so these callbacks never reject, which keeps the terminal catch's
-            // newlyAdded/invalidated snapshot from missing late-finishing siblings.
+            // outage)
             fail(stringifyError(err), err);
           }
         }));
@@ -10685,11 +10635,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // the RPC-bound pieces (resolving profiles via User DOs) and delegate the rest. Sharing stays
   // available even after the workspace observes sensitive data (`containsRestrictedData`):
   // access to that data is enforced per-gatekeeper by observer verification, not by blocking
-  // sharing wholesale -- except that the grant-creating mutators refuse once verification has
-  // lost its anchor (see assertNewSharingAllowed). The keepUsers re-rooting inside
-  // removeCollaborator/revokeShareLink needs no such check: it re-grants existing collaborators
-  // at no more than their prior role, so there is no new party and no new verification
-  // obligation.
+  // sharing wholesale
 
   async listObserverRequirements(
       role: CollaboratorRole): Promise<ObserverBindingNeed[]> {
@@ -11447,18 +11393,11 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     // collaborator open unchecked even though the data persists in chat history and storage.
     // Outstanding share links count as shared too: redemption is gated at open() only while the
     // record exists. Only the producers themselves are guarded -- a non-producer connection
-    // anchors no restricted-data verification, so it stays removable while shared. Unverifiable
-    // producers are guarded even so: a legacy record is exactly the *blocker* that denies every
-    // non-owner open (#inScopeGatekeepers throws on it), so removing it while shared would
-    // readmit every existing collaborator unverified. After an unshared removal the workspace is
-    // permanently owner-only (the action log never forgets) -- deliberate: nothing can verify a
-    // collaborator for the removed producer's data anymore, so the recovery for an owner who
-    // needs to share again is a new workspace.
+    // anchors no restricted-data verification, so it stays removable while shared.
     let sharing = await this.impl.getSharingManager();
     // Checked in the same synchronous block as the delete, after the only await (cf.
     // addCollaborator): a check ahead of the yield could pass, a concurrent grant land during
-    // it, and the delete still run past it. The grant side's own check+write block is likewise
-    // synchronous, so it either sees the delete or is seen here.
+    // it, and the delete still run past it.
     let record = this.impl.storage.gatekeepers.get(this.id);
     if (record && this.impl.removalBlockedByRestrictedData(this.id, sharing)) {
       throw new Error(

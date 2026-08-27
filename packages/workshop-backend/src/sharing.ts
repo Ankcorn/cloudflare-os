@@ -26,9 +26,7 @@ import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, A
 import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
 
 /**
- * Roles are totally ordered: build > use. Higher rank means strictly more access. Exported so
- * role comparisons elsewhere (e.g. the Overseer's `requireRole` floor) rank rather than
- * string-compare, which stays correct if a role is ever added between the two.
+ * Roles are totally ordered: build > use. Higher rank means strictly more access.
  */
 export function roleRank(role: CollaboratorRole): number {
   return role === "build" ? 2 : 1;
@@ -435,9 +433,7 @@ export class SharingManager {
         note?: string;
         /**
          * Optional policy check invoked synchronously with the grant's storage write, after
-         * every await, so a policy change cannot slip between check and grant. A throw aborts
-         * the call with nothing persisted (the minted key is discarded, never stored). The
-         * policy itself stays out of this module, per the module header.
+         * every await, so a policy change cannot slip between check and grant.
          */
         assertGrantAllowed?: () => void;
       })
