@@ -313,7 +313,7 @@ agent-facing `Worktree` binding API).
     same size-cap handling. This is what keeps pack decoding out of individual
     gatekeepers: `gitPull` strips protocol framing and pipes the pack body here.
     The pack decoder is hostile-input parsing (see watch-fors).
-- **`gitObjectMetadata` collection**: one row per oid — `{oid, type?, size?,
+- **`gitObjectMetadata` collection**: one row per oid — `{oid, type, size?,
   onRemote: WorkpieceId[], pullableFrom: WorkpieceId[], pendingPush:
   {gatekeeperId: WorkpieceId, actionId}[]}` (arrays rather than one row per pair,
   the idiomatic typed-storage shape). Gatekeeper ids are the `GatekeeperRecord`'s
@@ -336,7 +336,27 @@ agent-facing `Worktree` binding API).
   a blob is inherently cheap to repeat — the expensive bytes were never
   sent. Blobs too large for the transfer limiter itself never complete a
   `put()`, so they also record nothing and error (agent-visibly) on each
-  attempt — accepted for such an extreme case. The two
+  attempt — accepted for such an extreme case.
+  `type` is **required** — every write knows one: *measured* from bytes in
+  hand (put/consumePack, including oversize rejections), or *asserted* by the
+  context that introduced the oid (a tree entry's mode, a commit's
+  tree/parent headers, `advertiseCommit`'s commits-only scope). The grade is
+  read off `size` (present iff the bytes were measured — measured writers
+  always record both together), and conflicting claims — always a forged
+  object or a gatekeeper bug — reconcile as: measured wins unconditionally
+  (two measurements can never conflict; the oid covers the type header), an
+  assertion never overrides a measured type, and among assertions **"commit"
+  wins**, otherwise first claim kept. The commit bias fails toward attempting
+  the pull: commit-ness is what unlocks operations (worktree creation, push
+  heads), so a false non-commit tag could steer a reader into refusing
+  without pulling, while a false commit tag just makes us pull and discover
+  the truth. Every conflict is logged at warn (truncated oid — full oids are
+  capabilities) and none is fatal: a wrong type only mis-shapes advisory pull
+  hints until measured bytes correct it. Corollary, the **reader rule**:
+  never hard-reject an operation on an assertion-grade type — decode local
+  bytes or pull first (`verifyPushAncestry` prefers decoded local bytes over
+  the recorded type for exactly this reason: marks converted after an applied
+  push carry walk-stamped types). The two
   gatekeeper sets differ in **evidentiary grade** — proof versus assertion —
   which is what keeps the mistake-safeguard reliable:
   - `onRemote` — *proof* that the gatekeeper's remote possesses the object.
@@ -533,7 +553,12 @@ agent-facing `Worktree` binding API).
   binding name against the chat's own binding map (the only namespace it occupies);
   resolve the commit id — full oid or unambiguous prefix — against the **local store
   and known metadata** (`gitObjects` ∪ `gitObjectMetadata`; ambiguous → error
-  listing candidates; unknown → "look it up via the gatekeeper first"). There is no
+  listing candidates; unknown → "look it up via the gatekeeper first"). Filtering
+  prefix candidates by the metadata `type` tag is fine under §1's commit-bias
+  policy (any commit id an agent obtained from a gatekeeper was advertised,
+  forcing its tag to "commit"), but per §1's reader rule an assertion-grade
+  non-commit tag on an explicitly named oid must not refuse the creation without
+  pulling — attempt the pull and let the decoded bytes decide. There is no
   requirement that the commit came from a gatekeeper: any locally-present commit
   works (a gadget's history, another worktree's commit). Then: create the record (pending, like
   `createGadget` — stamped at the step barrier); add the chat binding; record
@@ -929,6 +954,13 @@ agent-facing `Worktree` binding API).
   authority still applies (don't widen the view casually), but don't contort
   the implementation chasing stronger properties here, or claim guarantees
   stronger than these.
+- **A false `advertiseCommit` can mis-tag a pending-push object**: §1's commit
+  bias flips an absent marked tree/blob's asserted type to "commit", so
+  `buildPack`'s fault for it uses commit-shaped hints; if the transport's
+  filter then suppresses the wanted object, the apply fails retryably
+  (warn-logged) and self-heals when the bytes arrive by any route. Accepted:
+  it requires a forged/buggy advertisement aimed at an oid the same workspace
+  has queued for push, and the failure is loud, not silent.
 - **Symlinks and submodules (gitlink entries) are inert everywhere** (the modes
   locked decision): the lazy walker and `listFiles` surface them with their
   kind and never walk through a gitlink; file ops on them throw the
@@ -1060,6 +1092,11 @@ to keep dependents compiling. PR boundaries to be decided later.
    `listTreeEntries`, `writeChangedFilesAsCommit` with separate
    treeBase/parents, raw object helpers). Workerd tests: cache round-trips vs
    known-good git hashes, poison rejection, metadata at every write point,
+   the type-claim reconciliation matrix (measured bytes correct an asserted
+   type; an assertion never overrides a measured one but still records its
+   routing hint; commit-bias among assertions, else first claim wins;
+   ancestry verification judging a proven object by decoded local bytes over
+   its recorded type),
    size recording from measured bytes only (exact `size` from a `put()` incl.
    cap rejection, then fail-fast on later reads; a filtered omission — the
    gitPull carve-out — surfaces the too-large error, records nothing, and
@@ -1178,6 +1215,13 @@ to keep dependents compiling. PR boundaries to be decided later.
 
 ## Punted / future work (deliberately kept open)
 
+- Eliminate `GitStore` by moving its callers to the new `WorkspaceGitCache`.
+  This will require reproducing isomorphic-git's functions for encoding objects
+  (commits, trees, blobs), but this would not be very hard and it would even let
+  us fix some bugs (isomorphic-git's parsing of trees is lossy when names contain
+  invalid UTF-8; we'd rather error).
+- Improve packfile decoding to avoid keeping entire unpacked contents in memory;
+  instead, read objects back from disk where needed.
 - Worktree UI (changes view, diffs) — the OT stream + pins already carry everything
   a future subscription needs.
 - Eviction/GC — `gitObjectMetadata` is the re-pull index; the GC-roots enumeration

@@ -27,11 +27,13 @@
     "diff3": "^0.0.3",
     "isomorphic-git": "^1.40.0",
     "jose": "^6.2.8",
+    "pako": "^2.1.0",
     "yjs": "^13.6.31",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
+    "@types/pako": "^2.0.4",
     "dompurify": "^3.4.13",
     "esbuild": "^0.28.1",
     "typescript": "catalog:",

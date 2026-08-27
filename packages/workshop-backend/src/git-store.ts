@@ -341,6 +341,89 @@ export class GitStore {
     }));
   }
 
+  /**
+   * Writes a commit whose tree is `treeBase`'s tree with `changes` applied (`null` = delete),
+   * returning the commit oid. `treeBase` (a commit oid) and `parents` are deliberately separate:
+   * an explicit worktree commit builds its tree from the chat pin's base but parents on the last
+   * explicit head (squash semantics).
+   *
+   * The tree is rebuilt top-down along changed paths only, so committing at repo scale never
+   * materializes the full file map: every untouched entry -- of *any* mode, symlinks and
+   * gitlinks included -- is copied through with mode and oid verbatim, and equal subtrees reuse
+   * their base oids. A changed file keeps its base entry's mode (editing an executable must not
+   * clear 100755); only genuinely new files default to 100644. A change that lands on a
+   * non-regular-file entry (a directory, symlink, or gitlink) is rejected -- callers gate those
+   * paths with descriptive errors before committing. Directories emptied by deletions are
+   * pruned, as git requires.
+   */
+  async writeChangedFilesAsCommit(
+      changes: ReadonlyMap<string, string | null>,
+      options: WriteCommitOptions & { treeBase: string }): Promise<string> {
+    let { commit } = await readCommit(
+        { fs: this.#fs, gitdir: GITDIR, oid: options.treeBase, cache: this.#cache });
+    let tree = await this.#rebuildTree(commit.tree, buildChangeNode(changes), "")
+        ?? await writeTree({ fs: this.#fs, gitdir: GITDIR, tree: [] });
+    let when = { timestamp: Math.floor(options.timestamp.getTime() / 1000), timezoneOffset: 0 };
+    return await writeCommit({
+      fs: this.#fs,
+      gitdir: GITDIR,
+      commit: {
+        message: options.message,
+        tree,
+        parent: [...options.parents],
+        author: { ...options.author, ...when },
+        committer: { ...(options.committer ?? options.author), ...when },
+      },
+    });
+  }
+
+  // Rebuilds one tree level for writeChangedFilesAsCommit: base entries are copied through
+  // untouched (mode + oid verbatim) except where the change node names them. Returns the new
+  // tree oid, or undefined when the resulting tree is empty (the entry is then pruned).
+  async #rebuildTree(baseTreeOid: string | undefined, node: ChangeNode, prefix: string)
+      : Promise<string | undefined> {
+    let entries = new Map<string, TreeEntry>();
+    if (baseTreeOid !== undefined) {
+      let { tree } = await readTree(
+          { fs: this.#fs, gitdir: GITDIR, oid: baseTreeOid, cache: this.#cache });
+      for (let entry of tree) entries.set(entry.path, entry);
+    }
+    for (let [name, child] of node) {
+      let path = prefix + name;
+      let base = entries.get(name);
+      if (child instanceof Map) {
+        if (base !== undefined && base.type !== "tree") {
+          throw new Error(`conflicting file paths at: ${path}`);
+        }
+        let sub = await this.#rebuildTree(base?.oid, child, `${path}/`);
+        if (sub === undefined) {
+          entries.delete(name);
+        } else {
+          entries.set(name, { mode: "040000", path: name, oid: sub, type: "tree" });
+        }
+      } else if (child === null) {
+        if (base !== undefined && base.type === "tree") {
+          throw new Error(`cannot delete ${path}: it is a directory`);
+        }
+        entries.delete(name);  // deleting an absent file is a no-op
+      } else {
+        if (base !== undefined &&
+            (base.type !== "blob" || (base.mode !== "100644" && base.mode !== "100755"))) {
+          throw new Error(`cannot write ${path}: not a regular file`);
+        }
+        let oid = await writeBlob({
+          fs: this.#fs,
+          gitdir: GITDIR,
+          blob: new TextEncoder().encode(child),
+        });
+        // A changed file keeps its base entry's mode; only new files default to 100644.
+        entries.set(name, { mode: base?.mode ?? "100644", path: name, oid, type: "blob" });
+      }
+    }
+    if (entries.size === 0) return undefined;
+    return await writeTree({ fs: this.#fs, gitdir: GITDIR, tree: [...entries.values()] });
+  }
+
   async #writeTreeNode(node: TreeNode): Promise<string> {
     let entries: TreeEntry[] = [];
     for (let [name, child] of node) {
@@ -396,6 +479,40 @@ export class GitStore {
       }
     }
   }
+}
+
+// A parsed-but-unwritten change set: new file contents (or null = delete) at the leaves,
+// touched subtrees within. The writeChangedFilesAsCommit analog of TreeNode.
+type ChangeNode = Map<string, ChangeNode | string | null>;
+
+// Converts a flat `path -> text | null` change map into nested nodes, with the same path-shape
+// validation as buildTreeNode.
+function buildChangeNode(changes: ReadonlyMap<string, string | null>): ChangeNode {
+  let root: ChangeNode = new Map();
+  for (let [path, content] of changes) {
+    let segments = path.split("/");
+    let node = root;
+    for (let [i, segment] of segments.entries()) {
+      if (segment === "" || segment === "." || segment === "..") {
+        throw new Error(`invalid file path: ${path}`);
+      }
+      let last = i === segments.length - 1;
+      let existing = node.get(segment);
+      if (last) {
+        if (existing !== undefined) throw new Error(`conflicting file paths at: ${path}`);
+        node.set(segment, content);
+      } else {
+        if (existing === undefined) {
+          existing = new Map();
+          node.set(segment, existing);
+        } else if (!(existing instanceof Map)) {
+          throw new Error(`conflicting file paths at: ${path}`);
+        }
+        node = existing;
+      }
+    }
+  }
+  return root;
 }
 
 // Converts a flat `path -> text` map into nested tree nodes, validating path shape as we go:
