@@ -57,6 +57,7 @@ describe("embedded agent declarations", () => {
   it("compiles the exact Google Drive agent declaration bundle without module dependencies", () => {
     const types = [
       source("docs-read-types.txt"),
+      stripTypeModulePrefix(source("docs-types.txt"), DOCS_TYPES_MODULE_PREFIX),
       source("sheets-types.txt"),
       stripTypeModulePrefix(source("drive-types.txt"), DRIVE_TYPES_MODULE_PREFIX),
     ].join("\n");
@@ -67,7 +68,8 @@ describe("embedded agent declarations", () => {
   it("keeps the Drive declaration aligned after module-only imports", () => {
     const modulePrefix =
       'import type { GoogleDocReadSession } from "./docs-read-types";\n' +
-      'import type { GoogleSpreadsheetSession } from "./sheets-types";\n\n';
+      'import type { GoogleDocSession } from "./docs-types";\n' +
+      'import type { GoogleSpreadsheetReadSession } from "./sheets-types";\n\n';
     const driveTypes = source("drive-types.d.ts");
     expect(driveTypes.startsWith(modulePrefix)).toBe(true);
     expect(source("drive-types.txt")).toBe(driveTypes);
@@ -83,7 +85,7 @@ describe("embedded agent declarations", () => {
     );
   });
 
-  it("hands out only read-only native sessions from Drive", () => {
+  it("keeps arbitrary Drive Docs and Sheets read-only while created Docs are writable", () => {
     const driveTypes = source("drive-types.d.ts");
     expect(driveTypes).toContain(
       "openGoogleDoc(fileId: string): Promise<GoogleDocReadSession>",
@@ -91,8 +93,15 @@ describe("embedded agent declarations", () => {
     expect(driveTypes).toContain(
       "openGoogleSheet(fileId: string): Promise<GoogleSpreadsheetReadSession>",
     );
-    expect(driveTypes).not.toContain("GoogleDocSession>");
-    expect(driveTypes).not.toContain("GoogleSpreadsheetSession>");
+    expect(driveTypes).toContain(
+      "openCreatedGoogleDoc(handle: DriveCreationHandle<\"googleDoc\">): Promise<GoogleDocSession>",
+    );
+    expect(driveTypes).not.toContain(
+      "openGoogleDoc(fileId: string): Promise<GoogleDocSession>",
+    );
+    expect(driveTypes).not.toContain(
+      "openGoogleSheet(fileId: string): Promise<GoogleSpreadsheetSession>",
+    );
     expect(driveTypes).toContain("export interface GoogleDriveReadSession");
   });
 
@@ -106,13 +115,22 @@ describe("embedded agent declarations", () => {
         declare const account: GoogleDriveSession;
         declare const sharedDrive: GoogleDriveSession;
         declare const file: GoogleDriveReadSession;
+        declare const handle: DriveCreationHandle<"googleDoc">;
+        declare const folderHandle: DriveCreationHandle<"folder">;
         declare const nestedDoc: GoogleDocReadSession;
         declare const directDoc: GoogleDocSession;
         declare const sheet: GoogleSpreadsheetSession;
 
-        account.createGoogleDoc({ name: "Quarterly plan" });
-        account.createGoogleSheet({ name: "Forecast", parentId: "folder-1" });
-        account.createFolder({ name: "Archive" });
+        const readDoc: Promise<GoogleDocReadSession> = account.openGoogleDoc("doc-1");
+        const createdDoc: Promise<GoogleDocSession> = account.openCreatedGoogleDoc(handle);
+        const docCreation: Promise<DriveCreationHandle<"googleDoc">> =
+          account.createGoogleDoc({ name: "Quarterly plan" });
+        const sheetCreation: Promise<DriveCreationHandle<"googleSheet">> =
+          account.createGoogleSheet({ name: "Forecast", parentId: "folder-1" });
+        const folderCreation: Promise<DriveCreationHandle<"folder">> =
+          account.createFolder({ name: "Archive" });
+        // @ts-expect-error Folder handles cannot open writable Docs.
+        account.openCreatedGoogleDoc(folderHandle);
         account.getCreationResult({ id: 1, kind: "googleDoc", name: "Quarterly plan" });
         sharedDrive.createGoogleDoc({ name: "Quarterly plan" });
         sharedDrive.createGoogleSheet({ name: "Forecast" });
@@ -123,6 +141,8 @@ describe("embedded agent declarations", () => {
         file.createGoogleDoc({ name: "Denied" });
         // @ts-expect-error Exact-file Drive sessions cannot query creation actions.
         file.getCreationResult({ id: 1, kind: "googleDoc", name: "Denied" });
+        // @ts-expect-error Exact-file Drive sessions cannot open writable created Docs.
+        file.openCreatedGoogleDoc(handle);
         // @ts-expect-error Nested Docs sessions expose no Drive creation methods.
         nestedDoc.createFolder({ name: "Denied" });
         // @ts-expect-error Direct Docs bindings retain only their existing document API.
