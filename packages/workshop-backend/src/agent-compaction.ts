@@ -390,6 +390,9 @@ export function buildCompactionState(
         if (call.error) continue;
         if (call.toolName === "createGadget" && call.output !== undefined) {
           chatBindings.set(call.input.bindingName, {type: "workpiece", id: call.output.gadgetId});
+        } else if (call.toolName === "createWorktree" && call.output !== undefined) {
+          chatBindings.set(call.input.bindingName,
+              {type: "workpiece", id: call.output.worktreeId});
         }
       }
     } else if (message.type === "agentCallback") {
@@ -407,6 +410,11 @@ export function buildCompactionState(
       for (let {gadgetId, bindingName} of message.createdGadgets ?? []) {
         if (!chatBindings.has(bindingName)) {
           chatBindings.set(bindingName, {type: "workpiece", id: gadgetId});
+        }
+      }
+      for (let {worktreeId, bindingName} of message.createdWorktrees ?? []) {
+        if (!chatBindings.has(bindingName)) {
+          chatBindings.set(bindingName, {type: "workpiece", id: worktreeId});
         }
       }
       ++nextChangeId;

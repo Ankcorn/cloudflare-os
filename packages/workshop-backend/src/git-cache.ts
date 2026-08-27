@@ -81,6 +81,16 @@ export const MAX_GIT_OBJECT_SIZE = 1 << 20;
  */
 export const MAX_GIT_PACK_BYTES = 64 << 20;
 
+/**
+ * Blob size fetched eagerly when pulling a worktree base: the pull requests the base commit with
+ * `filterBlobSize: EAGER_BLOB_LIMIT`, so the commit, its full tree structure, and every blob
+ * under this limit arrive in one fetch, and only genuinely large files pay a lazy fault's
+ * latency on first access. Both the worktree-creation pull and a later fault against a base
+ * whose trees are missing (a commit known only locally at creation; see #resolveEntryAt) use
+ * this shape.
+ */
+export const EAGER_BLOB_LIMIT = 64 * 1024;
+
 // =======================================================================================
 // Storage schema
 
@@ -431,12 +441,25 @@ export class WorkspaceGitCache {
    * The lazy walker's fault-and-parse step: returns the object, pulling it on a miss with
    * exact-object hints shaped from the expected type and the referencing object. Throws if the
    * object cannot be obtained or is not of the expected type.
+   *
+   * `eagerTree` widens a commit/tree miss into the worktree-creation pull shape -- the whole
+   * tree closure plus blobs up to EAGER_BLOB_LIMIT in one round trip (see #resolveEntryAt) --
+   * instead of one object per fault. It changes only how much a *miss* pulls; a locally present
+   * object never pulls anything.
    */
-  async ensureObject(oid: GitOid, expected: { type: GitObjectType, referencedBy?: GitOid })
+  async ensureObject(oid: GitOid,
+                     expected: { type: GitObjectType, referencedBy?: GitOid, eagerTree?: boolean })
       : Promise<PackableObject> {
     let local = this.readLocalObject(oid);
     if (local === undefined) {
-      await this.ensureGitObjects([oid], this.#exactObjectHints(expected.type, expected.referencedBy));
+      await this.ensureGitObjects([oid],
+          expected.eagerTree && expected.type !== "blob"
+              ? { type: expected.type,
+                  ...(expected.referencedBy !== undefined
+                      ? { referencedBy: expected.referencedBy } : {}),
+                  commitHistory: { kind: "depth", depth: 1 },
+                  filterBlobSize: EAGER_BLOB_LIMIT }
+              : this.#exactObjectHints(expected.type, expected.referencedBy));
       local = this.readLocalObject(oid);
       if (local === undefined) {
         // ensureGitObjects throws on failure; this is a defensive backstop.
@@ -474,8 +497,22 @@ export class WorkspaceGitCache {
    * NUL-bearing) content throws a clean, path-specific error.
    */
   async readFileAtCommit(commitOid: GitOid, path: string): Promise<string> {
+    let text = await this.readFileAtCommitIfExists(commitOid, path);
+    if (text === undefined) throw new Error(`${path}: no such file`);
+    return text;
+  }
+
+  /**
+   * Like `readFileAtCommit`, but an absent path (including a path whose leading segments don't
+   * resolve to directories, or one naming a directory) returns undefined instead of throwing.
+   * Every other failure -- symlink/gitlink paths, oversized or binary content, a pull failure --
+   * still throws its descriptive error. This is the lazy base resolver behind worktree session
+   * content: "no base text" is an ordinary state there ("edit of absent file" is then the
+   * change's own validation error), while the throwing errors describe the file itself.
+   */
+  async readFileAtCommitIfExists(commitOid: GitOid, path: string): Promise<string | undefined> {
     let { tree, entry } = await this.#resolveEntryAt(commitOid, path);
-    if (entry === undefined || entry.mode === "40000") throw new Error(`${path}: no such file`);
+    if (entry === undefined || entry.mode === "40000") return undefined;
     switch (entry.mode) {
       case "160000":
         throw new Error(`${path} is a submodule (gitlink) pointing at commit ${entry.oid}`);
@@ -525,25 +562,118 @@ export class WorkspaceGitCache {
   }
 
   // Walks a commit's tree along `path`, returning the tree containing the final segment and
-  // that segment's entry (undefined if absent). Intermediate segments must be directories.
+  // that segment's entry. `entry` is undefined when the path doesn't resolve -- the final
+  // segment is absent, or an intermediate segment is absent or not a directory (absence takes
+  // one shape so readFileAtCommitIfExists can report "no base text" uniformly).
+  //
+  // This is the worktree base resolver, so a miss anywhere along the walk pulls eagerly
+  // (`eagerTree`): the first fault against a base commit brings the whole tree closure and
+  // every small blob in one round trip -- the same shape as the worktree-creation pull --
+  // rather than one gatekeeper round trip per path segment. Reads that follow hit locally.
   async #resolveEntryAt(commitOid: GitOid, path: string)
       : Promise<{ tree: GitOid, entry: GitTreeEntry | undefined }> {
     let segments = splitTreePath(path);
     let name = segments.pop()!;
-    let commit = await this.ensureObject(commitOid, { type: "commit" });
+    let commit = await this.ensureObject(commitOid, { type: "commit", eagerTree: true });
     let treeOid = parseGitCommitRefs(commit.payload, commitOid).tree;
     let referencedBy = commitOid;
     for (let segment of segments) {
-      let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy });
+      let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy, eagerTree: true });
       let entry = parseGitTree(tree.payload, treeOid).find(e => e.name === segment);
       if (entry === undefined || entry.mode !== "40000") {
-        throw new Error(`${path}: no such file`);
+        return { tree: treeOid, entry: undefined };
       }
       referencedBy = treeOid;
       treeOid = entry.oid;
     }
-    let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy });
+    let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy, eagerTree: true });
     return { tree: treeOid, entry: parseGitTree(tree.payload, treeOid).find(e => e.name === name) };
+  }
+
+  /**
+   * Enforces the write side of the tree-entry modes decision on a worktree path: writing over a
+   * symlink or submodule (gitlink) throws the same descriptive error reading one does, and a
+   * path naming a base *directory* throws too -- a write there could never commit (git trees
+   * cannot hold a file and a directory of one name; writeChangedFilesAsCommit rejects the
+   * shape), so failing at the write keeps the error next to its cause instead of surfacing at
+   * a far-away commit or accept. An absent path (a new file) and a regular file of either mode
+   * pass -- including files whose *content* is unreadable (oversized/binary), since a
+   * whole-file write is coherent against any base. Base entries only: a conflicting shape the
+   * overlay itself creates (`set a/b` then `set a`) is caught by commit-time tree building,
+   * the backstop for everything this write-time check can't see.
+   */
+  async assertWorktreePathWritable(commitOid: GitOid, path: string): Promise<void> {
+    let { tree, entry } = await this.#resolveEntryAt(commitOid, path);
+    if (entry?.mode === "120000") {
+      // The target is the blob's content; the message tells the agent everything (same as reads).
+      let blob = await this.#readBlob(entry.oid, tree, path);
+      throw new Error(`${path} is a symlink to ${new TextDecoder().decode(blob)}`);
+    }
+    if (entry?.mode === "160000") {
+      throw new Error(`${path} is a submodule (gitlink) pointing at commit ${entry.oid}`);
+    }
+    if (entry?.mode === "40000") {
+      throw new Error(`${path} is a directory`);
+    }
+  }
+
+  /**
+   * Resolves a commit reference -- a full 40-hex oid or an unambiguous prefix of at least 4 hex
+   * digits -- against *local knowledge only*: the object store plus the metadata rows written by
+   * gatekeepers' puts and advertisements. Never a remote lookup (remote truncated-id resolution
+   * is a gatekeeper API, e.g. GitHub's getCommit, which returns and advertises the full oid).
+   * Returns the full oid without pulling anything; the caller decides whether to fetch.
+   *
+   * Errors are agent-readable: malformed refs, an ambiguous prefix (listing the candidates), an
+   * unknown ref ("look it up via the connection first"), and a locally-present non-commit.
+   * Prefix candidates are filtered by locally-decoded types (measured) or the metadata type tag
+   * (assertion-grade -- sound to filter on, because any commit id a gatekeeper handed the agent
+   * was advertised, which forces its tag to "commit" under the reconciliation policy's commit
+   * bias). A *full* oid is the reader-rule exception: an assertion-grade non-commit tag must not
+   * refuse the operation without pulling, so a full oid known only from metadata resolves
+   * regardless of its recorded type and the caller's pull lets the decoded bytes decide.
+   */
+  resolveCommitRef(ref: string): GitOid {
+    let normalized = ref.toLowerCase();
+    if (!/^[0-9a-f]{4,40}$/.test(normalized)) {
+      throw new Error(
+          `"${ref}" is not a git commit id: expected a 40-hex SHA-1, or a prefix of at least ` +
+          `4 hex digits.`);
+    }
+    let unknown = () => new Error(
+        `Commit ${ref} is not known to this workspace. Look it up through the connection that ` +
+        `provides the repository first (e.g. its commit or branch APIs), which makes it ` +
+        `available here.`);
+
+    if (normalized.length === 40) {
+      let local = this.readLocalObject(normalized);
+      if (local !== undefined) {
+        if (local.type !== "commit") {
+          throw new Error(`${normalized} is a ${local.type}, not a commit.`);
+        }
+        return normalized;
+      }
+      if (this.storage.gitObjectMetadata.get(normalized) === undefined) throw unknown();
+      return normalized;
+    }
+
+    // Prefix: gather candidates from both sources; a locally-decoded type (measured) wins over
+    // the metadata tag for the same oid.
+    let candidates = new Map<GitOid, boolean>();
+    for (let record of this.storage.gitObjects.list({ prefix: normalized })) {
+      candidates.set(record.oid, decodeLooseObject(record.data).type === "commit");
+    }
+    for (let meta of this.storage.gitObjectMetadata.list({ prefix: normalized })) {
+      if (!candidates.has(meta.oid)) candidates.set(meta.oid, meta.type === "commit");
+    }
+    let commits = [...candidates.entries()].filter(([, isCommit]) => isCommit).map(([oid]) => oid);
+    if (commits.length === 1) return commits[0];
+    if (commits.length > 1) {
+      throw new Error(
+          `Commit id prefix ${ref} is ambiguous between: ${commits.toSorted().join(", ")}. ` +
+          `Use a longer prefix.`);
+    }
+    throw unknown();
   }
 
   // Reads a blob for a file path, translating unavailable-at-size into the path-specific error.

@@ -2689,6 +2689,23 @@ export type AiChatMessageBody = {
   createdGadgets?: {gadgetId: WorkpieceId, title: string, bindingName: string}[];
 
   /**
+   * Worktrees created as part of this batch of changes (by the agent's `createWorktree` tool).
+   * Deliberately separate from `createdGadgets` so a client can never mistake a worktree for a
+   * gadget creation. Like gadget creations, they are provisional -- a merge through this message
+   * makes the record permanent (it stays private to this chat), and a revert covering it deletes
+   * it. The batch's `pins` include the worktree's birth pin `{gadgetId: worktreeId, baseCommit}`,
+   * which is what content reconstruction roots the worktree's changes at. `bindingName` is the
+   * name in the creating chat's env, recorded so replay can pick it back up.
+   *
+   * Worktree *content* is stripped from every client delivery: clients receive `change` payloads
+   * without worktree entries and `pins` without worktree pins (revision numbering preserved), so
+   * ids in this field are the only worktree trace a client sees. There is no worktree UI yet;
+   * without the stripping, a delivered worktree pin would make the code-sync client fetch an
+   * entire repository tree as a base commit.
+   */
+  createdWorktrees?: {worktreeId: WorkpieceId, title: string, bindingName: string}[];
+
+  /**
    * Binding edges added to gadgets as part of this batch of changes (by the agent's
    * setGadgetBinding tool, or by the user binding a connection with a chat open -- in the latter
    * case `change` is omitted). Like `createdGadgets`, the additions are
@@ -3039,6 +3056,44 @@ export type AiToolCall = {
    * doesn't have to re-fetch the blueprint (whose content may have changed since).
    */
   output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
+} | {
+  /**
+   * Create a new worktree workpiece: a file tree rooted at a git commit, private to the creating
+   * chat, whose files the agent then reads and edits with the regular file tools. Unlike a
+   * gadget, a worktree has no output, no bindings, and cannot execute; its name lives only in
+   * the chat's binding map, never in the workspace default binding list.
+   */
+  toolName: "createWorktree";
+  input: {
+    /** Human-readable title for the new worktree. Required, like a gadget's. */
+    title: string;
+
+    /**
+     * Name under which the worktree appears in the chat's env (see validateBindingName()). The
+     * chat's binding map is the only namespace a worktree name occupies.
+     */
+    bindingName: string;
+
+    /**
+     * The git commit to root the worktree at: a full 40-hex oid or an unambiguous prefix,
+     * resolved against the workspace's local git store and its gatekeeper-provided metadata
+     * (never a remote lookup -- remote refs resolve through gatekeeper APIs first).
+     */
+    commitId: string;
+  };
+
+  /**
+   * The created worktree's workpiece ID, recorded when the worktree was actually created; like
+   * createGadget's output, replay returns this recorded result instead of re-creating.
+   *
+   * `changeId` is the change number of the "changes" batch that records the creation (see
+   * `createdWorktrees` on the "changes" message body), like createGadget's.
+   *
+   * `baseCommit` is the full oid `input.commitId` resolved to -- the commit the worktree is
+   * rooted (and born pinned) at. Recorded because replay needs it to serve reads of untouched
+   * files lazily from the base tree, and the input may be a prefix.
+   */
+  output?: {worktreeId: WorkpieceId, changeId?: number, baseCommit: string};
 } | {
   toolName: "executeCode";
   input: {

@@ -66,7 +66,7 @@ import type {
 } from "@gadgets/workshop-shared/api";
 import { diffFiles, type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { CompactionCheckpoint } from "./agent";
-import type { OverseerStorage } from "./overseer";
+import type { GadgetRecord, OverseerStorage } from "./overseer";
 import { chatChangeStatuses, legacyChatBaseVersion } from "./agent-compaction";
 import { GitStore, filesEqual } from "./git-store";
 import { createWorkshopLogger } from "./observability";
@@ -335,8 +335,10 @@ export async function migrateCodeLogToGit(host: GitMigrationHost): Promise<{ com
   // synchronous, so they land atomically under the output gate, after every object they
   // reference exists.
 
-  // Gadget heads.
-  for (let gadget of Array.from(storage.gadgets.list())) {
+  // Gadget heads. This migration runs before the workpiece-type stamp (schema version 4), so
+  // every row here is a gadget whose `type` discriminant may be unstamped at runtime -- hence
+  // the cast rather than a discriminant narrowing, which would misread unstamped rows.
+  for (let gadget of Array.from(storage.gadgets.list()) as GadgetRecord[]) {
     let tip = tracked.get(gadget.id)!.chain[tracked.get(gadget.id)!.chain.length - 1];
     if (tip !== undefined && gadget.commitId !== tip.commitId) {
       gadget.commitId = tip.commitId;
@@ -494,7 +496,8 @@ function convertLegacyChat(
   let sequence = sequenceRecord?.nextSequence ?? 0;
   storage.nextChatSequences.put({ chatId: meta.id, nextSequence: sequence + 1 });
   let createdGadgets = carriedPending.map(id => {
-    let gadget = storage.gadgets.get(id)!;
+    // Pre-v4 rows are all gadgets (see the heads loop above for why this is a cast).
+    let gadget = storage.gadgets.get(id)! as GadgetRecord;
     return { gadgetId: id, title: gadget.title, bindingName: gadget.bindingName };
   });
   storage.chats.put({

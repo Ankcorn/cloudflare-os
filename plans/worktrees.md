@@ -64,7 +64,13 @@ agent-facing `Worktree` binding API).
     (same chat, same edit rights the agent's file tools exercise), and
     per-workpiece transform keeps such rows from perturbing anyone's gadget
     edits. "No UI" is a statement about what the shipped frontend does, not a
-    server-enforced invariant.
+    server-enforced invariant. "Like any other" does still mean the same content
+    rules the agent's file tools enforce: ingestion applies the tree-entry-mode
+    write checks to the submitted change (a `set` or `remove` whose path still
+    has a live symlink, gitlink, or directory base entry is rejected with the
+    descriptive read errors; an `edit`'s base seeding throws them on its own), at
+    submit time only — recorded rows are never re-checked, so folds stay
+    deterministic.
   (Frontend-side "ignore unknown ids" was rejected: the client's workpiece list
   arrives on a different subscription than the change stream, so classification
   would race.)
@@ -155,9 +161,14 @@ agent-facing `Worktree` binding API).
   repo *copying* stays structurally out of scope (cross-remote transfer moves
   only a verified push closure, batched at apply), and everything happens at
   the same chokepoint every other gatekeeper effect already flows through.
-- **Trees eager; blobs eager under a modest size limit.** Worktree creation pulls the
-  commit, its full tree structure, and all blobs under `EAGER_BLOB_LIMIT` in one fetch
-  (`filter blob:limit=…`). Larger blobs fault in on first access (GitHub is slow;
+- **Trees eager; blobs eager under a modest size limit.** Any pull of a worktree base
+  fetches the commit, its full tree structure, and all blobs under `EAGER_BLOB_LIMIT`
+  in one round trip (`filter blob:limit=…`). This shape is a property of the *pull*,
+  not of creation as an event: creating a worktree on a gatekeeper-known commit issues
+  it up front, while creating one on an already-local commit pulls nothing — and if
+  that commit's trees were never fetched, the first base read faults with the same
+  eager shape (one round trip, never a serial per-segment walk-and-fetch).
+  Larger blobs fault in on first access (GitHub is slow;
   over-laziness costs agent latency, so only genuinely large files pay it). Files over
   `MAX_WORKTREE_FILE_SIZE` (~1MB, aligned with the existing `MAX_FILE_TEXT_LENGTH` /
   2MB-record constraints) are unsupported for now: reads error cleanly, grep skips
@@ -565,7 +576,9 @@ agent-facing `Worktree` binding API).
   `{worktreeId, changeId}` as the tool output so replay never re-creates. For gatekeeper-known commits, creation performs the **initial
   pull**: `gitPull([commit], cache, {type: "commit", commitHistory: {kind: "depth",
   depth: 1}, filterBlobSize: EAGER_BLOB_LIMIT})` — one fetch for commit + all trees
-  + small blobs.
+  + small blobs. The pull covers only what's missing: a commit already present locally
+  pulls nothing at creation, and any trees it lacks fault in later with the same eager
+  shape on the first base read (see the trees-eager locked decision).
 - **Pin at birth**: creation declares the pin `{gadgetId: worktreeId, baseCommit}` on
   the same `"changes"` batch that records the creation (which rides the new
   `createdWorktrees` message field — deliberately separate from `createdGadgets` so
@@ -602,6 +615,16 @@ agent-facing `Worktree` binding API).
   Oversized/binary base files: clean tool error on read; a `set` (whole-file write)
   is still allowed on those — but not on symlink/gitlink paths, which reject
   reads *and* writes with the descriptive errors from the modes locked decision.
+  A path naming a base *directory* also rejects writes and deletes (`"<path> is a
+  directory"`; reads report "no such file"): a git tree cannot hold a file and a
+  directory of one name, so such a write could never commit, and failing at the
+  write keeps the error next to its cause rather than surfacing at a far-away
+  `commit()` or accept-time auto-commit. The check covers base entries only — a
+  conflicting shape the overlay itself creates (`set a/b` then `set a`) is caught
+  by commit-time tree building ("conflicting file paths"), the backstop for
+  everything write-time checks can't see. Directories are never deleted
+  explicitly: git has no empty directories, so deleting a directory's last file
+  prunes it (recursively) from the committed tree.
 - **Epoch reset in `mergeChanges`**: after commits land and pins reset, **every**
   live worktree re-pins in the new generation, and the re-pins are recorded on the
   merge message itself (a new `worktreePins` field, §4). The durable record is
@@ -627,7 +650,10 @@ agent-facing `Worktree` binding API).
     fetched, so sizes would force fetching every blob).
   - `readFile(path) → string`, `writeFile(path, text)`, `deleteFile(path)` — text
     oriented, regular files only (symlink/gitlink paths throw the descriptive
-    errors from the modes locked decision); writes/deletes are OT rows exactly like the file tools' (they join
+    errors from the modes locked decision, and writing or deleting a base
+    *directory* path throws `"<path> is a directory"` — see the lazy-content
+    bullet; deleting a directory's last file prunes the directory at commit);
+    writes/deletes are OT rows exactly like the file tools' (they join
     the same step buffer and land through the same barrier, so replay and the
     UI-someday subscription see them). **`writeFile` on an existing, readable file diffs**: the OT row is a
     minimal edit computed via `diffFiles` (fast-diff) against current content, not
@@ -897,7 +923,8 @@ agent-facing `Worktree` binding API).
 
 ## Constants (tunable, named in one place)
 
-- `EAGER_BLOB_LIMIT` — blob size fetched eagerly at worktree creation (64KB).
+- `EAGER_BLOB_LIMIT` — blob size fetched eagerly when pulling a worktree base
+  (64KB); used by both the creation pull and a later base fault.
 - `MAX_WORKTREE_FILE_SIZE` — hard per-file support cap (~1MB; must respect the
   existing `MAX_FILE_TEXT_LENGTH` UTF-16 and 2MB-record constraints).
 

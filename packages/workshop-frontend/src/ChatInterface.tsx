@@ -55,6 +55,7 @@ import {
   Question,
   ArrowUpRight,
   Blueprint,
+  GitBranch,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -759,6 +760,8 @@ function getToolCallSummary(
       const output = outputOf?.(tc);
       return { verb: `Created ${output?.noun ?? "gadget"}`, target: tc.input.title };
     }
+    case "createWorktree":
+      return { verb: "Created worktree", target: tc.input.title };
     case "executeCode": {
       // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
       // input is still streaming in, so guard against undefined.
@@ -863,6 +866,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Saved ${pluralize(count, "resource")}`;
     case "createGadget":
       return `Created ${pluralize(count, "gadget")}`;
+    case "createWorktree":
+      return `Created ${pluralize(count, "worktree")}`;
     case "observeUserChanges":
       return `Observed ${pluralize(count, "change set")}`;
     case "giveUp":
@@ -902,6 +907,8 @@ function getToolIcon(
       return LinkSimple;
     case "createGadget":
       return Plus;
+    case "createWorktree":
+      return GitBranch;
     case "listBlueprints":
       return Blueprint;
     case "observeUserChanges":
@@ -931,6 +938,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Saving resource";
     case "createGadget":
       return "Creating gadget";
+    case "createWorktree":
+      return "Creating worktree";
     case "executeCode":
       return "Running code";
     case "webFetch":
@@ -959,6 +968,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "setGadgetBinding": return "Wiring up";
     case "saveCapsuleAsBinding": return "Saving";
     case "createGadget": return "Creating gadget";
+    case "createWorktree": return "Creating worktree";
     case "executeCode": return "Running code";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
@@ -985,6 +995,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
     case "createGadget": return `Creating ${pluralize(count, "gadget")}`;
+    case "createWorktree": return `Creating ${pluralize(count, "worktree")}`;
     case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
     case "giveUp": return "Stopping";
     case "listBlueprints": return "Listing blueprints";

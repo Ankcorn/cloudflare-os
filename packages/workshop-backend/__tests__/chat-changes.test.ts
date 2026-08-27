@@ -37,7 +37,7 @@ async function withImpl(fn: (impl: any) => Promise<void>): Promise<void> {
 
 function addGadget(impl: any, id: number, bindingName: string, commitId?: string): void {
   impl.storage.gadgets.put({
-    id, title: bindingName, created: new Date(0), bindingName, bindings: {},
+    type: "gadget", id, title: bindingName, created: new Date(0), bindingName, bindings: {},
     ...(commitId !== undefined ? { commitId } : {}),
   });
 }
@@ -865,8 +865,8 @@ describe("revert and draft discard", () => {
       createdGadgets: [{ gadgetId: 2, title: "Mine", bindingName: "MINE" }],
     });
     impl.storage.gadgets.put({
-      id: 2, title: "Mine", created: new Date(0), bindingName: "MINE", bindings: {},
-      pending: { chatId: 1, sequence: boundary },
+      type: "gadget", id: 2, title: "Mine", created: new Date(0), bindingName: "MINE",
+      bindings: {}, pending: { chatId: 1, sequence: boundary },
     });
     let meta = impl.storage.chatMeta.get(1)!;
     meta.codeBase = {
@@ -1053,7 +1053,7 @@ describe("agent step barrier", () => {
   function stepMsgs(text: string): { type: "message", message: string }[] {
     return [{ type: "message", message: text }];
   }
-  const NO_EXTRAS = { createdGadgets: [], addedBindings: [] };
+  const NO_EXTRAS = { createdGadgets: [], createdWorktrees: [], addedBindings: [] };
 
   it("persists the step message, appends rows in order, and materializes -- one transaction",
       () => withImpl(async impl => {
@@ -1190,6 +1190,7 @@ describe("agent step barrier", () => {
       changes: [{ change: { [created.id]: [["main.js", { set: "code\n" }]] } }],
       createdGadgets: [
         { gadgetId: created.id, title: created.title, bindingName: "MY_GADGET" }],
+      createdWorktrees: [],
       addedBindings: [],
     })).toBe(true);
 
@@ -1249,6 +1250,7 @@ describe("reconcilePendingGadgets", () => {
       changes: [{ change: { [created.id]: [["main.js", { set: "code\n" }]] } }],
       createdGadgets: [
         { gadgetId: created.id, title: created.title, bindingName: "MY_GADGET" }],
+      createdWorktrees: [],
       addedBindings: [],
     });
     let stamp = impl.storage.gadgets.get(created.id)!.pending!.sequence!;

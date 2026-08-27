@@ -316,6 +316,12 @@ describe("writeChangedFilesAsCommit", () => {
     expect(next.entries.find(e => e.name === "docs")).toBeUndefined();
     expect(entriesOf(objects, commit, "a/deep").entries.map(e => e.name))
         .toStrictEqual(["new.txt"]);
+    // The prune cascades: deleting a nested directory's last file drops every directory the
+    // deletion emptied, all the way up.
+    let cascade = await store.writeChangedFilesAsCommit(
+        new Map([["a/deep/new.txt", null]]),
+        { ...OPTIONS, treeBase: commit, parents: [commit] });
+    expect(entriesOf(objects, cascade).entries.find(e => e.name === "a")).toBeUndefined();
     // Deleting an absent file is a no-op, not an error.
     let again = await store.writeChangedFilesAsCommit(
         new Map([["never-existed.txt", null]]), OPTIONS);

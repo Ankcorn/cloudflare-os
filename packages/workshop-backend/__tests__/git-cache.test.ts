@@ -3,6 +3,7 @@ import { createTypedStorage } from "@gadgets/typed-storage";
 import type { GitPullHints, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 import { makeMockStorage } from "./mock-storage";
 import {
+  EAGER_BLOB_LIMIT,
   GitCacheImpl,
   GitObjectTooLargeError,
   MAX_GIT_OBJECT_SIZE,
@@ -819,6 +820,49 @@ describe("lazy walker reads", () => {
     expect(await t.cache.readFileAtCommit(COMMIT_1, "docs/naïve.md")).toBe("naïve UTF-8 name\n");
   });
 
+  it("a fault against a worktree base pulls the whole tree and small blobs in one round trip",
+      async () => {
+    let t = makeCache();
+    // A closure-serving source, like a real protocol fetch: everything the filter spec admits.
+    // (fixtureSource serves exact objects only, which would mask the difference between one
+    // eager pull and a serial per-segment walk.)
+    t.sources.set(G1, async (oids, hints) => {
+      if (hints.filterTreeDepth !== undefined) {
+        // An exact-object fetch shape: serve just the wants.
+        for (let oid of oids) {
+          await t.cache.putFromGatekeeper(G1, fixture(oid).type, fixture(oid).payload);
+        }
+        return;
+      }
+      for (let object of FIXTURE_OBJECTS) {
+        if (!PACKED_OIDS.includes(object.oid)) continue;
+        let payload = b64Bytes(object.payload);
+        if (object.type === "blob" && hints.filterBlobSize !== undefined &&
+            payload.byteLength >= hints.filterBlobSize) {
+          continue;
+        }
+        await t.cache.putFromGatekeeper(G1, object.type, payload);
+      }
+    });
+    // Only the commit itself is local -- a worktree created on an already-local commit whose
+    // trees were never pulled (creation's ensureGitObjects no-ops when the commit is present).
+    await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+    t.pulls.length = 0;
+
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "src/util.js")).toBeDefined();
+    expect(t.pulls).toHaveLength(1);
+    expect(t.pulls[0].hints.type).toBe("tree");
+    expect(t.pulls[0].hints.filterTreeDepth).toBeUndefined();
+    expect(t.pulls[0].hints.filterBlobSize).toBe(EAGER_BLOB_LIMIT);
+
+    // The eager pull brought the whole tree structure and every small blob: reads elsewhere in
+    // the tree fault nothing further.
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "README.md")).toBe("# Fixture\n");
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "docs/naïve.md"))
+        .toBe("naïve UTF-8 name\n");
+    expect(t.pulls).toHaveLength(1);
+  });
+
   it("surfaces all five entry kinds from the fixture tree", async () => {
     let t = makeCache();
     t.sources.set(G1, fixtureSource(t, G1));
@@ -890,5 +934,107 @@ describe("lazy walker reads", () => {
         .rejects.toThrow(new RegExp(`${BAD_NAME_TREE}.*not valid UTF-8`));
     await expect(t.cache.readFileAtCommit(commit, "anything.txt"))
         .rejects.toThrow(/not valid UTF-8/);
+  });
+});
+
+// =======================================================================================
+
+describe("worktree read/write helpers", () => {
+  it("readFileAtCommitIfExists returns undefined for absent paths and text otherwise", async () => {
+    let t = makeCache();
+    t.sources.set(G1, fixtureSource(t, G1));
+    await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "README.md"))
+        .toBe("# Fixture\n");
+    // Absence in all its shapes: missing leaf, missing intermediate, non-directory
+    // intermediate, and a directory path.
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "nope.txt")).toBeUndefined();
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "no/such/file.txt")).toBeUndefined();
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "README.md/child")).toBeUndefined();
+    expect(await t.cache.readFileAtCommitIfExists(COMMIT_1, "src")).toBeUndefined();
+    // The descriptive errors still throw: absence is the only softened case.
+    await expect(t.cache.readFileAtCommitIfExists(COMMIT_1, "link.md"))
+        .rejects.toThrow("link.md is a symlink to README.md");
+    await expect(t.cache.readFileAtCommitIfExists(COMMIT_1, "vendored"))
+        .rejects.toThrow("vendored is a submodule");
+  });
+
+  it("assertWorktreePathWritable rejects symlink, gitlink, and directory paths, passes the rest",
+      async () => {
+    let t = makeCache();
+    t.sources.set(G1, fixtureSource(t, G1));
+    await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
+
+    await expect(t.cache.assertWorktreePathWritable(COMMIT_1, "link.md"))
+        .rejects.toThrow("link.md is a symlink to README.md");
+    await expect(t.cache.assertWorktreePathWritable(COMMIT_1, "vendored"))
+        .rejects.toThrow(`vendored is a submodule (gitlink) pointing at commit ${GITLINK_TARGET}`);
+    // A write at a directory-named path could never commit (a git tree cannot hold a file and
+    // a directory of one name), so it fails here, next to its cause.
+    await expect(t.cache.assertWorktreePathWritable(COMMIT_1, "src"))
+        .rejects.toThrow("src is a directory");
+    // Regular files (either mode) and new paths -- including under a base directory -- pass.
+    await t.cache.assertWorktreePathWritable(COMMIT_1, "README.md");
+    await t.cache.assertWorktreePathWritable(COMMIT_1, "run.sh");
+    await t.cache.assertWorktreePathWritable(COMMIT_1, "brand-new.txt");
+    await t.cache.assertWorktreePathWritable(COMMIT_1, "src/brand-new.txt");
+  });
+
+  it("assertWorktreePathWritable passes an oversized base blob (a set needs no readable base)",
+      async () => {
+    let t = makeCache();
+    let big = new Uint8Array(MAX_GIT_OBJECT_SIZE + 1).fill(0x61);
+    let bigOid = await gitObjectOid("blob", big);
+    let tree = await storeLocal(t.storage, {
+      type: "tree",
+      payload: treePayload([{ mode: "100644", name: "huge.txt", oid: bigOid }]),
+    });
+    let commit = await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(tree, [], "huge") });
+    await t.cache.assertWorktreePathWritable(commit, "huge.txt");
+  });
+});
+
+describe("resolveCommitRef", () => {
+  it("resolves full oids and unambiguous prefixes of local commits", async () => {
+    let t = makeCache();
+    let tree = await storeLocal(t.storage, { type: "tree", payload: treePayload([]) });
+    let commit = await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(tree, [], "local") });
+
+    expect(t.cache.resolveCommitRef(commit)).toBe(commit);
+    expect(t.cache.resolveCommitRef(commit.slice(0, 8))).toBe(commit);
+    expect(t.cache.resolveCommitRef(commit.slice(0, 8).toUpperCase())).toBe(commit);
+    // The tree shares no 8-hex prefix with the commit (vanishingly unlikely), and a prefix
+    // matching only non-commits resolves to nothing.
+    expect(() => t.cache.resolveCommitRef(tree.slice(0, 8)))
+        .toThrow(/not known to this workspace/);
+    // A locally-present non-commit named in full is rejected by its decoded type.
+    expect(() => t.cache.resolveCommitRef(tree)).toThrow(`${tree} is a tree, not a commit.`);
+  });
+
+  it("rejects malformed, unknown, and ambiguous refs", async () => {
+    let t = makeCache();
+    // Fabricated metadata rows steer prefix matching without any stored objects.
+    let put = (oid: GitOid, type: "commit" | "blob") => t.storage.gitObjectMetadata.put(
+        { oid, type, onRemote: [G1], pullableFrom: [], pendingPush: [] });
+    put("aaaa1111".padEnd(40, "0"), "commit");
+    put("aaaa2222".padEnd(40, "0"), "commit");
+    put("bbbb1111".padEnd(40, "0"), "blob");
+
+    expect(() => t.cache.resolveCommitRef("xyz")).toThrow(/not a git commit id/);
+    expect(() => t.cache.resolveCommitRef("abc")).toThrow(/not a git commit id/);  // too short
+    expect(() => t.cache.resolveCommitRef("cccc")).toThrow(/not known to this workspace/);
+    expect(() => t.cache.resolveCommitRef("aaaa"))
+        .toThrow(/ambiguous between: aaaa1111.*aaaa2222/);
+    expect(t.cache.resolveCommitRef("aaaa1")).toBe("aaaa1111".padEnd(40, "0"));
+    // An asserted non-commit is filtered from prefix candidates (commit-bias makes the tag
+    // trustworthy for refusal-free filtering)...
+    expect(() => t.cache.resolveCommitRef("bbbb")).toThrow(/not known to this workspace/);
+    // ...but a full oid resolves regardless of its assertion-grade tag (the reader rule: the
+    // caller's pull lets the decoded bytes decide).
+    expect(t.cache.resolveCommitRef("bbbb1111".padEnd(40, "0")))
+        .toBe("bbbb1111".padEnd(40, "0"));
   });
 });
