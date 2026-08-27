@@ -4469,6 +4469,15 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
+    // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
+    // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
+    // observer has already lost access in the sharing graph. If any named observer is still
+    // authorized, we cannot prevent them from seeing it, so we block the observation. See
+    // observers-implementation-plan.md §5 Step 5.
+    if (description.excludeObservers && description.excludeObservers.length > 0) {
+      await this.#enforceExcludeObservers(description.excludeObservers);
+    }
+
     let sharing = await this.getSharingManager();
 
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -4478,30 +4487,16 @@ class OverseerImpl implements AgentHooks {
       // arrive naming a connection this workspace no longer has -- with zero collaborators it
       // would sail past the coverage check's early return. Latching a missing producer id
       // permanently bricks sharing (assertNewSharingAllowed's missing-record branch), so refuse
-      // the read instead.
+      // the read instead. This same read is what refuses a connection removed during the
+      // exclusion awaits above, where the latch is not yet set and so
+      // removalBlockedByRestrictedData does not yet protect the producer.
       if (!gatekeeper) {
         throw new Error(
             "This observation was blocked because it contains sensitive data, but the " +
             "connection it was read through has been removed from this workspace.");
       }
       this.#assertSensitiveObservationCoverage(gatekeeperId, sharing);
-
-      // TODO: The exclusion gate below is decided after this latch,
-      // so a restricted observation the exclusion then blocks has already latched restricted
-      // mode despite delivering no data. The latch is one-way, so this manifests as a workspace
-      // permanently stuck in restricted mode -- metadata reports containsRestrictedData, actions
-      // and public web fetches are refused -- with no restricted data ever having entered it:
-      // the caller saw only the exclusion error, and nothing marks the latch as spurious.
       this.storage.prohibitAllSharing.put(true);
-    }
-
-    // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
-    // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
-    // observer has already lost access in the sharing graph. If any named observer is still
-    // authorized, we cannot prevent them from seeing it, so we block the observation. See
-    // observers-implementation-plan.md §5 Step 5.
-    if (description.excludeObservers && description.excludeObservers.length > 0) {
-      await this.#enforceExcludeObservers(description.excludeObservers);
     }
 
     let actionId = this.storage.nextActionId.get();
@@ -4662,11 +4657,7 @@ class OverseerImpl implements AgentHooks {
       // role. The skip also covers a *formerly*-bound producer (unbinding shrinks use scope
       // live) and a *never*-bound one reachable only through chat bindings, whose restricted
       // data the agent may have persisted with no "use" collaborator ever verified against it
-      // -- both accepted residuals; see docs/observers.md edge case 4. A rebind after an unbind
-      // is NOT part of the residual: ensureObserver prunes out-of-scope entries at every open,
-      // so a "use" collaborator whose only opens fell in the unbound window holds no entry here
-      // and blocks until they re-open at the restored scope. An absent role means "build" (see
-      // CollaboratorInfo), which fails safe here.
+      // -- both accepted residuals; see docs/observers.md edge case 4.
       if (vendorId && (collaborator.role ?? "build") === "use" && !inUseScope) continue;
       let observer = vendorId ? this.storage.observers.get(collaborator.profile.id) : undefined;
       if (!observer || !(gatekeeperId in observer.accountChoices)) {
