@@ -231,8 +231,6 @@ the follow-up worklist.
 - The exclusion gate's teardown deletes from a snapshot that can go stale across the
   awaited fan-out, so a re-granted profile's *replacement* observer record can be
   deleted, after which exclusions naming the new id fail open persistently.
-- A failed re-verification rolls back registrations that preserve forward exclusion;
-  only a first-ever verification should roll back fully.
 
 ## Known edge cases / watch-fors
 

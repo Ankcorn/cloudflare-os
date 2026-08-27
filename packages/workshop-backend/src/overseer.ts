@@ -8096,6 +8096,10 @@ class OverseerImpl implements AgentHooks {
         inScope.filter(gk => gk.id in accountChoices).map(gk => gk.id));
 
     let observerId = record?.observerId ?? crypto.randomUUID();
+    // Whether this collaborator was already an admitted observer when the call began. A returning
+    // observer's `observerId` is already persisted, so it stays resolvable no matter how this call
+    // ends -- which is what makes keeping their registrations on a failure safe (see the catch).
+    let returningObserver = record !== undefined;
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
     // Gatekeepers that refused (or whose account was gone) during this call and have not verified
@@ -8219,11 +8223,10 @@ class OverseerImpl implements AgentHooks {
             }
             await this.getGatekeeperFacet(gk.id).addObserver(observerId, verifier);
             if (!registeredBeforeCall.has(gk.id)) newlyAdded.add(gk.id);
-            // A binding an earlier pass invalidated has just verified, so it is no longer a
-            // registration resting on a scrubbed choice: a terminal failure elsewhere must leave it
-            // alone, since removing it would break forward exclusion for a registration that
-            // predates this call. Its persisted coverage stays scrubbed until step 6, so the
-            // coverage guard still fails closed if we never get there.
+            // Keep `invalidated` meaning "failed and has not verified since": this binding just
+            // verified, so it no longer rests on a scrubbed choice. Its persisted coverage stays
+            // scrubbed until step 6, so the coverage guard still fails closed if we never get
+            // there.
             invalidated.delete(gk.id);
           } catch (err) {
             // Either a settled denial or an operational failure (expired credentials, upstream
@@ -8262,16 +8265,18 @@ class OverseerImpl implements AgentHooks {
         break;
       }
     } catch (err) {
-      // Best-effort remove all the observers that were newly-added since we didn't persist the
-      // user's observer record -- and the invalidated ones, whose coverage fail() just scrubbed:
-      // their registrations reference a choice that is no longer persisted anywhere.
+      // Best-effort remove the observers we registered during *this* call, since we didn't persist
+      // the user's observer record.
       //
-      // TODO: For a *returning* collaborator whose re-verification
-      // failed, this rollback removes registrations that preserve forward exclusion -- once
-      // de-registered, gatekeepers stop naming the observer in excludeObservers -- so only a
-      // first-ever verification should roll back fully.
-      await this.#removeObserverFromGatekeepers(
-          observerId, [...new Set([...newlyAdded, ...invalidated])]);
+      // A first-ever verification rolls back the invalidated ones too: nothing referenced those
+      // registrations before this call, and the freshly-minted observerId is discarded with the
+      // unpersisted record, so anything left behind lingers unresolvable.
+      //
+      // A *returning* observer's registrations are kept instead. De-registering one is fail-open:
+      // the gatekeeper stops naming that observer in `excludeObservers`, so an observation it
+      // would have excluded them from is admitted with nothing left to block it.
+      let rollback = returningObserver ? newlyAdded : new Set([...newlyAdded, ...invalidated]);
+      await this.#removeObserverFromGatekeepers(observerId, [...rollback]);
       throw err;
     }
 

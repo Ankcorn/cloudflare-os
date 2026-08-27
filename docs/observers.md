@@ -662,9 +662,9 @@ This is why the broad bindings split the way they do:
 
 Revocations and role changes take effect within seconds -- the revocation restart lands in
 ~100ms -- and read-side races inside that envelope are accepted by design: a guard earns its
-place here only if its failure mode is *persistent* wrong state that outlives the window. Each
-item below is marked at its site in the code by a matching `TODO` comment.
+place here only if its failure mode is *persistent* wrong state that outlives the window.
 
-- **Re-verification rollback is too broad.** A failed re-verification of an admitted observer
-  rolls back gatekeeper registrations that preserve forward exclusion; only a first-ever
-  verification should roll back fully.
+The observer-side deferrals are ledgered in `plans/restricted-data-sharing.md`, each marked at
+its site in the code by a matching `TODO` comment: observer verification is not serialized per
+profile, and the exclusion gate's teardown deletes from a snapshot that can go stale across its
+awaited fan-out.
