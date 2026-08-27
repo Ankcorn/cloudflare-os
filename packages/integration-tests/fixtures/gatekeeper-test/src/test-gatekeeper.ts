@@ -251,8 +251,8 @@ export class TestVerifier
  *
  * The two methods exist so tests can drive the overseer's observation/action policy through the
  * same `ApprovalQueue` funnel a shipping gatekeeper uses: `readThing()` records an observation
- * (optionally marked `containsRestrictedData`, to trip the sensitive-data coverage guard and the
- * restricted-mode latch), and `doThing()` submits an action (which restricted mode blocks).
+ * (optionally marked `containsRestrictedData`, to trip the restricted-mode latch and the
+ * unverifiable-producer guard), and `doThing()` submits an action (which restricted mode blocks).
  */
 export class TestSession extends RpcTarget {
   #queue: RpcStub<ApprovalQueue>;

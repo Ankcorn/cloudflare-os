@@ -1,10 +1,12 @@
 // Tests for the sensitive-data (`containsRestrictedData`) observation policy.
 //
-// A sensitive observation is blocked only while some *current collaborator* has not been verified
-// (via `addObserver`) against the gatekeeper producing it; sharing itself stays available, since
-// recipients are verified when they open. The observation also latches the workspace into a
-// restricted mode: once latched, the workspace may not perform actions (nor fetch from the web,
-// which has no client-reachable surface to assert here).
+// Coverage is enforced at admission, not at the read: every collaborator passes the producing
+// gatekeeper's `addObserver` at their most recent open and cannot open without passing it, and
+// anything that widens what they must pass restarts the workspace so every live session re-opens
+// against the new scope. So sensitive observations are not blocked by an unverified collaborator,
+// and sharing stays available. The observation also latches the workspace into a restricted mode:
+// once latched, the workspace may not perform actions (nor fetch from the web, which has no
+// client-reachable surface to assert here).
 //
 // The fixture gatekeeper's session drives all of this through the real ApprovalQueue funnel:
 // `readThing(true)` records a `containsRestrictedData` observation, `doThing()` submits an action.
@@ -103,14 +105,16 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
   return { gadgetId, overseer, alice, aliceApi, session, gatekeeperId };
 }
 
-// Sign Bob up, add him as a collaborator, and give him his own fixture account.
-async function addBob(publicApi: RpcStub<PublicApi>, ws: Workspace): Promise<{
+type Bob = {
   bob: string;
   bobProfileId: string;
   bobApi: RpcStub<AuthenticatedApi>;
   bobAccount: ConnectedAccount;
   bobLabel: string;
-}> {
+};
+
+// Sign Bob up, add him as a collaborator, and give him his own fixture account.
+async function addBob(publicApi: RpcStub<PublicApi>, ws: Workspace): Promise<Bob> {
   const [bob] = nextUsernames("bob");
   const bobApi = await signUp(publicApi, bob);
   const bobAccount = await provisionAccount(bobApi);
@@ -123,15 +127,66 @@ async function addBob(publicApi: RpcStub<PublicApi>, ws: Workspace): Promise<{
 }
 
 // Bob opens the workspace, answering observer prompts with his own account. This is what writes
-// his observer record, i.e. verifies him against every in-scope gatekeeper.
+// his observer record, i.e. verifies him against every in-scope gatekeeper. Pass a `recorder` to
+// assert *which* connections the open asked him about.
 async function bobOpens(gadgetId: string, bobApi: RpcStub<AuthenticatedApi>,
-                        bobAccount: ConnectedAccount): Promise<RpcStub<Overseer>> {
-  const recorder = new ObserverConfigRecorder().alwaysChoose(bobAccount.id, MAX_OBSERVER_PROMPTS);
-  const callback = stubFor(recorder);
+                        bobAccount: ConnectedAccount,
+                        recorder?: ObserverConfigRecorder): Promise<RpcStub<Overseer>> {
+  const callback = stubFor(
+      recorder ?? new ObserverConfigRecorder().alwaysChoose(bobAccount.id, MAX_OBSERVER_PROMPTS));
   try {
     return await bobApi.openGadget(gadgetId, undefined, callback);
   } finally {
     callback[Symbol.dispose]();
+  }
+}
+
+// Wait out a restart and come back on a fresh connection, returning the owner's re-opened
+// workspace and a session on `gatekeeperId`.
+//
+// A restart aborts the DO shortly after the triggering call returns, killing every stub from the
+// connection that made it. A probe on a fresh connection can only detect a DO that is *already*
+// dead -- never one about to die -- so a reopen attempted inside the pre-abort window can fully
+// succeed against the doomed instance and then lose its session under the assertions that follow.
+// Hence two steps: watch the pre-restart session die, then reopen with retries.
+async function reopenAfterRestart(ws: Workspace, gatekeeperId = ws.gatekeeperId): Promise<{
+  publicApi: RpcStub<PublicApi>;
+  overseer: RpcStub<Overseer>;
+  session: RpcStub<TestSession>;
+}> {
+  await waitFor("the restart to fell the old workspace instance", () =>
+      ws.session.readThing().then(() => null, () => true));
+
+  return waitFor("the workspace to come back after the restart", async () => {
+    const publicApi = connect(harness.url);
+    try {
+      const aliceApi = await logIn(publicApi, ws.alice);
+      const overseer = await aliceApi.openGadget(ws.gadgetId);
+      const gatekeeper = await overseer.getGatekeeperById(gatekeeperId);
+      const session = await gatekeeper.openSession() as RpcStub<TestSession>;
+      // Probe with a benign read, so a session felled by the abort retries here rather than
+      // failing an assertion below.
+      await session.readThing();
+      return { publicApi, overseer, session };
+    } catch {
+      publicApi[Symbol.dispose]();
+      return null;
+    }
+  });
+}
+
+// Bob's forced re-open, on the fresh connection his browser would reconnect with. The restart
+// killed the whole session his `bobApi` came from -- every client of the workspace loses its
+// connection, not just its workspace stubs -- so reusing it here would fail on a dead socket
+// rather than exercising the re-verification this asserts.
+async function bobReopens(
+    ws: Workspace, bob: Bob, recorder: ObserverConfigRecorder): Promise<void> {
+  const publicApi = connect(harness.url);
+  try {
+    const bobApi = await logIn(publicApi, bob.bob);
+    (await bobOpens(ws.gadgetId, bobApi, bob.bobAccount, recorder))[Symbol.dispose]();
+  } finally {
+    publicApi[Symbol.dispose]();
   }
 }
 
@@ -159,9 +214,8 @@ describe("sensitive observations", () => {
       const ws = await newWorkspace(publicApi, "unredeemed");
       await ws.overseer.createShareLink("build", "never redeemed");
 
-      // Nobody has redeemed the link, so nobody unverified can be watching: the observation
-      // proceeds. (Redeeming inside open() writes a real edge, so a recipient would count -- and
-      // block -- from redemption until their verification succeeds.)
+      // An outstanding link grants nobody anything until it is redeemed, and redemption happens
+      // inside open() -- where verification runs -- so the observation proceeds.
       await expect(ws.session.readThing(true)).resolves.toContain("unredeemed");
     });
   });
@@ -184,16 +238,25 @@ describe("sensitive observations", () => {
     });
   });
 
-  it.concurrent("an unverified collaborator blocks a sensitive observation", async () => {
+  it.concurrent("an unverified collaborator does not block a sensitive observation", async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "unverified");
-      await addBob(publicApi, ws);
+      const bob = await addBob(publicApi, ws);
 
-      // Bob has access but has never opened, so he holds no observer record for this gatekeeper.
-      // He may hold a live session the moment he does open, so the observation must not proceed.
-      await expect(ws.session.readThing(true)).rejects.toThrow(/has not been verified/i);
-      // Non-sensitive reads are unaffected.
-      await expect(ws.session.readThing()).resolves.toContain("unverified");
+      // Bob has access but has never opened, so he holds no observer record for this gatekeeper
+      // -- and no session either, because verification is a precondition of getting one. There is
+      // nothing for the read to fail closed against.
+      await expect(ws.session.readThing(true)).resolves.toContain("unverified");
+
+      // Admission is where the coverage requirement bites: the gatekeeper refuses him, so his
+      // open is denied and he never reaches the workspace, let alone the observation.
+      await setVerifyOutcome(bob.bobLabel, { allow: false, reason: "You do not have access." });
+      await expect(bobOpens(ws.gadgetId, bob.bobApi, bob.bobAccount))
+          .rejects.toThrow(/could not confirm/i);
+
+      // His refusal costs the owner nothing -- a first-ever failure scrubs no coverage, so
+      // nothing was severed and reads keep flowing.
+      await expect(ws.session.readThing(true)).resolves.toContain("unverified");
     });
   });
 
@@ -207,22 +270,37 @@ describe("sensitive observations", () => {
     });
   });
 
-  it.concurrent("a verified collaborator does not cover a gatekeeper added later", async () => {
+  it.concurrent("adding a connection restarts the workspace so collaborators re-verify",
+      async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "covered");
       const bob = await addBob(publicApi, ws);
       (await bobOpens(ws.gadgetId, bob.bobApi, bob.bobAccount))[Symbol.dispose]();
 
-      // A second connection Bob has never been verified against.
+      // A second connection Bob has never been verified against. It is in his verification scope
+      // the moment it exists -- a "build" session can open a session on it with no observer check
+      // -- and his live session was admitted without it, so adding it severs every session.
       const accounts = await listConnectedAccounts(ws.aliceApi);
       const account = accounts.find(a => a.vendorId === TEST_VENDOR_ID)!;
       const late = await ws.overseer.newGatekeeper(account.id, thingUrl("late"));
       if (!late) throw new Error("Failed to create the second test connection");
-      const lateSession = await late.openSession() as RpcStub<TestSession>;
+      const lateId = await late.getId();
 
-      await expect(lateSession.readThing(true)).rejects.toThrow(/has not been verified/i);
-      // The gatekeeper Bob is verified against still reads fine.
-      await expect(ws.session.readThing(true)).resolves.toContain("covered");
+      const reopened = await reopenAfterRestart(ws, lateId);
+      try {
+        // Nothing is blocked: the owner reads restricted data through the new connection...
+        await expect(reopened.session.readThing(true)).resolves.toContain("late");
+
+        // ...and Bob's forced re-open is where it gets verified. He is asked about exactly it,
+        // since his coverage for the connections that predate it survived.
+        const recorder = new ObserverConfigRecorder()
+            .alwaysChoose(bob.bobAccount.id, MAX_OBSERVER_PROMPTS);
+        await bobReopens(ws, bob, recorder);
+        expect(recorder.callCount).toBe(1);
+        expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([lateId]);
+      } finally {
+        reopened.publicApi[Symbol.dispose]();
+      }
     });
   });
 
@@ -269,13 +347,14 @@ describe("sensitive observations", () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "scrub");
       // A second producer, so the test can prove the scrub is scoped to the one that refused.
+      // Added before Bob, so it widens nobody's scope and restarts nothing.
       const accounts = await listConnectedAccounts(ws.aliceApi);
       const account = accounts.find(a => a.vendorId === TEST_VENDOR_ID)!;
       const second = await ws.overseer.newGatekeeper(account.id, thingUrl("scrub-2"));
       if (!second) throw new Error("Failed to create the second test connection");
       const secondSession = await second.openSession() as RpcStub<TestSession>;
 
-      // Bob verifies against both producers, so both restricted reads are admitted.
+      // Bob verifies against both producers.
       const bob = await addBob(publicApi, ws);
       (await bobOpens(ws.gadgetId, bob.bobApi, bob.bobAccount))[Symbol.dispose]();
       await expect(ws.session.readThing(true)).resolves.toContain("scrub");
@@ -287,20 +366,29 @@ describe("sensitive observations", () => {
       await expect(bobOpens(ws.gadgetId, bob.bobApi, bob.bobAccount))
           .rejects.toThrow(/could not confirm/i);
 
-      // ...and the failure scrubbed his persisted coverage for that producer, so its restricted
-      // reads fail closed against his older live session rather than keep flowing to it...
-      await expect(ws.session.readThing(true)).rejects.toThrow(/has not been verified/i);
-      // ...while the producer he still passes stays covered (the scrub is scoped).
-      await expect(secondSession.readThing(true)).resolves.toContain("scrub-2");
+      // ...and because the failure shrank what his record claims, it severs the sessions that
+      // claim admitted -- including the one he opened while it still covered that producer.
+      const reopened = await reopenAfterRestart(ws);
+      try {
+        // The owner's reads keep flowing throughout: Bob cannot be admitted again without
+        // re-verifying, which is the whole of the enforcement.
+        await expect(reopened.session.readThing(true)).resolves.toContain("scrub");
 
-      // A repaired re-open re-verifies him and re-persists full coverage.
-      await setVerifyOutcome(bob.bobLabel, { allow: true }, thingUrl("scrub"));
-      (await bobOpens(ws.gadgetId, bob.bobApi, bob.bobAccount))[Symbol.dispose]();
-      await expect(ws.session.readThing(true)).resolves.toContain("scrub");
+        // A repaired re-open asks him about exactly the producer that refused: the scrub took
+        // his coverage for that one and left the other intact.
+        await setVerifyOutcome(bob.bobLabel, { allow: true }, thingUrl("scrub"));
+        const recorder = new ObserverConfigRecorder()
+            .alwaysChoose(bob.bobAccount.id, MAX_OBSERVER_PROMPTS);
+        await bobReopens(ws, bob, recorder);
+        expect(recorder.callCount).toBe(1);
+        expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([ws.gatekeeperId]);
+      } finally {
+        reopened.publicApi[Symbol.dispose]();
+      }
     });
   });
 
-  it.concurrent("a refused share-link recipient persists and blocks reads until removed",
+  it.concurrent("a refused share-link recipient persists as a collaborator without blocking reads",
       async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "refused-link");
@@ -327,43 +415,12 @@ describe("sensitive observations", () => {
         callback[Symbol.dispose]();
       }
 
-      // He is a current collaborator, so the coverage guard fails closed on him...
+      // The residue is a collaborator row, not access: he never opened, and he cannot open
+      // without passing the same check. So the owner's reads are untouched -- and nothing was
+      // severed either, since a first-ever failure has no persisted coverage to scrub.
       const collaborators = await ws.overseer.listCollaborators();
       expect(collaborators).toHaveLength(1);
-      await expect(ws.session.readThing(true)).rejects.toThrow(/has not been verified/i);
-
-      // ...until the owner removes him. The removal triggers the revocation restart -- the DO
-      // aborts shortly after the call returns, killing every stub from this connection -- so the
-      // post-removal assertion runs on a fresh connection (same dance as the removal test below).
-      await ws.overseer.removeCollaborator(collaborators[0].profile.id, []);
-
-      await waitFor("the revocation restart to fell the old workspace instance", () =>
-          ws.session.readThing().then(() => null, () => true));
-
-      const reopened = await waitFor("the workspace to come back after the revocation restart",
-          async () => {
-        const publicApi2 = connect(harness.url);
-        try {
-          const aliceApi = await logIn(publicApi2, ws.alice);
-          const overseer = await aliceApi.openGadget(ws.gadgetId);
-          const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
-          const session = await gatekeeper.openSession() as RpcStub<TestSession>;
-          // Probe with a benign read, so a session felled by the abort retries here rather than
-          // failing the assertion below.
-          await session.readThing();
-          return { publicApi2, session };
-        } catch {
-          publicApi2[Symbol.dispose]();
-          return null;
-        }
-      });
-
-      try {
-        // Reads flow again: the refused recipient is no longer reachable from the owner.
-        await expect(reopened.session.readThing(true)).resolves.toContain("refused-link");
-      } finally {
-        reopened.publicApi2[Symbol.dispose]();
-      }
+      await expect(ws.session.readThing(true)).resolves.toContain("refused-link");
     });
   });
 
@@ -482,8 +539,7 @@ describe("sensitive observations", () => {
     });
   });
 
-  it.concurrent("removal unblocks the observation and tears down the observer record",
-      async () => {
+  it.concurrent("removal restarts the workspace and tears down the observer record", async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "removal");
       const bob = await addBob(publicApi, ws);
@@ -491,47 +547,26 @@ describe("sensitive observations", () => {
       await expect(ws.session.readThing(true)).resolves.toContain("removal");
 
       // Removing Bob triggers the revocation restart: the DO aborts shortly after this call
-      // returns, killing every stub from this connection. Everything past this point runs on a
-      // fresh connection, retried across the abort window.
+      // returns, killing every stub from this connection -- including the session Bob holds,
+      // which is the point. Everything past here runs on a fresh connection.
       await ws.overseer.removeCollaborator(bob.bobProfileId, []);
-
-      // A probe on a fresh connection can only detect a DO that is *already* dead -- never one
-      // about to die -- so a reopen attempted inside the scheduled abort's pre-abort window can
-      // fully succeed against the doomed instance and then lose its session under the
-      // assertions below. First wait for the abort to fell the old instance: this pre-removal
-      // session stub dies with it.
-      await waitFor("the revocation restart to fell the old workspace instance", () =>
-          ws.session.readThing().then(() => null, () => true));
-
-      const reopened = await waitFor("the workspace to come back after the revocation restart",
-          async () => {
-        const publicApi2 = connect(harness.url);
-        try {
-          const aliceApi = await logIn(publicApi2, ws.alice);
-          const overseer = await aliceApi.openGadget(ws.gadgetId);
-          const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
-          const session = await gatekeeper.openSession() as RpcStub<TestSession>;
-          // Probe with a benign read, so a session felled by the abort retries here rather than
-          // failing an assertion below.
-          await session.readThing();
-          return { publicApi2, overseer, session };
-        } catch {
-          publicApi2[Symbol.dispose]();
-          return null;
-        }
-      });
+      const reopened = await reopenAfterRestart(ws);
 
       try {
-        // Bob's collaborator record lingers in storage (lazy revocation), but he is no longer
-        // reachable from the owner, so he no longer blocks the observation.
+        // Bob's collaborator record lingers in storage (lazy revocation), and the owner's reads
+        // are unaffected either way.
         await expect(reopened.session.readThing(true)).resolves.toContain("removal");
 
         // Removal also tore down his observer record, so re-adding him must not silently restore
-        // his coverage: he blocks again until he re-opens (which re-verifies him).
+        // his coverage: his next open has to name an account for the producer and pass
+        // addObserver again.
         await reopened.overseer.addCollaborator(bob.bob, "build");
-        await expect(reopened.session.readThing(true)).rejects.toThrow(/has not been verified/i);
+        const recorder = new ObserverConfigRecorder()
+            .alwaysChoose(bob.bobAccount.id, MAX_OBSERVER_PROMPTS);
+        await bobReopens(ws, bob, recorder);
+        expect(recorder.calls[0].map(need => need.gatekeeperId)).toContain(ws.gatekeeperId);
       } finally {
-        reopened.publicApi2[Symbol.dispose]();
+        reopened.publicApi[Symbol.dispose]();
       }
     });
   });
@@ -571,21 +606,27 @@ describe("sensitive observations", () => {
       const newAccount = await provisionAccount(ws.aliceApi);
       expect(newAccount.id).not.toBe(oldAccount.id);
 
-      // Reopen. Later opens run the capsule reconcile in the background, so wait for the
-      // replacement account's record to appear -- proof the reconcile has run.
-      const overseer2 = await ws.aliceApi.openGadget(ws.gadgetId);
-      await waitFor("the replacement ambient capsule to be provisioned", async () => {
-        const ids = await findAmbientIds(overseer2);
-        return ids.some(id => id !== ambientId) ? true : null;
-      });
+      // Reopen. Later opens run the capsule reconcile in the background, and provisioning the
+      // replacement is itself a connection Bob has never been verified against -- so the
+      // reconcile restarts the workspace out from under this connection. Come back on a fresh
+      // one, then wait for the replacement's record to appear (proof the reconcile has run).
+      (await ws.aliceApi.openGadget(ws.gadgetId))[Symbol.dispose]();
+      const reopened = await reopenAfterRestart(ws);
+      try {
+        const ids = await waitFor("the replacement ambient capsule to be provisioned", async () => {
+          const found = await findAmbientIds(reopened.overseer);
+          return found.some(id => id !== ambientId) ? found : null;
+        });
 
-      // The stale record anchors Bob's verification, so the reconcile must have skipped it:
-      // the record survives, and sharing -- which refuses once any producer's record is gone --
-      // still works.
-      expect(await findAmbientIds(overseer2)).toContain(ambientId);
-      await expect(overseer2.createShareLink("build", "still shareable")).resolves.toMatchObject({
-        key: expect.any(String),
-      });
+        // The stale record anchors Bob's verification, so the reconcile must have skipped it:
+        // the record survives, and sharing -- which refuses once any producer's record is gone --
+        // still works.
+        expect(ids).toContain(ambientId);
+        await expect(reopened.overseer.createShareLink("build", "still shareable"))
+            .resolves.toMatchObject({ key: expect.any(String) });
+      } finally {
+        reopened.publicApi[Symbol.dispose]();
+      }
     });
   });
 });

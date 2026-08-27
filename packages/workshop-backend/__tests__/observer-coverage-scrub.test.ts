@@ -1,11 +1,12 @@
 // A failed live check (a gatekeeper's addObserver refusing, or the verifier failing to resolve)
 // must scrub that gatekeeper from the collaborator's *persisted* observer record synchronously
-// with the failure determination: the coverage guard reads the persisted record from other turns,
-// so a stale entry would keep admitting the producer's restricted observations to the
-// collaborator's still-live sessions.
+// with the failure determination: the record is the standing claim that this collaborator was
+// verified for that producer, and this open is not going to renew it. Because the claim is what
+// admitted them, the shrink also severs their still-live sessions (see observer-scope-restart).
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
-// git-migration-do.test.ts); the gatekeeper facet and the client's User DO are the only fakes.
+// git-migration-do.test.ts); the gatekeeper facet, the client's User DO, and the restart are the
+// only fakes -- a real ctx.abort() would kill the test DO.
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -16,6 +17,15 @@ declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
   }
+}
+
+// Seed the owner profile id (so the sharing manager needs no User DO round trip) and record the
+// restart a coverage shrink schedules instead of performing it.
+function recordRestarts(impl: any): string[] {
+  impl.ownerProfileId = "owner";
+  let restarts: string[] = [];
+  impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
+  return restarts;
 }
 
 function seedGatekeepers(impl: any): void {
@@ -41,12 +51,13 @@ const fakeClientUser = {
 } as any;
 
 describe("observer coverage scrub on a failed live check", () => {
-  it("a refused re-verification drops the entry, and the coverage guard then refuses", async () => {
+  it("a refused re-verification drops the entry and severs the collaborator's sessions",
+      async () => {
     let stub = env.TEST_OVERSEER.getByName("observer-coverage-scrub-refused");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
       seedGatekeepers(impl);
-      impl.ownerProfileId = "owner";
+      let restarts = recordRestarts(impl);
       // Alice is a reachable collaborator whose previous successful open left coverage for both
       // gatekeepers.
       impl.storage.collaborators.put({
@@ -72,11 +83,16 @@ describe("observer coverage scrub on a failed live check", () => {
       expect(1 in record.accountChoices).toBe(false);
       expect(record.accountChoices[2]).toBe(20);
 
-      // The point of the scrub: gatekeeper 1's restricted observations now fail closed for
-      // alice's still-live sessions, while gatekeeper 2's remain covered.
+      // The point of the scrub: alice's coverage shrank, so every live session is severed and
+      // must re-open against what the record now claims.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(restarts).toHaveLength(1);
+
+      // Neither producer's restricted reads are blocked, though -- both are verifiable, so
+      // admission is the whole enforcement and nobody unverified can be watching.
       let restricted = { title: "t", description: "d", containsRestrictedData: true };
       await expect(impl.authorizeObservation(1, restricted, { from: "user" }))
-          .rejects.toThrow(/not been verified/);
+          .resolves.toBeUndefined();
       await expect(impl.authorizeObservation(2, restricted, { from: "user" }))
           .resolves.toBeUndefined();
     });
@@ -87,6 +103,7 @@ describe("observer coverage scrub on a failed live check", () => {
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
       seedGatekeepers(impl);
+      recordRestarts(impl);
       // Already-configured coverage for both gatekeepers, as a previous successful open left it.
       impl.storage.observers.put(
           { profileId: "alice", observerId: "obs-1", accountChoices: { 1: 10, 2: 20 } });
@@ -113,8 +130,8 @@ describe("observer coverage scrub on a failed live check", () => {
           .rejects.toThrow(/could not confirm/);
 
       // The rejection went through fail(): gatekeeper 1's persisted coverage is scrubbed -- so
-      // the coverage guard stops admitting its restricted reads to this collaborator's older
-      // live sessions -- while gatekeeper 2's survives.
+      // the record no longer claims this collaborator was verified for it -- while gatekeeper 2's
+      // survives.
       let record = impl.storage.observers.get("alice");
       expect(1 in record.accountChoices).toBe(false);
       expect(record.accountChoices[2]).toBe(20);
@@ -132,6 +149,7 @@ describe("observer coverage scrub on a failed live check", () => {
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
       seedGatekeepers(impl);
+      recordRestarts(impl);
       // Alice's previous open covered gatekeeper 1 only; gatekeeper 2 is a binding added since,
       // which she has never been verified against.
       impl.storage.observers.put(
@@ -156,7 +174,7 @@ describe("observer coverage scrub on a failed live check", () => {
       // 2's was created by this call, so rolling it back merely restores the pre-call state --
       // there was no prior registration whose exclusions could be lost.
       expect(removed).toEqual([2]);
-      // Coverage is still scrubbed, so gatekeeper 1's restricted reads fail closed regardless.
+      // Coverage is still scrubbed regardless, so her next open must re-verify gatekeeper 1.
       expect(1 in impl.storage.observers.get("alice").accountChoices).toBe(false);
     });
   });
@@ -166,6 +184,7 @@ describe("observer coverage scrub on a failed live check", () => {
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
       seedGatekeepers(impl);
+      recordRestarts(impl);
       // No observer record: Alice has never been admitted, so the observerId minted for this call
       // is discarded with the unpersisted record and anything registered under it would linger
       // unresolvable.

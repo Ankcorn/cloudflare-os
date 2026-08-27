@@ -1,13 +1,16 @@
 // authorizeObservation's restricted-data gates. The exclusion gate is decided before anything
 // else: the restricted-mode latch is one-way, so an observation the exclusion blocks must leave
 // no trace -- no latch, no record, sharing untouched. The decisions the delivery rests on (the
-// removed-connection refusal, the coverage check, the latch, the record) all run *after* the
-// exclusion teardown's awaited cross-worker fan-out, in one synchronous block, so a removal
-// landing mid-teardown refuses the observation rather than slipping past a pre-latched producer.
-// And a restricted observation arriving through an already-removed connection (an in-flight facet
-// RPC can outlive removeGatekeeper) is refused rather than latched: with zero collaborators it
-// would sail past the coverage check's early return, and latching a missing producer id would
-// permanently brick sharing via assertNewSharingAllowed's missing-record branch.
+// removed-connection refusal, the unverifiable-producer refusal, the latch, the record) all run
+// *after* the exclusion teardown's awaited cross-worker fan-out, in one synchronous block, so a
+// removal landing mid-teardown refuses the observation rather than slipping past a pre-latched
+// producer. And a restricted observation arriving through an already-removed connection (an
+// in-flight facet RPC can outlive removeGatekeeper) is refused rather than latched: with zero
+// collaborators nothing else would stop it, and latching a missing producer id would permanently
+// brick sharing via assertNewSharingAllowed's missing-record branch.
+//
+// The last case covers the one producer admission cannot enforce: a connection with no vendor
+// account behind it is in nobody's verification scope, so no collaborator is ever asked about it.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
 // restricted-producer-removal.test.ts); the gatekeeper facet is the only fake.
@@ -69,7 +72,7 @@ describe("authorizeObservation's restricted-data gates", () => {
       let impl = getImpl(instance);
       seedGatekeeper(impl, 1);
       // An outstanding share link keeps the workspace "shared" for
-      // removalBlockedByRestrictedData without any collaborator blocking the coverage check.
+      // removalBlockedByRestrictedData.
       impl.storage.shareKeys.put({
         id: "link-1", created: new Date(), createdBy: OWNER, role: "build",
       });
@@ -114,8 +117,8 @@ describe("authorizeObservation's restricted-data gates", () => {
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = getImpl(instance);
       seedGatekeeper(impl, 1);
-      // Mallory is a current collaborator, verified against the producer (so the coverage check
-      // would admit the observation): the exclusion gate is the only thing blocking it.
+      // Mallory is a current collaborator, verified against the producer: nothing else stands in
+      // this observation's way, so the exclusion gate is the only thing blocking it.
       impl.storage.collaborators.put({
         profile: { id: "mallory", name: "Mallory" },
         addedBy: [{ type: "user", sharer: OWNER, created: new Date(), role: "build" }],
@@ -172,8 +175,8 @@ describe("authorizeObservation's restricted-data gates", () => {
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = getImpl(instance);
       // No gatekeeper record: the in-flight facet RPC outlived removeGatekeeper. With zero
-      // collaborators the coverage check's early return admits it, so only this guard stands
-      // between the observation and latching a missing producer id.
+      // collaborators nothing else refuses it, so only this guard stands between the observation
+      // and latching a missing producer id.
       await expect(impl.authorizeObservation(1, {
         title: "Read a thing",
         description: "The test read a thing.",
@@ -184,6 +187,64 @@ describe("authorizeObservation's restricted-data gates", () => {
       // and above all must not be left permanently unshareable by latching a missing producer.
       expect(impl.storage.prohibitAllSharing.get()).toBe(false);
       expect(() => impl.assertNewSharingAllowed()).not.toThrow();
+    });
+  });
+
+  it("refuses an unverifiable producer's restricted data on a shared workspace", async () => {
+    let stub = env.TEST_OVERSEER.getByName("restricted-latch-unverifiable-shared");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = getImpl(instance);
+      // An AI model binding has no vendor account behind it, so #inScopeGatekeepers skips it and
+      // no collaborator is ever asked to verify against it -- the one producer admission cannot
+      // enforce, and the only one this check still refuses.
+      impl.storage.gatekeepers.put({
+        id: 1,
+        resourceTitle: "Claude",
+        class: {} as any,
+        creationSpec: {
+          type: "aiModel", modelId: "m", provider: "anthropic", modelName: "claude",
+        },
+      });
+      impl.storage.collaborators.put({
+        profile: { id: "mallory", name: "Mallory" },
+        addedBy: [{ type: "user", sharer: OWNER, created: new Date(), role: "build" }],
+      });
+
+      await expect(impl.authorizeObservation(1, {
+        title: "Read a thing",
+        description: "The test read a thing.",
+        containsRestrictedData: true,
+      }, { from: "user" })).rejects.toThrow(/cannot verify anyone's access/);
+
+      // Refused, so nothing latched: the owner can still unshare and read it.
+      expect(impl.storage.prohibitAllSharing.get()).toBe(false);
+      expect([...impl.storage.actions.list()]).toHaveLength(0);
+    });
+  });
+
+  it("admits an unverifiable producer's restricted data on a solo workspace", async () => {
+    let stub = env.TEST_OVERSEER.getByName("restricted-latch-unverifiable-solo");
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = getImpl(instance);
+      impl.storage.gatekeepers.put({
+        id: 1,
+        resourceTitle: "Claude",
+        class: {} as any,
+        creationSpec: {
+          type: "aiModel", modelId: "m", provider: "anthropic", modelName: "claude",
+        },
+      });
+
+      // Nobody to under-verify: the owner reads their own data, and the latch is what keeps it
+      // that way.
+      await expect(impl.authorizeObservation(1, {
+        title: "Read a thing",
+        description: "The test read a thing.",
+        containsRestrictedData: true,
+      }, { from: "user" })).resolves.toBeUndefined();
+
+      expect(impl.storage.prohibitAllSharing.get()).toBe(true);
+      expect(() => impl.assertNewSharingAllowed()).toThrow();
     });
   });
 });

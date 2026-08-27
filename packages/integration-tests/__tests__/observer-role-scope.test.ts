@@ -1,13 +1,14 @@
-// Tests for role-scoped observer enforcement: the sensitive-observation coverage guard holds a
-// collaborator only to what their role's verification scope can actually cover ("use"
-// collaborators are verified only against gadget-bound connections; see #inScopeGatekeepers in
-// overseer.ts). The external-message gate's role scoping is covered by
-// external-message-verification.test.ts.
+// Tests for role-scoped observer enforcement: a collaborator is held only to what their role's
+// verification scope can actually cover ("use" collaborators are verified only against
+// gadget-bound connections; see #inScopeGatekeepers in overseer.ts). So binding a connection into
+// a gadget widens every "use" collaborator's scope, and since sessions are verified only at open(),
+// that widening restarts the workspace: each client's next open re-verifies against the new scope.
+// The external-message gate's role scoping is covered by external-message-verification.test.ts.
 //
 // This lives in its own file -- with its own harness, like every suite here -- rather than in
-// sensitive-observations.test.ts, because that suite includes a revocation-restart test whose DO
-// abort makes the shared local harness briefly drop unrelated in-flight requests; its concurrent
-// tests pass with their current timing, but growing that file re-rolls those dice.
+// sensitive-observations.test.ts, because both suites restart the workspace, and a DO abort makes
+// the shared local harness briefly drop unrelated in-flight requests; their concurrent tests pass
+// with their current timing, but growing either file re-rolls those dice.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
@@ -17,8 +18,8 @@ import {
 } from "../src/harness.js";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import {
-  connect, listConnectedAccounts, MAX_OBSERVER_PROMPTS, nextUsernames, ObserverConfigRecorder,
-  signUp, stubFor, waitFor, type ConnectedAccount,
+  connect, listConnectedAccounts, logIn, MAX_OBSERVER_PROMPTS, nextUsernames,
+  ObserverConfigRecorder, signUp, stubFor, waitFor, type ConnectedAccount,
 } from "../src/rpc-client.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 
@@ -63,6 +64,7 @@ async function provisionAccount(api: RpcStub<AuthenticatedApi>): Promise<Connect
 type Workspace = {
   gadgetId: string;
   overseer: RpcStub<Overseer>;
+  alice: string;
   aliceApi: RpcStub<AuthenticatedApi>;
   /** The fixture session bound to the workspace's (first) gatekeeper. */
   session: RpcStub<TestSession>;
@@ -81,11 +83,55 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
   const gatekeeperId = await gatekeeper.getId();
   const session = await gatekeeper.openSession() as RpcStub<TestSession>;
   const { id: gadgetId } = await overseer.getMetadata();
-  return { gadgetId, overseer, aliceApi, session, gatekeeperId };
+  return { gadgetId, overseer, alice, aliceApi, session, gatekeeperId };
+}
+
+// The owner's own reconnect after a restart, on a fresh connection: the abort fells every client of
+// the workspace, so `ws`'s stubs -- and the whole session they came from -- are dead afterwards.
+async function reopenAfterRestart(ws: Workspace): Promise<{
+  publicApi: RpcStub<PublicApi>;
+  session: RpcStub<TestSession>;
+}> {
+  await waitFor("the restart to fell the old workspace instance", () =>
+      ws.session.readThing().then(() => null, () => true));
+
+  return waitFor("the workspace to come back after the restart", async () => {
+    const publicApi = connect(harness.url);
+    try {
+      const aliceApi = await logIn(publicApi, ws.alice);
+      const overseer = await aliceApi.openGadget(ws.gadgetId);
+      const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
+      const session = await gatekeeper.openSession() as RpcStub<TestSession>;
+      // Probe with a benign read, so a session felled by the abort retries here rather than
+      // failing an assertion below.
+      await session.readThing();
+      return { publicApi, session };
+    } catch {
+      publicApi[Symbol.dispose]();
+      return null;
+    }
+  });
+}
+
+// Carol's forced re-open, on the fresh connection her browser would reconnect with.
+async function carolReopens(
+    ws: Workspace, carol: string, recorder: ObserverConfigRecorder): Promise<void> {
+  const publicApi = connect(harness.url);
+  try {
+    const carolApi = await logIn(publicApi, carol);
+    const callback = stubFor(recorder);
+    try {
+      (await carolApi.openGadget(ws.gadgetId, undefined, callback))[Symbol.dispose]();
+    } finally {
+      callback[Symbol.dispose]();
+    }
+  } finally {
+    publicApi[Symbol.dispose]();
+  }
 }
 
 describe("role-scoped observer enforcement", () => {
-  it.concurrent("a use collaborator only blocks reads from connections in their scope",
+  it.concurrent("a use collaborator is verified only against connections in their scope",
       async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "use-scope");
@@ -104,26 +150,33 @@ describe("role-scoped observer enforcement", () => {
         emptyCallback[Symbol.dispose]();
       }
 
-      // ensureObserver can never verify Carol against an unbound connection, so she must not
-      // block its sensitive reads either -- demanding coverage her role can't gain would block
-      // them forever.
+      // Carol holds no coverage for the connection and never will while it stays unbound, but that
+      // is enforced against her open, not against the owner's reads: this restricted read goes
+      // through.
       await expect(ws.session.readThing(true)).resolves.toContain("use-scope");
 
       // Binding the connection to a gadget (pure storage writes; no gadget code runs) brings it
-      // into "use" scope. Carol is now in scope but uncovered, so the read blocks...
+      // into "use" scope. That widens what Carol's live session must be verified against, and a
+      // live session is never re-verified in place -- so the workspace restarts instead.
       using gadget = await ws.overseer.createGadget("Test Gadget", undefined, "TEST_GADGET");
       await gadget.bind("TEST_THING", ws.gatekeeperId);
-      await expect(ws.session.readThing(true)).rejects.toThrow(/has not been verified/i);
 
-      // ...and the error's remedy works: re-opening verifies her, which unblocks the read.
-      const callback = stubFor(
-          new ObserverConfigRecorder().alwaysChoose(carolAccount.id, MAX_OBSERVER_PROMPTS));
+      const reopened = await reopenAfterRestart(ws);
       try {
-        (await carolApi.openGadget(ws.gadgetId, undefined, callback))[Symbol.dispose]();
+        // The owner's restricted read is undisturbed by the widening: nothing about Carol's
+        // coverage gates it.
+        await expect(reopened.session.readThing(true)).resolves.toContain("use-scope");
+
+        // Carol's forced re-open is where the newly in-scope connection gets verified, and she is
+        // asked about exactly it -- the one connection her role's scope just gained.
+        const recorder =
+            new ObserverConfigRecorder().alwaysChoose(carolAccount.id, MAX_OBSERVER_PROMPTS);
+        await carolReopens(ws, carol, recorder);
+        expect(recorder.callCount).toBe(1);
+        expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([ws.gatekeeperId]);
       } finally {
-        callback[Symbol.dispose]();
+        reopened.publicApi[Symbol.dispose]();
       }
-      await expect(ws.session.readThing(true)).resolves.toContain("use-scope");
     });
   });
 });

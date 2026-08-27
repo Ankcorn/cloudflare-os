@@ -1,10 +1,12 @@
 // ensureObserver must prune out-of-scope account choices from the observer record at every open,
-// restoring the coverage guard's invariant "entry present => verified at this collaborator's most
-// recent open": rebinding a connection keeps the same gatekeeper id, so a stale entry left from
-// before an unbind would otherwise be trusted without any open having re-verified it.
+// keeping the record an accurate statement of what this collaborator's most recent open verified.
+// Rebinding a connection keeps the same gatekeeper id, so a stale entry left from before an unbind
+// would otherwise silently re-register them off an account choice made for a scope the workspace
+// no longer has, instead of asking them again.
 //
 // Runs against a real OverseerDurableObject (the TEST_OVERSEER binding, like
-// git-migration-do.test.ts); the gatekeeper facet and the client's User DO are the only fakes.
+// git-migration-do.test.ts); the gatekeeper facet, the client's User DO, and the restart are the
+// only fakes -- a real ctx.abort() would kill the test DO.
 
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
@@ -117,13 +119,15 @@ describe("ensureObserver out-of-scope coverage pruning", () => {
     });
   });
 
-  it("blocks a rebound producer's restricted reads until the collaborator re-opens", async () => {
+  it("restarts on a rebind, and the re-open re-verifies the pruned producer", async () => {
     let stub = env.TEST_OVERSEER.getByName("observer-scope-prune-rebind");
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
       seedGatekeepers(impl);
       seedGadgetBindingGk1(impl);
       impl.ownerProfileId = "owner";
+      let restarts: string[] = [];
+      impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
       // Alice is a "use" collaborator with stale coverage for gatekeeper 2, left over from before
       // it was unbound from every gadget.
       impl.storage.collaborators.put({
@@ -133,22 +137,36 @@ describe("ensureObserver out-of-scope coverage pruning", () => {
       impl.storage.observers.put(
           { profileId: "alice", observerId: "obs-1", accountChoices: { 1: 10, 2: 20 } });
 
-      impl.getGatekeeperFacet = () => ({ addObserver: async () => {} });
+      let verified: number[] = [];
+      impl.getGatekeeperFacet = (id: number) => ({
+        addObserver: async () => { verified.push(id); },
+      });
 
       // Alice opens during the unbound window: gatekeeper 2 is out of her scope, so this open
       // verifies nothing against it -- and prunes her stale entry.
       await impl.ensureObserver("alice", fakeClientUser, "use");
+      expect(verified).toEqual([1]);
+      expect(impl.storage.observers.get("alice").accountChoices).toEqual({ 1: 10 });
 
-      // Rebind gatekeeper 2 (same gatekeeper id -- only the gadget's binding edges change).
-      let gadget = impl.storage.gadgets.get(100);
-      gadget.bindings.DB2 = { target: 2 };
-      impl.storage.gadgets.put(gadget);
+      // Rebind gatekeeper 2 (same gatekeeper id -- only the gadget's binding edges change). That
+      // widens every "use" collaborator's scope, so it severs Alice's live session.
+      impl.bindWorkpiece(100, "DB2", 2);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(restarts).toHaveLength(1);
 
-      // Its restricted reads must now be blocked: Alice's most recent open never verified her
-      // against gatekeeper 2.
-      await expect(impl.authorizeObservation(
-          2, { title: "t", description: "d", containsRestrictedData: true }, { from: "user" }))
-          .rejects.toThrow(/not been verified/);
+      // Her forced re-open is where gatekeeper 2 gets verified again -- and since the prune left
+      // no entry to reuse, she is asked to choose an account for it rather than being re-registered
+      // off the choice she made before it was unbound.
+      let asked: number[] = [];
+      let configureCb = { configure: async (needs: { gatekeeperId: number }[]) => {
+        asked.push(...needs.map(need => need.gatekeeperId));
+        return needs.map(need => ({ gatekeeperId: need.gatekeeperId, accountId: 30 }));
+      } } as any;
+      await impl.ensureObserver("alice", fakeClientUser, "use", configureCb);
+
+      expect(asked).toEqual([2]);
+      expect(verified.toSorted()).toEqual([1, 1, 2]);
+      expect(impl.storage.observers.get("alice").accountChoices).toEqual({ 1: 10, 2: 30 });
     });
   });
 });
