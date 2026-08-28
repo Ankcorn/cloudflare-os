@@ -152,15 +152,17 @@ Because the role is recomputed from the graph on every `open()`, the live comput
 
 A share-key redemption goes through the same gate: the redemption is a grant like any other, policy-gated by `assertNewSharingAllowed` synchronously with the edge write. The redeeming open() then verifies the recipient as an observer like any other collaborator; a recipient whose verification fails persists as an unverified collaborator until removed (see Known limitations).
 
-### Terminating live sessions on revocation
+### Terminating live sessions on revocation or scope growth
 
 Authorization is only checked at `open()`, so a session that is *already* open is not re-checked per message. Without intervention, a collaborator who was just removed or downgraded could keep using their live session until something else disconnected them. To close this gap, `removeCollaborator`/`revokeShareLink` proactively restart the gadget's Overseer DO via `ctx.abort()` whenever the change actually removed or downgraded someone (i.e. the returned `AffectedCollaborator[]` is non-empty; pure no-op removals don't restart). Aborting forcibly disconnects every client; each reconnects and re-runs `open()`, which re-evaluates the now-changed permission graph -- sending removed users to the terminal access-denied page and handing downgraded users their reduced capability (the editor swaps to the `use` view automatically based on `metadata.role`). Since removals are rare (and DOs restart unpredictably anyway, so reconnects are already cheap), the disruption is acceptable.
 
-Two precautions surround the abort (`OverseerImpl.scheduleRevocationRestart`): the severed edge is flushed with `ctx.storage.sync()` first (because `ctx.abort()` does not respect the output gate, a restart could otherwise come back with the change lost), and the abort is delayed ~100ms so the triggering RPC's response reaches the caller -- typically the owner, who is also connected -- before their own connection drops. The disconnect reaches the browser through the existing `notifyClosed` plumbing: when the Overseer DO aborts, the per-session `notifyClosed` stub is disposed without being called, which `AuthenticatedApiImpl` treats as a lost connection and reacts to by killing the browser WebSocket, forcing a reconnect. The client discards its retained share key on the first successful open, so this forced reconnect after a removal is keyless and lands the removed collaborator on the access-denied page rather than silently re-redeeming the still-active link (which would undo the removal and break the assumption stated above). The residual is unchanged: the *link* itself survives a collaborator removal under the lazy model, so a recipient who kept the URL can still re-redeem it manually until the owner revokes it -- the discard removes only the client's automatic re-grant.
+Two precautions surround the abort (`OverseerImpl.scheduleAccessRestart`): the severed edge is flushed with `ctx.storage.sync()` first (because `ctx.abort()` does not respect the output gate, a restart could otherwise come back with the change lost), and the abort is delayed ~100ms so the triggering RPC's response reaches the caller -- typically the owner, who is also connected -- before their own connection drops. The disconnect reaches the browser through the existing `notifyClosed` plumbing: when the Overseer DO aborts, the per-session `notifyClosed` stub is disposed without being called, which `AuthenticatedApiImpl` treats as a lost connection and reacts to by killing the browser WebSocket, forcing a reconnect. The client discards its retained share key on the first successful open, so this forced reconnect after a removal is keyless and lands the removed collaborator on the access-denied page rather than silently re-redeeming the still-active link (which would undo the removal and break the assumption stated above). The residual is unchanged: the *link* itself survives a collaborator removal under the lazy model, so a recipient who kept the URL can still re-redeem it manually until the owner revokes it -- the discard removes only the client's automatic re-grant.
 
 The abort also lands later than the ~100ms delay alone suggests: the revocation handlers first await the observer teardown (`tearDownLostObservers`, a per-collaborator `removeObserver` fan-out) and the listing refresh (`refreshAffectedCollaboratorListings`, chunked cross-DO round trips), so the removed users' sessions stay live and watching for a window that scales with collaborator and gatekeeper count.
 
-Note this is only needed for removals/downgrades. Granting or raising access never strands anyone, and `containsRestrictedData` cannot strand a session either: an observation carrying that flag is *blocked* (rather than applied) unless every current collaborator *in whose verification scope the producing gatekeeper falls* is already a verified observer of it (coverage is held to each collaborator's role scope; see docs/observers.md edge case 4), so no live session ever belongs to someone the flag would newly exclude. Verification, though, is a *live* check re-run at each open: a collaborator whose provider-side access is later revoked may still hold an older session opened while they passed. That is why a failed re-verification scrubs the failed gatekeeper from their persisted observer record (docs/observers.md edge case 3) — from that point the coverage guard blocks that producer's restricted observations, including to the stale session, until a successful re-open.
+Granting or raising access never strands anyone: a live session's capability is fixed at open, so a `use` collaborator promoted to `build` in the graph still holds `UseOverseerInterface` until they re-open, and nobody is newly excluded from anything.
+
+The same abort serves a second purpose, though, and there the trigger is a *grant*: observer verification also runs only at `open()`, so widening the set of gatekeepers a collaborator must be verified against leaves their live session holding access they were never verified for. `OverseerImpl.#restartIfShared` restarts the workspace whenever that happens -- a connection is added, one is bound into a gadget, a merge promotes such a binding, or a re-verification failure scrubs a previously-persisted account choice -- so every client re-opens and re-runs `ensureObserver` at the new scope. It is a no-op when the workspace has no collaborators, so a solo workspace is never disturbed. See docs/observers.md, "Restarting when verification scope changes", for the full trigger list and the reasoning about what deliberately does *not* trigger it.
 
 ## Future work
 
@@ -179,12 +181,14 @@ Revocations and role changes take effect within seconds -- the revocation restar
 *persistent* wrong state remain. Each item below is marked at its site in the code by a matching
 `TODO` comment.
 
-- **An unverified redeemer blocks restricted reads.** Redemption writes a real edge before the
-  redeeming open's observer verification runs, so from the moment a recipient clicks the link
-  until their verification succeeds they are a current collaborator the coverage guard fails
-  closed on. Remedies: they verify (complete the open), the owner removes them, or the link is
-  revoked. Two-phase redemption (a pending edge granting nothing until verification confirms it)
-  is the planned fix.
+- **An unverified redeemer persists as a collaborator.** Redemption writes a real edge before the
+  redeeming open's observer verification runs, so from the moment a recipient clicks the link they
+  appear in `listCollaborators` whether or not they ever complete the open. They cannot reach the
+  workspace -- verification denies them at open -- but the workspace counts as *shared* for the
+  checks that ask only whether anyone else is on it: removing a restricted producer is blocked, and
+  an unverifiable producer's restricted reads are refused. Remedies: they verify (complete the
+  open), the owner removes them, or the link is revoked. Two-phase redemption (a pending edge
+  granting nothing until verification confirms it) is the planned fix.
 - **A refused recipient persists.** A recipient whose verification is refused keeps their edge:
-  they appear in `listCollaborators` and block restricted reads until the owner removes them (or
-  revokes the link). Fail-closed like the previous item, and covered by the same planned fix.
+  they appear in `listCollaborators` until the owner removes them (or revokes the link), with the
+  same consequences as the previous item, and covered by the same planned fix.

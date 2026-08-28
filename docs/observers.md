@@ -34,9 +34,12 @@ The mechanism is a per-user, gatekeeper-mediated check — "this data may be sha
 people who *also* have access to it". (Maximally sensitive data gets an extra layer: an
 observation marked **`containsRestrictedData`**
 (`ObservationDescription.containsRestrictedData` in `packages/workshop-shared/src/gatekeeper.ts`)
-latches the workspace into a restricted mode — no actions, no web fetches — and is admitted only
-if every current collaborator has been verified against the gatekeeper producing it; see the
-coverage guard, `#assertSensitiveObservationCoverage`, in `overseer.ts` and edge case 4 below.)
+latches the workspace into a restricted mode — no actions, no web fetches. Its coverage rests on
+admission: nobody can open the workspace without being verified against the producing gatekeeper,
+and anything that widens what they must be verified against restarts every live session. The one
+producer admission cannot see — one with no vendor account behind it — is refused outright while
+the workspace is shared; see `#assertUnverifiableProducerUnshared` in `overseer.ts` and edge case
+4 below.)
 
 The check works as follows:
 
@@ -94,7 +97,8 @@ The check works as follows:
 | Overseer DO, `open()` auth entry point | `packages/workshop-backend/src/overseer.ts` |
 | Server `openGadget` path | `packages/workshop-backend/src/server.ts` |
 | Role resolution / permission graph | `packages/workshop-backend/src/sharing.ts` (`getEffectiveRole`, `computeEffectiveRoles`) |
-| `containsRestrictedData` enforcement | `overseer.ts` (`authorizeObservation` coverage guard, `getWebFetchEnv`, `submitAction`) |
+| `containsRestrictedData` enforcement | `overseer.ts` (`authorizeObservation`'s `#assertUnverifiableProducerUnshared`, `getWebFetchEnv`, `submitAction`) |
+| Session restart when verification scope widens | `overseer.ts` (`#restartIfShared`, `scheduleAccessRestart`) |
 | Observation recording | `overseer.ts` `authorizeObservation()`; `ApprovalQueueImpl` |
 | Gatekeeper storage record | `overseer.ts` `GatekeeperRecord` (has `creationSpec.vendorId`) |
 | `GatekeeperCreationSpec` | `packages/workshop-shared/src/api.ts` |
@@ -287,11 +291,14 @@ Logic:
    - If any `addObserver` **throws** (or `getVerifier` throws on vendor mismatch, or returns null
      for a disconnected account), the user is not (or no longer) allowed. Every such failure goes
      through one `fail()` path that synchronously scrubs the failed gatekeeper from the
-     *persisted* record, so the coverage guard (edge case 4) fails closed immediately, and the
+     *persisted* record, so the record stops claiming a verification that no longer holds, and the
      user is offered a bounded number of re-prompts to repair (e.g. re-authenticate an expired
      account). On terminal failure the open is denied with a message naming each refused binding,
      and the registrations added by this call -- plus those it invalidated and no later pass
-     re-verified -- are best-effort-removed while no record is persisted.
+     re-verified -- are best-effort-removed while no record is persisted. A terminal failure that
+     scrubbed a previously-persisted choice also restarts the workspace (see
+     "Restarting when verification scope changes" below), because the collaborator may hold other
+     sessions that opened while that choice still verified them.
 
 6. **Persist the observer record** (with merged `accountChoices` and `observerId`) only after all
    `addObserver` calls succeed. Storing/creating the record is the canonical moment the user
@@ -313,6 +320,34 @@ Notes:
   stored account choices. The modal is only for genuinely uncovered bindings (first open, a binding
   the owner added after this user last configured, or an ambient binding without a matching provided
   account).
+
+#### Restarting when verification scope changes
+
+Verification runs at `open()` and nowhere else, so a live session is only ever as verified as the
+scope that existed when it opened. When that scope **widens**, the overseer restarts the workspace
+rather than trying to re-verify sessions in place: `#restartIfShared(reason)` delegates to
+`scheduleAccessRestart(reason)` — the same DO abort used to revoke a collaborator (see
+`docs/sharing.md`) — so every client's browser reconnects and re-runs
+`authorizeCollaborator`/`ensureObserver` against the new scope. It is a no-op when the workspace
+has no collaborators: the owner is never an observer, so there is nobody to re-verify.
+
+Four events trigger it:
+
+| Event | What grows |
+|---|---|
+| `addGatekeeper()` with a vendor-backed `creationSpec` | **build** scope — a live `build` session can `getGatekeeperById()`/`openSession()` on it with no observer check |
+| `bindWorkpiece()` for a permanent (non-`chatId`) edge onto a vendor-backed connection | **use** scope — the gadget UI a `use` session drives can now invoke it |
+| A merge that promotes a pending gadget or a pending binding edge | **use** scope, same reason |
+| A terminal `ensureObserver()` failure that scrubbed a previously-persisted account choice | Coverage *shrank*: the collaborator's other sessions still hold access the scrubbed choice used to justify |
+
+Shrinking scope needs no restart (`unbindWorkpiece`, `removeGatekeeper`): `ensureObserver`'s prune
+handles it at the next open, and a narrower scope can never under-verify. Role *rises*
+(`addCollaborator`, share-key redemption) are deliberately not triggers either — a live session's
+capability is fixed at open, so raising someone's graph role does not widen the session they
+already hold.
+
+Enforcement is therefore at admission, within the ~100 ms abort delay of the change, and held to
+the collaborator's role scope (edge case 4 below).
 
 ### Step 4 — Frontend: the configuration modal
 
@@ -415,48 +450,53 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
 3. **Underlying resource access revoked** — caught at the next open because `addObserver`
    re-runs the live check and throws; the open is denied. Consistent with the lazy-revocation
    model in `sharing.ts`. The denial also scrubs each failed gatekeeper from the collaborator's
-   persisted observer record, so the
-   sensitive-observation coverage guard (edge case 4) blocks that producer's later restricted
-   observations — including to the collaborator's still-live sessions — until a successful
-   re-open re-persists coverage, or the collaborator is removed. The gatekeeper-side
-   registration is kept on a re-verification failure — it is what preserves forward exclusion
-   (`excludeObservers`) for the collaborator's still-live sessions, it is fail-closed (it can
-   only add exclusion names), and the next successful open's `addObserver` overwrites its
-   verifier; only a *first-ever* verification failure rolls its registrations back, since that
-   collaborator was never admitted and the minted id would otherwise linger unresolvable. The
-   residual under the lazy
-   model: a collaborator who never re-opens keeps their record and any live session, but once
-   scrubbed they *block* that producer's restricted reads like any unverified collaborator.
-   An operational failure (vendor outage, expired credential) scrubs the same way — the
-   overseer cannot tell it from a settled denial, so coverage fails closed until a repaired
-   re-open.
-4. **`containsRestrictedData` interaction** — a sensitive observation is admitted only if every
-   current collaborator *in whose role-scope the producing gatekeeper falls* holds an observer
-   record covering it
-   (`#assertSensitiveObservationCoverage` in `authorizeObservation`); otherwise it is blocked
-   with a message naming the unverified collaborator. Coverage is held to each collaborator's own
-   verification scope because `ensureObserver` can never verify beyond it: a `use` collaborator
-   can't be covered for a gatekeeper no gadget binds, so demanding that would block the read
-   permanently (an unverifiable gatekeeper — no vendor account, or a legacy record — blocks
-   on any collaborator regardless of role). At open() time, `ensureObserver` re-verifies each
-   collaborator against every in-scope gatekeeper, which is what admits (or refuses) them for
-   sensitive data. The flag also latches the workspace into a restricted mode that blocks
-   actions and web fetches.
+   persisted observer record, so the record stops claiming a verification that no longer holds.
+   Because the collaborator may hold *other* sessions that opened while it did, a scrub also
+   restarts the workspace (see "Restarting when verification scope changes"), which forces every
+   session on it to re-open and re-verify; whoever cannot is denied at that open. The
+   gatekeeper-side registration is kept on a re-verification failure — de-registering it would be
+   fail-open, since the gatekeeper would stop naming that observer in `excludeObservers` and an
+   observation it would have excluded them from would be admitted with nothing left to block it,
+   while keeping it can only add exclusion names; the next successful open's `addObserver`
+   overwrites its verifier. Only a *first-ever* verification failure rolls its registrations back,
+   since that collaborator was never admitted and the minted id would otherwise linger
+   unresolvable. The residual under the lazy model is unchanged: a collaborator who never opens
+   again is never asked, so nothing detects their revocation and nothing severs the session they
+   already hold.
+   An operational failure (vendor outage, expired credential) is treated the same way — the
+   overseer cannot tell it from a settled denial, so it scrubs and restarts too, and the
+   collaborator gets back in as soon as a repaired open re-verifies them.
+4. **`containsRestrictedData` interaction** — coverage is enforced at *admission*, not per
+   observation: `ensureObserver` re-verifies each collaborator against every in-scope gatekeeper
+   at every `open()`, so nobody can be in the workspace without having passed the producing
+   gatekeeper's `addObserver()`, and anything that widens what they must pass restarts every live
+   session (see "Restarting when verification scope changes"). The flag also latches the workspace
+   into a restricted mode that blocks actions and web fetches.
+   One producer admission structurally cannot cover: one with no vendor account behind it — an
+   `aiModel`/`agentSpawner` binding, or a legacy record with no `creationSpec`.
+   `#inScopeGatekeepers` skips those, so no collaborator is ever asked about them, and
+   `#assertUnverifiableProducerUnshared` in `authorizeObservation` therefore refuses their
+   restricted observations outright while the workspace is shared. (This matches
+   `assertNewSharingAllowed()`, which already treats the same case as unshareable, and the message
+   names no collaborator: it reaches sandboxed gadget code and agent output.)
+   Verification is also held to each collaborator's own role scope, because `ensureObserver` can
+   never verify beyond it: a `use` collaborator can't be covered for a gatekeeper no gadget binds.
    `use` scope is *live* binding state, with a transition case in each direction. Adding a
-   binding grows it, and edge case 5 covers the interim. Unbinding shrinks it with no guard:
+   binding grows it, which restarts every session (edge case 5). Unbinding shrinks it silently:
    a formerly-bound producer drops out of `use` verification scope, so its sensitive reads
    stop requiring `use` collaborators' coverage — the same skip as a never-bound producer,
    though the liveness argument above doesn't apply to it. Accepted because (i) `use` sessions
    cannot read chat history or the action log, so the exposure is limited to state the gadget
    persisted, served through the gadget's own UI or export; (ii) that data entered gadget
    storage while the producer *was* bound, when every `use` collaborator was verified against
-   it or the read was blocked; (iii) the residual is `use` grants created after the unbind,
-   who view that persisted state unverified — and re-binding the connection restores their
+   it or could not open the workspace; (iii) the residual is `use` grants created after the
+   unbind, who view that persisted state unverified — and re-binding the connection restores their
    verifiability at their next open. Stale coverage does not ride across the unbind/rebind:
    `ensureObserver` prunes out-of-scope entries from the observer record at every open, so a
    `use` collaborator who opened only during the unbound window (verifying nothing against the
-   producer) holds no entry for it, and after the rebind the coverage guard blocks the
-   producer's sensitive reads until each such collaborator re-opens at the restored scope.
+   producer) holds no entry for it, and the rebind restarts the workspace, so their forced
+   re-open asks them about the producer again rather than re-registering them off the choice they
+   made before it was unbound.
    The *never*-bound flavor of the same skip is broader: a producer reachable only through
    chat bindings (an ambient singleton the agent reads in chat) was never in any `use`
    collaborator's scope, so premise (ii) does not hold for it — the agent can persist its
@@ -469,16 +509,14 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    collaborator is verified against it at their next open.
 5. **Owner adds a new binding after sharing** — existing observers see an incremental modal for
    just the new binding on their next open, and may be denied if they lack access to the new
-   resource (inherent to the security model). Adding a binding does not restart live sessions,
-   so an already-open collaborator is only verified against it at their next open; the coverage
-   guard (edge case 4) covers the interim, blocking the new connection's sensitive reads until
-   every collaborator has been verified against it. The residual — the live session watching the
-   new connection's *non-restricted* observations until re-open — is accepted. A connection
-   added *while a collaborator's verification is parked* on an await (the modal, verifier RPCs)
-   is part of this same residual, not a bypass: the committed record simply lacks an entry for
-   it, and every consumer fails closed on absence — the coverage guard blocks the connection's
-   restricted reads, and the next open re-verifies the uncovered binding — while their live
-   session watches like any other until re-open.
+   resource (inherent to the security model). Because that next open is what verifies them, the
+   addition restarts the workspace on a shared workspace (see "Restarting when verification scope
+   changes"): every client reconnects within ~100 ms and re-opens at the new scope, so no session
+   keeps watching a connection its holder was never verified against. A connection added *while a
+   collaborator's verification is parked* on an await (the modal, verifier RPCs) is covered by the
+   same restart: their committed record lacks an entry for the new connection, and the restart
+   forces the open that adds one. The residual is the ~100 ms window itself, which is inside the
+   revocation window the sharing model already accepts.
 6. **Performance** — `ensureObserver` does one `getVerifier` + one `addObserver` per in-scope
    gatekeeper per open. Parallelize with `Promise.all` and pipe the verifier promise straight into
    `addObserver`. Expensive gatekeepers cache on their side.

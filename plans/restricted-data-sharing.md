@@ -40,25 +40,23 @@ commits.
   old name.
 - **Admission is per-collaborator, checked continuously.** Not at grant time: at every
   `open()`, so revocation of a collaborator's underlying resource access is caught
-  promptly. `authorizeObservation` admits a restricted observation only when every
-  current collaborator in whose role scope the producer falls is already verified
-  against it (`#assertSensitiveObservationCoverage`). The exception for an unbound
-  producer and a `use` collaborator is the known security risk stated above.
+  promptly. Nobody is in the workspace without having passed the producer's
+  `addObserver()`, and anything that widens what they must pass restarts every live
+  session so it re-opens at the new scope (`#restartIfShared`). `authorizeObservation`
+  itself only has to refuse the one producer admission cannot see: an unverifiable one
+  (`#assertUnverifiableProducerUnshared`).
 - **Coverage is held to each collaborator's own role scope.** `ensureObserver` never
-  verifies a `use` collaborator against a gatekeeper no gadget binds, so demanding
-  coverage there would block the read permanently and make the error's remedy ("re-open
-  the workspace") a lie. This is a liveness tradeoff, not a security guarantee: restricted
-  data can flow from that gatekeeper through the agent into gadget-visible state. An
-  unverifiable gatekeeper — no vendor account, or a legacy record with no `creationSpec`
-  — blocks on any collaborator regardless of role.
+  verifies a `use` collaborator against a gatekeeper no gadget binds. This is a liveness
+  tradeoff, not a security guarantee: restricted data can flow from that gatekeeper
+  through the agent into gadget-visible state. The exception for an unbound producer and
+  a `use` collaborator is the known security risk stated above.
 - **Share-key redemption stays one-step.** Redeeming a key writes a real edge
   immediately, as on main, gated by `assertNewSharingAllowed` synchronously with the
   write. The redeeming open then verifies the recipient like any other collaborator.
-  Two consequences are accepted on the ledger below (both fail-closed: availability,
-  not confidentiality): an unverified redeemer blocks restricted reads until they
-  verify, and a refused recipient persists until removed. Two-phase redemption (a
-  pending edge granting nothing until verification confirms it) is the planned
-  follow-up fix for both.
+  Two consequences are accepted on the ledger below: an unverified redeemer, and a
+  refused recipient, both persist in `listCollaborators` until removed, which is enough
+  to make the workspace count as shared. Two-phase redemption (a pending edge granting
+  nothing until verification confirms it) is the planned follow-up fix for both.
 - **One authorization gate for every non-owner entry point.** `authorizeCollaborator`
   resolves the effective role and runs `ensureObserver`. Both `open()` and
   `receiveExternalMessage()` pass through it; the latter non-interactively, since there
@@ -88,17 +86,26 @@ commits.
 
 ## Design
 
-### 1. The coverage guard (`#assertSensitiveObservationCoverage`)
+### 1. Admission, and the residual guard (`#assertUnverifiableProducerUnshared`)
 
-Replaces the old `hasAnyShares()` block-everything check. Walks `listCollaborators()`
-and throws unless each has a persisted observer record naming the producing gatekeeper.
-Skips a verifiable gatekeeper outside a `use` collaborator's scope (see "Accepted
-tradeoffs"); an unverifiable one blocks on any collaborator.
+Coverage is enforced by admission rather than per observation. `ensureObserver` verifies
+each collaborator against every in-scope gatekeeper at every `open()`, and
+`#restartIfShared` aborts the DO whenever that scope widens (a connection added, one
+bound into a gadget, a merge promoting such a binding, or a re-verification failure that
+scrubbed a persisted account choice), so no live session outlives the scope it was
+verified at. It is a no-op on a workspace with no collaborators.
+
+What survives in `authorizeObservation` is the one producer admission structurally cannot
+see: one with no vendor account behind it (`aiModel`/`agentSpawner`, or a legacy record
+with no `creationSpec`). `#inScopeGatekeepers` skips those, so no collaborator is ever
+asked about them, and its restricted observations are refused outright while the
+workspace has any collaborator — consistent with `assertNewSharingAllowed`, which already
+treats the same case as unshareable.
 
 The error reaches sandboxed gadget code and agent output — an audience that cannot
-otherwise enumerate collaborators — so it names the collaborator but omits their profile
-id, which is the full email on OAuth and CF Access deployments. The display name is
-never a full email on any path.
+otherwise enumerate collaborators — so it reports only that the workspace is shared,
+naming neither the collaborators nor their profile ids (the full email on OAuth and CF
+Access deployments).
 
 ### 2. One-step share-key redemption (sharing.ts)
 
@@ -181,24 +188,24 @@ machinery it builds on has a set of preexisting concurrency races (and this PR's
 model adds atomicity hardening on top); those fixes are deferred to follow-up work.
 Each deferred fix is acknowledged at its site with a `TODO` comment; the docs collect
 the same items in their Known-limitations sections. Three fixes are carried here
-rather than deferred, because the model's coverage guard states them as preconditions
-(the scrub and the prune) or because the entry point would otherwise ship unverified
-(the external-message gate).
+rather than deferred, because the model states them as preconditions (the scrub and the
+prune) or because the entry point would otherwise ship unverified (the external-message
+gate).
 
 1. **Refactor — the rename.** Mechanical, no behavior change, spanning
    `workshop-shared`, `workshop-backend`, `workshop-frontend`, `gatekeeper-google`,
    `gatekeeper-mcp` and the gatekeeper-authoring skill doc. Atomic by necessity.
 2. **Part 1 — API.** The restated contract on `containsRestrictedData`. Server still
    implements the old behavior.
-3. **Part 2 — core server implementation.** The coverage guard, `authorizeCollaborator`
-   (both entry points: `open()` and, replacing its role-only check,
-   `receiveExternalMessage`), the redemption policy gate,
+3. **Part 2 — core server implementation.** The restricted-observation guard,
+   `authorizeCollaborator` (both entry points: `open()` and, replacing its role-only
+   check, `receiveExternalMessage`), the redemption policy gate,
    `restrictedProducerIds`/`assertNewSharingAllowed`, the producer-removal guard, the
    legacy flag shim, and removal of `hasAnyShares`. Places the full TODO ledger for the
    deferred fixes.
 4. **Bugfix — scrub persisted coverage on a failed live check** (§5; pulled forward).
 5. **Bugfix — prune out-of-scope observer coverage at every open** (pulled forward;
-   restores the coverage guard's "entry present ⇒ verified at the most recent open"
+   restores the observer record's "entry present ⇒ verified at the most recent open"
    invariant).
 6. **Part 3 — backend tests.**
 7. **Part 4 — integration tests.** Over real Durable Objects; the test gatekeeper fixture
@@ -221,13 +228,13 @@ the follow-up worklist.
 
 - Observer verification is not serialized per profile, so concurrent opens by one
   collaborator can overwrite each other's records and registrations.
-- An unverified redeemer blocks restricted reads: redemption writes a real edge before
-  the redeeming open's verification runs, so from click until verification succeeds the
-  recipient is a current collaborator the coverage guard fails closed on (remedies:
-  verify, remove, or revoke the link). Two-phase redemption is the planned fix.
+- An unverified redeemer persists as a collaborator: redemption writes a real edge
+  before the redeeming open's verification runs, so from click onward the recipient is
+  visible in `listCollaborators` whether or not they ever complete the open, which is
+  enough to make the workspace count as shared (remedies: verify, remove, or revoke the
+  link). Two-phase redemption is the planned fix.
 - A refused recipient persists: a recipient whose verification is refused keeps their
-  edge, visible in `listCollaborators` and blocking restricted reads until removed.
-  Fail-closed like the previous item, same planned fix.
+  edge, with the same consequence as the previous item, and the same planned fix.
 - The exclusion gate's teardown deletes from a snapshot that can go stale across the
   awaited fan-out, so a re-granted profile's *replacement* observer record can be
   deleted, after which exclusions naming the new id fail open persistently.
@@ -265,28 +272,24 @@ the follow-up worklist.
   formerly-bound producer's sensitive reads stop requiring `use` collaborators'
   coverage. Accepted because `use` sessions cannot read chat history or the action log;
   the data entered gadget storage while the producer *was* bound, when every `use`
-  collaborator was verified or the read was blocked; and re-binding restores
-  verifiability at the next open. The residual is `use` grants created after the unbind.
+  collaborator was verified against it or could not open the workspace; and re-binding
+  restores verifiability at the next open. The residual is `use` grants created after the
+  unbind.
 - **Known security risk — never-bound producers.** A producer reachable only through chat
   bindings (including an ambient singleton) is never in a `use` collaborator's verification
   scope. The agent can read restricted data from it, persist the result into gadget code,
   storage, or UI state, and the collaborator can then read that state through the deployed
-  gadget despite never passing the producer's `addObserver()` check. The coverage guard
-  deliberately skips this collaborator, so `containsRestrictedData` does not prevent this
-  disclosure. Binding the producer makes future opens verifiable but does not retract data
-  already exposed. Accepted temporarily to avoid making the read permanently unavailable
+  gadget despite never passing the producer's `addObserver()` check. Role-scoped
+  verification deliberately never asks this collaborator about that producer, so
+  `containsRestrictedData` does not prevent this disclosure. Binding the producer makes
+  future opens verifiable but does not retract data already exposed. Accepted temporarily
+  to avoid making the read permanently unavailable
   under the current role-scoped model. The required fix is either workspace-wide observer
   verification for `use` collaborators or enforceable provenance that prevents data from an
   unverified producer reaching their gadget-visible state. Both this and the formerly-bound
   residual are documented at `docs/observers.md` edge case 4.
 - **`calculate()`-style aggregates are out of scope here.** This plan governs *who* may
   see restricted data, not what an aggregate over it discloses.
-- **The coverage guard is O(collaborators) per restricted observation**, reading one
-  observer record each. Fine at current scale; revisit if workspaces grow large
-  collaborator sets.
-- **No re-verification on binding *addition* for live sessions.** Adding a binding does
-  not restart open sessions; the coverage guard covers the interim by blocking the new
-  connection's sensitive reads until each collaborator's next open.
 - **Verification remains interactive-only.** `receiveExternalMessage` can verify but
   cannot configure, so a caller with unconfigured account choices is told to open the
   workspace. A non-interactive configuration path is future work.
