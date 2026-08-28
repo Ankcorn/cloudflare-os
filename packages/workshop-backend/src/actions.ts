@@ -50,12 +50,17 @@ type StagedSync = {
   promise: Promise<number[]>;
 };
 
-// workerd raises `TypeError: The RPC receiver does not implement the method
-// "applyActionsThrough".` for an un-migrated gatekeeper. The error is untyped after the RPC hop
-// (only the message survives), so this matches the message text.
-function isMethodMissing(error: unknown): boolean {
-  return error instanceof Error &&
-      error.message.includes('does not implement the method "applyActionsThrough"');
+/**
+ * Returns whether `error` is workerd's missing-`applyActionsThrough` RPC error.
+ *
+ * Production workerd includes `the method` in this error; Miniflare's real DO stub omits it. The
+ * error is untyped after the RPC hop (only the message survives), so both runtime variants are
+ * matched narrowly and retain the method name.
+ */
+export function isMethodMissing(error: unknown): boolean {
+  return error instanceof Error && (
+    error.message.includes('does not implement the method "applyActionsThrough"') ||
+    error.message.includes('does not implement "applyActionsThrough"'));
 }
 
 export class ActionSyncDriver {
