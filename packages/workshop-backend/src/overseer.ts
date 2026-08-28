@@ -9517,15 +9517,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let decided = await this.impl.syncActions(
         action.gatekeeperId, {frontier: action.action, resolvedBy: profile});
 
-    let fresh = this.impl.storage.actions.get(id);
-    if (fresh?.type === "action" && fresh.state === "pending") {
-      // The gatekeeper stopped at (or before) this action; surface the display-safe reason so the
-      // user can resolve the problem and retry. The action stays pending.
-      throw new Error(fresh.failure ?? `Failed to apply action: ${id}`);
-    }
-
     // Resume turns suspended on awaitDecision whose awaited actions this pass decided -- the batch
-    // may have covered earlier actions from other chats, not just the approved one.
+    // may have covered earlier actions from other chats, not just the approved one. Done before
+    // the outcome check below, so a failure on this action doesn't strand another chat's turn.
     let chatIds = new Set<number>();
     for (let recordId of decided) {
       let record = this.impl.storage.actions.get(recordId);
@@ -9536,6 +9530,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     for (let chatId of chatIds) {
       await this.#maybeResumeAfterActionDecision(chatId);
+    }
+
+    let fresh = this.impl.storage.actions.get(id);
+    if (fresh?.type === "action" && fresh.state !== "approved") {
+      // Rejected: a veto this pass delivered cascade-invalidated it, or another client rejected it
+      // while the pass was in flight. Either way it was not applied, so this must not report
+      // success -- the client displays a resolved approval optimistically.
+      if (fresh.state === "rejected") {
+        throw new Error(fresh.cascadedFrom !== undefined
+            ? `Action was invalidated by a rejected earlier action: ${id}`
+            : `Action was rejected: ${id}`);
+      }
+      // Still pending: the gatekeeper stopped at (or before) this action; surface the
+      // display-safe reason so the user can resolve the problem and retry.
+      throw new Error(fresh.failure ?? `Failed to apply action: ${id}`);
     }
   }
 
