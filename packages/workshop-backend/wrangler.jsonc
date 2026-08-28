@@ -24,6 +24,14 @@
   "compatibility_flags": [
     "allow_irrevocable_stub_storage",
     "enhanced_error_serialization",
+
+    // !!! DEV-ONLY -- DO NOT DEPLOY THIS BRANCH !!!
+    // Enables experimental runtime APIs, needed for RpcStub.revocable() (per-session revocation
+    // in overseer.ts, which falls back to the whole-DO restart when the API is missing). The API
+    // only exists in a patched workerd (see docs/revocable-sessions-dev.md), and a production
+    // deploy would reject this flag -- which is the intended guard-rail while it is experimental.
+    "experimental",
+
     "global_fetch_strictly_public",
 
     // The pi-ai inference layer wraps the official provider SDKs (@anthropic-ai/sdk, openai,

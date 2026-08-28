@@ -86,6 +86,8 @@ export async function openFakeOverseer(
       joinOutputsFanout: () => () => {},
       ensureObserver: async () => {},
       syncOutputsTo: async () => {},
+      // Pass-through, as on any runtime without RpcStub.revocable().
+      trackSession: <T extends object>(session: T) => session,
       // What open() consults for a non-owner's role: the permission-graph lookup and observer
       // verification in one. The sharing manager is still reached, but only to redeem a share key,
       // which these tests never pass.

@@ -1419,6 +1419,13 @@ export function observationContainsRestrictedData(description: ObservationDescri
   return (d.containsRestrictedData ?? d.prohibitAllSharing) === true;
 }
 
+// RpcStub.revocable() is experimental (patched workerd + "experimental" compat flag) and absent
+// from workers-types, so it is detected at runtime; when missing, every revocation falls back to
+// the whole-DO restart that production has today.
+interface SessionRevoker { revoke(reason?: unknown): void; readonly revoked: boolean; }
+const revocableStub: (<T extends object>(value: T) => { stub: T; revoker: SessionRevoker })
+    | undefined = (NativeRpcStub as any).revocable;
+
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
@@ -5145,6 +5152,11 @@ class OverseerImpl implements AgentHooks {
   // - Verification scope widened (see #restartIfShared): a collaborator's live session was
   //   verified against a smaller set of gatekeepers than the workspace now holds.
   //
+  // When the runtime supports RpcStub.revocable() (see revocableStub above), the preferred lever
+  // is revokeSessions()/revokeCollaboratorSessions(): it severs exactly the affected sessions and
+  // leaves everyone else connected. This restart remains as the fallback on stock runtimes, and as
+  // the primary mechanism for deleteSelf(), where the workspace is gone for everyone anyway.
+  //
   // We restart by aborting the whole DO. Aborting propagates to clients: the `notifyClosed` stub
   // handed to each session is disposed without being called, which AuthenticatedApiImpl detects
   // and reacts to by killing the browser WebSocket, forcing a reconnect that re-runs open() and
@@ -5168,12 +5180,72 @@ class OverseerImpl implements AgentHooks {
     this.ctx.abort(reason);
   }
 
+  // Live sessions handed out by open(), keyed by the session interface object, each with the
+  // revoker that severs its stub. In-memory only: a session cannot outlive the DO instance, so
+  // there is nothing to persist. Empty when revocableStub is unavailable.
+  #sessionRevokers = new Map<object, {profileId: string, isOwner: boolean,
+                                      revoker: SessionRevoker}>();
+
+  // Wrap a freshly constructed session interface in a revocable stub and remember its revoker, so
+  // revokeSessions() can later sever it. Everything derived from the session -- subscriptions,
+  // gadget client interfaces, callbacks the client passed in -- lives inside the stub's membrane
+  // and dies with it, so revocation is transitive without tracking any of it. Returns the session
+  // unwrapped when the runtime lacks RpcStub.revocable().
+  trackSession<T extends object>(session: T, profileId: string, isOwner: boolean): T {
+    if (!revocableStub) return session;
+    let {stub, revoker} = revocableStub(session);
+    this.#sessionRevokers.set(session, {profileId, isOwner, revoker});
+    return stub;
+  }
+
+  // Called from a session's [Symbol.dispose] to report whether its teardown was caused by
+  // revocation (vs. a clean close or DO shutdown). Also unregisters the session, so a tracked
+  // session's dispose is all the cleanup there is.
+  sessionRevoked(session: object): boolean {
+    let entry = this.#sessionRevokers.get(session);
+    this.#sessionRevokers.delete(session);
+    return entry?.revoker.revoked ?? false;
+  }
+
+  // Sever every live session held by the given profiles. Returns false when the runtime lacks
+  // RpcStub.revocable(), in which case the caller must fall back to scheduleAccessRestart().
+  // The reason is user-facing: it becomes the rejection of the revoked holder's in-flight calls.
+  revokeSessions(profileIds: string[], reason: string): boolean {
+    if (!revocableStub) return false;
+    let ids = new Set(profileIds);
+    for (let entry of this.#sessionRevokers.values()) {
+      if (ids.has(entry.profileId)) entry.revoker.revoke(new Error(reason));
+    }
+    return true;
+  }
+
+  // Sever every live non-owner session; used when the verification scope widens and every
+  // collaborator must re-verify. The owner is never an observer, so their session stays. Returns
+  // false when the runtime lacks RpcStub.revocable() (fall back, as above).
+  revokeCollaboratorSessions(reason: string): boolean {
+    if (!revocableStub) return false;
+    for (let entry of this.#sessionRevokers.values()) {
+      if (!entry.isOwner) entry.revoker.revoke(new Error(reason));
+    }
+    return true;
+  }
+
+  // Sever the sessions of collaborators whose access was just removed or downgraded, falling back
+  // to a whole-DO restart (un-awaited, matching the callers' previous direct calls) on stock
+  // runtimes.
+  severRevokedAccess(affected: AffectedCollaborator[], restartReason: string): void {
+    if (!this.revokeSessions(affected.map(a => a.profile.id),
+        "Your access to this workspace has been removed or changed.")) {
+      void this.scheduleAccessRestart(restartReason);
+    }
+  }
+
   // Sessions are authorized and verified only at open(), so widening what a live session's holder
-  // must be verified against leaves that session holding unverified access. Restart everyone --
-  // the same mechanism used when access is revoked -- so each client's next open() re-runs
-  // authorizeCollaborator/ensureObserver against the new scope. No-op when the workspace has no
-  // collaborators: the owner is never an observer, so there is nobody to re-verify and no reason
-  // to disturb the one session that exists.
+  // must be verified against leaves that session holding unverified access. Sever every
+  // collaborator session (restarting the whole DO on stock runtimes) so each client's next open()
+  // re-runs authorizeCollaborator/ensureObserver against the new scope. No-op when the workspace
+  // has no collaborators: the owner is never an observer, so there is nobody to re-verify and no
+  // reason to disturb the one session that exists.
   //
   // Fire-and-forget: the callers are synchronous (bindWorkpiece) or already past their last write,
   // and getSharingManager() is async, so failures are logged rather than left as an unhandled
@@ -5185,6 +5257,7 @@ class OverseerImpl implements AgentHooks {
   #restartIfShared(reason: string): void {
     this.getSharingManager().then(sharing => {
       if (sharing.listCollaborators().length === 0) return;
+      if (this.revokeCollaboratorSessions(reason)) return;
       return this.scheduleAccessRestart(reason);
     }).catch(error => {
       this.logger.error("failed to restart sessions after verification scope widened", {
@@ -8319,13 +8392,17 @@ class OverseerImpl implements AgentHooks {
       await this.#removeObserverFromGatekeepers(observerId, [...rollback]);
 
       // This open is being denied, but the collaborator may hold other sessions that opened while
-      // the scrubbed choice still verified them. Sever every session so they must re-verify --
-      // whoever can't will simply be denied their next open. This cannot loop: a second identical
-      // failure finds the entry already scrubbed, so no flag and no restart. A re-prompt that
-      // repairs the failure never reaches here, and step 6 re-persists full coverage.
+      // the scrubbed choice still verified them. Sever their sessions so they must re-verify --
+      // on stock runtimes, by restarting everyone -- whoever can't will simply be denied their
+      // next open. This cannot loop: a second identical failure finds the entry already scrubbed,
+      // so no flag and no restart. A re-prompt that repairs the failure never reaches here, and
+      // step 6 re-persists full coverage.
       if (scrubbedCoverage) {
-        this.#restartIfShared(
-            "Gadget restarted because a collaborator failed to re-verify their access.");
+        if (!this.revokeSessions([profileId],
+            "Your access to this workspace could not be re-verified.")) {
+          this.#restartIfShared(
+              "Gadget restarted because a collaborator failed to re-verify their access.");
+        }
       }
       throw err;
     }
@@ -8674,13 +8751,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
-      return new UseOverseerInterface(
-          this.impl, profileId, userId, notifyClosed.dup());
+      return this.impl.trackSession(new UseOverseerInterface(
+          this.impl, profileId, userId, notifyClosed.dup()), profileId, isOwner);
     }
 
-    return new OverseerClientInterface(
+    return this.impl.trackSession(new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
-        ensureCapsules);
+        ensureCapsules), profileId, isOwner);
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -9392,7 +9469,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   [Symbol.dispose]() {
     this.#leavePresence();
     this.#leaveOutputsFanout();
-    this.notifyClosed();
+    // A revoked session must present to the worker as a lost connection -- notifyClosed disposed
+    // without being called -- so it kills this client's WebSocket and the reconnect re-runs
+    // open()'s access checks. Calling it would read as a clean client close and leave the revoked
+    // holder connected.
+    if (!this.impl.sessionRevoked(this)) {
+      this.notifyClosed();
+    }
     this.notifyClosed[Symbol.dispose]();
   }
 
@@ -9611,6 +9694,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.#owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
+      // Deliberately a whole-DO restart, not per-session revocation: the workspace is gone for
+      // everyone, owner included.
       this.impl.scheduleAccessRestart("Gadget restarted because the workspace was deleted.");
       this.impl.ownerId = undefined;
     });
@@ -10737,11 +10822,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Likewise update or remove their cached workspace listing. Must happen before the restart
     // below, which destroys this DO.
     await this.impl.refreshAffectedCollaboratorListings(affected);
-    // Only restart if someone actually lost access or was downgraded (kept users are already
-    // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
-    // disconnect everyone.
+    // Only sever sessions if someone actually lost access or was downgraded (kept users are
+    // already excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on --
+    // shouldn't disconnect anyone.
     if (affected.length > 0) {
-      this.impl.scheduleAccessRestart(
+      this.impl.severRevokedAccess(affected,
           "Gadget restarted to revoke access for a removed collaborator.");
     }
     return affected;
@@ -10759,9 +10844,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.tearDownLostObservers(affected);
     // Likewise update or remove their cached workspace listing (see removeCollaborator).
     await this.impl.refreshAffectedCollaboratorListings(affected);
-    // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
+    // Only sever sessions if someone actually lost access or was downgraded (see
+    // removeCollaborator).
     if (affected.length > 0) {
-      this.impl.scheduleAccessRestart(
+      this.impl.severRevokedAccess(affected,
           "Gadget restarted to revoke access for a revoked share link.");
     }
     return affected;
@@ -10883,7 +10969,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   [Symbol.dispose]() {
     this.#leavePresence();
     this.#leaveOutputsFanout();
-    this.notifyClosed();
+    // Dispose-without-call on revocation; see OverseerClientInterface[Symbol.dispose].
+    if (!this.impl.sessionRevoked(this)) {
+      this.notifyClosed();
+    }
     this.notifyClosed[Symbol.dispose]();
   }
 

@@ -324,10 +324,11 @@ Notes:
 #### Restarting when verification scope changes
 
 Verification runs at `open()` and nowhere else, so a live session is only ever as verified as the
-scope that existed when it opened. When that scope **widens**, the overseer restarts the workspace
-rather than trying to re-verify sessions in place: `#restartIfShared(reason)` delegates to
+scope that existed when it opened. When that scope **widens**, the overseer severs live sessions
+rather than trying to re-verify them in place: `#restartIfShared(reason)` revokes every
+collaborator session (per-session revocation, below) or, on stock runtimes, delegates to
 `scheduleAccessRestart(reason)` — the same DO abort used to revoke a collaborator (see
-`docs/sharing.md`) — so every client's browser reconnects and re-runs
+`docs/sharing.md`). Either way each affected client's browser reconnects and re-runs
 `authorizeCollaborator`/`ensureObserver` against the new scope. It is a no-op when the workspace
 has no collaborators: the owner is never an observer, so there is nobody to re-verify.
 
@@ -348,6 +349,22 @@ already hold.
 
 Enforcement is therefore at admission, within the ~100 ms abort delay of the change, and held to
 the collaborator's role scope (edge case 4 below).
+
+#### Per-session revocation (experimental)
+
+On a runtime with `RpcStub.revocable()` (a patched workerd plus the `experimental` compat flag;
+see `docs/revocable-sessions-dev.md`), the overseer prefers severing exactly the affected
+sessions over restarting the whole DO. `open()` wraps each session interface in a revocable stub
+(`trackSession` in `overseer.ts`); revoking it severs the stub's whole membrane, so everything
+derived from the session — subscriptions, gadget client interfaces, callbacks the client passed
+in — dies with it. A revoked session's teardown deliberately presents to the worker as a *lost
+connection* (its `notifyClosed` stub is disposed without being called), so the worker kills that
+client's WebSocket and the reconnect re-runs `open()`'s access checks — now denied, re-verified,
+or downgraded. Everyone else, in particular the owner, stays connected.
+
+The whole-DO restart (`scheduleAccessRestart`) remains as the fallback whenever the API is
+missing — production behaves exactly as before — and as the primary mechanism for workspace
+deletion, where the workspace is gone for everyone anyway.
 
 ### Step 4 — Frontend: the configuration modal
 
@@ -452,8 +469,9 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    model in `sharing.ts`. The denial also scrubs each failed gatekeeper from the collaborator's
    persisted observer record, so the record stops claiming a verification that no longer holds.
    Because the collaborator may hold *other* sessions that opened while it did, a scrub also
-   restarts the workspace (see "Restarting when verification scope changes"), which forces every
-   session on it to re-open and re-verify; whoever cannot is denied at that open. The
+   severs that collaborator's sessions — on stock runtimes, by restarting the workspace (see
+   "Restarting when verification scope changes"), which forces every session on it to re-open and
+   re-verify; whoever cannot is denied at that open. The
    gatekeeper-side registration is kept on a re-verification failure — de-registering it would be
    fail-open, since the gatekeeper would stop naming that observer in `excludeObservers` and an
    observation it would have excluded them from would be admitted with nothing left to block it,
