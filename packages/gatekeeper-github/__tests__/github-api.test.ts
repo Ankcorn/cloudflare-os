@@ -101,3 +101,69 @@ describe("GitHubApi.searchIssuesConditional", () => {
     expect(requestUrl?.searchParams.get("advanced_search")).toBe("true");
   });
 });
+
+function captureRequests(body: unknown = []): () => URL {
+  let requestUrl: URL | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+    requestUrl = new URL(String(input));
+    return new Response(JSON.stringify(body), {
+      headers: { "content-type": "application/json" },
+    });
+  }));
+  return () => {
+    if (!requestUrl) throw new Error("no request was made");
+    return requestUrl;
+  };
+}
+
+describe("GitHubApi git reads", () => {
+  it("encodes commit refs into the lookup path", async () => {
+    const url = captureRequests({});
+    const api = new GitHubApi(async () => "test-token");
+    await api.getCommitConditional("cloudflare", "workerd", "feature/thing");
+    expect(url().pathname).toBe("/repos/cloudflare/workerd/commits/feature%2Fthing");
+  });
+
+  it("passes history filters to the commit list endpoint", async () => {
+    const url = captureRequests();
+    const api = new GitHubApi(async () => "test-token");
+    await api.listCommitsConditional("cloudflare", "workerd", {
+      sha: "main",
+      path: "src/workerd",
+      author: "kentonv",
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-02-01T00:00:00.000Z",
+      per_page: 100,
+      page: 2,
+    });
+    expect(url().pathname).toBe("/repos/cloudflare/workerd/commits");
+    expect(Object.fromEntries(url().searchParams)).toEqual({
+      sha: "main",
+      path: "src/workerd",
+      author: "kentonv",
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-02-01T00:00:00.000Z",
+      per_page: "100",
+      page: "2",
+    });
+  });
+
+  it("passes the protected filter to the branch list endpoint, omitting it when unset", async () => {
+    const url = captureRequests();
+    const api = new GitHubApi(async () => "test-token");
+    await api.listBranchesConditional("cloudflare", "workerd", { protected: true, per_page: 100, page: 1 });
+    expect(url().pathname).toBe("/repos/cloudflare/workerd/branches");
+    expect(url().searchParams.get("protected")).toBe("true");
+
+    await api.listBranchesConditional("cloudflare", "workerd", { per_page: 100, page: 1 });
+    expect(url().searchParams.has("protected")).toBe(false);
+  });
+
+  it("addresses pull request commits by pull number", async () => {
+    const url = captureRequests();
+    const api = new GitHubApi(async () => "test-token");
+    await api.listPullRequestCommitsConditional("cloudflare", "workerd", 42, 3, 50);
+    expect(url().pathname).toBe("/repos/cloudflare/workerd/pulls/42/commits");
+    expect(Object.fromEntries(url().searchParams)).toEqual({ page: "3", per_page: "50" });
+  });
+});

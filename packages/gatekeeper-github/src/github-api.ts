@@ -128,13 +128,53 @@ export type GitHubPullFileResponse = {
   patch?: string;
 };
 
+export type GitHubBranchResponse = {
+  name: string;
+  commit: {
+    sha: string;
+  };
+  protected?: boolean;
+};
+
+export type GitHubTagResponse = {
+  name: string;
+  commit: {
+    sha: string;
+  };
+};
+
+/** A commit author/committer identity as recorded in the git commit object itself. */
+export type GitHubGitIdentityResponse = {
+  name?: string | null;
+  email?: string | null;
+  date?: string | null;
+};
+
+export type GitHubCommitResponse = {
+  sha: string;
+  html_url: string;
+  commit: {
+    message: string;
+    author?: GitHubGitIdentityResponse | null;
+    committer?: GitHubGitIdentityResponse | null;
+  };
+  author?: GitHubSimpleUser | null;
+  parents: Array<{
+    sha: string;
+  }>;
+  /** Present on single-commit lookups; omitted from list responses. */
+  stats?: {
+    additions: number;
+    deletions: number;
+    total: number;
+  };
+};
+
 export type GitHubCompareResponse = {
   base_commit: {
     sha: string;
   };
-  commits?: Array<{
-    sha: string;
-  }>;
+  commits?: GitHubCommitResponse[];
   total_commits: number;
   files?: GitHubPullFileResponse[];
 };
@@ -1082,6 +1122,96 @@ export class GitHubApi {
     return await this.#conditionalGet<GitHubCompareResponse>(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(`${base}...${head}`)}`,
       undefined,
+      options,
+    );
+  }
+
+  async listBranchesConditional(
+    owner: string,
+    repo: string,
+    query: {
+      protected?: boolean;
+      per_page: number;
+      page: number;
+    },
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubBranchResponse[]>> {
+    return await this.#conditionalGet<GitHubBranchResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+      query,
+      options,
+    );
+  }
+
+  async listTagsConditional(
+    owner: string,
+    repo: string,
+    query: {
+      per_page: number;
+      page: number;
+    },
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubTagResponse[]>> {
+    return await this.#conditionalGet<GitHubTagResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tags`,
+      query,
+      options,
+    );
+  }
+
+  /**
+   * Look up a single commit. `ref` may be a full or truncated commit SHA, a branch name, or a tag
+   * name; GitHub resolves truncated SHAs natively (404 if unknown or ambiguous).
+   */
+  async getCommitConditional(
+    owner: string,
+    repo: string,
+    ref: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubCommitResponse>> {
+    return await this.#conditionalGet<GitHubCommitResponse>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async listCommitsConditional(
+    owner: string,
+    repo: string,
+    query: {
+      /** Branch name, tag name, or commit SHA to start listing from. */
+      sha?: string;
+      path?: string;
+      author?: string;
+      since?: string;
+      until?: string;
+      per_page: number;
+      page: number;
+    },
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubCommitResponse[]>> {
+    return await this.#conditionalGet<GitHubCommitResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits`,
+      query,
+      options,
+    );
+  }
+
+  async listPullRequestCommitsConditional(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    page: number,
+    perPage: number,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<GitHubCommitResponse[]>> {
+    return await this.#conditionalGet<GitHubCommitResponse[]>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/commits`,
+      {
+        page,
+        per_page: perPage,
+      },
       options,
     );
   }

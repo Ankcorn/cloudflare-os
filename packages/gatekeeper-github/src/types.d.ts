@@ -2,13 +2,49 @@
  * A GitHub repository.
  *
  * A GitHub repo is a Git repo *plus* issues, pull requests, etc.
+ *
+ * Git-level access works in terms of commit ids: use `listBranches()`, `listTags()`,
+ * `listCommits()`, or `getCommit()` to discover commit ids, then mount a commit as a worktree
+ * (see the `createWorktree` tool) to read or edit the files it contains. The repository's file
+ * *content* is not readable through this interface directly.
  */
 export interface GitHubRepo {
-  // TODO: Add methods to access code. Maybe represent that as `GitRepository`. For now we only
-  //   expose issues and PRs.
-
   /** Returns basic metadata about the repository. */
   getMetadata(): Promise<GitHubRepoMetadata>;
+
+  /**
+   * Lists branches in this repository.
+   *
+   * Results are streamed through the returned cursor. Call `next()` repeatedly on that
+   * same cursor until it returns `null`.
+   */
+  listBranches(options?: GitHubBranchFilter): Promise<Cursor<GitHubBranchSummary>>;
+
+  /**
+   * Lists tags in this repository.
+   *
+   * Results are streamed through the returned cursor. Call `next()` repeatedly on that
+   * same cursor until it returns `null`.
+   */
+  listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>>;
+
+  /**
+   * Looks up a single commit.
+   *
+   * `ref` may be a full commit id, an unambiguously truncated commit id, a branch name, or a tag
+   * name. Use this to resolve a truncated commit id -- e.g. one mentioned in a code comment, a
+   * commit message, or a CI log -- to the full id, which the rest of the system requires.
+   */
+  getCommit(ref: string): Promise<GitHubCommitDetails>;
+
+  /**
+   * Lists this repository's commit history, newest first, starting from `options.ref` (the
+   * default branch when omitted).
+   *
+   * Results are streamed through the returned cursor. Call `next()` repeatedly on that
+   * same cursor until it returns `null`.
+   */
+  listCommits(options?: GitHubCommitFilter): Promise<Cursor<GitHubCommitSummary>>;
 
   /**
    * Creates a new issue in this repository.
@@ -153,6 +189,14 @@ export interface GitHubPullRequest extends GitHubIssue {
    */
   replyToDiffComment(commentId: string, bodyMarkdown: string): Promise<void>;
 
+  /**
+   * Lists the commits that make up this pull request, oldest first.
+   *
+   * Results are streamed through the returned cursor. Call `next()` repeatedly on that
+   * same cursor until it returns `null`.
+   */
+  listCommits(options?: GitHubPageOptions): Promise<Cursor<GitHubCommitSummary>>;
+
   /** Merges the pull request. */
   merge(options?: GitHubPullRequestMergeOptions): Promise<void>;
 }
@@ -254,6 +298,63 @@ export type GitHubPullRequestDetails = GitHubIssueDetails & GitHubPullRequestSum
   changedFiles: number;
 }
 
+/** A branch returned by `GitHubRepo.listBranches()`. */
+export type GitHubBranchSummary = {
+  name: string;
+  /** Commit id of the branch's current head. */
+  headCommit: string;
+  /** Whether the branch is covered by a branch protection rule. */
+  protected: boolean;
+}
+
+/** A tag returned by `GitHubRepo.listTags()`. */
+export type GitHubTagSummary = {
+  name: string;
+  /** Commit id the tag points at. */
+  commit: string;
+}
+
+/** The author or committer of a commit, as recorded in the commit itself. */
+export type GitHubCommitIdentity = {
+  name?: string;
+  email?: string;
+  date?: Date;
+}
+
+/**
+ * A commit, as returned from commit lookups and history enumeration.
+ *
+ * `id` is the commit's full git commit id. Commit ids may be used anywhere the system accepts
+ * one -- most notably, a commit can be mounted as a worktree (see the `createWorktree` tool) to
+ * read or edit the files it contains, and commit ids created on such a worktree can be passed
+ * back into this gatekeeper's APIs.
+ */
+export type GitHubCommitSummary = {
+  /** The full git commit id (40 hex digits). */
+  id: string;
+  /** The full commit message. The first line is conventionally a short summary. */
+  message: string;
+  /** Who wrote the change, per the commit itself. */
+  author: GitHubCommitIdentity;
+  /** Who created the commit, per the commit itself (differs from `author` after e.g. a rebase). */
+  committer: GitHubCommitIdentity;
+  /** The GitHub account of the author, when GitHub can determine one. */
+  authorAccount: GitHubActor | null;
+  /** Commit ids of this commit's parents: empty for a root commit, two or more for a merge. */
+  parents: string[];
+  url: string;
+}
+
+/** Full commit details returned by `GitHubRepo.getCommit()`. */
+export type GitHubCommitDetails = GitHubCommitSummary & {
+  /** Line counts across the commit's whole diff, when GitHub reports them. */
+  stats?: {
+    additions: number;
+    deletions: number;
+    total: number;
+  };
+}
+
 /**
  * A pagination cursor.
  *
@@ -305,6 +406,29 @@ export type GitHubPullRequestSearch = GitHubPageOptions & {
   labels?: string[];
   author?: string;
   assignee?: string;
+}
+
+/** Filters for listing branches. */
+export type GitHubBranchFilter = GitHubPageOptions & {
+  /** When set, return only protected (`true`) or only unprotected (`false`) branches. */
+  protected?: boolean;
+}
+
+/** Filters for listing commit history. */
+export type GitHubCommitFilter = GitHubPageOptions & {
+  /**
+   * Where to start listing from: a branch name, tag name, or commit id. History is enumerated
+   * newest-first from here. Defaults to the repository's default branch.
+   */
+  ref?: string;
+  /** Only commits touching the given file or directory path. */
+  path?: string;
+  /** Only commits whose author matches the given GitHub login or email address. */
+  author?: string;
+  /** Only commits dated after this time. */
+  since?: Date;
+  /** Only commits dated before this time. */
+  until?: Date;
 }
 
 export type GitHubIssueState = "open" | "closed";

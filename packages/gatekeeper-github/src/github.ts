@@ -12,6 +12,8 @@ import {
   type GatekeeperUser,
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type GitCache,
+  type GitOid,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -31,9 +33,25 @@ import {
   type GitHubPullRequestReviewCommentResponse,
 } from "./github-api";
 import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-search";
+import {
+  actorFromUser,
+  advertiseCommits,
+  commitIdsOfPullSummary,
+  commitIdsOfSummary,
+  CommitAdvertisingCursor,
+  normalizeBranchSummary,
+  normalizeCommitDetails,
+  normalizeCommitSummary,
+  normalizeTagSummary,
+} from "./git-commits";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubActor,
+  GitHubBranchFilter,
+  GitHubBranchSummary,
+  GitHubCommitDetails,
+  GitHubCommitFilter,
+  GitHubCommitSummary,
   GitHubCreateIssueOptions,
   GitHubCreatePullRequestOptions,
   GitHubDiffCommentTarget,
@@ -64,6 +82,7 @@ import type {
   GitHubRepoMetadata,
   GitHubRepoRef,
   GitHubReviewDecision,
+  GitHubTagSummary,
 } from "./types";
 import TYPES_CODE from "./types.txt";
 import {
@@ -394,16 +413,6 @@ function repoRef(owner: string, repo: string): GitHubRepoRef {
     name: repo,
     fullName: `${owner}/${repo}`,
     url: canonicalRepoUrl(owner, repo),
-  };
-}
-
-function actorFromUser(user: { login: string; name?: string | null; html_url: string; avatar_url?: string } | null): GitHubActor | null {
-  if (!user) return null;
-  return {
-    login: user.login,
-    displayName: user.name ?? undefined,
-    url: user.html_url,
-    avatarUrl: user.avatar_url,
   };
 }
 
@@ -925,6 +934,75 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
         this.#buffer.push(this.#injectedItems[this.#injectedIndex++]);
       }
     }
+  }
+}
+
+/**
+ * RPC wrapper around `CommitAdvertisingCursor` (see git-commits.ts): each page a caller fetches
+ * advertises its commit ids to the workspace git cache before it is returned. Owns the `GitCache`
+ * stub it is given (a dup of the session's), disposing it with the cursor.
+ */
+@validateRpc()
+class AdvertisingCursor<T> extends RpcTarget implements Cursor<T> {
+  #inner: CommitAdvertisingCursor<T>;
+  #cache: RpcStub<GitCache>;
+
+  constructor(inner: Cursor<T>, cache: RpcStub<GitCache>, commitIds: (item: T) => GitOid[]) {
+    super();
+    this.#inner = new CommitAdvertisingCursor(inner, cache, commitIds);
+    this.#cache = cache;
+  }
+
+  async next(): Promise<T[] | null> {
+    return await this.#inner.next();
+  }
+
+  [Symbol.dispose](): void {
+    this.#cache[Symbol.dispose]();
+  }
+}
+
+/**
+ * Lazily obtains and owns a session's `GitCache` stub (fetched at most once per session, via
+ * `ObservationAuthorizer.getGitCache()`), through which the session advertises the commit ids its
+ * reads return -- advertisement is workspace-internal pull-routing metadata, not a read, so no
+ * observation accompanies it. A plain helper, deliberately not an `RpcTarget`: the cache stub
+ * must never be reachable by the session's callers.
+ */
+class SessionGitCache {
+  #approvalQueue: RpcStub<ApprovalQueue>;
+  #cache?: Promise<RpcStub<GitCache>>;
+
+  /** `approvalQueue` is only borrowed; the owning session must outlive this helper. */
+  constructor(approvalQueue: RpcStub<ApprovalQueue>) {
+    this.#approvalQueue = approvalQueue;
+  }
+
+  #get(): Promise<RpcStub<GitCache>> {
+    this.#cache ??= this.#approvalQueue.getGitCache();
+    return this.#cache;
+  }
+
+  /**
+   * Advertise the given commit ids (deduplicated, in parallel). Values that aren't full commit
+   * ids -- e.g. a provisional pull request's empty branch sha -- are skipped.
+   */
+  async advertise(ids: Iterable<GitOid>): Promise<void> {
+    await advertiseCommits(await this.#get(), ids);
+  }
+
+  /**
+   * Wrap a cursor so that each page it returns advertises its commit ids first. The wrapper holds
+   * its own dup of the cache stub, so it keeps working if the session is disposed before the
+   * cursor is drained.
+   */
+  async wrap<T>(cursor: Cursor<T>, commitIds: (item: T) => GitOid[]): Promise<Cursor<T>> {
+    const cache = await this.#get();
+    return new AdvertisingCursor(cursor, cache.dup(), commitIds);
+  }
+
+  dispose(): void {
+    void this.#cache?.then(cache => cache[Symbol.dispose]()).catch(() => {});
   }
 }
 
@@ -3607,6 +3685,177 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#searchPullSummaries(query, pageSize);
   }
 
+  async listBranches(filter: GitHubBranchFilter | undefined, pageSize: number): Promise<Cursor<GitHubBranchSummary>> {
+    const owner = this.ctx.props.owner;
+    const repo = this.ctx.props.repo;
+    return new StreamingCursor<GitHubBranchSummary>({
+      fetchPage: async (page, perPage) => {
+        const cacheKey = this.#cacheKey("list-branches", stableKey(filter ?? {}), `p${page}`);
+        return await this.#loadCachedWithEtag<GitHubBranchSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
+          const raw = await this.#withApi(api => api.listBranchesConditional(owner, repo, {
+            protected: filter?.protected,
+            page,
+            per_page: perPage,
+          }, { ifNoneMatch: etag }));
+          if (raw.status === 304) {
+            return raw;
+          }
+
+          return {
+            status: 200,
+            headers: raw.headers,
+            data: raw.data.map(normalizeBranchSummary),
+          };
+        });
+      },
+      overlay: item => item,
+      filter: () => true,
+      comparator: () => 0,
+      injectedItems: [],
+      pageSize,
+    });
+  }
+
+  async listTags(pageSize: number): Promise<Cursor<GitHubTagSummary>> {
+    const owner = this.ctx.props.owner;
+    const repo = this.ctx.props.repo;
+    return new StreamingCursor<GitHubTagSummary>({
+      fetchPage: async (page, perPage) => {
+        const cacheKey = this.#cacheKey("list-tags", `p${page}`);
+        return await this.#loadCachedWithEtag<GitHubTagSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
+          const raw = await this.#withApi(api => api.listTagsConditional(owner, repo, {
+            page,
+            per_page: perPage,
+          }, { ifNoneMatch: etag }));
+          if (raw.status === 304) {
+            return raw;
+          }
+
+          return {
+            status: 200,
+            headers: raw.headers,
+            data: raw.data.map(normalizeTagSummary),
+          };
+        });
+      },
+      overlay: item => item,
+      filter: () => true,
+      comparator: () => 0,
+      injectedItems: [],
+      pageSize,
+    });
+  }
+
+  async getCommit(ref: string): Promise<GitHubCommitDetails> {
+    // Commits are immutable, but `ref` may be a branch or tag name, so the short TTL still applies.
+    const cacheKey = this.#cacheKey("commit", stableKey(ref));
+    return await this.#loadCachedWithEtag<GitHubCommitDetails>(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
+      const result = await this.#withApi(api =>
+        api.getCommitConditional(this.ctx.props.owner, this.ctx.props.repo, ref, { ifNoneMatch: etag })
+      );
+      if (result.status === 304) {
+        return result;
+      }
+
+      return {
+        status: 200,
+        headers: result.headers,
+        data: normalizeCommitDetails(result.data),
+      };
+    });
+  }
+
+  async listCommits(filter: GitHubCommitFilter | undefined, pageSize: number): Promise<Cursor<GitHubCommitSummary>> {
+    const owner = this.ctx.props.owner;
+    const repo = this.ctx.props.repo;
+    return new StreamingCursor<GitHubCommitSummary>({
+      fetchPage: async (page, perPage) => {
+        const cacheKey = this.#cacheKey("list-commits", stableKey(filter ?? {}), `p${page}`);
+        return await this.#loadCachedWithEtag<GitHubCommitSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
+          const raw = await this.#withApi(api => api.listCommitsConditional(owner, repo, {
+            sha: filter?.ref,
+            path: filter?.path,
+            author: filter?.author,
+            since: filter?.since?.toISOString(),
+            until: filter?.until?.toISOString(),
+            page,
+            per_page: perPage,
+          }, { ifNoneMatch: etag }));
+          if (raw.status === 304) {
+            return raw;
+          }
+
+          return {
+            status: 200,
+            headers: raw.headers,
+            data: raw.data.map(normalizeCommitSummary),
+          };
+        });
+      },
+      overlay: item => item,
+      filter: () => true,
+      comparator: () => 0,
+      injectedItems: [],
+      pageSize,
+    });
+  }
+
+  async pullCommits(logicalId: string, pageSize: number): Promise<Cursor<GitHubCommitSummary>> {
+    const owner = this.ctx.props.owner;
+    const repo = this.ctx.props.repo;
+    if (logicalId.startsWith("~") && !this.#resolveProvisionalId(logicalId)) {
+      const action = this.#findCreateAction(logicalId, "pull") as CreatePullRequestAction | undefined;
+      if (!action) {
+        throw new Error(`Provisional pull request ${logicalId} is no longer available.`);
+      }
+
+      // The pull request doesn't exist on GitHub yet; simulate its commit list from the branch
+      // comparison, the same source #getDiff uses for provisional pull requests.
+      const cacheKey = this.#cacheKey("pull-commits-provisional", logicalId);
+      const commits = await this.#loadCachedWithEtag<GitHubCommitSummary[]>(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
+        const comparison = await this.#withApi(api =>
+          api.compareBranchesConditional(owner, repo, action.options.base, action.options.head, { ifNoneMatch: etag })
+        );
+        if (comparison.status === 304) {
+          return comparison;
+        }
+
+        return {
+          status: 200,
+          headers: comparison.headers,
+          data: (comparison.data.commits ?? []).map(normalizeCommitSummary),
+        };
+      });
+      return new ArrayCursor(commits, pageSize);
+    }
+
+    const realId = logicalId.startsWith("~") ? this.#resolveProvisionalId(logicalId)! : logicalId;
+    return new StreamingCursor<GitHubCommitSummary>({
+      fetchPage: async (page, perPage) => {
+        const cacheKey = this.#cacheKey("pull-commits", realId, `p${page}`);
+        return await this.#loadCachedWithEtag<GitHubCommitSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
+          const raw = await this.#withApi(api =>
+            api.listPullRequestCommitsConditional(owner, repo, Number(realId), page, perPage, { ifNoneMatch: etag })
+          );
+          if (raw.status === 304) {
+            return raw;
+          }
+
+          return {
+            status: 200,
+            headers: raw.headers,
+            data: raw.data.map(normalizeCommitSummary),
+          };
+        });
+      },
+      overlay: item => item,
+      filter: () => true,
+      comparator: () => 0,
+      injectedItems: [],
+      pageSize,
+    });
+  }
+
   async prepareCreateIssue(options: GitHubCreateIssueOptions): Promise<CreateIssueAction> {
     return {
       type: "createIssue",
@@ -3796,18 +4045,23 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   async removeObserver(_id: string): Promise<void> {}
 }
 
+// Exported (like the impls below) for the workerd wiring tests, which instantiate sessions
+// directly against fake gatekeepers -- see __tests__/workerd/session-git.test.ts.
 @validateRpc()
-class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
+export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
   #gatekeeper: GitHubGatekeeperImpl;
   #approvalQueue: RpcStub<ApprovalQueue>;
+  #gitCache: SessionGitCache;
 
   constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>) {
     super();
     this.#gatekeeper = gatekeeper;
     this.#approvalQueue = approvalQueue;
+    this.#gitCache = new SessionGitCache(approvalQueue);
   }
 
   [Symbol.dispose](): void {
+    this.#gitCache.dispose();
     (this.#approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
   }
 
@@ -3879,7 +4133,8 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
       title: `List pull requests`,
       description: `List pull requests in the GitHub repository.`,
     });
-    return this.#gatekeeper.listPullRequests(options, options?.resultsPerPage ?? 50);
+    const cursor = await this.#gatekeeper.listPullRequests(options, options?.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
   }
 
   async searchPullRequests(query: GitHubPullRequestSearch): Promise<Cursor<GitHubPullRequestSummary>> {
@@ -3887,7 +4142,46 @@ class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSession {
       title: `Search pull requests for "${query.text}"`,
       description: `Search pull requests in the GitHub repository for "${query.text}".`,
     });
-    return this.#gatekeeper.searchPullRequests(query, query.resultsPerPage ?? 50);
+    const cursor = await this.#gatekeeper.searchPullRequests(query, query.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
+  }
+
+  async listBranches(options?: GitHubBranchFilter): Promise<Cursor<GitHubBranchSummary>> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `List branches`,
+      description: `List branches in the GitHub repository.`,
+    });
+    const cursor = await this.#gatekeeper.listBranches(options, options?.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, branch => [branch.headCommit]);
+  }
+
+  async listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `List tags`,
+      description: `List tags in the GitHub repository.`,
+    });
+    const cursor = await this.#gatekeeper.listTags(options?.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, tag => [tag.commit]);
+  }
+
+  async getCommit(ref: string): Promise<GitHubCommitDetails> {
+    const details = await this.#gatekeeper.getCommit(ref);
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read commit ${details.id.slice(0, 12)}`,
+      description: `Read commit ${details.id}`
+        + `${ref === details.id ? "" : ` (resolved from "${ref}")`} in the GitHub repository.`,
+    });
+    await this.#gitCache.advertise(commitIdsOfSummary(details));
+    return details;
+  }
+
+  async listCommits(options?: GitHubCommitFilter): Promise<Cursor<GitHubCommitSummary>> {
+    await this.#approvalQueue.authorizeObservation({
+      title: `List commit history`,
+      description: `List commits in the GitHub repository.`,
+    });
+    const cursor = await this.#gatekeeper.listCommits(options, options?.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
   }
 }
 
@@ -4010,9 +4304,17 @@ class GitHubIssueImpl extends RpcTarget implements GitHubIssue {
 }
 
 @validateRpc()
-class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest {
+export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest {
+  #gitCache: SessionGitCache;
+
   constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>, logicalId: string) {
     super(gatekeeper, approvalQueue, logicalId, "pull");
+    this.#gitCache = new SessionGitCache(approvalQueue);
+  }
+
+  override [Symbol.dispose](): void {
+    this.#gitCache.dispose();
+    super[Symbol.dispose]();
   }
 
   async getDetails(): Promise<GitHubPullRequestDetails> {
@@ -4021,6 +4323,8 @@ class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest
       title: `Read pull request #${details.id}: ${details.title}`,
       description: `Read the full details of pull request #${details.id} in ${details.repo.fullName}.`,
     });
+    // A provisional pull request may carry empty branch shas; advertise() skips them.
+    await this.#gitCache.advertise(commitIdsOfPullSummary(details));
     return details;
   }
 
@@ -4029,7 +4333,18 @@ class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPullRequest
       title: `Read diff for #${this.logicalId}`,
       description: `Read the diff for pull request #${this.logicalId}.`,
     });
-    return this.gatekeeper.pullDiff(this.logicalId, options?.resultsPerPage ?? 20);
+    const diff = await this.gatekeeper.pullDiff(this.logicalId, options?.resultsPerPage ?? 20);
+    await this.#gitCache.advertise([diff.revision.baseSha, diff.revision.headSha]);
+    return diff;
+  }
+
+  async listCommits(options?: GitHubPageOptions): Promise<Cursor<GitHubCommitSummary>> {
+    await this.approvalQueue.authorizeObservation({
+      title: `List commits for #${this.logicalId}`,
+      description: `List the commits of pull request #${this.logicalId}.`,
+    });
+    const cursor = await this.gatekeeper.pullCommits(this.logicalId, options?.resultsPerPage ?? 50);
+    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
   }
 
   async readDiffThreads(options?: GitHubPageOptions): Promise<Cursor<GitHubDiffThread>> {
