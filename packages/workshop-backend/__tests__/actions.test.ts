@@ -1,9 +1,20 @@
+import { env } from "cloudflare:workers";
 import { describe, it, expect, vi } from "vitest";
-import { ActionSyncDriver, ActionSyncStorage, GatekeeperActionTarget } from "../src/actions.js";
-import type { ActionRecord, GatekeeperActionRecord } from "../src/overseer.js";
+import {
+  ActionSyncDriver, ActionSyncStorage, GatekeeperActionTarget, isMethodMissing,
+} from "../src/actions.js";
+import type {
+  ActionRecord, GatekeeperActionRecord, OverseerDurableObject,
+} from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import type { ApplyActionsThroughResult } from "@gadgets/workshop-shared/gatekeeper";
 import { makeActionStorage as makeStorage } from "./fixtures.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+  }
+}
 
 const GK = 1;
 const ENABLER: AiChatAuthorInfo = { type: "user", id: "enabler@example.com", name: "Enabler" };
@@ -412,6 +423,22 @@ describe("ActionSyncDriver.sync", () => {
 });
 
 describe("ActionSyncDriver legacy fallback", () => {
+  it("recognizes workerd's real missing-method error", async () => {
+    let stub = env.TEST_OVERSEER.get(env.TEST_OVERSEER.newUniqueId());
+    let call = (stub as any).applyActionsThrough(1, []);
+    let error: unknown;
+    try {
+      await call;
+    } catch (caught) {
+      error = caught;
+    } finally {
+      call[Symbol.dispose]();
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('does not implement "applyActionsThrough"');
+    expect(isMethodMissing(error)).toBe(true);
+  });
   it("falls back on workerd's method-missing TypeError, delivering vetoes then applies in " +
      "ascending order, and probes only once", async () => {
     let storage = makeStorage();
