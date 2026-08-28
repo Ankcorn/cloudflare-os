@@ -43,7 +43,7 @@ import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker"
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
-import { ActionSyncDriver, ManualApproval } from "./actions";
+import { ActionSyncDriver, ManualApproval, PassResult } from "./actions";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
@@ -571,8 +571,9 @@ export type ActionRecord = {
   autoApproved?: boolean;         // set when applied by an auto-approval rule rather than a human
 
   /**
-   * Display-safe reason the most recent application attempt stopped at this action. Only present
-   * while the action remains pending; cleared when it applies or is rejected.
+   * Display-safe reason the most recent application attempt stopped at this action. Set while the
+   * action is pending, and retained on an action the user rejected after such an attempt, whose
+   * outcome the gatekeeper never confirmed. Cleared when the action applies.
    */
   failure?: string;
 
@@ -588,6 +589,12 @@ export type ActionRecord = {
    * so legacy rejections are never re-delivered.
    */
   vetoPending?: true;
+
+  /**
+   * Set when submitting this action suspended its agent turn: an `awaitDecision` action with no
+   * auto-approval rule to clear it. Deciding a record without it must never start a turn.
+   */
+  suspendedTurn?: true;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -4300,18 +4307,18 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
-  // Reconcile the gatekeeper's pending actions through one batch applyActionsThrough call: staged
-  // manual approvals, then auto-eligible actions (stopping at the first manual gate -- nothing is
-  // silently applied past one), then any deliverable staged vetoes. Resolves with the workspace
-  // record ids the pass decided. Delegates to the single-flight driver, which coalesces concurrent
-  // requests for the same gatekeeper (the DO's input gate is open across the RPC await).
-  applyDecidedActions(gatekeeperId: number, manualApproval?: ManualApproval): Promise<number[]> {
+  // Reconcile the gatekeeper's pending actions through one batch applyActionsThrough call: the
+  // caller's staged approval plus any rule-authorized action, stopping below any undecided action
+  // with neither authority, then any deliverable staged vetoes. Resolves with what the pass
+  // decided. Delegates to the single-flight driver, which coalesces concurrent requests for the
+  // same gatekeeper (the DO's input gate is open across the RPC await).
+  applyDecidedActions(gatekeeperId: number, manualApproval?: ManualApproval): Promise<PassResult> {
     return this.#actionSync.apply(gatekeeperId, manualApproval);
   }
 
-  // Resolves once no apply pass is in flight (see ActionSyncDriver.awaitSettled).
-  awaitActionsSettled(gatekeeperId: number): Promise<void> {
-    return this.#actionSync.awaitSettled(gatekeeperId);
+  // Runs the transition with no apply pass in flight (see ActionSyncDriver.withSettled).
+  withActionsSettled(gatekeeperId: number, transition: () => void): Promise<void> {
+    return this.#actionSync.withSettled(gatekeeperId, transition);
   }
 
   // Blocks other messages and agent turns for this chat until the returned object is disposed.
@@ -4691,6 +4698,16 @@ class OverseerImpl implements AgentHooks {
 
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
+    // Auto-approval gate, named because awaitDecision uses it too. Applying is deferred: it calls
+    // back into the gatekeeper facet still awaiting submitAction.
+    let willAutoApprove = !!(description.autoApprovable && description.actionKind &&
+        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined);
+
+    // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
+    // Auto-approved actions keep the seamless behavior the user opted into.
+    let suspendsTurn = caller.from === "agent" && description.awaitDecision === true &&
+        !willAutoApprove;
+
     let record: GatekeeperActionRecord = {
       id: actionId,
       gatekeeperId,
@@ -4701,21 +4718,14 @@ class OverseerImpl implements AgentHooks {
       createdAt: new Date(),
       state: "pending",
       type: "action",
-      description
+      description,
     };
     if (suspendsTurn) record.suspendedTurn = true;
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
 
-    // Same auto-approval gate as before, named because awaitDecision uses it too. The drain is
-    // deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
-    let willAutoApprove = !!(description.autoApprovable && description.actionKind &&
-        this.storage.autoApproveTags.get(`${gatekeeperId}:${description.actionKind.tag}`) !== undefined);
-
-    // Only agent turns suspend on awaitDecision, and only when a manual decision is pending.
-    // Auto-approved actions keep the seamless behavior the user opted into.
-    if (caller.from === "agent" && description.awaitDecision && !willAutoApprove) {
+    if (caller.from === "agent" && suspendsTurn) {
       this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
     }
 
@@ -9511,41 +9521,54 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // action applied in the world but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
-    // Approving is a decision frontier: the pass applies this action AND every earlier
-    // undecided action from the same gatekeeper (attributed to this approver), then continues
-    // through any auto-eligible actions the cleared gate unblocked.
-    let decided = await this.impl.applyDecidedActions(
-        action.gatekeeperId, {frontier: action.action, resolvedBy: profile});
+    // Applies this action plus any earlier undecided action an auto-approval rule already
+    // authorizes; an undecided action with neither authority stops the pass below it.
+    let {decided, blockedBy} = await this.impl.applyDecidedActions(
+        action.gatekeeperId, {action: action.action, resolvedBy: profile});
 
-    // Resume turns suspended on awaitDecision whose awaited actions this pass decided -- the batch
-    // may have covered earlier actions from other chats, not just the approved one. Done before
-    // the outcome check below, so a failure on this action doesn't strand another chat's turn.
+    // Resume turns that suspended on awaitDecision and whose awaited actions this pass decided --
+    // the batch may have covered earlier actions from other chats, not just the approved one. Done
+    // before the outcome check below, so a failure on this action doesn't strand another chat's
+    // turn.
     let chatIds = new Set<number>();
     for (let recordId of decided) {
       let record = this.impl.storage.actions.get(recordId);
-      if (record?.type === "action" && record.caller.from === "agent" &&
-          record.description.awaitDecision) {
+      if (record?.type === "action" && record.caller.from === "agent" && record.suspendedTurn) {
         chatIds.add(record.caller.chatId);
       }
     }
     for (let chatId of chatIds) {
-      await this.#maybeResumeAfterActionDecision(chatId);
+      try {
+        await this.#maybeResumeAfterActionDecision(chatId);
+      } catch (err) {
+        // Never propagated: the approval's own outcome check below is this call's result signal.
+        this.impl.logger.warn("failed to resume turn after action decision", {
+          event: "action.resume.failed", chatId, error: err,
+        });
+      }
     }
 
+    // Report the real outcome: the client displays a resolved approval optimistically, so anything
+    // other than "approved" must surface as an error.
     let fresh = this.impl.storage.actions.get(id);
-    if (fresh?.type === "action" && fresh.state !== "approved") {
-      // Rejected: a veto this pass delivered cascade-invalidated it, or another client rejected it
-      // while the pass was in flight. Either way it was not applied, so this must not report
-      // success -- the client displays a resolved approval optimistically.
-      if (fresh.state === "rejected") {
-        throw new Error(fresh.cascadedFrom !== undefined
-            ? `Action was invalidated by a rejected earlier action: ${id}`
-            : `Action was rejected: ${id}`);
-      }
-      // Still pending: the gatekeeper stopped at (or before) this action; surface the
-      // display-safe reason so the user can resolve the problem and retry.
-      throw new Error(fresh.failure ?? `Failed to apply action: ${id}`);
+    if (fresh?.type !== "action" || fresh.state === "approved") return;
+
+    // Rejected: a veto this pass delivered cascade-invalidated it, or another client rejected it
+    // while the pass was in flight. Either way it was not applied.
+    if (fresh.state === "rejected") {
+      throw new Error(fresh.cascadedFrom !== undefined
+          ? `Action was invalidated by a rejected earlier action: ${id}`
+          : `Action was rejected: ${id}`);
     }
+
+    // Still pending: an earlier undecided action held the frontier below this one, or the
+    // gatekeeper stopped here. Either way, surface the reason the user can act on.
+    if (blockedBy !== undefined) {
+      throw new Error(`Approve "${blockedBy}" first: it was requested earlier and must be ` +
+          `applied before this one.`);
+    }
+    throw new Error(fresh.failure ??
+        "Couldn't apply this action; an earlier action on this connection needs attention.");
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -9674,23 +9697,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // half-rejected.
     let profile = await this.#getClientProfile();
 
-    // A rejection must never interleave with an in-flight apply pass that might be applying this
-    // very action; wait it out, then re-check.
-    await this.impl.awaitActionsSettled(action.gatekeeperId);
-    let fresh = this.impl.storage.actions.get(id);
-    if (fresh?.type !== "action" || fresh.state !== "pending") {
-      throw new Error(`Action is not pending: ${id}`);
-    }
-
     // The rejection is decided here and now; delivery to the gatekeeper is a staged veto. It goes
-    // out with the next apply pass whose frontier covers it -- immediately below, if every earlier
-    // action is already decided, otherwise once the actions below it are.
-    fresh.state = "rejected";
-    fresh.appliedAt = new Date();
-    fresh.resolvedBy = profile;
-    fresh.vetoPending = true;
-    delete fresh.failure;
-    this.impl.storage.actions.put(fresh);
+    // out with the next apply pass whose frontier covers it. The write runs with no pass in
+    // flight, so an apply and this rejection can never both claim the same action.
+    await this.impl.withActionsSettled(action.gatekeeperId, () => {
+      let fresh = this.impl.storage.actions.get(id);
+      if (fresh?.type !== "action" || fresh.state !== "pending") {
+        throw new Error(`Action is not pending: ${id}`);
+      }
+      fresh.state = "rejected";
+      fresh.appliedAt = new Date();
+      fresh.resolvedBy = profile;
+      fresh.vetoPending = true;
+      this.impl.storage.actions.put(fresh);
+    });
 
     this.impl.ctx.waitUntil(this.impl.applyDecidedActions(action.gatekeeperId));
 

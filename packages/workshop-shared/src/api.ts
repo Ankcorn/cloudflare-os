@@ -1524,8 +1524,9 @@ export type ActionLogEntry = {
   cascadedFrom?: number;
 
   /**
-   * Display-safe reason the most recent application attempt stopped at this action. Only set while
-   * the action remains pending. The action may be retried or rejected.
+   * Display-safe reason the most recent application attempt stopped at this action. Set while the
+   * action is pending, and retained on an action the user rejected after such an attempt, whose
+   * outcome the gatekeeper never confirmed. Cleared when the action applies.
    */
   failure?: string;
 } | {

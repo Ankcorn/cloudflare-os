@@ -854,6 +854,10 @@ export interface Gatekeeper<Session> extends DurableObject {
    * reported via `stopped`. An action whose `submitAction()` call has not yet completed must not
    * be applied.
    *
+   * Every ID in `vetoes` must be durably recorded before any action is applied, including when
+   * processing stops: the caller clears its staged veto on any call that returns, so a veto lost
+   * behind a `stopped` result would let a later frontier apply a rejected action.
+   *
    * `actionId` is the decision frontier and may equal the current frontier to deliver vetoes only.
    * Every action ID in `vetoes` must be less than or equal to `actionId`. A veto may arrive long
    * after the user rejected the action; delivery is opportunistic, not prompt.

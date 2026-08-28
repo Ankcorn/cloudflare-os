@@ -1,8 +1,9 @@
 // Action-sync core: reconciles this workspace's pending action records with a gatekeeper through
 // one batch `applyActionsThrough(actionId, vetoes)` call per pass. A pass computes the decision
 // frontier (manual approvals staged by the caller, then auto-approval rules, then deliverable
-// vetoes), makes the call, and translates the result back onto the records: everything at or below
-// the applied frontier becomes "approved" with the right attribution, a `stopped` action keeps its
+// vetoes), stopping below any undecided action that is neither clicked nor rule-authorized, then
+// makes the call and translates the result back onto the records: everything at or below the
+// applied frontier becomes "approved" with the right attribution, a `stopped` action keeps its
 // pending state plus a display-safe `failure`, and veto-cascade invalidations become "rejected"
 // with `cascadedFrom` attribution.
 //
@@ -38,16 +39,29 @@ export type GatekeeperActionTarget =
 export type GetGatekeeperFn = (gatekeeperId: number) => GatekeeperActionTarget;
 
 /**
- * A staged manual approval: apply every undecided action through `frontier` (a gatekeeper-local
- * action ID) under `resolvedBy`'s authority.
+ * A staged manual approval: the user clicked Approve on `action` (a gatekeeper-local action ID),
+ * under `resolvedBy`'s authority. Earlier undecided actions go out with it only where an
+ * auto-approval rule already authorizes them.
  */
-export type ManualApproval = { frontier: number, resolvedBy: AiChatAuthorInfo };
+export type ManualApproval = { action: number, resolvedBy: AiChatAuthorInfo };
+
+/** What one pass decided, plus the gate that held back a click it could not honour. */
+export type PassResult = {
+  /** Workspace record IDs decided (approved or cascade-rejected) by the pass. */
+  decided: number[];
+
+  /**
+   * Title of the earlier undecided action that stopped the frontier, set when a click sat above
+   * it. Transient queue state, so it is reported rather than recorded on the action.
+   */
+  blockedBy?: string;
+};
 
 type StagedPass = {
   manualApprovals: ManualApproval[];
-  resolve: (decided: number[]) => void;
+  resolve: (result: PassResult) => void;
   reject: (error: unknown) => void;
-  promise: Promise<number[]>;
+  promise: Promise<PassResult>;
 };
 
 /**
@@ -93,19 +107,23 @@ export class ActionSyncDriver {
   // which is what lets a migrated deploy shed the fallback without bookkeeping.
   #legacy = new Set<number>();
 
+  // Transitions waiting to run between two passes, so a rejection can't starve behind a steady
+  // stream of approvals extending the run loop.
+  #barriers = new Map<number, Array<() => void>>();
+
   constructor(
       private storage: ActionSyncStorage,
       private getGatekeeper: GetGatekeeperFn) {}
 
   /**
-   * Reconcile the gatekeeper's queue, optionally staging a manual approval. Resolves with the
-   * workspace record IDs decided (approved or cascade-rejected) by the pass that carried this
-   * request's intent. Concurrent calls for the same gatekeeper coalesce into one pass.
+   * Reconcile the gatekeeper's queue, optionally staging a manual approval. Resolves with what the
+   * pass carrying this request's intent decided. Concurrent calls for the same gatekeeper coalesce
+   * into one pass.
    */
-  apply(gatekeeperId: number, manualApproval?: ManualApproval): Promise<number[]> {
+  apply(gatekeeperId: number, manualApproval?: ManualApproval): Promise<PassResult> {
     let slot = this.#staged.get(gatekeeperId);
     if (!slot) {
-      slot = { manualApprovals: [], ...Promise.withResolvers<number[]>() };
+      slot = { manualApprovals: [], ...Promise.withResolvers<PassResult>() };
       this.#staged.set(gatekeeperId, slot);
     }
     if (manualApproval) slot.manualApprovals.push(manualApproval);
@@ -117,20 +135,39 @@ export class ActionSyncDriver {
   }
 
   /**
-   * Resolves once no apply pass is in flight for the gatekeeper. Used by rejection: a veto must
-   * never be staged while a pass that might apply the same action is mid-RPC.
+   * Runs `transition` with no pass in flight for the gatekeeper: immediately when the run loop is
+   * idle, otherwise between two of its passes. Either way the callback runs synchronously, with no
+   * window for a pass to start first. Used by rejection, whose record write must never land while
+   * a pass that might apply the same action is mid-RPC.
    */
-  async awaitSettled(gatekeeperId: number): Promise<void> {
-    for (;;) {
-      let running = this.#running.get(gatekeeperId);
-      if (!running) return;
-      await running.catch(() => {});
-    }
+  async withSettled(gatekeeperId: number, transition: () => void): Promise<void> {
+    if (!this.#running.has(gatekeeperId)) return transition();
+    let {promise, resolve, reject} = Promise.withResolvers<void>();
+    let queue = this.#barriers.get(gatekeeperId);
+    if (!queue) this.#barriers.set(gatekeeperId, queue = []);
+    queue.push(() => {
+      try {
+        transition();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    return promise;
+  }
+
+  // Run every transition queued behind the current pass. Called where no pass is in flight.
+  #releaseBarriers(gatekeeperId: number): void {
+    let queue = this.#barriers.get(gatekeeperId);
+    if (!queue) return;
+    this.#barriers.delete(gatekeeperId);
+    for (let release of queue) release();
   }
 
   async #run(gatekeeperId: number): Promise<void> {
     try {
       for (;;) {
+        this.#releaseBarriers(gatekeeperId);
         let slot = this.#staged.get(gatekeeperId);
         if (!slot) break;
         this.#staged.delete(gatekeeperId);
@@ -149,10 +186,11 @@ export class ActionSyncDriver {
       // Synchronous with the loop's empty-staged check above, so a request staged mid-pass either
       // was picked up by the loop or sees #running empty and starts a fresh one.
       this.#running.delete(gatekeeperId);
+      this.#releaseBarriers(gatekeeperId);
     }
   }
 
-  async #applyOnce(gatekeeperId: number, manualApprovals: ManualApproval[]): Promise<number[]> {
+  async #applyOnce(gatekeeperId: number, manualApprovals: ManualApproval[]): Promise<PassResult> {
     // Snapshot both indexes before reconciling (see actionsAscending). The pending index was
     // backfilled by the action-index migration; vetoPending only exists on records written after
     // its index was introduced, so it needs no legacy backfill.
@@ -162,34 +200,48 @@ export class ActionSyncDriver {
             .filter(record => record.state === "rejected" && record.vetoPending === true);
     let byAction = new Map([...pending, ...stagedVetoes].map(record => [record.action, record]));
 
-    // Decide the frontier and, for every pending action it covers, the attribution to record if
-    // the gatekeeper applies it. Attribution is captured now, before the RPC, so a rule removed
-    // mid-call can't leave an applied action unattributed: this is the single pending->approved
-    // chokepoint, and every transition must record the resolving user and whether it was
-    // automatic.
-    let manualAscending = manualApprovals.toSorted((a, b) => a.frontier - b.frontier);
-    let frontier = manualAscending.at(-1)?.frontier ?? 0;
+    // Two authorities extend the frontier and nothing else: the user's own click on that exact
+    // action, or an auto-approval rule they enabled for its kind. An undecided action with neither
+    // is a gate -- the frontier stops below it, because `applyActionsThrough` would apply it too.
+    // Attribution is captured here, before the RPC, so a rule removed mid-call can't leave an
+    // applied action unattributed: this is the single pending->approved chokepoint, and every
+    // transition must record the resolving user and whether it was automatic.
+    let clicked = new Map(manualApprovals.map(manual => [manual.action, manual.resolvedBy]));
+    // -1, not 0: 0 is a valid action ID, so "no frontier" must sort below every one of them.
+    let frontier = Math.max(-1, ...manualApprovals.map(manual => manual.action));
     let attribution = new Map<number, {resolvedBy: AiChatAuthorInfo, autoApproved: boolean}>();
-
+    let gate: GatekeeperActionRecord | undefined;
     for (let record of pending) {
-      // Covered by a manual approval; the smallest covering frontier's user takes responsibility
-      // for this earlier action riding along.
-      let covering = manualAscending.find(manual => manual.frontier >= record.action);
-      if (covering) {
-        attribution.set(record.action, {resolvedBy: covering.resolvedBy, autoApproved: false});
+      let resolvedBy = clicked.get(record.action);
+      if (resolvedBy) {
+        attribution.set(record.action, {resolvedBy, autoApproved: false});
         continue;
       }
-      // Above every manual frontier: extend while auto-eligible, exactly like the old drain.
-      // Eligibility requires BOTH signals: the author's `autoApprovable` verdict on the action AND
-      // a user-enabled rule for the action's kind. Stop at the first manual gate -- nothing is
-      // ever applied past one.
-      let tag = record.description.actionKind?.tag;
-      let rule = tag !== undefined
-          ? this.storage.autoApproveTags.get(`${gatekeeperId}:${tag}`)
+      // Both signals required: the author's `autoApprovable` verdict and a user-enabled rule for
+      // the kind, whose enabler the auto-approval is attributed to. An action the gatekeeper
+      // already stopped at needs a third: a click. The stop says why, not whether the action took
+      // effect, so re-sending it unattended could repeat a side effect that already landed.
+      let tag = record.failure === undefined && record.description.autoApprovable === true
+          ? record.description.actionKind?.tag
           : undefined;
-      if (record.description.autoApprovable !== true || rule === undefined) break;
+      let rule = tag === undefined
+          ? undefined
+          : this.storage.autoApproveTags.get(`${gatekeeperId}:${tag}`);
+      if (!rule) {
+        gate = record;
+        break;
+      }
       attribution.set(record.action, {resolvedBy: rule.enabledBy, autoApproved: true});
-      frontier = record.action;
+      if (record.action > frontier) frontier = record.action;
+    }
+
+    // A click above a gate is not authority over the gate: pull the frontier below it and report
+    // which action must go first. Iteration is ascending, so nothing already attributed sits above
+    // the gate.
+    let blockedBy: string | undefined;
+    if (gate && gate.action <= frontier) {
+      frontier = gate.action - 1;
+      blockedBy = gate.description.title;
     }
 
     // Vetoes ride along up to the frontier. Beyond it, a staged veto is deliverable only when
@@ -201,7 +253,7 @@ export class ActionSyncDriver {
     }
     let sendVetoes = stagedVetoes.filter(veto => veto.action <= frontier);
 
-    if (attribution.size === 0 && sendVetoes.length === 0) return [];
+    if (attribution.size === 0 && sendVetoes.length === 0) return {decided: [], blockedBy};
 
     let decided: number[] = [];
 
@@ -282,7 +334,7 @@ export class ActionSyncDriver {
       }
     }
 
-    return decided;
+    return {decided, blockedBy};
   }
 
   // Re-read a record immediately before mutating it, guarding against concurrent decisions made
