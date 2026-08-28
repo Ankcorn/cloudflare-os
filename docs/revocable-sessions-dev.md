@@ -15,6 +15,33 @@ revocation falls back to the whole-DO restart production has today. That's why t
 suite (vitest-pool-workers runs stock workerd) passes unchanged; the revocation path itself can
 only be exercised against the patched binary.
 
+## Automated tests
+
+`__tests__/revocable-sessions.test.ts` pins the revocation path against a real
+`OverseerDurableObject`: revocation severs the session and presents as a lost connection
+(`notifyClosed` disposed uncalled), a clean close still calls `notifyClosed`, only the named
+collaborator is severed, the owner is spared, and neither `severRevokedAccess` nor a scope
+widening aborts the DO. Miniflare (which vitest-pool-workers runs on) honors
+`MINIFLARE_WORKERD_PATH`, so the whole suite runs under either runtime:
+
+```bash
+# Revocation tests run (568 tests, 6 of them the revocation path):
+MINIFLARE_WORKERD_PATH=$HOME/Desktop/Github/workerd/bazel-bin/src/workerd/server/workerd \
+    pnpm --filter workshop-backend exec vitest run
+
+# Stock workerd (what CI runs): the file skips itself via describe.skipIf(!RpcStub.revocable).
+pnpm --filter workshop-backend exec vitest run
+```
+
+The fallback-pinning tests (`observer-scope-restart`, `observer-coverage-scrub`,
+`observer-scope-prune`) force the stock-runtime branch by stubbing
+`revokeSessions`/`revokeCollaboratorSessions` to return false, so they assert the restart wiring
+under either binary.
+
+Gotcha: don't hand a native RPC promise to vitest's `expect(...).rejects` — the promise is a
+pipelining proxy, and the matcher touching it spawns extra doomed pipelined calls that surface as
+unhandled rejections. Attach handlers directly (see `rejectionOf` in the test).
+
 ## Running with the patched runtime
 
 ```bash

@@ -38,6 +38,10 @@ async function withImpl(fn: (impl: any, restarts: string[]) => Promise<void>): P
     impl.ownerProfileId = OWNER;
     let restarts: string[] = [];
     impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
+    // Force the stock-runtime fallback so the restart stays the observable outcome even under a
+    // patched workerd with RpcStub.revocable() (that path is pinned by revocable-sessions.test.ts).
+    impl.revokeSessions = () => false;
+    impl.revokeCollaboratorSessions = () => false;
     await fn(impl, restarts);
   });
 }

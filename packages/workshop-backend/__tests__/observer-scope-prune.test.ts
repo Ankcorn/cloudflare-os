@@ -128,6 +128,10 @@ describe("ensureObserver out-of-scope coverage pruning", () => {
       impl.ownerProfileId = "owner";
       let restarts: string[] = [];
       impl.scheduleAccessRestart = async (reason: string) => { restarts.push(reason); };
+      // Force the stock-runtime fallback so the restart stays the observable outcome even under
+      // a patched workerd with RpcStub.revocable() (pinned by revocable-sessions.test.ts).
+      impl.revokeSessions = () => false;
+      impl.revokeCollaboratorSessions = () => false;
       // Alice is a "use" collaborator with stale coverage for gatekeeper 2, left over from before
       // it was unbound from every gadget.
       impl.storage.collaborators.put({
