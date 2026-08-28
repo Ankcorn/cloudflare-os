@@ -2,22 +2,31 @@
 // hints-to-filter-spec matrix, and that no fetch command ever emits a `have` line -- the
 // transport locked decision of plans/worktrees.md), response demultiplexing feeding
 // `consumePack()` (against a mock cache; real pack decoding is workshop-backend's test surface),
-// and the pull driver's requested-oid verification with its filtered-blob carve-out.
+// the pull driver's requested-oid verification with its filtered-blob carve-out, and the
+// send-pack side: ref-update command encoding (branch-name/oid validation included), the
+// canonical empty pack, report-status parsing, and the push driver's body composition.
 
 import type { GitOid, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import { describe, expect, it } from "vitest";
 import {
   DELIM_PKT,
   FLUSH_PKT,
+  GitRefUpdateRejectedError,
   MAX_GIT_FETCH_BYTES,
   PktLineParser,
+  ZERO_OID,
   buildGitFetchRequest,
+  buildRefUpdateRequest,
   demuxGitFetchResponse,
+  emptyPackBytes,
   encodePktLine,
   filterSpecForHints,
   parsePktItems,
+  parseReceivePackResponse,
   pktText,
   pullGitObjectsIntoCache,
+  pushGitRefUpdate,
+  validateBranchName,
 } from "../src/git-transport";
 
 /** Deterministic fake full oid. */
@@ -367,5 +376,158 @@ describe("pullGitObjectsIntoCache", () => {
         async () => new Response("nope", { status: 502 }), [oid(1)], HINTS, cache))
       .rejects.toThrow(/HTTP 502/);
     expect(cache.consumed).toEqual([]);
+  });
+});
+
+describe("validateBranchName", () => {
+  it("accepts ordinary branch names", () => {
+    for (const name of ["main", "feature/foo-bar", "release/v1.2.3", "user/kenton/wip_2",
+                        "with.dots", "UPPER"]) {
+      expect(validateBranchName(name)).toBe(name);
+    }
+  });
+
+  it("rejects names that could escape the ref namespace or corrupt pkt-line framing", () => {
+    for (const name of ["", "has space", "has\ttab", "has\nnewline", "has\0nul", "a..b",
+                        "/leading", "trailing/", "double//slash", "~tilde", "care^t", "colon:",
+                        "quest?", "star*", "brack[et", "back\\slash", "at@{brace", "@",
+                        ".leading-dot", "trailing-dot.", "inner/.dot", "locked.lock",
+                        "locked.lock/sub", "dot./slash", "a".repeat(256)]) {
+      expect(() => validateBranchName(name), JSON.stringify(name)).toThrow(/invalid branch name/);
+    }
+  });
+});
+
+describe("buildRefUpdateRequest", () => {
+  it("encodes one command pkt with the capability list and a terminating flush", () => {
+    const request = buildRefUpdateRequest({ branch: "main", oldSha: oid(1), newSha: oid(2) });
+    const items = parsePktItems(request);
+    expect(items.map(item => item.kind)).toEqual(["data", "flush"]);
+    const command = pktText((items[0] as { data: Uint8Array }).data);
+    expect(command).toBe(`${oid(1)} ${oid(2)} refs/heads/main\0report-status agent=cloudflare-gadgets`);
+  });
+
+  it("accepts the zero id on either side, but rejects a no-op update", () => {
+    expect(() => buildRefUpdateRequest({ branch: "b", oldSha: ZERO_OID, newSha: oid(1) }))
+      .not.toThrow();
+    expect(() => buildRefUpdateRequest({ branch: "b", oldSha: oid(1), newSha: ZERO_OID }))
+      .not.toThrow();
+    expect(() => buildRefUpdateRequest({ branch: "b", oldSha: oid(1), newSha: oid(1) }))
+      .toThrow(/no-op/);
+  });
+
+  it("rejects malformed oids and branch names", () => {
+    expect(() => buildRefUpdateRequest({ branch: "b", oldSha: "nope", newSha: oid(1) }))
+      .toThrow(/invalid git oid/);
+    expect(() => buildRefUpdateRequest({ branch: "bad name", oldSha: ZERO_OID, newSha: oid(1) }))
+      .toThrow(/invalid branch name/);
+  });
+});
+
+describe("emptyPackBytes", () => {
+  it("produces the canonical zero-object pack: header plus its SHA-1 trailer", async () => {
+    const pack = await emptyPackBytes();
+    expect([...pack.subarray(0, 12)]).toEqual([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0]);
+    const trailer = new Uint8Array(await crypto.subtle.digest("SHA-1", pack.subarray(0, 12)));
+    expect(pack.subarray(12)).toEqual(trailer);
+    // git's well-known empty-pack checksum, as a cross-check against an independently wrong
+    // header and digest agreeing with each other.
+    expect([...pack.subarray(12)].map(b => b.toString(16).padStart(2, "0")).join(""))
+      .toBe("029d08823bd8a8eab510ad6ac75c823cfd3ed31e");
+  });
+});
+
+describe("parseReceivePackResponse", () => {
+  function report(...lines: string[]): Uint8Array {
+    return concatBytes([...lines.map(encodePktLine), FLUSH_PKT]);
+  }
+
+  it("returns normally when the update was applied", () => {
+    expect(() => parseReceivePackResponse(
+        report("unpack ok", "ok refs/heads/main"), "refs/heads/main")).not.toThrow();
+  });
+
+  it("throws the distinguished rejection with the server's reason on ng", () => {
+    let caught: unknown;
+    try {
+      parseReceivePackResponse(
+          report("unpack ok", "ng refs/heads/main fetch first"), "refs/heads/main");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(GitRefUpdateRejectedError);
+    expect((caught as GitRefUpdateRejectedError).reason).toBe("fetch first");
+  });
+
+  it("throws on unpack failure, a missing ref report, and a malformed response", () => {
+    expect(() => parseReceivePackResponse(
+        report("unpack index-pack abnormal exit", "ng refs/heads/main unpacker error"),
+        "refs/heads/main"))
+      .toThrow(/unpack error: index-pack abnormal exit/);
+    expect(() => parseReceivePackResponse(
+        report("unpack ok", "ok refs/heads/other"), "refs/heads/main"))
+      .toThrow(/did not mention refs\/heads\/main/);
+    expect(() => parseReceivePackResponse(report(), "refs/heads/main"))
+      .toThrow(/no unpack status/);
+  });
+});
+
+describe("pushGitRefUpdate", () => {
+  function okReport(ref: string): Uint8Array {
+    return concatBytes([encodePktLine("unpack ok"), encodePktLine(`ok ${ref}`), FLUSH_PKT]);
+  }
+
+  function captureFetch(requests: Uint8Array[], response: Uint8Array) {
+    return async (body: ReadableStream<Uint8Array>) => {
+      requests.push(await collect(body));
+      return new Response(response);
+    };
+  }
+
+  it("sends the command block followed by the pack, and accepts an ok report", async () => {
+    const requests: Uint8Array[] = [];
+    const pack = new TextEncoder().encode("PACKBYTES");
+    await pushGitRefUpdate(
+        captureFetch(requests, okReport("refs/heads/main")),
+        { branch: "main", oldSha: oid(1), newSha: oid(2) },
+        streamOf([pack]));
+    expect(requests).toHaveLength(1);
+    const expectedHeader = buildRefUpdateRequest({ branch: "main", oldSha: oid(1), newSha: oid(2) });
+    expect(requests[0]).toEqual(concatBytes([expectedHeader, pack]));
+  });
+
+  it("sends no pack with a deletion, and requires a pack for anything else", async () => {
+    const requests: Uint8Array[] = [];
+    await pushGitRefUpdate(
+        captureFetch(requests, okReport("refs/heads/main")),
+        { branch: "main", oldSha: oid(2), newSha: ZERO_OID }, null);
+    expect(requests[0]).toEqual(
+        buildRefUpdateRequest({ branch: "main", oldSha: oid(2), newSha: ZERO_OID }));
+
+    await expect(pushGitRefUpdate(
+        captureFetch([], okReport("refs/heads/main")),
+        { branch: "main", oldSha: oid(1), newSha: oid(2) }, null))
+      .rejects.toThrow(/requires a pack/);
+    await expect(pushGitRefUpdate(
+        captureFetch([], okReport("refs/heads/main")),
+        { branch: "main", oldSha: oid(2), newSha: ZERO_OID }, streamOf([new Uint8Array(1)])))
+      .rejects.toThrow(/must not send a pack/);
+  });
+
+  it("propagates a rejection and fails on a non-OK response", async () => {
+    const ngReport = concatBytes([
+      encodePktLine("unpack ok"),
+      encodePktLine("ng refs/heads/main non-fast-forward"),
+      FLUSH_PKT,
+    ]);
+    await expect(pushGitRefUpdate(
+        captureFetch([], ngReport),
+        { branch: "main", oldSha: oid(1), newSha: oid(2) }, streamOf([new Uint8Array(1)])))
+      .rejects.toThrow(GitRefUpdateRejectedError);
+
+    await expect(pushGitRefUpdate(
+        async body => { await collect(body); return new Response("nope", { status: 502 }); },
+        { branch: "main", oldSha: oid(1), newSha: oid(2) }, streamOf([new Uint8Array(1)])))
+      .rejects.toThrow(/HTTP 502/);
   });
 });

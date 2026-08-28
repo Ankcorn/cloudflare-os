@@ -47,6 +47,25 @@ export interface GitHubRepo {
   listCommits(options?: GitHubCommitFilter): Promise<Cursor<GitHubCommitSummary>>;
 
   /**
+   * Pushes a commit to a branch, setting the branch's head to `commitId` -- the way commits made
+   * in a worktree get to GitHub. The branch is created if it does not exist.
+   *
+   * `commitId` must be a full 40-character commit id (e.g. the result of a worktree `commit()`),
+   * and the commit's history must be locally available down to a commit that came from this
+   * repository -- which is automatic for commits authored in a worktree mounted from a commit of
+   * this repository.
+   *
+   * Without `force`, the push must be a fast-forward: the branch's current head must be an
+   * ancestor of `commitId`. If the branch has moved past the head your work was based on, the
+   * push fails with an error saying so; pull the new head and rebase, or pass `force: true` to
+   * overwrite the branch (which may discard others' commits -- prefer rebasing).
+   *
+   * To open a pull request for newly pushed work: `push(branch, commitId)` to a new branch, then
+   * `createPullRequest({head: branch, base: ...})`.
+   */
+  push(branch: string, commitId: string, options?: { force?: boolean }): Promise<void>;
+
+  /**
    * Creates a new issue in this repository.
    *
    * The issue may not be created on GitHub immediately. While creation is pending, the
@@ -65,6 +84,9 @@ export interface GitHubRepo {
    * number. You can reference it in other content using `#~1` syntax; these references
    * are automatically rewritten to the real `#number` once the PR is created. The
    * returned object is fully functional in the meantime.
+   *
+   * To create a pull request from a commit you made (e.g. in a worktree), first `push()` the
+   * commit to a new branch, then create the pull request with that branch as `head`.
    */
   createPullRequest(options: GitHubCreatePullRequestOptions): Promise<GitHubPullRequest>;
 

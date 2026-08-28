@@ -141,6 +141,104 @@ export async function advertiseCommits(
   await Promise.all([...batch].map(id => advertiser.advertiseCommit(id)));
 }
 
+// =======================================================================================
+// Raw commit-object parsing (for simulating reads of commits queued for push)
+
+/** A raw git commit object's decoded headers and message. */
+export type ParsedGitCommit = {
+  tree: GitOid;
+  parents: GitOid[];
+  author: GitHubCommitIdentity;
+  committer: GitHubCommitIdentity;
+  message: string;
+};
+
+/**
+ * Parse a git commit object's payload (as returned by `GitCache.get()` -- no `<type> <size>\0`
+ * header). Used to answer commit lookups for commits that are queued for push but not yet on
+ * GitHub, from their exact local bytes. Tolerant of headers it doesn't know (mergetag, gpgsig
+ * with continuation lines, ...), but throws on anything that fails to parse as a commit at all.
+ */
+export function parseGitCommitPayload(payload: Uint8Array, oid: GitOid): ParsedGitCommit {
+  const text = new TextDecoder().decode(payload);
+  const separator = text.indexOf("\n\n");
+  const headerText = separator === -1 ? text : text.slice(0, separator);
+  const message = separator === -1 ? "" : text.slice(separator + 2);
+
+  let tree: GitOid | undefined;
+  const parents: GitOid[] = [];
+  let author: GitHubCommitIdentity = {};
+  let committer: GitHubCommitIdentity = {};
+  for (const line of headerText.split("\n")) {
+    if (line.startsWith(" ")) continue;  // continuation of a multi-line header (e.g. gpgsig)
+    const space = line.indexOf(" ");
+    const key = space === -1 ? line : line.slice(0, space);
+    const value = space === -1 ? "" : line.slice(space + 1);
+    switch (key) {
+      case "tree":
+        if (tree !== undefined || !isCommitOid(value)) {
+          throw new Error(`git object ${oid} is not a well-formed commit`);
+        }
+        tree = value;
+        break;
+      case "parent":
+        if (!isCommitOid(value)) {
+          throw new Error(`git object ${oid} is not a well-formed commit`);
+        }
+        parents.push(value);
+        break;
+      case "author":
+        author = parseGitIdentity(value);
+        break;
+      case "committer":
+        committer = parseGitIdentity(value);
+        break;
+      default:
+        break;  // unknown headers are fine
+    }
+  }
+  if (tree === undefined) {
+    throw new Error(`git object ${oid} is not a well-formed commit`);
+  }
+  return { tree, parents, author, committer, message };
+}
+
+// Decodes a commit's identity line value: `Name <email> <unix-seconds> <tz>`. Every field is
+// best-effort -- a malformed identity yields an empty one rather than failing the whole read.
+function parseGitIdentity(value: string): GitHubCommitIdentity {
+  const match = /^(.*?)\s*<([^<>]*)>(?:\s+(\d+)(?:\s+[+-]\d{4})?)?$/.exec(value);
+  if (!match) return {};
+  return {
+    name: match[1] || undefined,
+    email: match[2] || undefined,
+    date: match[3] ? new Date(Number(match[3]) * 1000) : undefined,
+  };
+}
+
+/**
+ * Synthesize the `GitHubCommitDetails` shape from a raw commit object, for reads served from the
+ * workspace git cache while the commit is queued for push (simulation: it reads exactly as it
+ * will once pushed). `authorAccount` is unknowable without GitHub's attribution, and `stats`
+ * would require diffing, so both are omitted -- their types are nullable/optional for this
+ * reason.
+ */
+export function commitDetailsFromGitObject(
+  oid: GitOid,
+  payload: Uint8Array,
+  repoUrl: string,
+): GitHubCommitDetails {
+  const parsed = parseGitCommitPayload(payload, oid);
+  return {
+    id: oid,
+    message: parsed.message.replace(/\n$/, ""),
+    author: parsed.author,
+    committer: parsed.committer,
+    authorAccount: null,
+    parents: parsed.parents,
+    url: `${repoUrl}/commit/${oid}`,
+  };
+}
+
 /**
  * Cursor wrapper that advertises the commit ids on each page before returning it.
  *

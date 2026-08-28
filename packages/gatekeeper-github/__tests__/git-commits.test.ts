@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   CommitAdvertisingCursor,
   advertiseCommits,
+  commitDetailsFromGitObject,
   commitIdsOfSummary,
   isCommitOid,
   normalizeBranchSummary,
   normalizeCommitDetails,
   normalizeCommitSummary,
   normalizeTagSummary,
+  parseGitCommitPayload,
 } from "../src/git-commits";
 import type { GitHubCommitResponse } from "../src/github-api";
 import type { Cursor } from "../src/types";
@@ -223,5 +225,82 @@ describe("CommitAdvertisingCursor", () => {
 
     await cursor.next();
     expect(advertiser.calls).toEqual([oid(1)]);
+  });
+});
+
+describe("parseGitCommitPayload", () => {
+  function payload(lines: string[]): Uint8Array {
+    return new TextEncoder().encode(lines.join("\n"));
+  }
+
+  it("parses tree, parents, identities, and the message", () => {
+    const parsed = parseGitCommitPayload(payload([
+      `tree ${oid(9)}`,
+      `parent ${oid(1)}`,
+      `parent ${oid(2)}`,
+      "author Ada Lovelace <ada@example.com> 1700000000 +0130",
+      "committer Charles Babbage <charles@example.com> 1700000100 -0500",
+      "",
+      "Add the engine",
+      "",
+      "With details.",
+    ]), oid(7));
+    expect(parsed.tree).toBe(oid(9));
+    expect(parsed.parents).toEqual([oid(1), oid(2)]);
+    expect(parsed.author).toEqual({
+      name: "Ada Lovelace",
+      email: "ada@example.com",
+      date: new Date(1700000000 * 1000),
+    });
+    expect(parsed.committer.name).toBe("Charles Babbage");
+    expect(parsed.message).toBe("Add the engine\n\nWith details.");
+  });
+
+  it("tolerates unknown and multi-line headers (gpgsig continuation lines)", () => {
+    const parsed = parseGitCommitPayload(payload([
+      `tree ${oid(9)}`,
+      "author A <a@example.com> 1700000000 +0000",
+      "committer A <a@example.com> 1700000000 +0000",
+      "gpgsig -----BEGIN PGP SIGNATURE-----",
+      " lineone",
+      " -----END PGP SIGNATURE-----",
+      "",
+      "signed commit",
+    ]), oid(7));
+    expect(parsed.parents).toEqual([]);
+    expect(parsed.message).toBe("signed commit");
+  });
+
+  it("rejects payloads that are not well-formed commits", () => {
+    expect(() => parseGitCommitPayload(payload(["not a commit"]), oid(7)))
+      .toThrow(/not a well-formed commit/);
+    expect(() => parseGitCommitPayload(payload([`parent ${oid(1)}`, "", "no tree"]), oid(7)))
+      .toThrow(/not a well-formed commit/);
+    expect(() => parseGitCommitPayload(payload([`tree ${oid(9)}`, "parent nope", "", "m"]), oid(7)))
+      .toThrow(/not a well-formed commit/);
+  });
+});
+
+describe("commitDetailsFromGitObject", () => {
+  it("synthesizes the details shape from exact bytes, omitting GitHub-only fields", () => {
+    const bytes = new TextEncoder().encode([
+      `tree ${oid(9)}`,
+      `parent ${oid(1)}`,
+      "author Ada Lovelace <ada@example.com> 1700000000 +0000",
+      "committer Ada Lovelace <ada@example.com> 1700000100 +0000",
+      "",
+      "feat: pending work",
+      "",
+    ].join("\n"));
+    const details = commitDetailsFromGitObject(oid(7), bytes, "https://github.com/acme/widgets");
+    expect(details).toEqual({
+      id: oid(7),
+      message: "feat: pending work",
+      author: { name: "Ada Lovelace", email: "ada@example.com", date: new Date(1700000000000) },
+      committer: { name: "Ada Lovelace", email: "ada@example.com", date: new Date(1700000100000) },
+      authorAccount: null,
+      parents: [oid(1)],
+      url: `https://github.com/acme/widgets/commit/${oid(7)}`,
+    });
   });
 });

@@ -534,6 +534,81 @@ describe("push ancestry verification", () => {
 
 // =======================================================================================
 
+describe("isAncestor", () => {
+  // Builds and stores the chain root <- mid <- head locally (no gatekeeper attribution -- the
+  // shape of agent-authored commits, which is what the pre-submit fast-forward check walks).
+  async function storeChain(t: TestCache) {
+    let root = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [], "root"),
+    });
+    let mid = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [root], "mid"),
+    });
+    let head = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [mid], "head"),
+    });
+    return { root, mid, head };
+  }
+
+  it("finds an ancestor over locally cached commits, regardless of any gatekeeper view", async () => {
+    let t = makeCache();
+    let { root, mid, head } = await storeChain(t);
+    expect(t.cache.isAncestor(root, head)).toBe(true);
+    expect(t.cache.isAncestor(mid, head)).toBe(true);
+    // Inclusive, like `git merge-base --is-ancestor`: a commit is its own ancestor.
+    expect(t.cache.isAncestor(head, head)).toBe(true);
+    // Not symmetric.
+    expect(t.cache.isAncestor(head, root)).toBe(false);
+  });
+
+  it("walks all parents of a merge commit", async () => {
+    let t = makeCache();
+    let { root, head } = await storeChain(t);
+    let side = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [], "side root"),
+    });
+    let merge = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [head, side], "merge"),
+    });
+    expect(t.cache.isAncestor(root, merge)).toBe(true);
+    expect(t.cache.isAncestor(side, merge)).toBe(true);
+  });
+
+  it("returns false when the chain leaves the cache before reaching the ancestor", async () => {
+    let t = makeCache();
+    let missingParent = "d".repeat(40);
+    let head = await storeLocal(t.storage, {
+      type: "commit", payload: commitPayload(TREE_1, [missingParent], "shallow head"),
+    });
+    // The truth is unknowable over cached history; the answer is the verifiable "false", not an
+    // error -- a queue-time fast-forward check should fail closed here.
+    expect(t.cache.isAncestor("e".repeat(40), head)).toBe(false);
+  });
+
+  it("throws when the descendant is not a locally cached commit", async () => {
+    let t = makeCache();
+    expect(() => t.cache.isAncestor("a".repeat(40), "b".repeat(40)))
+        .toThrow(/not a commit in the workspace's git cache/);
+    let blob = await storeLocal(t.storage, {
+      type: "blob", payload: new TextEncoder().encode("not a commit"),
+    });
+    expect(() => t.cache.isAncestor("a".repeat(40), blob))
+        .toThrow(/not a commit in the workspace's git cache/);
+  });
+
+  it("is exposed on the per-gatekeeper stub without scope restriction", async () => {
+    let t = makeCache();
+    let { root, head } = await storeChain(t);
+    // G1 has never seen these commits; the stub still answers (see the interface doc's
+    // deliberate-unscoping note).
+    let stub = new GitCacheImpl(t.cache, G1);
+    expect(await stub.isAncestor(root, head)).toBe(true);
+    expect(await stub.isAncestor(head, root)).toBe(false);
+  });
+});
+
+// =======================================================================================
+
 describe("the marking walk", () => {
   it("marks the closure, skipping remote-known objects without descending", async () => {
     let t = await setupCrossRemote();

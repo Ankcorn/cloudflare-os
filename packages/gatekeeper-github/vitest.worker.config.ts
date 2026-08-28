@@ -4,14 +4,16 @@ import { defineConfig } from "vitest/config";
 
 /**
  * The suite that has to run in workerd, because what it covers -- the session-side git-cache
- * wiring, where every commit id a read returns must be advertised -- is built on `RpcTarget` and
- * `RpcStub`. The sibling `vitest.config.ts` keeps the pure-logic tests in Node, where they are far
- * cheaper.
+ * wiring (where every commit id a read returns must be advertised) and the push action's
+ * queue/simulate/apply/revert flow on the real gatekeeper Durable Object -- is built on
+ * `RpcTarget`, `RpcStub`, and `DurableObject` props. The sibling `vitest.config.ts` keeps the
+ * pure-logic tests in Node, where they are far cheaper.
  */
 export default defineConfig({
   plugins: [
     capnwebValidate(),
     cloudflareTest({
+      main: "./__tests__/workerd/worker.ts",
       miniflare: {
         // Kept in step with wrangler.jsonc; a drift here tests a runtime we do not deploy.
         compatibilityDate: "2026-02-02",
@@ -20,6 +22,15 @@ export default defineConfig({
         modulesRules: [
           { type: "Text", include: ["**/*.txt", "**/*.svg"] },
         ],
+        durableObjects: {
+          USER_ACCOUNT: { className: "UserAccount", useSQLite: true },
+          GITHUB_GATEKEEPER: { className: "GitHubGatekeeperImpl", useSQLite: true },
+          // The gatekeeper DO reads `ctx.props`, and a `DurableObjectClass` carrying props is
+          // only reachable through `ctx.facets` -- so the tests drive it from a hook Durable
+          // Object, exactly as the overseer does in production, rather than a plain namespace
+          // binding.
+          TEST_HOOKS: { className: "TestHooks", useSQLite: true },
+        },
       },
     }),
   ],

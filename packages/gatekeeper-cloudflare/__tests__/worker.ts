@@ -44,6 +44,9 @@ class TestGitCache extends RpcTarget implements GitCache {
   async consumePack(_pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
     throw new Error("not implemented");
   }
+  async isAncestor(_ancestor: GitOid, _descendant: GitOid): Promise<boolean> {
+    throw new Error("not implemented");
+  }
 }
 
 /** Stands in for another user's Cloudflare account during an observer admission check. */

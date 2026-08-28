@@ -151,6 +151,27 @@ describe("GitHubRepoSessionImpl advertising", () => {
       listBranches: async () => pagesCursor([
         [{ name: "main", headCommit: oid(1), protected: true }],
       ]),
+      isCommitPendingPush: () => false,
+    });
+
+    const cursor = await session.listBranches();
+    await cursor.next();
+    expect(queue.cache.advertised).toEqual([oid(1)]);
+  });
+
+  it("withholds a simulated branch head (a queued push's commit) from advertising", async () => {
+    const queue = new TestApprovalQueue();
+    // The listing shows oid(2) as `main`'s head because a queued push overlays it; that commit
+    // is not on GitHub yet, so advertising it would record a wrong pull-routing hint that
+    // outlives a rejection.
+    const session = repoSession(queue, {
+      listBranches: async () => pagesCursor([
+        [
+          { name: "main", headCommit: oid(2), protected: false },
+          { name: "other", headCommit: oid(1), protected: false },
+        ],
+      ]),
+      isCommitPendingPush: (id: string) => id === oid(2),
     });
 
     const cursor = await session.listBranches();
@@ -187,12 +208,84 @@ describe("GitHubRepoSessionImpl advertising", () => {
   it("advertises the resolved commit and its parents from getCommit", async () => {
     const queue = new TestApprovalQueue();
     const session = repoSession(queue, {
-      getCommit: async () => commitSummary(oid(1), [oid(2), oid(3)]),
+      getCommit: async () => ({ details: commitSummary(oid(1), [oid(2), oid(3)]), fromCache: false }),
     });
 
     const details = await session.getCommit("abc1234");
     expect(details.id).toBe(oid(1));
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2), oid(3)]);
+  });
+
+  it("does not advertise a cache-served getCommit result", async () => {
+    const queue = new TestApprovalQueue();
+    // A cache-served read is either already-recorded provenance or a pending push; the session
+    // must advertise neither the commit nor its parents.
+    const session = repoSession(queue, {
+      getCommit: async () => ({ details: commitSummary(oid(1), [oid(2)]), fromCache: true }),
+    });
+
+    const details = await session.getCommit(oid(1));
+    expect(details.id).toBe(oid(1));
+    expect(queue.cache.advertised).toEqual([]);
+  });
+});
+
+describe("GitHubRepoSessionImpl push", () => {
+  function pushFakes() {
+    const prepared: unknown[][] = [];
+    const submitted: { action: { type: string }, description: { pushedCommits?: string[] } }[] = [];
+    const methods = {
+      preparePush: async (branch: string, commitId: string, force: boolean, cache: unknown) => {
+        prepared.push([branch, commitId, force, cache]);
+        return {
+          type: "push", approvalId: 1, submittedAt: 0, owner: "cloudflare", repo: "workerd",
+          branch, expectedOldSha: oid(9), newSha: commitId, force,
+        };
+      },
+      submitActionForApproval: async (
+        _queue: unknown, action: { type: string }, description: { pushedCommits?: string[] },
+      ) => {
+        submitted.push({ action, description });
+      },
+    };
+    return { prepared, submitted, methods };
+  }
+
+  it("records the branch-head observation and declares the pushed commit", async () => {
+    const queue = new TestApprovalQueue();
+    const { prepared, submitted, methods } = pushFakes();
+    const session = repoSession(queue, methods);
+
+    await session.push("main", oid(1));
+
+    expect(queue.observations).toEqual(["Read head of branch main"]);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].slice(0, 3)).toEqual(["main", oid(1), false]);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].description.pushedCommits).toEqual([oid(1)]);
+  });
+
+  it("submits nothing when the branch is already at the commit", async () => {
+    const queue = new TestApprovalQueue();
+    const { submitted, methods } = pushFakes();
+    const session = repoSession(queue, {
+      ...methods,
+      preparePush: async () => null,  // the gatekeeper found the desired state already holds
+    });
+
+    await session.push("main", oid(1));
+    expect(submitted).toEqual([]);
+  });
+
+  it("rejects a truncated commit id and a bad branch name before reading anything", async () => {
+    const queue = new TestApprovalQueue();
+    const { prepared, methods } = pushFakes();
+    const session = repoSession(queue, methods);
+
+    await expect(session.push("main", "abc1234")).rejects.toThrow(/full 40-character commit id/);
+    await expect(session.push("bad name", oid(1))).rejects.toThrow(/invalid branch name/);
+    expect(queue.observations).toEqual([]);
+    expect(prepared).toEqual([]);
   });
 });
 

@@ -1482,6 +1482,24 @@ export interface GitCache extends RpcTarget {
    */
   consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]>;
 
+  /**
+   * Returns whether `ancestor` is reachable from `descendant` (inclusive: a commit is its own
+   * ancestor) by following parent links over commits in the workspace cache. The walk reads only
+   * locally cached objects and never pulls; a parent chain that leaves the cache simply stops, so
+   * `false` means "not verifiable as an ancestor over cached history" -- exactly the grade of
+   * answer a queue-time fast-forward check needs. Throws (rather than returning false) if
+   * `descendant` is not a locally cached commit, so a caller can distinguish "verified not an
+   * ancestor" from "history not available".
+   *
+   * Deliberately NOT restricted to this gatekeeper's scoped view: the caller names both oids, and
+   * oids are treated as capabilities throughout the system, so learning one bit of ancestry
+   * between two oids the caller already holds reveals nothing it couldn't learn by other means.
+   * This is what lets a gatekeeper validate a push's fast-forward requirement *before* submitting
+   * the action, while the commits to be pushed are not yet in its scoped view (they only enter it
+   * when `submitAction()` records the push -- see `ActionDescription.pushedCommits`).
+   */
+  isAncestor(ancestor: GitOid, descendant: GitOid): Promise<boolean>;
+
   // TODO(someday): putStream() method for large blobs?
 }
 

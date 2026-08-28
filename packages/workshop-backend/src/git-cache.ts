@@ -874,6 +874,40 @@ export class WorkspaceGitCache {
   }
 
   /**
+   * `GitCache.isAncestor()`: whether `ancestor` is reachable from `descendant` (inclusive) by
+   * following parent links over locally cached commits. The walk never pulls; a parent chain
+   * that leaves the cache simply stops, so false means "not verifiable as an ancestor over
+   * cached history". Throws if `descendant` is not itself a locally cached commit, so callers
+   * can distinguish "verified not an ancestor" from "history not available". Deliberately not
+   * scoped to any gatekeeper's view (see the interface doc): this is what lets a gatekeeper
+   * run a fast-forward check before submitting the push that would put the commits in view.
+   */
+  isAncestor(ancestor: GitOid, descendant: GitOid): boolean {
+    validateGitOid(ancestor);
+    validateGitOid(descendant);
+    let start = this.readLocalObject(descendant);
+    if (start === undefined || start.type !== "commit") {
+      throw new Error(
+          `Cannot check ancestry: ${descendant} is not a commit in the workspace's git cache.`);
+    }
+    if (ancestor === descendant) return true;
+    let visited = new Set<GitOid>([descendant]);
+    let stack = [...parseGitCommitRefs(start.payload, descendant).parents];
+    while (stack.length > 0) {
+      let oid = stack.pop()!;
+      if (visited.has(oid)) continue;
+      visited.add(oid);
+      if (oid === ancestor) return true;
+      let local = this.readLocalObject(oid);
+      // An absent or non-commit parent ends this path: the walk answers over cached commit
+      // history only. (A non-commit parent oid means a forged commit; not this method's problem.)
+      if (local === undefined || local.type !== "commit") continue;
+      stack.push(...parseGitCommitRefs(local.payload, oid).parents);
+    }
+    return false;
+  }
+
+  /**
    * Marks the push closure of a verified `pushedCommits` declaration: walks from the heads
    * through parents and containment (commit → tree → entries), stamping every visited object
    * `pendingPush {gatekeeperId, actionId}` -- skipping, without descending, objects the remote
@@ -1145,6 +1179,10 @@ export class GitCacheImpl extends RpcTarget implements GitCache {
 
   async consumePack(pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
     return this.cache.consumePackFromGatekeeper(this.gatekeeperId, pack);
+  }
+
+  async isAncestor(ancestor: GitOid, descendant: GitOid): Promise<boolean> {
+    return this.cache.isAncestor(ancestor, descendant);
   }
 }
 

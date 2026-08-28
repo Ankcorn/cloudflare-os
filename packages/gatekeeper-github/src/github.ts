@@ -37,15 +37,24 @@ import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-
 import {
   actorFromUser,
   advertiseCommits,
+  commitDetailsFromGitObject,
   commitIdsOfPullSummary,
   commitIdsOfSummary,
   CommitAdvertisingCursor,
+  isCommitOid,
   normalizeBranchSummary,
   normalizeCommitDetails,
   normalizeCommitSummary,
   normalizeTagSummary,
 } from "./git-commits";
-import { pullGitObjectsIntoCache } from "./git-transport";
+import {
+  GitRefUpdateRejectedError,
+  ZERO_OID,
+  emptyPackBytes,
+  pullGitObjectsIntoCache,
+  pushGitRefUpdate,
+  validateBranchName,
+} from "./git-transport";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubActor,
@@ -263,6 +272,22 @@ type MergePullRequestAction = BaseAction & {
   options?: GitHubPullRequestMergeOptions;
 };
 
+/**
+ * A queued git push (see `GitHubRepo.push()`). The expected remote ref state is bound at queue
+ * time: what the user approves is "move `branch` from `expectedOldSha` to `newSha`", not "move
+ * `branch` from wherever it is by then" -- apply enforces `expectedOldSha` via receive-pack's
+ * old-sha compare-and-swap, so a branch that moved between approval and apply fails cleanly
+ * instead of being clobbered. `expectedOldSha` doubles as the revert target (`ZERO_OID` means
+ * the push creates the branch, and revert deletes it).
+ */
+type PushAction = BaseAction & {
+  type: "push";
+  branch: string;
+  expectedOldSha: string;
+  newSha: string;
+  force: boolean;
+};
+
 type GitHubAction =
   | CreateIssueAction
   | CreatePullRequestAction
@@ -274,7 +299,8 @@ type GitHubAction =
   | PostCommentAction
   | PostReviewAction
   | ReplyToDiffCommentAction
-  | MergePullRequestAction;
+  | MergePullRequestAction
+  | PushAction;
 
 type StoredActionRecord = {
   action: GitHubAction;
@@ -365,6 +391,15 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
     </div>
   </body>
 </html>`;
+
+function bytesToStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
 
 function hexEncode(bytes: Uint8Array): string {
   return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -978,6 +1013,15 @@ class SessionGitCache {
   /** `approvalQueue` is only borrowed; the owning session must outlive this helper. */
   constructor(approvalQueue: RpcStub<ApprovalQueue>) {
     this.#approvalQueue = approvalQueue;
+  }
+
+  /**
+   * The session-owned cache stub itself, for callers that need more than advertising (e.g. the
+   * push queue path's ancestry check and pending-commit simulation reads). Borrowed, not
+   * transferred: this helper still owns and disposes it.
+   */
+  stub(): Promise<RpcStub<GitCache>> {
+    return this.#get();
   }
 
   #get(): Promise<RpcStub<GitCache>> {
@@ -2049,6 +2093,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       case "replyToDiffComment":
       case "mergePullRequest":
         return kind === "pull" && action.pullId === provisionalId;
+      case "push":
+        return false;  // pushes target a branch, never an issue/PR
     }
   }
 
@@ -2107,7 +2153,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   #pendingActionsForEntity(kind: EntityKind, logicalId: string): GitHubAction[] {
     return this.#listPendingActions().filter(action => {
-      if (action.type === "createIssue" || action.type === "createPullRequest") {
+      if (action.type === "createIssue" || action.type === "createPullRequest" ||
+          action.type === "push") {
         return false;
       }
 
@@ -3349,7 +3396,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       oids, hints, cache));
   }
 
-  async applyAction(actionId: number): Promise<void> {
+  async applyAction(actionId: number, cache: RpcStub<GitCache>): Promise<void> {
     const record = this.#requireActionRecord(actionId);
     if (record.state !== "pending" && record.state !== "staged") {
       throw new Error(`GitHub action ${actionId} is no longer pending.`);
@@ -3535,6 +3582,43 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "push": {
+        // No gatekeeper-side object walk: the overseer composes the pack from the action's
+        // pending-push marks (`cache.buildPack()` on the action-scoped stub), and this side
+        // contributes only send-pack framing plus the ref-update command. The command's old-sha
+        // is the queue-time `expectedOldSha` -- receive-pack's compare-and-swap applies to every
+        // update, force or not (fast-forward policy was already enforced at queue time), so a
+        // branch that moved between approval and apply fails cleanly instead of being clobbered.
+        try {
+          const pack = await cache.buildPack();
+          await this.#withApi(api => pushGitRefUpdate(
+            body => api.fetchGitReceivePack(action.owner, action.repo, body),
+            { branch: action.branch, oldSha: action.expectedOldSha, newSha: action.newSha },
+            pack));
+        } catch (error) {
+          if (!(error instanceof GitRefUpdateRejectedError)) throw error;
+          // Desired-state semantics: apply succeeds iff the branch ends up at newSha -- by our
+          // CAS'd push, or by finding it already there (a retried apply whose first attempt
+          // landed but crashed before this record was persisted, or a third party's
+          // byte-identical push -- indistinguishable, and the approved end state holds either
+          // way).
+          const head = await this.#withApi(api =>
+            api.getBranchHead(action.owner, action.repo, action.branch));
+          if (head !== action.newSha) {
+            throw new Error(action.expectedOldSha === ZERO_OID
+              ? `The push cannot be applied: a branch named "${action.branch}" was created ` +
+                `after this push was queued (the push would have created it). Re-observe the ` +
+                `branch and queue a fresh push against its current head.`
+              : `The push cannot be applied: branch "${action.branch}" has moved from ` +
+                `${action.expectedOldSha}, the head it was approved against. Re-observe the ` +
+                `branch and queue a fresh push against its current head.`,
+              { cause: error });
+          }
+        }
+        this.#markActionApproved(action);
+        this.#clearCaches();
+        return;
+      }
     }
   }
 
@@ -3654,6 +3738,37 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         this.#clearCaches();
         return;
       }
+      case "push": {
+        // Ref rollback: move the branch back to the head the user approved pushing it from
+        // (delete it, if the push created it). The command's old-sha is the pushed commit, so
+        // work that landed on the branch after the push is never stomped -- the rollback then
+        // fails cleanly instead. The pushed objects stay on the remote (they merely go
+        // dangling), which is also why the rollback needs no pack contents: an empty pack
+        // accompanies the update, and a deletion sends none (the protocol forbids it).
+        const deleting = action.expectedOldSha === ZERO_OID;
+        try {
+          await this.#withApi(async api => pushGitRefUpdate(
+            body => api.fetchGitReceivePack(action.owner, action.repo, body),
+            {
+              branch: action.branch,
+              oldSha: action.newSha,
+              newSha: deleting ? ZERO_OID : action.expectedOldSha,
+            },
+            deleting ? null : bytesToStream(await emptyPackBytes())));
+        } catch (error) {
+          if (error instanceof GitRefUpdateRejectedError) {
+            return {
+              message: `Branch "${action.branch}" is no longer at the pushed commit ` +
+                `${action.newSha}, so it cannot be rolled back automatically. Reset the branch ` +
+                `manually if needed.`,
+              canRetry: false,
+            };
+          }
+          throw error;
+        }
+        this.#clearCaches();
+        return;
+      }
       case "createIssue":
       case "createPullRequest":
       case "postReview":
@@ -3705,9 +3820,88 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#searchPullSummaries(query, pageSize);
   }
 
+  /** The queued pushes, oldest first (optionally only those targeting `branch`). */
+  #pendingPushActions(branch?: string): PushAction[] {
+    return this.#listPendingActions().filter((action): action is PushAction =>
+      action.type === "push" && (branch === undefined || action.branch === branch));
+  }
+
+  /**
+   * Whether `commitId` is the head of a push queued on this gatekeeper -- a commit simulation
+   * may hand back that is not on GitHub yet. Session read paths consult this to withhold
+   * advertisement of such commits (see `getCommit` for why a cache-served result must not be
+   * advertised). Deliberately synchronous, so per-page cursor advertising can check it live as
+   * pages are drained; sessions hold this object directly and never call it over RPC.
+   */
+  isCommitPendingPush(commitId: GitOid): boolean {
+    return this.#pendingPushActions().some(action => action.newSha === commitId);
+  }
+
+  /**
+   * The head a branch reads at once its queued pushes are treated as applied: starting from the
+   * real head (`null` = the branch does not exist), each queued push whose bound `expectedOldSha`
+   * matches advances it to that push's `newSha` -- exactly the transition apply will enforce, so
+   * stacked pushes compose and a push whose expectation the remote has since invalidated simply
+   * stops overlaying. This is both the simulation read (`listBranches`/`getCommit`) and what the
+   * queue path binds the *next* push's `expectedOldSha` to.
+   */
+  #simulateBranchHead(branch: string, realHead: string | null): string | null {
+    let head = realHead;
+    // Chain-follow to a fixpoint rather than trusting list order: each queued push binds its
+    // expectation to the previous one's newSha, so consuming "the action expecting the current
+    // head" until none matches applies a well-formed chain regardless of tie-broken ordering.
+    const remaining = this.#pendingPushActions(branch);
+    for (let index = 0; index !== -1;) {
+      index = remaining.findIndex(action =>
+        head === (action.expectedOldSha === ZERO_OID ? null : action.expectedOldSha));
+      if (index !== -1) {
+        head = remaining[index].newSha;
+        remaining.splice(index, 1);
+      }
+    }
+    return head;
+  }
+
+  // Reads a commit queued for push (or already proven on this remote) from the workspace git
+  // cache and synthesizes the details shape from its exact bytes; null if the cache's scoped
+  // view doesn't serve it as a commit.
+  async #tryReadCachedCommitDetails(
+    gitCache: RpcStub<GitCache>, oid: string,
+  ): Promise<GitHubCommitDetails | null> {
+    const object = await gitCache.get(oid);
+    if (object === null || object.type !== "commit") return null;
+    return commitDetailsFromGitObject(
+      oid, object.content, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo));
+  }
+
   async listBranches(filter: GitHubBranchFilter | undefined, pageSize: number): Promise<Cursor<GitHubBranchSummary>> {
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
+
+    // Simulation: a branch a queued push *creates* is injected (protected: false, like any new
+    // branch) -- but only while the remote still lacks the name, checked against the live
+    // branch here, mirroring how a head overlay stops applying once the remote invalidates its
+    // expectation (and the same condition apply's zero-id CAS will enforce). If the branch has
+    // appeared remotely in the interim, nothing is injected and the real row is listed (with
+    // the ordinary head overlay), so reads never hide a branch that genuinely exists. The
+    // name filter below only closes the race between this check and the page fetch.
+    const injectedNames = new Set<string>();
+    const injectedItems: GitHubBranchSummary[] = [];
+    const creationsChecked = new Set<string>();
+    for (const action of this.#pendingPushActions()) {
+      if (action.expectedOldSha !== ZERO_OID || creationsChecked.has(action.branch)) continue;
+      creationsChecked.add(action.branch);
+      const realHead = await this.#withApi(api =>
+        api.getBranchHead(this.ctx.props.owner, this.ctx.props.repo, action.branch));
+      if (realHead !== null) continue;
+      const head = this.#simulateBranchHead(action.branch, null);
+      if (head === null) continue;
+      injectedNames.add(action.branch);
+      if (filter?.protected !== true) {
+        injectedItems.push({ name: action.branch, headCommit: head, protected: false });
+      }
+    }
+
     return new StreamingCursor<GitHubBranchSummary>({
       fetchPage: async (page, perPage) => {
         const cacheKey = this.#cacheKey("list-branches", stableKey(filter ?? {}), `p${page}`);
@@ -3728,10 +3922,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           };
         });
       },
-      overlay: item => item,
-      filter: () => true,
+      // A branch a queued push moves reads at the pushed head (see #simulateBranchHead).
+      overlay: item => ({
+        ...item,
+        headCommit: this.#simulateBranchHead(item.name, item.headCommit) ?? item.headCommit,
+      }),
+      filter: item => !injectedNames.has(item.name),
       comparator: () => 0,
-      injectedItems: [],
+      injectedItems,
       pageSize,
     });
   }
@@ -3766,7 +3964,53 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     });
   }
 
-  async getCommit(ref: string): Promise<GitHubCommitDetails> {
+  /**
+   * Look up a commit for the session. `fromCache` reports whether the details were served from
+   * the workspace git cache rather than from GitHub; the session must not advertise a
+   * cache-served result -- either the commit was populated from this remote in the first place
+   * (its provenance is already recorded, so advertising again is a no-op) or it is part of a
+   * pending push (not on the remote yet, and an advertisement would outlive a rejection as a
+   * permanently wrong pull-routing hint that also makes future push marking walks skip the
+   * object as remote-known).
+   */
+  async getCommit(ref: string, gitCache?: RpcStub<GitCache>)
+      : Promise<{ details: GitHubCommitDetails, fromCache: boolean }> {
+    // Simulation: a branch name with queued pushes resolves to its simulated head, read from the
+    // workspace git cache (a queued commit reads exactly as it will once pushed).
+    if (gitCache !== undefined && this.#pendingPushActions(ref).length > 0) {
+      let realHead: string | null = null;
+      try {
+        realHead = (await this.#getRemoteCommitDetails(ref)).id;
+      } catch (error) {
+        if (!(error instanceof GitHubApiError && error.status === 404)) throw error;
+      }
+      const simulated = this.#simulateBranchHead(ref, realHead);
+      if (simulated !== null && simulated !== realHead) {
+        const details = await this.#tryReadCachedCommitDetails(gitCache, simulated);
+        if (details !== null) return { details, fromCache: true };
+      }
+      if (realHead === null) {
+        throw new Error(`No commit found for ref "${ref}".`);
+      }
+      // The overlay was a no-op (e.g. the remote invalidated the queued push's expectation);
+      // fall through to the real read.
+    }
+
+    try {
+      return { details: await this.#getRemoteCommitDetails(ref), fromCache: false };
+    } catch (error) {
+      // A full commit id GitHub doesn't know yet may be queued for push; serve it from the
+      // workspace git cache so the caller sees the world as if the push had landed.
+      if (gitCache !== undefined && isCommitOid(ref) &&
+          error instanceof GitHubApiError && error.status === 404) {
+        const details = await this.#tryReadCachedCommitDetails(gitCache, ref);
+        if (details !== null) return { details, fromCache: true };
+      }
+      throw error;
+    }
+  }
+
+  async #getRemoteCommitDetails(ref: string): Promise<GitHubCommitDetails> {
     // Commits are immutable, but `ref` may be a branch or tag name, so the short TTL still applies.
     const cacheKey = this.#cacheKey("commit", stableKey(ref));
     return await this.#loadCachedWithEtag<GitHubCommitDetails>(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
@@ -4042,6 +4286,49 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   /**
+   * Prepare a push action, binding the expected remote ref state at queue time: reads the
+   * branch's current head and overlays this repo's earlier queued pushes (see
+   * `#simulateBranchHead` -- stacked pushes bind each `expectedOldSha` to the previous push's
+   * `newSha`, so approving them in order applies cleanly). Returns null when the (simulated)
+   * branch is already at `commitId`: the desired end state already holds and there is no side
+   * effect to queue.
+   *
+   * A non-force push must be a fast-forward: `expectedOldSha` must be an ancestor of `commitId`,
+   * checked here -- before anything is queued -- by walking the workspace-cached commit chain
+   * (`GitCache.isAncestor()`; the chain from an agent-authored commit down to a pulled base is
+   * locally cached by construction). Branch creation is exempt (there is no old head to
+   * fast-forward from; the zero-id compare-and-swap at apply protects against a branch appearing
+   * in the interim), and `force` skips only this policy check -- it does not loosen the old-sha
+   * match at apply.
+   */
+  async preparePush(branch: string, commitId: string, force: boolean,
+                    gitCache: RpcStub<GitCache>): Promise<PushAction | null> {
+    const realHead = await this.#withApi(api =>
+      api.getBranchHead(this.ctx.props.owner, this.ctx.props.repo, branch));
+    const expectedOldSha = this.#simulateBranchHead(branch, realHead) ?? ZERO_OID;
+    if (expectedOldSha === commitId) return null;
+    if (!force && expectedOldSha !== ZERO_OID &&
+        !(await gitCache.isAncestor(expectedOldSha, commitId))) {
+      throw new Error(
+        `Cannot push to branch "${branch}": its current head ${expectedOldSha} is not an ` +
+        `ancestor of ${commitId}, so this push is not a fast-forward -- the branch has moved ` +
+        `past the head this work was based on. Pull the branch's new head and rebase onto it, ` +
+        `or pass force: true to overwrite the branch.`);
+    }
+    return {
+      type: "push",
+      approvalId: this.#nextActionId(),
+      submittedAt: Date.now(),
+      owner: this.ctx.props.owner,
+      repo: this.ctx.props.repo,
+      branch,
+      expectedOldSha,
+      newSha: commitId,
+      force,
+    };
+  }
+
+  /**
    * Observer tracking: GitHub uses the "ACL check (single unit)" strategy. Every binding — repo,
    * issue, or pull request — is scoped to one repository, and issues/PRs inherit the repo's
    * permissions, so the repository is the atomic ACL unit. To admit an observer we simply confirm
@@ -4172,7 +4459,13 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       description: `List branches in the GitHub repository.`,
     });
     const cursor = await this.#gatekeeper.listBranches(options, options?.resultsPerPage ?? 50);
-    return await this.#gitCache.wrap(cursor, branch => [branch.headCommit]);
+    // A simulated head -- a queued push's commit, which the listing shows as if already pushed
+    // -- is withheld from advertising: it is not on GitHub yet, and the hint would outlive a
+    // rejection (see GitHubGatekeeperImpl.isCommitPendingPush). Checked live per page, since a
+    // push may be queued while the cursor is being drained.
+    const gatekeeper = this.#gatekeeper;
+    return await this.#gitCache.wrap(cursor, branch =>
+      gatekeeper.isCommitPendingPush(branch.headCommit) ? [] : [branch.headCommit]);
   }
 
   async listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>> {
@@ -4185,14 +4478,48 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
   }
 
   async getCommit(ref: string): Promise<GitHubCommitDetails> {
-    const details = await this.#gatekeeper.getCommit(ref);
+    const { details, fromCache } =
+      await this.#gatekeeper.getCommit(ref, await this.#gitCache.stub());
     await this.#approvalQueue.authorizeObservation({
       title: `Read commit ${details.id.slice(0, 12)}`,
       description: `Read commit ${details.id}`
         + `${ref === details.id ? "" : ` (resolved from "${ref}")`} in the GitHub repository.`,
     });
-    await this.#gitCache.advertise(commitIdsOfSummary(details));
+    // A cache-served read is never advertised: either the commit was populated from this remote
+    // in the first place (provenance already recorded; re-advertising is a no-op) or it is part
+    // of a pending push (not on the remote yet -- the hint would outlive a rejection).
+    if (!fromCache) {
+      await this.#gitCache.advertise(commitIdsOfSummary(details));
+    }
     return details;
+  }
+
+  async push(branch: string, commitId: string, options?: { force?: boolean }): Promise<void> {
+    validateBranchName(branch);
+    if (!isCommitOid(commitId)) {
+      throw new Error(
+        `push() requires a full 40-character commit id; got ${JSON.stringify(commitId)}. ` +
+        `Use getCommit() to resolve a truncated id.`);
+    }
+    // Binding the push's expected old head reads the branch's current state.
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read head of branch ${branch}`,
+      description: `Read the current head of branch "${branch}" in order to push to it.`,
+    });
+    const action = await this.#gatekeeper.preparePush(
+      branch, commitId, options?.force ?? false, await this.#gitCache.stub());
+    if (action === null) return;  // the branch is already at commitId: nothing to do
+    const creating = action.expectedOldSha === ZERO_OID;
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title: `Push ${commitId.slice(0, 12)} to ${branch}`,
+      description: creating
+        ? `Push commit ${commitId} to ${action.owner}/${action.repo}, creating branch "${branch}".`
+        : `Push commit ${commitId} to branch "${branch}" of ${action.owner}/${action.repo}, ` +
+          `moving the branch from its current head ${action.expectedOldSha}.` +
+          (action.force ? " This is a force push: it rewrites the branch's history." : ""),
+      pushedCommits: [commitId],
+      implementsRevert: true,
+    });
   }
 
   async listCommits(options?: GitHubCommitFilter): Promise<Cursor<GitHubCommitSummary>> {

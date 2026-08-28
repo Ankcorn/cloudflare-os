@@ -1,8 +1,14 @@
-// Git smart-HTTP protocol v2 fetch client behind `Gatekeeper.gitPull()` (see github.ts): pkt-line
-// framing, fetch-command composition from `GitPullHints`, and sideband demultiplexing of the
-// packfile response. The gatekeeper handles only protocol framing -- the raw pack body streams
-// into `GitCache.consumePack()`, which decodes, hash-verifies, and stores every object
-// overseer-side -- and retains nothing locally.
+// Git smart-HTTP transport framing behind the GitHub gatekeeper's git operations (see github.ts):
+//
+// - The protocol v2 *fetch* client behind `Gatekeeper.gitPull()`: pkt-line framing, fetch-command
+//   composition from `GitPullHints`, and sideband demultiplexing of the packfile response. The
+//   raw pack body streams into `GitCache.consumePack()`, which decodes, hash-verifies, and
+//   stores every object overseer-side.
+// - The *send-pack* client behind the `push` action: the ref-update command block, pack body
+//   composition (the pack bytes themselves come from `GitCache.buildPack()` -- no pack encoding
+//   here either), and report-status response parsing.
+//
+// In both directions the gatekeeper handles only protocol framing and retains nothing locally.
 //
 // Two locked transport decisions (plans/worktrees.md) shape every request this module composes:
 //
@@ -382,4 +388,220 @@ export async function pullGitObjectsIntoCache(
     throw new Error(`git fetch did not provide the requested object${
         missing.length === 1 ? "" : "s"} ${missing.join(", ")}`);
   }
+}
+
+// =======================================================================================
+// Send-pack (push)
+
+/** The all-zeros oid: "no such ref" as a ref-update command's old (creation) or new (deletion). */
+export const ZERO_OID = "0".repeat(40);
+
+/**
+ * Maximum size of a receive-pack response accepted before parsing. A report-status body is a
+ * handful of pkt-lines; anything approaching this bound is not one.
+ */
+export const MAX_RECEIVE_PACK_RESPONSE_BYTES = 64 * 1024;
+
+/** One ref update for `pushGitRefUpdate`. `branch` is a branch name, not a full refname. */
+export type GitRefUpdate = {
+  branch: string;
+  /** The expected current value of the ref (`ZERO_OID` to require that it not exist). */
+  oldSha: GitOid;
+  /** The value to set (`ZERO_OID` to delete the ref). */
+  newSha: GitOid;
+};
+
+/**
+ * Validate a branch name against git's refname rules (the subset that matters for
+ * `refs/heads/<branch>`), so a hostile name can neither escape the ref namespace (`..`, leading
+ * `/`) nor corrupt the pkt-line framing (control bytes, spaces). Returns the name unchanged.
+ */
+export function validateBranchName(branch: string): string {
+  if (branch.length === 0 || branch.length > 255) {
+    throw new Error(`invalid branch name: ${JSON.stringify(branch.slice(0, 64))}`);
+  }
+  // One check for everything git forbids in a refname component, plus NUL/space/DEL and the
+  // rest of the control range, which also covers the "@{", "..", and "//" sequences.
+  // oxlint-disable-next-line no-control-regex -- intentionally rejecting control chars (protocol-framing guard)
+  if (/[\u0000-\u0020\u007f~^:?*[\\]|\.\.|@\{|\/\/|\.\/|\.lock(\/|$)/.test(branch) ||
+      branch.startsWith("/") || branch.endsWith("/") ||
+      branch.startsWith(".") || branch.endsWith(".") ||
+      branch.includes("/.") || branch === "@") {
+    throw new Error(`invalid branch name: ${JSON.stringify(branch.slice(0, 64))}`);
+  }
+  return branch;
+}
+
+function validateOid(oid: GitOid): GitOid {
+  if (!OID_PATTERN.test(oid)) throw new Error(`invalid git oid: ${JSON.stringify(oid)}`);
+  return oid;
+}
+
+/**
+ * Compose the ref-update command block of a send-pack request: one command pkt-line
+ * (`<old> <new> refs/heads/<branch>` with the capability list after a NUL) and the terminating
+ * flush-pkt. The pack itself follows this block in the request body (except for a pure
+ * deletion, which must send no pack).
+ *
+ * Only `report-status` (and the `agent`) is requested: no side-band, so the response is a bare
+ * report-status body (see `parseReceivePackResponse`), and no `delete-refs` is needed for the
+ * one-command deletes revert issues (servers accept a zero-id new-sha regardless; GitHub
+ * advertises the capability).
+ */
+export function buildRefUpdateRequest(update: GitRefUpdate): Uint8Array {
+  validateOid(update.oldSha);
+  validateOid(update.newSha);
+  validateBranchName(update.branch);
+  if (update.oldSha === update.newSha) {
+    throw new Error("ref update is a no-op");
+  }
+  let command = `${update.oldSha} ${update.newSha} refs/heads/${update.branch}` +
+      `\0report-status agent=${GIT_AGENT}`;
+  let pieces = [encodePktLine(command), FLUSH_PKT];
+  let out = new Uint8Array(pieces.reduce((total, piece) => total + piece.byteLength, 0));
+  let offset = 0;
+  for (let piece of pieces) {
+    out.set(piece, offset);
+    offset += piece.byteLength;
+  }
+  return out;
+}
+
+/**
+ * A packfile containing zero objects: the 12-byte header plus its SHA-1 trailer. Sent when a
+ * ref update transmits no new objects -- rolling a branch back to a commit the remote already
+ * has -- since receive-pack still expects a pack for any non-delete command.
+ */
+export async function emptyPackBytes(): Promise<Uint8Array> {
+  let header = new Uint8Array([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0]);  // "PACK", v2, 0
+  let trailer = new Uint8Array(await crypto.subtle.digest("SHA-1", header));
+  let out = new Uint8Array(header.byteLength + trailer.byteLength);
+  out.set(header, 0);
+  out.set(trailer, header.byteLength);
+  return out;
+}
+
+/**
+ * Parse a receive-pack report-status response (requested without side-band, so the body is bare
+ * pkt-lines): `unpack ok` followed by one `ok <ref>` / `ng <ref> <reason>` per command. Returns
+ * normally iff the update to `refName` succeeded; throws with the server's reason otherwise --
+ * most importantly the old-sha compare-and-swap failure, which the caller maps to its
+ * branch-moved error.
+ */
+export function parseReceivePackResponse(body: Uint8Array, refName: string): void {
+  let unpackSeen = false;
+  for (let item of parsePktItems(body)) {
+    if (item.kind !== "data") continue;
+    let line = pktText(item.data);
+    if (line.startsWith("unpack ")) {
+      unpackSeen = true;
+      let status = line.slice("unpack ".length);
+      if (status !== "ok") throw new Error(`git push failed: unpack error: ${status}`);
+    } else if (line === `ok ${refName}`) {
+      return;
+    } else if (line.startsWith(`ng ${refName} `) || line === `ng ${refName}`) {
+      let reason = line.slice(`ng ${refName}`.length).trim();
+      throw new GitRefUpdateRejectedError(refName, reason || "rejected");
+    }
+    // Lines about other refs (there are none in our one-command requests) are ignored.
+  }
+  throw new Error(unpackSeen
+      ? `git push failed: the server's status report did not mention ${refName}`
+      : "git push failed: malformed receive-pack response (no unpack status)");
+}
+
+/**
+ * The server rejected the ref-update command itself (the objects were fine): most commonly the
+ * old-sha compare-and-swap failed because the branch moved (or appeared) between approval and
+ * apply. Distinguished so the caller can map it to its branch-moved guidance.
+ */
+export class GitRefUpdateRejectedError extends Error {
+  constructor(refName: string, public readonly reason: string) {
+    super(`git push rejected for ${refName}: ${reason}`);
+  }
+}
+
+/**
+ * The whole of one push's wire exchange: compose the ref-update command block, splice the pack
+ * behind it (no pack for a deletion -- the protocol forbids one when only deletes are sent),
+ * POST it via the caller-supplied transport (which owns the URL, auth, and HTTP-level error
+ * handling), and parse the report-status response. Resolves iff the server reports the update
+ * applied; throws `GitRefUpdateRejectedError` when the command was rejected (e.g. the old-sha
+ * CAS failed because the branch moved).
+ */
+export async function pushGitRefUpdate(
+  fetchReceivePack: (requestBody: ReadableStream<Uint8Array>) => Promise<Response>,
+  update: GitRefUpdate,
+  pack: ReadableStream<Uint8Array> | null,
+): Promise<void> {
+  let header = buildRefUpdateRequest(update);
+  if ((update.newSha === ZERO_OID) !== (pack === null)) {
+    throw new Error(pack === null
+        ? "a non-delete ref update requires a pack"
+        : "a ref deletion must not send a pack");
+  }
+
+  let headerSent = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (!headerSent) {
+        headerSent = true;
+        controller.enqueue(header);
+        return;
+      }
+      if (pack === null) {
+        controller.close();
+        return;
+      }
+      reader ??= pack.getReader();
+      let { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    async cancel(reason) {
+      if (reader !== undefined) await reader.cancel(reason).catch(() => {});
+      else await pack?.cancel(reason).catch(() => {});
+    },
+  });
+
+  let response = await fetchReceivePack(body);
+  if (!response.ok) {
+    // Defensive backstop, as in pullGitObjectsIntoCache: the transport normally throws first.
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`git push failed: HTTP ${response.status}`);
+  }
+  if (response.body === null) {
+    throw new Error("git push failed: response had no body");
+  }
+  let report = await collectStream(response.body, MAX_RECEIVE_PACK_RESPONSE_BYTES);
+  parseReceivePackResponse(report, `refs/heads/${update.branch}`);
+}
+
+// Collects a byte stream into one buffer, enforcing a size cap as chunks arrive.
+async function collectStream(stream: ReadableStream<Uint8Array>, maxBytes: number)
+    : Promise<Uint8Array> {
+  let chunks: Uint8Array[] = [];
+  let total = 0;
+  let reader = stream.getReader();
+  try {
+    while (true) {
+      let result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > maxBytes) {
+        throw new Error(`git push response exceeded the ${maxBytes}-byte limit`);
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  let out = new Uint8Array(total);
+  let offset = 0;
+  for (let chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }

@@ -148,7 +148,12 @@ agent-facing `Worktree` binding API).
   for objects proven on its remote plus objects pending push to it, and nothing
   else. Proof means hash-verified bytes — a `put()` from that gatekeeper or a
   successful push to it; an advertisement is just an assertion and never
-  qualifies (§1's metadata grades). The design serves two purposes, and neither
+  qualifies (§1's metadata grades). One content-free predicate deliberately
+  sits outside the scoped view: `GitCache.isAncestor()` (§1), which lets the
+  gatekeeper run its fast-forward policy check *before* queuing — the commits
+  aren't in view until `submitAction()` marks them — at the cost of one bit of
+  ancestry between oids the caller already holds (nothing, under the
+  trust-model watch-for). The design serves two purposes, and neither
   is defense against a hostile gatekeeper (see the trust-model watch-for): the
   ancestry rule is a **safeguard against agent and user mistakes** — an
   accidental push to an unrelated remote fails closed at queue time with an
@@ -324,6 +329,20 @@ agent-facing `Worktree` binding API).
     same size-cap handling. This is what keeps pack decoding out of individual
     gatekeepers: `gitPull` strips protocol framing and pipes the pack body here.
     The pack decoder is hostile-input parsing (see watch-fors).
+  - `isAncestor(ancestor, descendant)` (added with commit 7) — whether `ancestor`
+    is reachable from `descendant` (inclusive) over *locally cached* commits:
+    the walk never pulls, a parent chain that leaves the cache simply stops
+    (false = "not verifiable over cached history" — the right grade for a
+    queue-time fast-forward check), and an unknown descendant throws so callers
+    can distinguish "verified not an ancestor" from "history not available".
+    Deliberately **not** restricted to the gatekeeper's scoped view: the caller
+    names both oids, and oids are capabilities (trust-model watch-for), so one
+    bit of ancestry between oids it already holds reveals nothing new. This is
+    what lets a gatekeeper validate a push's fast-forward requirement *before*
+    `submitAction()` — the commits to be pushed enter its scoped view only when
+    the action is queued, so without this method the check could only run
+    post-queue, and a failure would strand an already-queued action with no way
+    to withdraw it.
 - **`gitObjectMetadata` collection**: one row per oid — `{oid, type, size?,
   onRemote: WorkpieceId[], pullableFrom: WorkpieceId[], pendingPush:
   {gatekeeperId: WorkpieceId, actionId}[]}` (arrays rather than one row per pair,
@@ -712,7 +731,17 @@ agent-facing `Worktree` binding API).
   observations, every commit id they return advertised via
   `GitCache.advertiseCommit()` (cursor-returning methods advertise per page —
   see below; the session obtains its cache stub once, via
-  `ObservationAuthorizer.getGitCache()`):
+  `ObservationAuthorizer.getGitCache()`) — with one carve-out: a result **served
+  from the git cache rather than from GitHub is never advertised**. Such a read
+  is either a commit that came from this remote in the first place (provenance
+  already recorded; re-advertising is a no-op) or a simulated pending-push
+  commit, which is *not* on the remote yet — advertising it would outlive a
+  rejection as a permanently wrong `pullableFrom` hint that also makes a future
+  push's marking walk skip the object as remote-known, under-filling its pack.
+  Concretely: `getCommit` reports cache-served results (the session skips the
+  advertisement wholesale, parents included), and `listBranches`' advertising
+  callback withholds any head that is a queued push's commit
+  (`isCommitPendingPush`, checked live per page):
   - `listBranches(filter?) → Cursor<{name, headCommit, ...}>`
   - `listTags(filter?) → Cursor<{name, commit, ...}>`
   - `getCommit(ref) → CommitDetails` — full/truncated SHA, branch, or tag; REST
@@ -778,14 +807,22 @@ agent-facing `Worktree` binding API).
     an unrelated commit, a missing ancestor, or an unproven root fails right
     there, agent-visible, before anything is queued. **The queue path also
     binds the expected remote ref state**: the DO reads the branch's current
-    head (zero-id if the branch doesn't exist) and stores
-    `{branch, expectedOldSha, newSha, force}` as the per-action record — what
-    the user approves is "move `branch` from `expectedOldSha` to `newSha`",
-    not "move `branch` from wherever it is by then". A non-force push
-    additionally requires `expectedOldSha` to be an ancestor of `newSha`,
-    checked at queue time by walking the cached commit chain (the ancestry
-    verification already guarantees that chain is cached down to a proven
-    commit); a head that isn't in it fails queuing with "branch has moved /
+    head (zero-id if the branch doesn't exist), **overlays this repo's earlier
+    queued pushes** (the same `#simulateBranchHead` overlay the simulation
+    reads use — so stacked pushes compose, the second binding its expectation
+    to the first's `newSha`, and approving them in order applies cleanly; a
+    push whose target is already at `commitId` is a no-op and queues nothing),
+    and stores `{branch, expectedOldSha, newSha, force}` as the per-action
+    record — what the user approves is "move `branch` from `expectedOldSha` to
+    `newSha`", not "move `branch` from wherever it is by then". A non-force
+    push additionally requires `expectedOldSha` to be an ancestor of `newSha`,
+    checked at queue time — *before* `submitAction()`, via
+    `GitCache.isAncestor()` (§1; added for exactly this, since the commits
+    aren't in the gatekeeper's scoped view until the action is queued, and a
+    post-queue failure would strand an unwithdrawable action) — over the
+    cached commit chain, which is cached by construction in the supported
+    flow (agent-authored commits atop a pulled base); a head that isn't in it
+    fails queuing with "branch has moved /
     not a fast-forward — pull the new head and rebase, or force". **Branch
     creation (`expectedOldSha` = zero-id) is exempt** from this check — there
     is no old head to fast-forward from, and the zero-id CAS at apply is what
@@ -798,7 +835,13 @@ agent-facing `Worktree` binding API).
     simulation convention — branch at `expectedOldSha` reads as `newSha`,
     exactly the transition apply will enforce — reading pending commits via
     `GitCache.get()`, which serves (pulling through if needed) exactly what is
-    queued for push to this remote, to be treated as already pushed.
+    queued for push to this remote, to be treated as already pushed. Two
+    sharp edges of the overlay: a queued *creation* injects its branch into
+    `listBranches` only while the remote still lacks the name (checked against
+    the live branch — once a same-named branch appears, the creation's
+    expectation is invalidated exactly like a moved head's, and the real row
+    is listed rather than hidden); and simulated results are never advertised
+    (the cache-served carve-out in the session bullet above).
   - Apply: **no gatekeeper-side object walk at all** — call `buildPack()` on the
     action-scoped `GitCache` stub passed to `applyAction()` (approval can happen
     hours after the session that queued the action, so the cache must arrive
@@ -846,8 +889,10 @@ agent-facing `Worktree` binding API).
 
 - The `gatekeeper.ts` types from 34ebecd land essentially as sketched, with:
   - `GitCache` finalized as `get(oid, hints?)` / `has` / `stat` / `put` /
-    `advertiseCommit()` / `buildPack()` / `consumePack()` (§1); the sketch's
-    `pull()` TODO resolves by
+    `advertiseCommit()` / `buildPack()` / `consumePack()` /
+    `isAncestor()` (§1; `isAncestor` was added with commit 7 — the fast-forward
+    check has to run before `submitAction()` puts the commits in view); the
+    sketch's `pull()` TODO resolves by
     *deletion* — gatekeepers never trigger pulls. The interface extends
     `RpcTarget`, and `gitPull`/`applyAction` receive it as `RpcStub<GitCache>`.
     Doc-comment the scoped view
@@ -857,7 +902,10 @@ agent-facing `Worktree` binding API).
     commits-only scope (trees/blobs are advertised implicitly as `put()`
     referents), `buildPack()`'s zero-argument, apply-time-only nature (the
     action-scoped stub supplies the commit list and closure),
-    `consumePack()`'s equivalence to a sequence of `put()`s, and the
+    `consumePack()`'s equivalence to a sequence of `put()`s,
+    `isAncestor()`'s deliberate unscoping (local-only walk; one bit of
+    ancestry between oids the caller already holds — see the trust-model
+    watch-for), and the
     parallel-`put` note (no batch method for loose objects — `consumePack` is
     the bulk path for packs; the stub is facet-to-parent, always local).
   - `ActionDescription.pushedCommits?: GitOid[]` — the push declaration
@@ -1225,10 +1273,22 @@ to keep dependents compiling. PR boundaries to be decided later.
    revert): `pushedCommits` declaration, simulation overlay reading pending
    commits via `get()`, apply = `buildPack` stream → send-pack framing +
    ref-update command; types.d.ts flow docs for push + createPullRequest.
+   Also carries the one kernel addition implementation surfaced (separable for
+   review): `GitCache.isAncestor()` in workshop-shared + workshop-backend (§1),
+   because the pre-queue fast-forward check has no other read path — the
+   commits being pushed enter the gatekeeper's scoped view only when
+   `submitAction()` marks them, and a post-queue failure would strand an
+   already-queued action the queue offers no way to withdraw.
    Tests: queue-time rejection surfaces to the agent (unrelated commit, missing
    ancestry, unproven root, non-force non-fast-forward against the queue-time
-   head), simulation reads pending commits as pushed (branch at
-   `expectedOldSha` → `newSha`),
+   head), queue-time binding against the simulated head (stacked pushes
+   compose; already-at-`newSha` queues nothing), `isAncestor` semantics
+   (inclusive; merge parents; chain-leaves-cache → false; unknown descendant
+   throws; unscoped stub access), simulation reads pending commits as pushed
+   (branch at `expectedOldSha` → `newSha`, injected created branches — and a
+   branch that appears remotely un-hides itself, ending the injection,
+   `getCommit` synthesis from cached bytes), cache-served reads withheld from
+   advertising (`getCommit` `fromCache`; simulated branch heads),
    ref-update encoding, branch-moved-after-approval CAS failure for force and
    non-force alike (and zero-id CAS failure when the branch appeared in the
    interim), desired-state
@@ -1238,7 +1298,10 @@ to keep dependents compiling. PR boundaries to be decided later.
    from the fast-forward check),
    cross-remote push end-to-end against two mock remotes (pull shared ancestor
    from B → push A-derived commits to B, absent filtered blobs pulled through
-   during `buildPack`; oversized cross-remote failure).
+   during `buildPack`; oversized cross-remote failure — the closure-completion
+   half of this is covered by workshop-backend's git-cache/git-push-actions
+   suites; a combined overseer+gatekeeper two-remote harness remains follow-up
+   work).
 
 ## Punted / future work (deliberately kept open)
 

@@ -1144,6 +1144,27 @@ export class GitHubApi {
     );
   }
 
+  /**
+   * Look up a single branch's current head commit sha, or null if the branch does not exist.
+   * Always an unconditional, uncached read: callers use this to bind a push's expected old head,
+   * which must reflect the remote's live state.
+   */
+  async getBranchHead(owner: string, repo: string, branch: string): Promise<string | null> {
+    try {
+      const result = await this.#request<GitHubBranchResponse>(
+        "GET",
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${
+          branch.split("/").map(encodeURIComponent).join("/")}`,
+      );
+      return result.data.commit.sha;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async listTagsConditional(
     owner: string,
     repo: string,
@@ -1248,6 +1269,38 @@ export class GitHubApi {
       throw new GitHubApiError(
         response.status,
         `git fetch failed: ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`,
+      );
+    }
+    return response;
+  }
+
+  /**
+   * POST a git smart-HTTP `receive-pack` request (the git push endpoint; classic protocol -- there
+   * is no v2 for receive-pack) and return the raw `Response`, whose report-status body the caller
+   * parses -- see git-transport.ts. The request body streams (the pack may be large), so it is
+   * sent chunked. Auth and error handling mirror `fetchGitUploadPack`.
+   */
+  async fetchGitReceivePack(
+    owner: string, repo: string, requestBody: ReadableStream<Uint8Array>,
+  ): Promise<Response> {
+    const url = `${LOGIN_BASE_URL}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/git-receive-pack`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-receive-pack-request",
+        Accept: "application/x-git-receive-pack-result",
+        "User-Agent": USER_AGENT,
+        Authorization: `Basic ${encodeBasicAuth("x-access-token", await this.#getToken())}`,
+      },
+      body: requestBody,
+      // Same generous budget as fetch: the signal also covers streaming the pack up.
+      signal: AbortSignal.timeout(GIT_UPLOAD_PACK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => "")).trim().slice(0, 200);
+      throw new GitHubApiError(
+        response.status,
+        `git push failed: ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`,
       );
     }
     return response;
