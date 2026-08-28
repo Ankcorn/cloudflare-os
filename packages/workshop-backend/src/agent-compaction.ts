@@ -434,6 +434,13 @@ export function buildCompactionState(
     if (message.type === "merge" && message.epochBoundary) {
       pins.clear();
       epoch = message.sequence;
+      // Worktree pins re-establish at the boundary itself, from the merge's own re-pin record
+      // (see AiChatMessageBody.worktreePins) -- there is no later "changes" declaration to
+      // re-pin them lazily, so the checkpoint must carry them or post-compaction replay would
+      // lose the worktrees' bases.
+      for (let pin of message.worktreePins ?? []) {
+        pins.set(pin.worktreeId, {gadgetId: pin.worktreeId, baseCommit: pin.baseCommit});
+      }
     } else if (message.type === "changes" && statuses.get(message.sequence) !== "reverted") {
       if (message.conversionBoundary) {
         pins.clear();

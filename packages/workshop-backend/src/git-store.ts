@@ -341,6 +341,12 @@ export class GitStore {
     }));
   }
 
+  /** The tree oid of a commit. */
+  async commitTree(oid: string): Promise<string> {
+    let { commit } = await readCommit({ fs: this.#fs, gitdir: GITDIR, oid, cache: this.#cache });
+    return commit.tree;
+  }
+
   /**
    * Writes a commit whose tree is `treeBase`'s tree with `changes` applied (`null` = delete),
    * returning the commit oid. `treeBase` (a commit oid) and `parents` are deliberately separate:
@@ -359,10 +365,26 @@ export class GitStore {
   async writeChangedFilesAsCommit(
       changes: ReadonlyMap<string, string | null>,
       options: WriteCommitOptions & { treeBase: string }): Promise<string> {
-    let { commit } = await readCommit(
-        { fs: this.#fs, gitdir: GITDIR, oid: options.treeBase, cache: this.#cache });
-    let tree = await this.#rebuildTree(commit.tree, buildChangeNode(changes), "")
+    return await this.writeCommitForTree(
+        await this.writeChangedTree(options.treeBase, changes), options);
+  }
+
+  /**
+   * The tree half of `writeChangedFilesAsCommit` (same rebuild rules; see there): writes the
+   * tree objects for `treeBase`'s tree with `changes` applied and returns the new root tree oid
+   * (the empty tree when everything was deleted), without writing a commit. Exposed separately
+   * so the accept-time epoch reset can compare the flattened tree against the pin base's and
+   * head's trees -- deciding "clean", "reuse headCommit", or "auto-commit" -- before deciding
+   * to write any commit at all.
+   */
+  async writeChangedTree(
+      treeBase: string, changes: ReadonlyMap<string, string | null>): Promise<string> {
+    return await this.#rebuildTree(await this.commitTree(treeBase), buildChangeNode(changes), "")
         ?? await writeTree({ fs: this.#fs, gitdir: GITDIR, tree: [] });
+  }
+
+  /** The commit half of `writeChangedFilesAsCommit`: writes a commit for an existing tree oid. */
+  async writeCommitForTree(tree: string, options: WriteCommitOptions): Promise<string> {
     let when = { timestamp: Math.floor(options.timestamp.getTime() / 1000), timezoneOffset: 0 };
     return await writeCommit({
       fs: this.#fs,

@@ -208,6 +208,17 @@ export class GitObjectTooLargeError extends Error {
   }
 }
 
+/**
+ * A worktree file's *content* cannot be presented as text: the blob is over the support cap
+ * (oversized) or is not valid UTF-8 text (binary). The message is the agent-visible, path-
+ * flavored description. Distinct from path-shape errors (symlink/gitlink/directory) and from
+ * transient pull failures so callers can tell "fine to overwrite whole, but unreadable and
+ * undiffable" apart from errors that must propagate: the Worktree binding's writeFile falls
+ * back to a whole-file `set` on this error (and only this error), and its grep/diff render it
+ * as a skip note.
+ */
+export class UnreadableContentError extends Error {}
+
 // =======================================================================================
 // Tree entry kinds (the agent-facing vocabulary for the five git modes)
 
@@ -217,6 +228,14 @@ export type GitTreeEntryKind = "file" | "executable" | "dir" | "symlink" | "subm
 /** One entry of a directory listing produced by `listTreeEntries()`. */
 export interface GitTreeDirEntry {
   name: string;
+  kind: GitTreeEntryKind;
+  oid: GitOid;
+}
+
+/** One entry of a path-keyed listing produced by `listCommitTreePaths()`. */
+export interface GitTreePathEntry {
+  /** Full path from the commit's tree root. */
+  path: string;
   kind: GitTreeEntryKind;
   oid: GitOid;
 }
@@ -521,15 +540,8 @@ export class WorkspaceGitCache {
         let blob = await this.#readBlob(entry.oid, tree, path);
         throw new Error(`${path} is a symlink to ${new TextDecoder().decode(blob)}`);
       }
-      default: {
-        let blob = await this.#readBlob(entry.oid, tree, path);
-        if (blob.includes(0)) throw new Error(`${path} is not a text file`);
-        try {
-          return TEXT_DECODER_STRICT.decode(blob);
-        } catch {
-          throw new Error(`${path} is not a text file`);
-        }
-      }
+      default:
+        return decodeBlobText(await this.#readBlob(entry.oid, tree, path), path);
     }
   }
 
@@ -588,6 +600,104 @@ export class WorkspaceGitCache {
     }
     let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy, eagerTree: true });
     return { tree: treeOid, entry: parseGitTree(tree.payload, treeOid).find(e => e.name === name) };
+  }
+
+  /**
+   * The kind and oid of the entry at `path` in a commit's tree, or undefined when the path
+   * doesn't resolve. `""` names the root directory (whose oid is the root tree). Trees along the
+   * walk fault in as needed; blob content is never read. `referencedBy` is the object whose
+   * payload holds the entry -- its containing tree, or the commit itself for the root -- the
+   * hint a later read of the entry's object should carry.
+   */
+  async pathEntryAtCommit(commitOid: GitOid, path: string)
+      : Promise<{ kind: GitTreeEntryKind, oid: GitOid, referencedBy: GitOid } | undefined> {
+    if (path === "") {
+      let commit = await this.ensureObject(commitOid, { type: "commit", eagerTree: true });
+      return { kind: "dir", oid: parseGitCommitRefs(commit.payload, commitOid).tree,
+               referencedBy: commitOid };
+    }
+    let { tree, entry } = await this.#resolveEntryAt(commitOid, path);
+    return entry === undefined ? undefined
+        : { kind: MODE_KINDS[entry.mode], oid: entry.oid, referencedBy: tree };
+  }
+
+  /**
+   * Lists a commit's tree by full path: the entries of the directory at `path` (the root when
+   * omitted or `""`), each with its five-mode kind, descending into subdirectories when
+   * `recursive`. Throws "no such directory" when `path` doesn't name a directory. Trees fault in
+   * as needed (eagerly, like every worktree base walk); blob content is never read, so listings
+   * carry no sizes.
+   */
+  async listCommitTreePaths(commitOid: GitOid, path?: string, options?: { recursive?: boolean })
+      : Promise<GitTreePathEntry[]> {
+    let scope = path ?? "";
+    let root = await this.pathEntryAtCommit(commitOid, scope);
+    if (root === undefined || root.kind !== "dir") {
+      throw new Error(`${scope}: no such directory`);
+    }
+    let out: GitTreePathEntry[] = [];
+    let walk = async (treeOid: GitOid, referencedBy: GitOid, prefix: string): Promise<void> => {
+      let tree = await this.ensureObject(treeOid, { type: "tree", referencedBy, eagerTree: true });
+      for (let entry of parseGitTree(tree.payload, treeOid)) {
+        let entryPath = prefix + entry.name;
+        out.push({ path: entryPath, kind: MODE_KINDS[entry.mode], oid: entry.oid });
+        if (options?.recursive && entry.mode === "40000") {
+          await walk(entry.oid, treeOid, `${entryPath}/`);
+        }
+      }
+    };
+    await walk(root.oid, root.referencedBy, scope === "" ? "" : `${scope}/`);
+    return out;
+  }
+
+  /**
+   * The set of paths whose non-directory entry differs between two commits' trees (added,
+   * removed, or changed in oid or mode), walking only differing subtrees and fault-pulling
+   * whatever is missing -- the lazy, worktree-scale sibling of `GitStore.changedPaths`. Blob
+   * content is never read. Symlink and gitlink entries are reported like files (callers render
+   * them with their descriptive errors), and a name that is a file on one side and a directory
+   * on the other contributes both the file path and the directory's differing contents.
+   */
+  async changedFilePathsBetween(aCommit: GitOid, bCommit: GitOid): Promise<Set<string>> {
+    let out = new Set<string>();
+    if (aCommit === bCommit) return out;
+    let treeOf = async (oid: GitOid) => {
+      let commit = await this.ensureObject(oid, { type: "commit", eagerTree: true });
+      return parseGitCommitRefs(commit.payload, oid).tree;
+    };
+    await this.#diffTreesLazy(
+        await treeOf(aCommit), aCommit, await treeOf(bCommit), bCommit, "", out);
+    return out;
+  }
+
+  // Accumulates the differing non-directory paths of two trees (either may be absent) into
+  // `out`. `aRef`/`bRef` are the referencing objects for pull hints.
+  async #diffTreesLazy(aOid: GitOid | undefined, aRef: GitOid, bOid: GitOid | undefined,
+                       bRef: GitOid, prefix: string, out: Set<string>): Promise<void> {
+    if (aOid === bOid) return;
+    let entriesOf = async (oid: GitOid | undefined, referencedBy: GitOid) => {
+      if (oid === undefined) return new Map<string, GitTreeEntry>();
+      let tree = await this.ensureObject(oid, { type: "tree", referencedBy, eagerTree: true });
+      return new Map(parseGitTree(tree.payload, oid).map(entry => [entry.name, entry]));
+    };
+    let aEntries = await entriesOf(aOid, aRef);
+    let bEntries = await entriesOf(bOid, bRef);
+    for (let name of new Set([...aEntries.keys(), ...bEntries.keys()])) {
+      let a = aEntries.get(name);
+      let b = bEntries.get(name);
+      if (a?.oid === b?.oid && a?.mode === b?.mode) continue;
+      let path = prefix + name;
+      let aDir = a?.mode === "40000";
+      let bDir = b?.mode === "40000";
+      if (aDir || bDir) {
+        // Descend the tree side(s); a non-tree entry opposite a tree is one more difference.
+        await this.#diffTreesLazy(aDir ? a!.oid : undefined, aOid ?? aRef,
+                                  bDir ? b!.oid : undefined, bOid ?? bRef, `${path}/`, out);
+        if ((a !== undefined && !aDir) || (b !== undefined && !bDir)) out.add(path);
+      } else {
+        out.add(path);
+      }
+    }
   }
 
   /**
@@ -676,6 +786,16 @@ export class WorkspaceGitCache {
     throw unknown();
   }
 
+  /**
+   * Reads a blob as UTF-8 text under the file-content rules every worktree read applies --
+   * UnreadableContentError, path-flavored, for oversized or binary content -- fault-pulling the
+   * blob on a miss (`referencedBy` shapes the pull hints; `path` names the file in errors).
+   * For batch callers (grep) that ensured the blobs beforehand, this is a local read.
+   */
+  async readTextBlob(oid: GitOid, referencedBy: GitOid, path: string): Promise<string> {
+    return decodeBlobText(await this.#readBlob(oid, referencedBy, path), path);
+  }
+
   // Reads a blob for a file path, translating unavailable-at-size into the path-specific error.
   async #readBlob(oid: GitOid, referencedBy: GitOid, path: string): Promise<Uint8Array> {
     let blob: PackableObject;
@@ -683,14 +803,15 @@ export class WorkspaceGitCache {
       blob = await this.ensureObject(oid, { type: "blob", referencedBy });
     } catch (err) {
       if (err instanceof GitObjectTooLargeError) {
-        throw new Error(
+        throw new UnreadableContentError(
             `${path} is too large to read (over ${MAX_GIT_OBJECT_SIZE} bytes)`, { cause: err });
       }
       throw err;
     }
     if (blob.payload.byteLength > MAX_GIT_OBJECT_SIZE) {
       // Locally-present but over the cap (e.g. written before the cap existed).
-      throw new Error(`${path} is too large to read (over ${MAX_GIT_OBJECT_SIZE} bytes)`);
+      throw new UnreadableContentError(
+          `${path} is too large to read (over ${MAX_GIT_OBJECT_SIZE} bytes)`);
     }
     return blob.payload;
   }
@@ -1034,6 +1155,17 @@ function addUnique<T>(array: T[], value: T): boolean {
   if (array.includes(value)) return false;
   array.push(value);
   return true;
+}
+
+// Decodes a blob's payload as strict UTF-8 text, throwing the path-flavored
+// UnreadableContentError for binary content (NUL bytes or invalid UTF-8).
+function decodeBlobText(payload: Uint8Array, path: string): string {
+  if (payload.includes(0)) throw new UnreadableContentError(`${path} is not a text file`);
+  try {
+    return TEXT_DECODER_STRICT.decode(payload);
+  } catch {
+    throw new UnreadableContentError(`${path} is not a text file`);
+  }
 }
 
 // Splits and validates a file path against the same shape rules git-store enforces on writes:

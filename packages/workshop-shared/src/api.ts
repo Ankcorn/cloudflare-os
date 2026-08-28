@@ -2706,6 +2706,19 @@ export type AiChatMessageBody = {
   createdWorktrees?: {worktreeId: WorkpieceId, title: string, bindingName: string}[];
 
   /**
+   * Explicit worktree commits made as part of this batch: the agent's `commit()` calls on the
+   * Worktree binding, each advancing the worktree's head from `previousHead` to `commit` (the
+   * new head; also the call's return value). This is the durable, sequence-bearing record of the
+   * advancement: the worktree registry record's head is updated in the same synchronous step
+   * this message is written, and a revert covering this message rolls each affected worktree's
+   * head back to its earliest reverted entry's `previousHead` (entries are ordered within the
+   * message and messages by sequence, so multiple commits per step or per reverted range
+   * compose). The commit objects themselves always remain -- content-addressed, and merely
+   * dangling after a rollback -- so a queued push naming a rolled-back commit stays valid.
+   */
+  worktreeCommits?: {worktreeId: WorkpieceId, commit: string, previousHead: string}[];
+
+  /**
    * Binding edges added to gadgets as part of this batch of changes (by the agent's
    * setGadgetBinding tool, or by the user binding a connection with a chat open -- in the latter
    * case `change` is omitted). Like `createdGadgets`, the additions are
@@ -2746,6 +2759,21 @@ export type AiChatMessageBody = {
    * epochs.
    */
   epochBoundary?: true;
+
+  /**
+   * The chat's worktree re-pins across this merge's epoch reset, present when the chat had live
+   * worktrees. The reset evaporates every pin, but a worktree's uncommitted content must survive
+   * an accept, so the merge re-pins each worktree in the new generation at `baseCommit`: a fresh
+   * local auto-commit capturing its uncommitted overlay when the closed epoch left it dirty,
+   * else its unchanged base. Auto-commits are internal bookkeeping, squashed out of explicit
+   * history -- the worktree's reported head is untouched, and a later explicit commit parents on
+   * that head, never on an auto-commit. This field is the durable record the re-pins are
+   * reconstructed from: content reconstruction and compaction checkpoints re-root worktree
+   * content here, since `pins` on "changes" messages only cover in-epoch establishment. Worktree
+   * *content* is stripped from client deliveries, but this field is not a content-fetch trigger
+   * (unlike a `pins` entry) and rides along untouched.
+   */
+  worktreePins?: {worktreeId: WorkpieceId, baseCommit: string}[];
 } | {
   /**
    * Indicates that at this point in the chat, the user chose to revert all changes starting at the

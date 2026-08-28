@@ -6,6 +6,7 @@ import { diffFiles, type CodeChange, type CodeContent, type FileChange }
   from "@gadgets/workshop-shared/code-change";
 import { keyString } from "@gadgets/typed-storage";
 import type { OverseerDurableObject } from "../src/overseer.js";
+import { buildCompactionState } from "../src/agent-compaction";
 import { COMMIT_1, FIXTURE_OBJECTS, PACKED_OIDS, b64Bytes } from "./git-cache-fixtures";
 
 declare module "cloudflare:workers" {
@@ -59,12 +60,14 @@ function chatMessages(impl: any, chatId: number): AiChatMessage[] {
 async function barrier(impl: any, chatId: number, step: {
   changes?: { change: CodeChange }[],
   createdWorktrees?: { worktreeId: number, title: string, bindingName: string }[],
+  worktreeCommits?: { worktreeId: number, commit: string, previousHead: string }[],
 }): Promise<boolean> {
   return await impl.commitAgentStep(chatId, AGENT, [{ type: "message", message: "step" }], {
     changes: step.changes ?? [],
     createdGadgets: [],
     createdWorktrees: step.createdWorktrees ?? [],
     addedBindings: [],
+    worktreeCommits: step.worktreeCommits ?? [],
   });
 }
 
@@ -457,5 +460,211 @@ describe("client delivery filtering", () => {
     expect(delivered.codeBase!.pins).toEqual([]);
     // The stored metadata was not mutated.
     expect(meta.codeBase!.pins).toHaveLength(1);
+  }));
+});
+
+describe("worktree commit head advancements", () => {
+  it("advances headCommit at the barrier, recording ordered worktreeCommits on the message",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+
+    // Two explicit commits within one step (as two commit() calls in one executeCode would
+    // buffer them): the barrier validates the previousHead chain and applies both in order.
+    let c2 = await impl.gitStore.writeChangedFilesAsCommit(
+        new Map([["a.txt", "two\n"]]),
+        { treeBase: c1, parents: [c1], author: { name: "A", email: "a@x" },
+          message: "first", timestamp: new Date(1700000000_000) });
+    let c3 = await impl.gitStore.writeChangedFilesAsCommit(
+        new Map([["a.txt", "three\n"]]),
+        { treeBase: c1, parents: [c2], author: { name: "A", email: "a@x" },
+          message: "second", timestamp: new Date(1700000001_000) });
+    await barrier(impl, 1, { worktreeCommits: [
+      { worktreeId: id, commit: c2, previousHead: c1 },
+      { worktreeId: id, commit: c3, previousHead: c2 },
+    ]});
+
+    expect(impl.storage.gadgets.get(id)!.headCommit).toBe(c3);
+    let message = chatMessages(impl, 1)
+        .findLast(msg => msg.type === "changes" && msg.worktreeCommits !== undefined)!;
+    expect(message.worktreeCommits).toEqual([
+      { worktreeId: id, commit: c2, previousHead: c1 },
+      { worktreeId: id, commit: c3, previousHead: c2 },
+    ]);
+    // The pin (and hence content reconstruction) is untouched by explicit commits.
+    expect(impl.storage.chatMeta.get(1)!.codeBase!.pins).toEqual(
+        [{ gadgetId: id, baseCommit: c1, mergedCommit: c1 }]);
+    expect(impl.storage.gadgets.get(id)!.pinBase).toBe(c1);
+  }));
+
+  it("fails the barrier on a broken previousHead chain, leaving the head unchanged",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    let c2 = await commitFiles(impl, { "a.txt": "two\n" }, [c1]);
+
+    await expect(barrier(impl, 1, { worktreeCommits: [
+      { worktreeId: id, commit: c2, previousHead: c2 },  // wrong: head is c1
+    ]})).rejects.toThrow(/head moved during the turn/);
+    expect(impl.storage.gadgets.get(id)!.headCommit).toBe(c1);
+  }));
+
+  it("rejects advancements for another chat's worktree", () => withImpl(async impl => {
+    addChat(impl, 1);
+    addChat(impl, 2);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    let c2 = await commitFiles(impl, { "a.txt": "two\n" }, [c1]);
+
+    await expect(barrier(impl, 2, { worktreeCommits: [
+      { worktreeId: id, commit: c2, previousHead: c1 },
+    ]})).rejects.toThrow(/not this chat's worktree/);
+    expect(impl.storage.gadgets.get(id)!.headCommit).toBe(c1);
+  }));
+
+  it("a revert rolls each affected head back to the earliest reverted previousHead",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    let c2 = await commitFiles(impl, { "a.txt": "two\n" }, [c1]);
+    let c3 = await commitFiles(impl, { "a.txt": "three\n" }, [c2]);
+
+    // Two advancements across two steps (separate barriers, like two executeCode calls in one
+    // turn -- or two turns).
+    await barrier(impl, 1, { worktreeCommits: [{ worktreeId: id, commit: c2, previousHead: c1 }]});
+    let firstStamp = chatMessages(impl, 1)
+        .findLast(msg => msg.type === "changes" && msg.worktreeCommits !== undefined)!.sequence;
+    await barrier(impl, 1, { worktreeCommits: [{ worktreeId: id, commit: c3, previousHead: c2 }]});
+    expect(impl.storage.gadgets.get(id)!.headCommit).toBe(c3);
+
+    // Reverting a range spanning both advancements returns the head to before the first.
+    await impl.revertChanges(1, firstStamp, USER);
+    expect(impl.storage.gadgets.get(id)!.headCommit).toBe(c1);
+    // The commit objects remain (dangling, like auto-commits).
+    expect(impl.gitCache.hasLocalObject(c3)).toBe(true);
+  }));
+});
+
+describe("epoch reset re-pins worktrees", () => {
+  it("auto-commits a dirty worktree and re-pins, preserving content and leaving the head alone",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n", "src/b.txt": "bee\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    await barrier(impl, 1, { changes: [
+      { change: editChange(id, "a.txt", "one\n", "one!\n") },
+      { change: { [id]: [["new.txt", { set: "fresh\n" }]] } },
+      { change: { [id]: [["src/b.txt", { remove: true }]] } },
+    ]});
+
+    expect(await impl.mergeChanges(1, USER_META, "client-user")).toEqual({ outcome: "merged" });
+
+    // The record re-pinned at a fresh auto-commit; the head (explicit history) is untouched.
+    let record = impl.storage.gadgets.get(id)!;
+    expect(record.pinBase).not.toBe(c1);
+    expect(record.headCommit).toBe(c1);
+    expect(record.baseCommit).toBe(c1);
+
+    // The auto-commit captures the overlay exactly: edits, new files, and deletions (whose
+    // emptied directory is pruned), parenting on the old pin base.
+    expect(await impl.readFileAtCommit(record.pinBase, "a.txt")).toBe("one!\n");
+    expect(await impl.readFileAtCommit(record.pinBase, "new.txt")).toBe("fresh\n");
+    expect(await impl.readFileAtCommit(record.pinBase, "src/b.txt")).toBeUndefined();
+    let [autoCommit] = await impl.gitStore.readCommitLog(record.pinBase, { depth: 1 });
+    expect(autoCommit.parents).toEqual([c1]);
+    expect(autoCommit.author.name).toBe(USER.name);
+
+    // The merge message records the re-pin, and the live code base re-established it.
+    let merge = chatMessages(impl, 1).find(msg => msg.type === "merge")!;
+    expect(merge.worktreePins).toEqual([{ worktreeId: id, baseCommit: record.pinBase }]);
+    expect(impl.storage.chatMeta.get(1)!.codeBase!.pins).toEqual(
+        [{ gadgetId: id, baseCommit: record.pinBase, mergedCommit: record.pinBase }]);
+
+    // Content reconstructs from the log alone in the new epoch: a fresh edit seeds its base
+    // from the re-pin, not the stale creation base.
+    let codeBase = impl.storage.chatMeta.get(1)!.codeBase!;
+    await impl.submitCodeChange(1, {
+      generation: codeBase.generation, revision: codeBase.revision,
+      clientId: "cli-post", seq: 1,
+      change: editChange(id, "a.txt", "one!\n", "one!!\n"),
+    }, USER, "user-do");
+    expect(await workpieceContent(impl, 1, id)).toEqual({ "a.txt": "one!!\n" });
+
+    // The boundary record marks the worktree bridge-eligible (its re-pin commit is the chat's
+    // content at the reset) and not discontinuous.
+    let boundary = impl.storage.chatChangeBoundaries.get(1)!;
+    expect(boundary.boundaries).toContainEqual({ gadgetId: id, commitId: record.pinBase });
+    expect(impl.storage.chatMeta.get(1)!.codeBase!.prior!.discontinuousGadgets).toEqual([]);
+  }));
+
+  it("re-pins a clean worktree at its unchanged base, and one matching its head at the head",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+
+    // Clean: nothing touched this epoch, so the re-pin is the unchanged pin base.
+    await impl.mergeChanges(1, USER_META, "client-user");
+    expect(impl.storage.gadgets.get(id)!.pinBase).toBe(c1);
+    expect(chatMessages(impl, 1).find(msg => msg.type === "merge")!.worktreePins)
+        .toEqual([{ worktreeId: id, baseCommit: c1 }]);
+
+    // Edit, then advance the head to a commit capturing exactly that edit (as an explicit
+    // commit() would): the accept's flatten equals the head's tree, so the re-pin reuses the
+    // head instead of writing an auto-commit.
+    await barrier(impl, 1, { changes: [{ change: editChange(id, "a.txt", "one\n", "one!\n") }]});
+    let c2 = await impl.gitStore.writeChangedFilesAsCommit(
+        new Map([["a.txt", "one!\n"]]),
+        { treeBase: c1, parents: [c1], author: { name: "A", email: "a@x" },
+          message: "explicit", timestamp: new Date(1700000002_000) });
+    await barrier(impl, 1, { worktreeCommits: [{ worktreeId: id, commit: c2, previousHead: c1 }]});
+    await impl.mergeChanges(1, USER_META, "client-user");
+    let record = impl.storage.gadgets.get(id)!;
+    expect(record.pinBase).toBe(c2);
+    expect(record.headCommit).toBe(c2);
+  }));
+
+  it("squashes auto-commits out of explicit history across accepts", () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+
+    // Two accepts, each with a dirty epoch: pinBase advances through two auto-commits.
+    await barrier(impl, 1, { changes: [{ change: editChange(id, "a.txt", "one\n", "two\n") }]});
+    await impl.mergeChanges(1, USER_META, "client-user");
+    await barrier(impl, 1, { changes: [{ change: editChange(id, "a.txt", "two\n", "three\n") }]});
+    await impl.mergeChanges(1, USER_META, "client-user");
+    let record = impl.storage.gadgets.get(id)!;
+    expect(record.headCommit).toBe(c1);
+    expect(record.pinBase).not.toBe(c1);
+
+    // An explicit commit built the way commit() builds one -- tree from pinBase + (empty)
+    // overlay, parent on the last explicit head -- skips both auto-commits in its ancestry.
+    let explicit = await impl.gitStore.writeChangedFilesAsCommit(
+        new Map(), { treeBase: record.pinBase, parents: [record.headCommit],
+                     author: { name: "A", email: "a@x" }, message: "explicit",
+                     timestamp: new Date(1700000003_000) });
+    let [info] = await impl.gitStore.readCommitLog(explicit, { depth: 1 });
+    expect(info.parents).toEqual([c1]);
+    expect(await impl.readFileAtCommit(explicit, "a.txt")).toBe("three\n");
+  }));
+
+  it("carries worktree re-pins into compaction checkpoints", () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    await barrier(impl, 1, { changes: [{ change: editChange(id, "a.txt", "one\n", "one!\n") }]});
+    await impl.mergeChanges(1, USER_META, "client-user");
+    let repin = impl.storage.gadgets.get(id)!.pinBase;
+
+    // A checkpoint whose boundary lies past the merge must re-establish the worktree's base
+    // from the merge message's worktreePins (pins clear at the boundary).
+    let messages = chatMessages(impl, 1);
+    let boundary = messages[messages.length - 1].sequence + 1;
+    let state = buildCompactionState(messages, boundary, [], undefined);
+    expect(state.pins).toContainEqual({ gadgetId: id, baseCommit: repin });
   }));
 });
