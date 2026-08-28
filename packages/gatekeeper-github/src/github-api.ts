@@ -226,6 +226,7 @@ const API_VERSION = "2022-11-28";
 const DEFAULT_ACCEPT = "application/vnd.github+json";
 const USER_AGENT = "Cloudflare-Gadgets";
 const REQUEST_TIMEOUT_MS = 30_000;
+const GIT_UPLOAD_PACK_TIMEOUT_MS = 120_000;
 
 function encodeBasicAuth(username: string, password: string): string {
   return btoa(`${username}:${password}`);
@@ -1214,5 +1215,41 @@ export class GitHubApi {
       },
       options,
     );
+  }
+
+  /**
+   * POST a git smart-HTTP protocol v2 `upload-pack` request (the git fetch endpoint, on
+   * github.com rather than api.github.com) and return the raw `Response`, whose body the caller
+   * streams -- see git-transport.ts. Auth is Basic with the `x-access-token` username GitHub
+   * specifies for token-authenticated git operations. Throws `GitHubApiError` on a non-OK
+   * status (401 marks it an auth error, like every other method here), so callers get the same
+   * credential-expiry handling as REST calls.
+   */
+  async fetchGitUploadPack(owner: string, repo: string, requestBody: Uint8Array): Promise<Response> {
+    const url = `${LOGIN_BASE_URL}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/git-upload-pack`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        Accept: "application/x-git-upload-pack-result",
+        "Git-Protocol": "version=2",
+        "User-Agent": USER_AGENT,
+        Authorization: `Basic ${encodeBasicAuth("x-access-token", await this.#getToken())}`,
+      },
+      body: requestBody,
+      // Longer than REQUEST_TIMEOUT_MS: the signal also covers streaming the response body,
+      // which may be a pack of tens of megabytes.
+      signal: AbortSignal.timeout(GIT_UPLOAD_PACK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      // The error body is short prose (e.g. "Repository not found"); a truncated copy makes the
+      // failure actionable without trusting its size.
+      const detail = (await response.text().catch(() => "")).trim().slice(0, 200);
+      throw new GitHubApiError(
+        response.status,
+        `git fetch failed: ${response.status} ${response.statusText}${detail ? `: ${detail}` : ""}`,
+      );
+    }
+    return response;
   }
 }

@@ -14,6 +14,7 @@ import {
   type GatekeeperVendor as GatekeeperVendorIface,
   type GitCache,
   type GitOid,
+  type GitPullHints,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -44,6 +45,7 @@ import {
   normalizeCommitSummary,
   normalizeTagSummary,
 } from "./git-commits";
+import { pullGitObjectsIntoCache } from "./git-transport";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubActor,
@@ -3327,6 +3329,24 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       case "pull":
         return new GitHubPullRequestImpl(this, queue, String(this.ctx.props.issueNumber));
     }
+  }
+
+  /**
+   * `Gatekeeper.gitPull()`: fetch the requested objects from this repo over git smart-HTTP
+   * (protocol v2) and deposit them in the workspace git cache. The gatekeeper contributes only
+   * protocol framing -- git-transport.ts composes the fetch command from the hints and strips
+   * the response down to the raw pack body, which streams into `cache.consumePack()` for
+   * overseer-side decoding, hash verification, and storage -- and retains nothing locally.
+   *
+   * No observation is recorded: a pull is overseer-initiated population of the workspace cache
+   * with objects whose commit ids were already returned (and advertised) by observed session
+   * reads, not a new agent-visible read; observer access to the git data rides the same
+   * repo-level ACL as everything else here (strategy B).
+   */
+  async gitPull(oids: GitOid[], cache: RpcStub<GitCache>, hints: GitPullHints): Promise<void> {
+    await this.#withApi(api => pullGitObjectsIntoCache(
+      body => api.fetchGitUploadPack(this.ctx.props.owner, this.ctx.props.repo, body),
+      oids, hints, cache));
   }
 
   async applyAction(actionId: number): Promise<void> {
