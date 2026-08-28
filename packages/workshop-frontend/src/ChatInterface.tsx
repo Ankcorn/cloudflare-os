@@ -6291,7 +6291,7 @@ function ChatInterface({
   >(null);
 
   // Enable auto-approval of an action tag on its connection (gated by the confirm dialog). The
-  // server applies the now-eligible pending action(s) via its drain, and the action state flips to
+  // server applies the now-eligible pending action(s) in an apply pass, and the state flips to
   // "approved" through the actions subscription -- so we don't optimistically mutate it here.
   const { alwaysApproveTag, isTagAutoApproved } =
     useAlwaysApproveTag(overseer, setProcessingActions, onAutoApproveChange);

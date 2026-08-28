@@ -115,7 +115,7 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-describe("ActionSyncDriver.sync", () => {
+describe("ActionSyncDriver.apply", () => {
   it("applies through a manual frontier, attributing covered actions to the approver and " +
      "auto-extended ones to the rule enabler", async () => {
     let storage = makeStorage();
@@ -125,8 +125,7 @@ describe("ActionSyncDriver.sync", () => {
     let a3 = putAction(storage, 3);  // auto-eligible beyond the manual frontier
 
     let { target, calls } = makeBatchGatekeeper();
-    let decided = await makeDriver(storage, target)
-        .sync(GK, { frontier: 2, resolvedBy: APPROVER });
+    let decided = await makeDriver(storage, target).apply(GK, { frontier: 2, resolvedBy: APPROVER });
 
     expect(calls).toEqual([{ actionId: 3, vetoes: [] }]);
     expect(decided.toSorted((a, b) => a - b)).toEqual([a1, a2, a3]);
@@ -150,7 +149,7 @@ describe("ActionSyncDriver.sync", () => {
     putAction(storage, 3);
 
     let { target, calls } = makeBatchGatekeeper();
-    await makeDriver(storage, target).sync(GK);
+    await makeDriver(storage, target).apply(GK);
 
     expect(calls).toEqual([{ actionId: 1, vetoes: [] }]);
     expect(getAction(storage, 1).state).toBe("approved");
@@ -169,7 +168,7 @@ describe("ActionSyncDriver.sync", () => {
     let fullScan = vi.spyOn(storage.actions, "list");
 
     let { target } = makeBatchGatekeeper();
-    await makeDriver(storage, target).sync(GK);
+    await makeDriver(storage, target).apply(GK);
 
     expect(fullScan).not.toHaveBeenCalled();
     expect(getAction(storage, 501).state).toBe("approved");
@@ -181,7 +180,7 @@ describe("ActionSyncDriver.sync", () => {
     putAction(storage, 1, { autoApprovable: false });
 
     let { target, calls } = makeBatchGatekeeper();
-    let decided = await makeDriver(storage, target).sync(GK);
+    let decided = await makeDriver(storage, target).apply(GK);
 
     expect(decided).toEqual([]);
     expect(calls).toEqual([]);
@@ -197,7 +196,7 @@ describe("ActionSyncDriver.sync", () => {
     results.push({ stopped: { at: 2, reason: new Error("page was deleted upstream") } });
     let driver = makeDriver(storage, target);
 
-    let first = await driver.sync(GK, { frontier: 2, resolvedBy: APPROVER });
+    let first = await driver.apply(GK, { frontier: 2, resolvedBy: APPROVER });
 
     expect(first).toEqual([a1]);
     expect(getAction(storage, 1).state).toBe("approved");
@@ -208,7 +207,7 @@ describe("ActionSyncDriver.sync", () => {
     // Retry after the user resolves the problem: only the stopped action remains pending, and its
     // failure is cleared. The already-applied action is never re-sent (idempotent contract), and
     // the gatekeeper sees a second call at the same frontier.
-    let retry = await driver.sync(GK, { frontier: 2, resolvedBy: APPROVER });
+    let retry = await driver.apply(GK, { frontier: 2, resolvedBy: APPROVER });
 
     expect(retry).toEqual([getAction(storage, 2).id]);
     expect(calls).toEqual([{ actionId: 2, vetoes: [] }, { actionId: 2, vetoes: [] }]);
@@ -235,7 +234,7 @@ describe("ActionSyncDriver.sync", () => {
     putAction(storage, 2, { state: "rejected", vetoPending: true, resolvedBy: REJECTER });
 
     let { target, calls } = makeBatchGatekeeper();
-    await makeDriver(storage, target).sync(GK);
+    await makeDriver(storage, target).apply(GK);
 
     expect(calls).toEqual([]);
     expect(getAction(storage, 2).vetoPending).toBe(true);
@@ -250,7 +249,7 @@ describe("ActionSyncDriver.sync", () => {
     // A fresh driver over the same storage (e.g. after DO hibernation) must still see the staged
     // veto -- it is durable state, not driver memory.
     let { target, calls } = makeBatchGatekeeper();
-    await makeDriver(storage, target).sync(GK);
+    await makeDriver(storage, target).apply(GK);
 
     expect(calls).toEqual([{ actionId: 2, vetoes: [2] }]);
     expect(getAction(storage, 2).vetoPending).toBeUndefined();
@@ -263,8 +262,7 @@ describe("ActionSyncDriver.sync", () => {
     let a3 = putAction(storage, 3, { autoApprovable: false });
 
     let { target, calls } = makeBatchGatekeeper();
-    let decided = await makeDriver(storage, target)
-        .sync(GK, { frontier: 3, resolvedBy: APPROVER });
+    let decided = await makeDriver(storage, target).apply(GK, { frontier: 3, resolvedBy: APPROVER });
 
     expect(calls).toEqual([{ actionId: 3, vetoes: [2] }]);
     expect(decided.toSorted((a, b) => a - b)).toEqual([a1, a3]);
@@ -281,7 +279,7 @@ describe("ActionSyncDriver.sync", () => {
 
     let { target, results } = makeBatchGatekeeper();
     results.push({ invalidatedByVeto: [{ action: 3, invalidatedBy: 2 }] });
-    let decided = await makeDriver(storage, target).sync(GK);
+    let decided = await makeDriver(storage, target).apply(GK);
 
     expect(decided).toEqual([a3]);
     let invalidated = getAction(storage, 3);
@@ -301,8 +299,7 @@ describe("ActionSyncDriver.sync", () => {
     // Approving 3 rides veto 2 along; the gatekeeper applies 1, deletes 3 as a cascade of 2.
     let { target, calls, results } = makeBatchGatekeeper();
     results.push({ invalidatedByVeto: [{ action: 3, invalidatedBy: 2 }] });
-    let decided = await makeDriver(storage, target)
-        .sync(GK, { frontier: 3, resolvedBy: APPROVER });
+    let decided = await makeDriver(storage, target).apply(GK, { frontier: 3, resolvedBy: APPROVER });
 
     expect(calls).toEqual([{ actionId: 3, vetoes: [2] }]);
     expect(decided.toSorted((a, b) => a - b)).toEqual([a1, a3]);
@@ -323,7 +320,7 @@ describe("ActionSyncDriver.sync", () => {
       { action: 1, invalidatedBy: 2 },   // already applied
       { action: 99, invalidatedBy: 2 },  // unknown
     ]});
-    let decided = await makeDriver(storage, target).sync(GK);
+    let decided = await makeDriver(storage, target).apply(GK);
 
     expect(decided).toEqual([]);
     expect(getAction(storage, 1).state).toBe("approved");
@@ -347,10 +344,10 @@ describe("ActionSyncDriver.sync", () => {
     } as unknown as GatekeeperActionTarget;
     let driver = makeDriver(storage, target);
 
-    let first = driver.sync(GK, { frontier: 1, resolvedBy: APPROVER });   // parks mid-RPC
+    let first = driver.apply(GK, { frontier: 1, resolvedBy: APPROVER });   // parks mid-RPC
     await flush();
-    let second = driver.sync(GK, { frontier: 3, resolvedBy: APPROVER });  // staged
-    let third = driver.sync(GK, { frontier: 2, resolvedBy: APPROVER });   // merged with second
+    let second = driver.apply(GK, { frontier: 3, resolvedBy: APPROVER });  // staged
+    let third = driver.apply(GK, { frontier: 2, resolvedBy: APPROVER });   // merged with second
     expect(calls).toEqual([{ actionId: 1, vetoes: [] }]);
 
     gates.shift()!();  // finish pass 1
@@ -380,10 +377,10 @@ describe("ActionSyncDriver.sync", () => {
     } as unknown as GatekeeperActionTarget;
     let driver = makeDriver(storage, target);
 
-    let pass = driver.sync(GK, { frontier: 1, resolvedBy: APPROVER });
+    let pass = driver.apply(GK, { frontier: 1, resolvedBy: APPROVER });
     await flush();
     let settledDone = false;
-    let settled = driver.settled(GK).then(() => { settledDone = true; });
+    let settled = driver.awaitSettled(GK).then(() => { settledDone = true; });
     await flush();
     expect(settledDone).toBe(false);
 
@@ -401,11 +398,11 @@ describe("ActionSyncDriver.sync", () => {
     results.push(new Error("network unreachable"));
     let driver = makeDriver(storage, target);
 
-    await expect(driver.sync(GK, { frontier: 1, resolvedBy: APPROVER }))
+    await expect(driver.apply(GK, { frontier: 1, resolvedBy: APPROVER }))
         .rejects.toThrow("network unreachable");
     expect(getAction(storage, 1).state).toBe("pending");
 
-    await driver.sync(GK, { frontier: 1, resolvedBy: APPROVER });
+    await driver.apply(GK, { frontier: 1, resolvedBy: APPROVER });
     expect(getAction(storage, 1).state).toBe("approved");
   });
 
@@ -415,8 +412,7 @@ describe("ActionSyncDriver.sync", () => {
     let a2 = putAction(storage, 2, { autoApprovable: false, chatId: 8, awaitDecision: true });
 
     let { target } = makeBatchGatekeeper();
-    let decided = await makeDriver(storage, target)
-        .sync(GK, { frontier: 2, resolvedBy: APPROVER });
+    let decided = await makeDriver(storage, target).apply(GK, { frontier: 2, resolvedBy: APPROVER });
 
     expect(decided.toSorted((a, b) => a - b)).toEqual([a1, a2]);
   });
@@ -428,7 +424,7 @@ describe("ActionSyncDriver.sync", () => {
 
     let { target, results } = makeBatchGatekeeper();
     results.push({ invalidatedByVeto: [{ action: 3, invalidatedBy: 2 }] });
-    let pass = makeDriver(storage, target).sync(GK);
+    let pass = makeDriver(storage, target).apply(GK);
     let a3 = putAction(storage, 3, { autoApprovable: false });  // arrives while the RPC is in
     let decided = await pass;                                   // flight, so it misses the snapshot
 
@@ -466,7 +462,7 @@ describe("ActionSyncDriver legacy fallback", () => {
     let legacy = makeLegacyGatekeeper({ remote: true });
     let driver = makeDriver(storage, legacy.target);
 
-    await driver.sync(GK, { frontier: 3, resolvedBy: APPROVER });
+    await driver.apply(GK, { frontier: 3, resolvedBy: APPROVER });
 
     // Vetoes first (the {restart} return is discarded), then pending actions ascending.
     expect(legacy.calls).toEqual(["reject:2", "apply:1", "apply:3"]);
@@ -477,7 +473,7 @@ describe("ActionSyncDriver legacy fallback", () => {
 
     // The legacy verdict is cached: a later pass goes straight to per-action calls.
     putAction(storage, 4, { autoApprovable: false });
-    await driver.sync(GK, { frontier: 4, resolvedBy: APPROVER });
+    await driver.apply(GK, { frontier: 4, resolvedBy: APPROVER });
     expect(legacy.probeCount()).toBe(1);
     expect(legacy.calls).toEqual(["reject:2", "apply:1", "apply:3", "apply:4"]);
   });
@@ -487,7 +483,7 @@ describe("ActionSyncDriver legacy fallback", () => {
     putAction(storage, 1, { autoApprovable: false });
 
     let legacy = makeLegacyGatekeeper();
-    await makeDriver(storage, legacy.target).sync(GK, { frontier: 1, resolvedBy: APPROVER });
+    await makeDriver(storage, legacy.target).apply(GK, { frontier: 1, resolvedBy: APPROVER });
 
     expect(legacy.calls).toEqual(["apply:1"]);
     expect(getAction(storage, 1).state).toBe("approved");
@@ -500,7 +496,7 @@ describe("ActionSyncDriver legacy fallback", () => {
     putAction(storage, 3, { autoApprovable: false });
 
     let legacy = makeLegacyGatekeeper({ failApply: [2] });
-    await makeDriver(storage, legacy.target).sync(GK, { frontier: 3, resolvedBy: APPROVER });
+    await makeDriver(storage, legacy.target).apply(GK, { frontier: 3, resolvedBy: APPROVER });
 
     expect(legacy.calls).toEqual(["apply:1", "apply:2"]);  // never skips ahead of the failure
     expect(getAction(storage, 1).state).toBe("approved");
@@ -521,7 +517,7 @@ describe("ActionSyncDriver legacy fallback", () => {
       legacy.calls.push(`reject:${action}`);
       throw new Error("already settled");
     }) as typeof legacy.target.rejectAction;
-    await makeDriver(storage, legacy.target).sync(GK);
+    await makeDriver(storage, legacy.target).apply(GK);
 
     // The error can't say whether the gatekeeper ever saw the rejection, so it is re-sent on the
     // next pass rather than dropped: a lost veto would let a later frontier apply the action the
@@ -543,7 +539,7 @@ describe("ActionSyncDriver legacy fallback", () => {
     let target = {
       async applyAction() { seen.push(getAction(storage, 1).state); },
     } as unknown as GatekeeperActionTarget;
-    await makeDriver(storage, target).sync(GK, { frontier: 2, resolvedBy: APPROVER });
+    await makeDriver(storage, target).apply(GK, { frontier: 2, resolvedBy: APPROVER });
 
     expect(seen).toEqual(["pending", "approved"]);
     expect(getAction(storage, 2).state).toBe("approved");

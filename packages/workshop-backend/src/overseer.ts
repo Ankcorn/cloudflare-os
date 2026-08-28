@@ -4305,13 +4305,13 @@ class OverseerImpl implements AgentHooks {
   // silently applied past one), then any deliverable staged vetoes. Resolves with the workspace
   // record ids the pass decided. Delegates to the single-flight driver, which coalesces concurrent
   // requests for the same gatekeeper (the DO's input gate is open across the RPC await).
-  syncActions(gatekeeperId: number, manualApproval?: ManualApproval): Promise<number[]> {
-    return this.#actionSync.sync(gatekeeperId, manualApproval);
+  applyDecidedActions(gatekeeperId: number, manualApproval?: ManualApproval): Promise<number[]> {
+    return this.#actionSync.apply(gatekeeperId, manualApproval);
   }
 
-  // Resolves once no sync pass is in flight for the gatekeeper (see ActionSyncDriver.settled).
-  settledActionSync(gatekeeperId: number): Promise<void> {
-    return this.#actionSync.settled(gatekeeperId);
+  // Resolves once no apply pass is in flight (see ActionSyncDriver.awaitSettled).
+  awaitActionsSettled(gatekeeperId: number): Promise<void> {
+    return this.#actionSync.awaitSettled(gatekeeperId);
   }
 
   // Blocks other messages and agent turns for this chat until the returned object is disposed.
@@ -4720,7 +4720,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (willAutoApprove) {
-      this.ctx.waitUntil(this.syncActions(gatekeeperId));
+      this.ctx.waitUntil(this.applyDecidedActions(gatekeeperId));
     }
   }
 
@@ -9511,10 +9511,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // action applied in the world but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
-    // Approving is a decision frontier: the sync pass applies this action AND every earlier
+    // Approving is a decision frontier: the pass applies this action AND every earlier
     // undecided action from the same gatekeeper (attributed to this approver), then continues
     // through any auto-eligible actions the cleared gate unblocked.
-    let decided = await this.impl.syncActions(
+    let decided = await this.impl.applyDecidedActions(
         action.gatekeeperId, {frontier: action.action, resolvedBy: profile});
 
     // Resume turns suspended on awaitDecision whose awaited actions this pass decided -- the batch
@@ -9674,16 +9674,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // half-rejected.
     let profile = await this.#getClientProfile();
 
-    // A rejection must never interleave with an in-flight sync pass that might be applying this
+    // A rejection must never interleave with an in-flight apply pass that might be applying this
     // very action; wait it out, then re-check.
-    await this.impl.settledActionSync(action.gatekeeperId);
+    await this.impl.awaitActionsSettled(action.gatekeeperId);
     let fresh = this.impl.storage.actions.get(id);
     if (fresh?.type !== "action" || fresh.state !== "pending") {
       throw new Error(`Action is not pending: ${id}`);
     }
 
     // The rejection is decided here and now; delivery to the gatekeeper is a staged veto. It goes
-    // out with the next sync pass whose frontier covers it -- immediately below, if every earlier
+    // out with the next apply pass whose frontier covers it -- immediately below, if every earlier
     // action is already decided, otherwise once the actions below it are.
     fresh.state = "rejected";
     fresh.appliedAt = new Date();
@@ -9692,7 +9692,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     delete fresh.failure;
     this.impl.storage.actions.put(fresh);
 
-    this.impl.ctx.waitUntil(this.impl.syncActions(action.gatekeeperId));
+    this.impl.ctx.waitUntil(this.impl.applyDecidedActions(action.gatekeeperId));
 
     // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
     // sibling approval from resuming this turn.
@@ -9700,8 +9700,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // Enable auto-approval of actions carrying `actionKind` on the given gatekeeper. Stores the
   // opt-in rule (one of the two gates required to auto-apply -- the action's own `autoApprovable`
-  // verdict is the other) with the kind's display label, and immediately drains any pending
-  // actions that this newly unblocks. Auto-approval rules are workspace-wide per gatekeeper.
+  // verdict is the other) with the kind's display label, then runs an apply pass so any pending
+  // action this newly authorizes goes out now. Rules are workspace-wide per gatekeeper.
   async setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind)
       : Promise<void> {
     let gatekeeper = this.impl.storage.gatekeepers.get(gatekeeperId);
@@ -9716,7 +9716,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       enabledBy: profile,
     });
     // Apply the currently-visible pending action(s) with this tag right away.
-    this.impl.ctx.waitUntil(this.impl.syncActions(gatekeeperId));
+    this.impl.ctx.waitUntil(this.impl.applyDecidedActions(gatekeeperId));
   }
 
   // Remove the auto-approval rule for `tag` on the given gatekeeper, so future matching actions
