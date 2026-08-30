@@ -31,54 +31,36 @@ export interface Worktree {
    * List the entries of the directory at `path` (the worktree root when omitted), or all of its
    * descendants with `recursive: true`. Every returned path is a full path from the worktree
    * root, suitable for passing back to the other file operations.
-   *
-   * Entries carry no sizes: git tree entries don't record them, and a worktree fetches file
-   * content lazily, so reporting sizes would force downloading every file.
    */
   listFiles(path?: string, options?: {recursive?: boolean}): Promise<WorktreeFileEntry[]>;
 
-  /**
-   * Read a file as text. Throws if the path doesn't name a regular file: for a symlink the error
-   * names the link target, for a submodule (gitlink) it names the pinned commit, and binary or
-   * very large (over ~1MB) files report that they cannot be read as text.
-   */
+  /** Read a file as text. */
   readFile(path: string): Promise<string>;
 
   /**
-   * Write a file's entire content, creating it if absent. Regular files only: writing over a
-   * symlink, submodule, or directory throws the same descriptive errors reading one does. An
-   * edited executable file keeps its executable bit; newly created files are regular
-   * non-executable files. Writes are proposed changes like the file tools' -- they become
-   * permanent when the user accepts the conversation's changes.
+   * Write a file's entire content, creating it if absent. An edited executable file keeps its
+   * executable bit; newly created files are regular non-executable files.
    */
   writeFile(path: string, text: string): Promise<void>;
 
-  /**
-   * Delete a file. Regular files only (symlinks and submodules throw; directories cannot be
-   * deleted explicitly -- git has no empty directories, so deleting a directory's last file
-   * prunes the directory from the next commit).
-   */
+  /** Delete a file. */
   deleteFile(path: string): Promise<void>;
 
   /**
    * Search the given file (or recursively search the given directory) for all lines matching the
    * given regular expression.
    *
-   * Returns results in the format `grep -n` would return, i.e. a string where each line is
-   * "<line number>:<line content>", or if `path` refers to a directory,
-   * "<file path>:<line number>:<line content>". This format is useful if you just intend to
-   * console.log() it. If you intend to operate on the result programmatically, consider using
-   * `structuredGrep()` instead.
-   *
-   * When searching a directory, files that cannot be searched -- binary or over-limit files,
-   * symlinks, and submodules -- are skipped, with a note appended to the output for each.
+   * Returns results in the format `grep -n` would return, intended to be viewed by a human or
+   * agent. This format is useful if you just intend to console.log() it. Do not try to parse this
+   * format; if you intend to operate on the result programmatically, use `structuredGrep()`
+   * instead.
    */
   grep(path: string, pattern: RegExp): Promise<string>;
 
   /**
    * Like grep but returns a structured format useful for analyzing in code. Unsearchable files
-   * (binary/over-limit files, symlinks, submodules) are silently skipped here; use `grep()` or
-   * `listFiles()` if you need to see them.
+   * (binary/over-limit files, symlinks, submodules) are silently skipped here (whereas `grep()`
+   * will include notes about them in the output).
    */
   structuredGrep(path: string, pattern: RegExp): Promise<GrepMatch[]>;
 
@@ -86,8 +68,8 @@ export interface Worktree {
   // Git operations
 
   /**
-   * Commit the contents of the worktree to git, returning the new commit ID, and updating the
-   * head commit to point at it.
+   * Commit the contents of the worktree to git, returning the new commit ID, and updating the head
+   * commit to point at it.
    *
    * There is no separate staging. All changes you have made in this worktree will be included in
    * the git commit.
@@ -100,7 +82,7 @@ export interface Worktree {
    * may be any commit known to the workspace, e.g. the worktree's base commit to see everything
    * changed since it was created.
    *
-   * Returns the diff in a format similar to `git diff`; an empty string means no differences.
+   * Returns the diff in a format similar to `git diff`. An empty string means no differences.
    * Paths that cannot be rendered as text (binary/over-limit files, symlinks, submodules)
    * contribute a note instead of a diff.
    */
@@ -118,9 +100,11 @@ export type WorktreeFileEntry = {
 
   /**
    * What the entry is. "file" and "executable" are regular files -- readable and editable, and an
-   * edited executable keeps its executable bit. "dir" is a directory. "symlink" and "submodule"
-   * entries are inert: file operations on them throw a descriptive error (naming the symlink's
-   * target or the submodule's pinned commit), and searches skip them.
+   * edited executable keeps its executable bit. "dir" is a directory.
+   *
+   * As of this writing, operating on "symlink" and "submodule" entries is not yet supported. File
+   * operations on them throw a descriptive error (naming the symlink's target or the submodule's
+   * pinned commit), and searches skip them. This will change in the future.
    */
   kind: "file" | "executable" | "dir" | "symlink" | "submodule";
 };
