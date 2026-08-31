@@ -210,6 +210,15 @@ function same(ctx: EmailDesignerContext, left: string, right: string): boolean {
   return resolved !== undefined && resolved === ctx.resolveDesignerId(right);
 }
 
+function mergeDefined(base: unknown, patch: Record<string, unknown>): Record<string, unknown> {
+  let result: Record<string, unknown> =
+    base && typeof base === "object" && !Array.isArray(base) ? { ...base } : {};
+  for (let [key, value] of Object.entries(patch)) {
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
 function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]): Record<string, unknown> {
   let result = structuredClone(base);
   for (let action of pending) {
@@ -223,9 +232,21 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
       }
       if (patch.name !== undefined) result.name = patch.name;
       if (patch.description !== undefined) result.description = patch.description;
-      if (patch.data !== undefined) result.content = normalize({ id: "x", data: patch.data as RawDesignerAsset["data"] }).content;
-      if (patch.headers !== undefined) result.headers = { ...(result.headers as object), ...patch.headers as object };
-      if (patch.settings !== undefined) result.settings = { ...(result.settings as object), ...patch.settings as object };
+      if (patch.data !== undefined) {
+        let changed = normalize({ id: "x", data: patch.data as RawDesignerAsset["data"] }).content;
+        result.content = mergeDefined(result.content, changed as Record<string, unknown>);
+      }
+      if (patch.headers !== undefined) {
+        result.headers = mergeDefined(result.headers, patch.headers as Record<string, unknown>);
+      }
+      if (patch.settings !== undefined) {
+        let changed = patch.settings as Record<string, unknown>;
+        result.settings = mergeDefined(result.settings, changed);
+        if (action.asset === "designerFragment") {
+          if (changed.fragmentSubType !== undefined) result.fragmentSubType = changed.fragmentSubType;
+          if (changed.supportedChannels !== undefined) result.supportedChannels = changed.supportedChannels;
+        }
+      }
       if (patch.templateId !== undefined) result.templateId = patch.templateId;
     }
     if (action.type === "designerLifecycle") {
@@ -438,7 +459,10 @@ export class MarketoDesignerFragmentImpl extends DesignerAssetImpl {
     let supportedChannels = stringArray(input.supportedChannels, "supportedChannels");
     await this.submitUpdate({ name: input.name === undefined ? undefined : text(input.name, "Fragment name"),
       description: optionalText(input.description, "description"), data: content(input.content),
-      settings: fragmentSubType === undefined && supportedChannels === undefined ? undefined : { fragmentSubType, supportedChannels } });
+      settings: fragmentSubType === undefined && supportedChannels === undefined ? undefined : {
+        ...(fragmentSubType === undefined ? {} : { fragmentSubType }),
+        ...(supportedChannels === undefined ? {} : { supportedChannels }),
+      } });
   }
   async clone(name: string, description?: string) { return await this.cloneAsset(name, description) as MarketoDesignerFragmentImpl; }
 }

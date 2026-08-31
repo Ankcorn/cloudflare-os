@@ -1080,7 +1080,10 @@ describe("new Email Designer", () => {
       .toEqual(designerCloneSnapshot({
         appType: "marketo",
         appData: { editorType: "email", workspaceId: 1, folderId: 10 },
-        data: { html: { body: "<p>New</p>" } },
+        data: {
+          html: { body: "<p>New</p>" },
+          text: { body: "Old", syncFromHtml: false },
+        },
         headers: { subject: "New", fromEmail: "team@example.com" },
         settings: { enableUrlTracking: true, isOperational: true },
         templateId: 20,

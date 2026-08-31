@@ -60,6 +60,32 @@ function snapshotRecord(snapshot: DesignerCloneSnapshot): Record<DesignerCloneFi
   ])) as Record<DesignerCloneField, unknown>;
 }
 
+function mergeDefinedRecords(base: unknown, patch: unknown): Record<string, unknown> {
+  let result: Record<string, unknown> =
+    base && typeof base === "object" && !Array.isArray(base) ? { ...base } : {};
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return result;
+  for (let [key, value] of Object.entries(patch)) {
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
+function mergeDesignerData(base: unknown, patch: unknown): Record<string, unknown> {
+  let result = mergeDefinedRecords(base, patch);
+  for (let channel of ["html", "text"] as const) {
+    let value = patch && typeof patch === "object" && !Array.isArray(patch)
+      ? Reflect.get(patch, channel)
+      : undefined;
+    if (value !== undefined) {
+      result[channel] = mergeDefinedRecords(
+        base && typeof base === "object" && !Array.isArray(base) ? Reflect.get(base, channel) : undefined,
+        value,
+      );
+    }
+  }
+  return result;
+}
+
 /** Build a stable, JSON-safe snapshot while preserving absent top-level fields. */
 export function designerCloneSnapshot(source: Record<string, unknown>): DesignerCloneSnapshot {
   let normalized: Record<string, unknown> = {
@@ -102,10 +128,10 @@ export function updateDesignerCloneSnapshot(
   let source = snapshotRecord(snapshot);
   for (let field of SOURCE_COMPARISON_FIELDS) {
     if (patch[field] === undefined) continue;
-    if (["appData", "headers", "settings"].includes(field) && source[field] && patch[field] &&
-        typeof source[field] === "object" && typeof patch[field] === "object" &&
-        !Array.isArray(source[field]) && !Array.isArray(patch[field])) {
-      source[field] = { ...source[field] as object, ...patch[field] as object };
+    if (field === "data") {
+      source[field] = mergeDesignerData(source[field], patch[field]);
+    } else if (["appData", "headers", "settings"].includes(field)) {
+      source[field] = mergeDefinedRecords(source[field], patch[field]);
     } else {
       source[field] = patch[field];
     }
