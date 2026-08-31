@@ -122,7 +122,8 @@ export async function executeEmailDesignerAction(
     return;
   }
   if (action.type === "designerDelete") {
-    assertTargetResult(await client.deleteDesignerAsset(kind, id), id, "delete");
+    let result = await client.deleteDesignerAsset(kind, id);
+    if (result.length > 0) assertTargetResult(result, id, "delete");
     return;
   }
   let operation: "approve" | "unapprove" | "discard" | "create_draft" =

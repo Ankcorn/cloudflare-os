@@ -4209,6 +4209,57 @@ describe("Email Designer action lifecycle", () => {
     });
   });
 
+  it("accepts a successful resultless Email Designer delete", async () => {
+    let action: EmailDesignerAction = {
+      id: 1,
+      type: "designerDelete",
+      asset: "designerEmail",
+      targetId: "email-1",
+    };
+    let requests: { path: string; method: string; body: BodyInit | null | undefined }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      requests.push({ path: new URL(url).pathname, method: init?.method ?? "GET", body: init?.body });
+      return Response.json({ success: true });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).resolves.toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("applied");
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+    });
+    expect(requests).toEqual([{
+      path: "/rest/asset/v2/email/email-1/delete",
+      method: "POST",
+      body: "{}",
+    }]);
+  });
+
+  it("keeps resultless Email Designer deletes without explicit success uncertain", async () => {
+    for (let response of [{}, { result: [] }]) {
+      let action: EmailDesignerAction = {
+        id: 1,
+        type: "designerDelete",
+        asset: "designerEmail",
+        targetId: "email-1",
+      };
+      vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+        ? Response.json({ access_token: "token", expires_in: 3600 })
+        : Response.json(response));
+      let stub = await emailDesignerActionGatekeeper([action]);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.applyAction(1)).rejects.toThrow(/without confirming success/);
+        expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+        expect(state.storage.kv.get("pending:1")).toBeDefined();
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps empty, malformed, wrong-id, and wrong-status mutation results uncertain", async () => {
     let cases: { action: EmailDesignerAction; result: unknown[] }[] = [
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [] },

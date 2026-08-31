@@ -519,8 +519,14 @@ export class MarketoClient {
     path: string,
     parse: (value: unknown, label: string) => T,
     options?: { method?: string; query?: Query; body?: unknown },
+    requireExplicitSuccess = false,
   ): Promise<T[]> {
     let envelope = await this.#request<unknown>(path, { ...options, appType: true });
+    if (requireExplicitSuccess && envelope.success !== true) {
+      throw new MarketoError("Marketo returned a designer result without confirming success.", {
+        operation: path,
+      });
+    }
     if (envelope.result === undefined) return [];
     if (!Array.isArray(envelope.result)) {
       throw new MarketoError("Marketo returned a designer result with an unexpected shape.", { operation: path });
@@ -611,7 +617,7 @@ export class MarketoClient {
   async deleteDesignerAsset(kind: DesignerAssetKind, id: string): Promise<RawDesignerAsset[]> {
     return await this.#designerResult(`/asset/v2/${kind}/${encodeURIComponent(id)}/delete`, parseDesignerAsset, {
       method: "POST", body: {},
-    });
+    }, true);
   }
 
   async getDesignerAssetUsedBy(kind: DesignerAssetKind, body: DesignerUsedByRequest): Promise<RawDesignerUsedByResponse> {
