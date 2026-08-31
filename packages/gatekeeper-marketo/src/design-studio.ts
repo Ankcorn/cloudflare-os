@@ -308,7 +308,13 @@ function normalize(kind: DesignStudioAssetKind, raw: unknown): Summary {
 function normalizeFolder(raw: unknown): Summary {
   let value = recordValue(raw);
   let parent = recordValue(value.parent);
-  let type = textValue(value.folderType)?.toLowerCase() === "program" ? "program" : "folder";
+  let folderId = recordValue(value.folderId);
+  let rawType = value.folderId === undefined ? textValue(value.folderType) : textValue(folderId.type);
+  let normalizedType = rawType?.toLowerCase();
+  if (normalizedType !== "folder" && normalizedType !== "program") {
+    throw new Error("Marketo returned a folder with an invalid type.");
+  }
+  let type = normalizedType;
   return {
     id: String(readId(raw)),
     name: textValue(value.name) ?? "",

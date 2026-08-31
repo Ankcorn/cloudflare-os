@@ -1861,7 +1861,9 @@ describe("Design Studio simulation", () => {
   });
 
   it("resolves at most one pending folder candidate per page", async () => {
-    let getFolder = vi.fn(async (id: number) => ({ id, name: `Folder ${id}`, parent: { id: 10 } }));
+    let getFolder = vi.fn(async (id: number) => ({
+      id, name: `Folder ${id}`, folderId: { id, type: "Folder" }, parent: { id: 10 },
+    }));
     let { ctx } = designContext({ getFolders: async () => [], getFolder }, [
       { id: 1, type: "designMetadata", asset: "folder", targetId: "21", patch: { name: "One" } },
       { id: 2, type: "designMetadata", asset: "folder", targetId: "22", patch: { name: "Two" } },
@@ -2120,9 +2122,9 @@ describe("Design Studio simulation", () => {
 
   it("locally pages complete unpaged exact-name folder responses", async () => {
     let getFoldersByName = vi.fn(async () => [
-      { id: 1, name: "Same" },
-      { id: 2, name: "Same" },
-      { id: 3, name: "Same" },
+      { id: 1, name: "Same", folderId: { id: 1, type: "Folder" } },
+      { id: 2, name: "Same", folderId: { id: 2, type: "Folder" } },
+      { id: 3, name: "Same", folderId: { id: 3, type: "Folder" } },
     ]);
     let studio = new MarketoDesignStudioImpl(designContext({ getFoldersByName }).ctx);
     let ids: string[] = [];
@@ -2141,8 +2143,12 @@ describe("Design Studio simulation", () => {
   });
 
   it("overlays pending folder renames and deletions in rooted exact-name lists", async () => {
-    let getFoldersByName = vi.fn(async () => [{ id: 22, name: "New", parent: { id: 10 } }]);
-    let getFolder = vi.fn(async (id: number) => ({ id, name: "Old", parent: { id: 10 } }));
+    let getFoldersByName = vi.fn(async () => [{
+      id: 22, name: "New", folderId: { id: 22, type: "Folder" }, parent: { id: 10 },
+    }]);
+    let getFolder = vi.fn(async (id: number) => ({
+      id, name: "Old", folderId: { id, type: "Folder" }, parent: { id: 10 },
+    }));
     let { ctx } = designContext({ getFoldersByName, getFolder }, [
       { id: 1, type: "designMetadata", asset: "folder", targetId: "21", patch: { name: "New" } },
       { id: 2, type: "designDeleteFolder", targetId: "22" },
@@ -2207,15 +2213,17 @@ describe("Design Studio simulation", () => {
     let outside = new MarketoDesignStudioImpl(designContext({
       getFoldersByName: async () => [],
       getFolder: async (id: number) => id === 21
-        ? { id, name: "Old", parent: { id: 11 } }
-        : { id, name: "Outside root" },
+        ? { id, name: "Old", folderId: { id, type: "Folder" }, parent: { id: 11 } }
+        : { id, name: "Outside root", folderId: { id, type: "Folder" } },
     }, [{ id: 1, type: "designMetadata", asset: "folder", targetId: "21", patch: { name: "New" } }]).ctx);
     expect((await outside.listFolders({ name: "New", root: { id: "10", type: "folder" } })).items)
       .toEqual([]);
 
     let mismatched = new MarketoDesignStudioImpl(designContext({
       getFoldersByName: async () => [],
-      getFolder: async () => ({ id: 99, name: "Wrong", parent: { id: 10 } }),
+      getFolder: async () => ({
+        id: 99, name: "Wrong", folderId: { id: 99, type: "Folder" }, parent: { id: 10 },
+      }),
     }, [{ id: 1, type: "designMetadata", asset: "folder", targetId: "21", patch: { name: "New" } }]).ctx);
     await expect(mismatched.listFolders({ name: "New" })).rejects.toThrow(/99 when 21 was requested/);
   });
@@ -2236,23 +2244,53 @@ describe("Design Studio simulation", () => {
   });
 
   it("preserves Program type for handles and rooted by-name folder lookups", async () => {
-    let getFolder = vi.fn(async (id: number, type: "Folder" | "Program" = "Folder") => ({
+    let getFolder = vi.fn(async (id: number) => ({
       id,
       name: "Program",
-      folderType: type,
+      folderId: { id, type: "Program" },
+      folderType: "Folder",
     }));
     let getFoldersByName = vi.fn(async () => []);
-    let { ctx } = designContext({ getFolder, getFoldersByName });
+    let { ctx, actions } = designContext({ getFolder, getFoldersByName });
     let studio = new MarketoDesignStudioImpl(ctx);
 
-    expect((await studio.getFolder("10", "program").describe()).type).toBe("program");
+    let program = studio.getFolder("10", "folder");
+    expect((await program.describe()).type).toBe("program");
+    await expect(program.updateMetadata({ name: "Renamed" })).rejects.toThrow(/Program folders cannot be edited/);
+    await expect(program.delete()).rejects.toThrow(/Program folders cannot be deleted/);
+    expect(actions).toEqual([]);
     await studio.listFolders({ name: "Child", root: { id: "10", type: "program" } });
-    expect(getFolder).toHaveBeenCalledWith(10, "Program");
     expect(getFoldersByName).toHaveBeenCalledWith("Child", {
       type: "Program",
       root: { id: 10, type: "Program" },
       workspace: undefined,
     });
+  });
+
+  it("accepts only explicit folder discriminators and gives nested types precedence", async () => {
+    let fallback = new MarketoDesignStudioImpl(designContext({
+      getFolder: async id => ({ id, name: "Program", folderType: "Program" }),
+    }).ctx).getFolder("10", "folder");
+    expect((await fallback.describe()).type).toBe("program");
+    await expect(fallback.delete()).rejects.toThrow(/Program folders cannot be deleted/);
+
+    let nested = new MarketoDesignStudioImpl(designContext({
+      getFolder: async id => ({ id, name: "Folder", folderId: { id, type: "Folder" }, folderType: "Program" }),
+    }).ctx).getFolder("10", "program");
+    expect((await nested.describe()).type).toBe("folder");
+
+    for (let response of [
+      { id: 10, name: "Missing" },
+      { id: 10, name: "Unknown", folderId: { id: 10, type: "Unknown" } },
+      { id: 10, name: "Invalid nested", folderId: {}, folderType: "Program" },
+      { id: 10, name: "Empty", folderType: "" },
+    ]) {
+      let { ctx, actions } = designContext({ getFolder: async () => response });
+      let folder = new MarketoDesignStudioImpl(ctx).getFolder("10", "folder");
+      await expect(folder.updateMetadata({ name: "Unsafe" })).rejects.toThrow(/invalid type/);
+      await expect(folder.delete()).rejects.toThrow(/invalid type/);
+      expect(actions).toEqual([]);
+    }
   });
 
   it("omits preHeader from create but carries it on update", async () => {
