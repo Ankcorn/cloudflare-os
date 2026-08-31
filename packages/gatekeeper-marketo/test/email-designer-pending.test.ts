@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MarketoEmailDesignerImpl,
   MarketoDesignerEmailImpl,
+  MarketoDesignerEmailTemplateImpl,
   MarketoDesignerFragmentImpl,
   type EmailDesignerContext,
 } from "../src/email-designer";
@@ -443,6 +444,77 @@ describe("Email Designer pending-state simulation", () => {
 
     await expect(email.describe()).rejects.toThrow(/was deleted/);
     expect(providerReads).toBe(1);
+  });
+
+  it("moves a pending email template reference from the old used-by set to the new one before paging", async () => {
+    let requests: { assetId: string; pageIndex?: number; pageSize?: number }[] = [];
+    let { ctx } = context({
+      getDesignerAsset: async () => ({
+        id: "email-1", name: "Changed email", templateId: "template-A",
+        appData: { workspaceId: "1", folderId: "10" },
+      }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        requests.push(request);
+        let result = request.assetId === "template-A"
+          ? [{ id: "email-1", name: "Changed email", contentType: "email" }]
+          : [{ id: "other-1", name: "First" }, { id: "other-2", name: "Second" }];
+        return {
+          result,
+          pageDetails: { totalItems: result.length, currentPage: (request.pageIndex ?? 0) + 1, pageSize: request.pageSize },
+        };
+      },
+    });
+    await new MarketoDesignerEmailImpl(ctx, "email-1").update({ templateId: "template-B" });
+
+    expect(await new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy()).toMatchObject({
+      items: [], totalItems: 0,
+    });
+    let second = await new MarketoDesignerEmailTemplateImpl(ctx, "template-B").getUsedBy(1, 2);
+    expect(second).toMatchObject({
+      items: [{ id: "email-1", name: "Changed email", workspaceId: "1", folderId: "10" }],
+      totalItems: 3, pageIndex: 1, pageSize: 2,
+    });
+    expect(requests).toEqual([
+      { assetId: "template-A", pageIndex: 0, pageSize: 50, type: "all" },
+      { assetId: "template-B", pageIndex: 0, pageSize: 50, type: "all" },
+    ]);
+  });
+
+  it("adds a pending email creation to its template used-by set", async () => {
+    let { ctx } = context({
+      getDesignerAssetUsedBy: async (_kind, request) => ({
+        result: [], pageDetails: { totalItems: 0, currentPage: 1, pageSize: request.pageSize },
+      }),
+    });
+    await new MarketoEmailDesignerImpl(ctx).createEmail({
+      location: { workspaceId: "1", folderId: "10" },
+      name: "Created email",
+      headers: { subject: "Subject" },
+      templateId: "template-B",
+    });
+
+    expect(await new MarketoDesignerEmailTemplateImpl(ctx, "template-B").getUsedBy()).toMatchObject({
+      items: [{ id: "~1", name: "Created email", workspaceId: "1", folderId: "10" }],
+      totalItems: 1,
+    });
+  });
+
+  it("removes a pending email deletion from its template used-by set", async () => {
+    let { ctx } = context({
+      getDesignerAsset: async () => ({
+        id: "email-1", name: "Deleted email", templateId: "template-A",
+        appData: { workspaceId: "1" },
+      }),
+      getDesignerAssetUsedBy: async (_kind, request) => ({
+        result: [{ id: "email-1", name: "Deleted email", contentType: "email" }],
+        pageDetails: { totalItems: 1, currentPage: 1, pageSize: request.pageSize },
+      }),
+    });
+    await new MarketoDesignerEmailImpl(ctx, "email-1").delete();
+
+    expect(await new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy()).toMatchObject({
+      items: [], totalItems: 0,
+    });
   });
 
   it("merges a page without materializing an upstream collection over 1000 rows", async () => {

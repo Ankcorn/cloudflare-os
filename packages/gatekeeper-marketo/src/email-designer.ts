@@ -217,6 +217,17 @@ function listSummary(item: Record<string, unknown>): MarketoDesignerAssetSummary
   };
 }
 
+function usedBySummary(item: Record<string, unknown>): MarketoDesignerUsedBy {
+  return {
+    id: String(item.id),
+    name: String(item.name ?? ""),
+    channel: item.channel as string | undefined,
+    contentType: item.contentType as string | undefined,
+    workspaceId: item.workspaceId as string | undefined,
+    folderId: item.folderId as string | undefined,
+  };
+}
+
 function actions(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity): EmailDesignerAction[] {
   return ctx.pendingDesigner().filter(action => action.id < before && action.asset === kind && (
     (action.type === "designerCreate" || action.type === "designerClone") && action.provisionalId === assetId ||
@@ -661,18 +672,80 @@ abstract class DesignerAssetImpl extends RpcTarget {
     if (!Number.isSafeInteger(pageIndex) || pageIndex < 0) throw new Error("pageIndex must be a non-negative integer.");
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("pageSize must be between 1 and 50.");
     let physical = this.ctx.resolveDesignerId(this.assetId);
-    if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
-    let raw = await (await this.ctx.client()).getDesignerAssetUsedBy(path(this.kind), { assetId: physical, pageIndex, pageSize, type: "all" });
-    if (raw.pageDetails?.currentPage !== pageIndex + 1 || raw.pageDetails.pageSize !== pageSize) {
-      throw new Error(`Marketo returned used-by page ${String(raw.pageDetails?.currentPage)} with page size ${String(raw.pageDetails?.pageSize)} when page ${pageIndex} with page size ${pageSize} was requested.`);
+    let affected = this.kind === "designerTemplate" ? this.ctx.pendingDesigner().filter(action =>
+      action.asset === "designerEmail" && (
+        action.type === "designerCreate" || action.type === "designerClone" || action.type === "designerDelete" ||
+        action.type === "designerUpdate" && action.patch.templateId !== undefined
+      )) : [];
+    let client = await this.ctx.client();
+    if (affected.length === 0) {
+      if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
+      let raw = await client.getDesignerAssetUsedBy(path(this.kind), { assetId: physical, pageIndex, pageSize, type: "all" });
+      if (raw.pageDetails?.currentPage !== pageIndex + 1 || raw.pageDetails.pageSize !== pageSize) {
+        throw new Error(`Marketo returned used-by page ${String(raw.pageDetails?.currentPage)} with page size ${String(raw.pageDetails?.pageSize)} when page ${pageIndex} with page size ${pageSize} was requested.`);
+      }
+      let items = raw.result.flatMap(item => item.id === undefined ? [] : [usedBySummary({
+        ...item,
+        workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
+        folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
+      })]);
+      await this.ctx.observe(`Read dependencies for Marketo designer ${this.kind}`, `Read ${items.length} direct dependency record(s) for ${this.assetId}.`);
+      return { items, totalItems: raw.pageDetails.totalItems, pageIndex, pageSize };
     }
-    let items: MarketoDesignerUsedBy[] = raw.result.flatMap(item => item.id === undefined ? [] : [{
-      id: String(item.id), name: item.name ?? "", channel: item.channel, contentType: item.contentType,
-      workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
-      folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
-    }]);
+
+    let items: MarketoDesignerUsedBy[] = [];
+    if (physical !== undefined) {
+      let providerCount = 0;
+      for (let providerPage = 0; ; providerPage++) {
+        let raw = await client.getDesignerAssetUsedBy(path(this.kind), {
+          assetId: physical, pageIndex: providerPage, pageSize: DESIGNER_PAGE_SIZE, type: "all",
+        });
+        if (raw.pageDetails?.currentPage !== providerPage + 1 || raw.pageDetails.pageSize !== DESIGNER_PAGE_SIZE) {
+          throw new Error(`Marketo returned used-by page ${String(raw.pageDetails?.currentPage)} with page size ${String(raw.pageDetails?.pageSize)} when page ${providerPage} with page size ${DESIGNER_PAGE_SIZE} was requested.`);
+        }
+        items.push(...raw.result.flatMap(item => item.id === undefined ? [] : [usedBySummary({
+          ...item,
+          workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
+          folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
+        })]));
+        providerCount += raw.result.length;
+        if (raw.result.length < DESIGNER_PAGE_SIZE ||
+            raw.pageDetails.totalItems !== undefined && providerCount >= raw.pageDetails.totalItems) break;
+      }
+    }
+
+    let candidateIds: string[] = [];
+    for (let action of affected) {
+      let candidate = action.type === "designerCreate" || action.type === "designerClone"
+        ? action.provisionalId
+        : action.targetId;
+      if (!candidateIds.some(existing => same(this.ctx, existing, candidate))) candidateIds.push(candidate);
+    }
+    for (let candidateId of candidateIds) {
+      let candidateActions = actions(this.ctx, "designerEmail", candidateId);
+      let first = affected.find(action =>
+        action.asset === "designerEmail" && (action.type === "designerCreate" || action.type === "designerClone"
+          ? same(this.ctx, action.provisionalId, candidateId)
+          : same(this.ctx, action.targetId, candidateId)));
+      if (!first) continue;
+      let isCreation = candidateActions.some(action =>
+        action.type === "designerCreate" || action.type === "designerClone");
+      let original = isCreation ? undefined : await summary(this.ctx, "designerEmail", candidateId, first.id);
+      let deleted = candidateActions.some(action => action.type === "designerDelete");
+      let final = deleted ? undefined : await summary(this.ctx, "designerEmail", candidateId);
+      let originalMatches = original?.templateId !== undefined && same(this.ctx, String(original.templateId), this.assetId);
+      let finalMatches = final?.templateId !== undefined && same(this.ctx, String(final.templateId), this.assetId);
+      let physicalCandidate = this.ctx.resolveDesignerId(candidateId);
+      if (originalMatches || finalMatches || (isCreation && physicalCandidate !== undefined)) {
+        items = items.filter(item => item.id !== candidateId && item.id !== physicalCandidate);
+      }
+      if (finalMatches && final) items.push(usedBySummary(final));
+    }
+
+    let totalItems = items.length;
+    items = items.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
     await this.ctx.observe(`Read dependencies for Marketo designer ${this.kind}`, `Read ${items.length} direct dependency record(s) for ${this.assetId}.`);
-    return { items, totalItems: raw.pageDetails.totalItems, pageIndex, pageSize };
+    return { items, totalItems, pageIndex, pageSize };
   }
 }
 
