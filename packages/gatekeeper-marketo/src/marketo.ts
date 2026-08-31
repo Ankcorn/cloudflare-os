@@ -431,7 +431,7 @@ async function requireAccountCredentials(
 type MarketoUserVerifierProps = { userObjectId: string };
 
 interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
-  hasCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean>;
+  hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean>;
 }
 
 async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
@@ -447,14 +447,18 @@ export class MarketoUserVerifier
   extends WorkerEntrypoint<Env, MarketoUserVerifierProps>
   implements MarketoUserVerifierApi
 {
-  async hasCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean> {
-    let credentials = await userAccountStub(
-      this.ctx.exports,
-      this.ctx.props.userObjectId,
-    ).getCredentials();
-    return credentials?.endpoint === endpoint &&
-      credentials.clientId === clientId &&
-      await credentialFingerprint(credentials) === fingerprint;
+  async hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean> {
+    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let credentials = await account.getCredentials();
+    if (
+      !credentials || credentials.endpoint !== endpoint || credentials.clientId !== clientId ||
+      await credentialFingerprint(credentials) !== fingerprint
+    ) return false;
+
+    let valid = await (await tokenCacheStub(this.ctx.exports, credentials))
+      .verifyCredentials(credentials);
+    if (!valid) await account.credentialsExpired();
+    return valid;
   }
 }
 
@@ -908,7 +912,7 @@ export class MarketoGatekeeperImpl
     let credentials = await this.#credentials();
     let verifier = user as unknown as Fetcher<MarketoUserVerifierApi>;
     if (!(
-      await verifier.hasCredential(
+      await verifier.hasLiveCredential(
         credentials.endpoint,
         credentials.clientId,
         await credentialFingerprint(credentials),

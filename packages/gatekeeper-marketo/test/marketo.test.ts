@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { RpcStub, RpcTarget } from "cloudflare:workers";
-import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type {
   ActionDescription,
   ApprovalQueue,
@@ -3713,7 +3713,8 @@ async function accountWithCredentials(credentials: MarketoCredentials): Promise<
 
 async function gatekeeperForAccount(
   userObjectId: string,
-  kind: "instance" | "design-studio" = "instance",
+  kind: "instance" | "design-studio" | "program" | "list" = "instance",
+  resourceId?: number,
 ) {
   let namespace = (env as unknown as {
     MarketoGatekeeperImpl: DurableObjectNamespace<MarketoGatekeeperImpl>;
@@ -3721,9 +3722,15 @@ async function gatekeeperForAccount(
   let stub = namespace.get(namespace.newUniqueId());
   await runInDurableObject(stub, instance => {
     let ctx = (instance as unknown as {
-      ctx: { props: { userObjectId: string; kind: "instance" | "design-studio" } };
+      ctx: {
+        props: {
+          userObjectId: string;
+          kind: "instance" | "design-studio" | "program" | "list";
+          resourceId?: number;
+        };
+      };
     }).ctx;
-    ctx.props = { userObjectId, kind };
+    ctx.props = { userObjectId, kind, resourceId };
   });
   return stub;
 }
@@ -3854,6 +3861,21 @@ async function addObserverFromAccount(
 describe("collaborator credentials", () => {
   const OWNER = { endpoint: ORIGIN, clientId: "client", clientSecret: "secret" };
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+  });
+
   it("accepts only the same complete LaunchPoint credential", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
@@ -3870,6 +3892,37 @@ describe("collaborator credentials", () => {
         /not connected with the same Marketo LaunchPoint service/,
       );
     }
+  });
+
+  it("live-checks the shared service credential for every resource kind", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let observerId = await accountWithCredentials(OWNER);
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        paths.push(url.pathname);
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+
+    for (let [kind, resourceId] of [
+      ["instance", undefined],
+      ["design-studio", undefined],
+      ["program", 41],
+      ["list", 42],
+    ] as const) {
+      let gatekeeper = await gatekeeperForAccount(ownerId.toString(), kind, resourceId);
+      await expect(addObserverFromAccount(gatekeeper, observerId.toString())).resolves.toBeUndefined();
+    }
+
+    expect(paths).toEqual([
+      "/identity/oauth/token",
+      "/identity/oauth/token",
+      "/identity/oauth/token",
+      "/identity/oauth/token",
+    ]);
   });
 
   it("re-verifies a previously admitted observer against live credentials", async () => {
@@ -3896,6 +3949,41 @@ describe("collaborator credentials", () => {
         verifier as unknown as Fetcher<GatekeeperUserVerifier>,
       )).rejects.toThrow(/not connected with the same Marketo LaunchPoint service/);
     });
+  });
+
+  it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await expect(addObserverFromAccount(gatekeeper, observerId.toString())).resolves.toBeUndefined();
+    let expiryNotification = vi.spyOn(UserAccount.prototype, "credentialsExpired");
+
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ error: "invalid_client" }, { status: 401 });
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+    await expect(addObserverFromAccount(gatekeeper, observerId.toString())).rejects.toThrow(
+      /not connected with the same Marketo LaunchPoint service/,
+    );
+    expect(expiryNotification).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces transient Identity failures without expiring the credential", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    let expiryNotification = vi.spyOn(UserAccount.prototype, "credentialsExpired");
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("temporary outage");
+    });
+
+    await expect(addObserverFromAccount(gatekeeper, observerId.toString())).rejects.toThrow(
+      /Could not reach the Marketo Identity endpoint/,
+    );
+    expect(expiryNotification).not.toHaveBeenCalled();
   });
 });
 

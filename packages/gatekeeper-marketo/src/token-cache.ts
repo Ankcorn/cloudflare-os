@@ -9,6 +9,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   fetchAccessToken,
   MarketoClient,
+  MarketoError,
   type MarketoCredentials,
   type TokenProvider,
 } from "./marketo-api";
@@ -42,6 +43,17 @@ export class MarketoTokenCache extends DurableObject<Env> {
    */
   async getScope(creds: MarketoCredentials): Promise<string | undefined> {
     return (await this.#current(creds, false)).scope;
+  }
+
+  /** Force a provider round trip and distinguish rejected credentials from operational failures. */
+  async verifyCredentials(creds: MarketoCredentials): Promise<boolean> {
+    try {
+      await this.#current(creds, true);
+      return true;
+    } catch (error) {
+      if (error instanceof MarketoError && error.isAuthError) return false;
+      throw error;
+    }
   }
 
   async #current(creds: MarketoCredentials, forceRefresh: boolean): Promise<CachedToken> {
