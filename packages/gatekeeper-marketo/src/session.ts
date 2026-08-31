@@ -1475,15 +1475,22 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     if (!field) throw new Error("A filter field is required.");
     if (!values?.length) throw new Error("At least one filter value is required.");
     requireFilterValueCount(values, "filter");
+    let requestedFields = fields?.length ? new Set(fields) : undefined;
+    let queryFields = requestedFields ? [...new Set([...requestedFields, field])] : fields;
     let records = await (await this.#ctx.client()).queryCustomObject(
       this.#apiName,
       field,
       values,
-      fields,
+      queryFields,
     );
     let requested = new Set(values.map(String));
     if (records.some(record => !isRequestedFilterValue(record[field], requested))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested filter.");
+    }
+    if (requestedFields && field !== "marketoGUID" && !requestedFields.has(field)) {
+      records = records.map(record => Object.fromEntries(
+        Object.entries(record).filter(([name]) => name !== field),
+      ));
     }
     await this.#ctx.observe(
       `Read ${records.length} \`${this.#apiName}\` record(s)`,
@@ -1524,11 +1531,19 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     let records = await client.queryCustomObjectByDedupeKeys(
       this.#apiName,
       input,
-      fields,
+      fields?.length ? [...new Set([...fields, ...dedupeFields])] : fields,
     );
     if (records.some(record => !input.some(key => dedupeFields.every(field =>
       sameFilterValue(record[field], key[field]))))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested dedupe keys.");
+    }
+    if (fields?.length) {
+      let requestedFields = new Set(fields);
+      let internalFields = new Set(dedupeFields.filter(field =>
+        field !== "marketoGUID" && !requestedFields.has(field)));
+      records = records.map(record => Object.fromEntries(
+        Object.entries(record).filter(([field]) => !internalFields.has(field)),
+      ));
     }
     await this.#ctx.observe(
       `Read ${records.length} \`${this.#apiName}\` record(s)`,

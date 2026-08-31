@@ -186,8 +186,15 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
       }
     }
     try {
-      let page = await (await this.ctx.client()).queryBusinessObject(this.kind, query);
       let filter = query.filter;
+      let correlationFields = "dedupeKeys" in filter
+        ? BUSINESS_OBJECTS[this.kind].dedupeFields
+        : [filter.field];
+      let requestedFields = query.fields?.length ? new Set(query.fields) : undefined;
+      let page = await (await this.ctx.client()).queryBusinessObject(this.kind, {
+        ...query,
+        fields: requestedFields ? [...new Set([...requestedFields, ...correlationFields])] : query.fields,
+      });
       let matches = "dedupeKeys" in filter
         ? (record: Record<string, unknown>) => filter.dedupeKeys.some(key =>
           BUSINESS_OBJECTS[this.kind].dedupeFields.every(field => sameFilterValue(record[field], key[field])))
@@ -196,9 +203,14 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
       if (page.result.some(record => !matches(record))) {
         throw new MarketoError(`Marketo returned a ${this.kind} record outside the requested filter.`);
       }
+      let idField = BUSINESS_OBJECTS[this.kind].idField;
+      let records = requestedFields
+        ? page.result.map(record => Object.fromEntries(Object.entries(record).filter(([field]) =>
+          field === idField || requestedFields.has(field) || !correlationFields.includes(field))))
+        : page.result;
       let count = page.result.length;
       await this.ctx.observe(`Read ${count} Marketo ${this.kind} record(s)`, `Queried one page using ${"dedupeKeys" in query.filter ? "compound dedupe keys" : `field ${query.filter.field}`}; ${count} record(s) returned.`);
-      return { records: page.result, moreResult: page.moreResult, nextPageToken: page.nextPageToken };
+      return { records, moreResult: page.moreResult, nextPageToken: page.nextPageToken };
     } catch (error) {
       if (this.kind === "opportunityRole" && permissionDenied(error)) {
         this.ctx.setBusinessObjectAccess(this.kind, "unavailable");
