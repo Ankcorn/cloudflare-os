@@ -498,6 +498,9 @@ export type MarketoDesignStudioListOptions = {
   maxResults?: number;
 };
 
+/** Controls Design Studio file listings, which do not support lifecycle status filters. */
+export type MarketoDesignStudioFileListOptions = Omit<MarketoDesignStudioListOptions, "status">;
+
 /** Controls folder hierarchy discovery in Design Studio. */
 export type MarketoDesignStudioFolderListOptions = {
   /** Exact folder name to match. Name matching follows Marketo's case-insensitive rules. */
@@ -1275,7 +1278,7 @@ export interface MarketoDesignStudio {
 
   /** List files, optionally narrowed by exact name or folder. */
   listFiles(
-    options?: MarketoDesignStudioListOptions,
+    options?: MarketoDesignStudioFileListOptions,
   ): Promise<MarketoDesignStudioPage<MarketoFileSummary>>;
   /** Open a file handle by opaque id. */
   getFile(id: MarketoDesignStudioId): MarketoFile;

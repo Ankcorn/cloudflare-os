@@ -419,6 +419,9 @@ export async function executeDesignStudioAction(
       case "emailTemplate": assertTargetResult(await client.updateEmailTemplateContent(id, required(action.content, "content")), id, "email-template content update"); return;
       case "landingPageTemplate": assertTargetResult(await client.updateLandingPageTemplateContent(id, required(action.content, "content")), id, "landing-page-template content update"); return;
       case "snippet":
+        if (action.html === undefined && action.text === undefined) {
+          throw new Error("Missing snippet content rendition.");
+        }
         if (action.html !== undefined) assertTargetResult(await client.updateSnippetContent(id, "HTML", action.html), id, "snippet HTML update");
         if (action.text !== undefined) assertTargetResult(await client.updateSnippetContent(id, "Text", action.text), id, "snippet text update");
         return;

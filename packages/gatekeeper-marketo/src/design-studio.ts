@@ -10,6 +10,7 @@ import type {
   MarketoCreateSnippetInput,
   MarketoDesignStudioFolder,
   MarketoDesignStudioFolderRef,
+  MarketoDesignStudioFileListOptions,
   MarketoDesignStudioFolderListOptions,
   MarketoDesignStudioFolderSummary,
   MarketoDesignStudioListOptions,
@@ -572,15 +573,17 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let pending = this.#ctx.pending();
     let physicalRoot = root ? this.#ctx.resolveId(root.id) : undefined;
     let rootRef = root && physicalRoot !== undefined ? { id: physicalRoot, type: root.type } : undefined;
-    let raw = root && physicalRoot === undefined ? [] : options.name === undefined
+    let browse = options.name === undefined || validated.maxDepth !== undefined;
+    let raw = root && physicalRoot === undefined ? [] : browse
       ? await client.getFolders({ root: rootRef, maxDepth: validated.maxDepth, workspace: validated.workspace, offset, maxReturn: batchSize })
-       : await client.getFoldersByName(name ?? "", {
+      : await client.getFoldersByName(name ?? "", {
           type: root?.type,
           root: rootRef,
           workspace: validated.workspace,
         });
     let upstream = raw.map(item => normalizeFolder(item))
-      .map(item => overlaySummary(item, actionsFor(this.#ctx, "folder", item.id, pending))).filter(notNull);
+      .map(item => overlaySummary(item, actionsFor(this.#ctx, "folder", item.id, pending))).filter(notNull)
+      .filter(item => name === undefined || item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
     let candidateIds = state.pending ?? pendingFolderIds(this.#ctx, root, validated.maxDepth, pending);
     let candidateBatch = pendingFolderBatch(this.#ctx, candidateIds, maxReturn, pending);
     let candidates = await pendingFolderSummaries(
@@ -597,7 +600,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       candidateIds.slice(candidateBatch.length),
       upstream,
       raw.length,
-      options.name === undefined && raw.length === batchSize,
+      browse && raw.length === batchSize,
       pageState,
       resolvedMask(this.#ctx, pageState.masked),
       maxReturn,
@@ -710,7 +713,12 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   getForm(id: string) { return new MarketoFormImpl(this.#ctx, logicalId(id)); }
   listSnippets(options?: MarketoDesignStudioListOptions) { return this.#list("snippet", options); }
   getSnippet(id: string) { return new MarketoSnippetImpl(this.#ctx, logicalId(id)); }
-  listFiles(options?: MarketoDesignStudioListOptions) { return this.#list("file", options); }
+  listFiles(options: MarketoDesignStudioFileListOptions = {}) {
+    if ("status" in options && options.status !== undefined) {
+      throw new Error("status is not supported when listing Design Studio files.");
+    }
+    return this.#list("file", options);
+  }
   getFile(id: string) { return new MarketoFileImpl(this.#ctx, logicalId(id)); }
 
   async #list(kind: Exclude<DesignStudioAssetKind, "folder">, options: MarketoDesignStudioListOptions = {}) {
@@ -880,13 +888,38 @@ async function pendingFolderSummaries(
   pending: DesignStudioAction[],
 ): Promise<Summary[]> {
   let eligibleCreations = pendingFolderCreationIds(ctx, root, maxDepth, pending);
+  let workspaceReads = new Map<string, Promise<string | undefined>>();
+  let inheritedWorkspace = (id: string, type: "Folder" | "Program"): Promise<string | undefined> => {
+    let key = `${type}:${id}`;
+    let existing = workspaceReads.get(key);
+    if (existing) return existing;
+    let read = (async () => {
+      let creation = findCreation(ctx, "folder", id, pending);
+      if (creation) return await inheritedWorkspace(creation.parent.id, creation.parent.type);
+      let physical = ctx.resolveId(id);
+      if (physical === undefined) return undefined;
+      let raw = await client.getFolder(physical, type);
+      if (!raw) return undefined;
+      if (readId(raw) !== physical) {
+        throw new Error(`Marketo returned asset ${readId(raw)} when ${physical} was requested.`);
+      }
+      return normalizeFolder(raw).workspaceName;
+    })();
+    workspaceReads.set(key, read);
+    return read;
+  };
   let summaries = await Promise.all(ids.map(async id => {
     let creation = findCreation(ctx, "folder", id, pending);
     if (creation) {
-      if (workspace !== undefined || root && !eligibleCreations.some(candidate => sameLogicalId(ctx, candidate, id))) {
+      if (root && !eligibleCreations.some(candidate => sameLogicalId(ctx, candidate, id))) {
         return undefined;
       }
-      return creationSummary(creation);
+      let summary = creationSummary(creation);
+      if (workspace !== undefined) {
+        summary.workspaceName = await inheritedWorkspace(creation.parent.id, creation.parent.type);
+        if (summary.workspaceName !== workspace) return undefined;
+      }
+      return summary;
     }
     if (actionsFor(ctx, "folder", id, pending).some(action => action.type === "designDeleteFolder")) {
       return undefined;
@@ -938,7 +971,9 @@ async function pendingAssetSummaries(
     let creation = findCreation(ctx, kind, id, pending);
     if (creation) {
       if (parent && !sameLogicalId(ctx, creation.parent.id, parent.id)) return undefined;
-      return creationSummary(creation);
+      return creation.type === "designClone"
+        ? await simulatedSummary(ctx, kind, id, undefined, pending)
+        : creationSummary(creation);
     }
     if (parent && physicalParent === undefined) return undefined;
     let physical = ctx.resolveId(id);
@@ -974,34 +1009,9 @@ abstract class AssetImpl extends RpcTarget {
   }
 
   protected async summary(): Promise<Summary> {
-    let creation = findCreation(this.ctx, this.kind, this.id);
-    let summary: Summary;
-    if (creation?.type === "designClone") {
-      assertAcyclicCloneSource(this.ctx, this.kind, this.id);
-      let source = await handle(this.ctx, this.kind, creation.sourceId).summary();
-      summary = {
-        ...source,
-        id: creation.provisionalId,
-        name: creation.name,
-        status: "draft",
-        createdAt: undefined,
-        updatedAt: undefined,
-      };
-    } else if (creation) summary = creationSummary(creation);
-    else {
-      this.assertReadable();
-      let physical = physicalId(this.ctx, this.id);
-      let raw = await readAsset(await this.ctx.client(), this.kind, physical, this.folderType);
-      if (!raw) throw new Error(`Marketo ${this.kind} ${this.id} was not found.`);
-      let returned = readId(raw);
-      if (returned !== physical) throw new Error(`Marketo returned asset ${returned} when ${physical} was requested.`);
-      summary = this.kind === "folder" ? normalizeFolder(raw) : normalize(this.kind, raw);
-      summary.id = this.id;
-    }
-    let overlaid = overlaySummary(summary, actionsFor(this.ctx, this.kind, this.id));
-    if (!overlaid) throw new Error(`Marketo ${this.kind} ${this.id} was deleted.`);
+    let summary = await simulatedSummary(this.ctx, this.kind, this.id, this.folderType);
     await this.ctx.observe(`Read Marketo ${this.kind} ${this.id}`, `Read Design Studio ${this.kind} \`${this.id}\`.`);
-    return overlaid;
+    return summary;
   }
 
   protected async metadata(patch: DesignStudioMetadata): Promise<void> {
@@ -1012,6 +1022,45 @@ abstract class AssetImpl extends RpcTarget {
     if (this.kind === "folder" || this.kind === "file") throw new Error("This asset has no approval lifecycle.");
     return submitDesign(this.ctx, { type: "designLifecycle", asset: this.kind, targetId: this.id, operation });
   }
+}
+
+async function simulatedSummary(
+  ctx: DesignStudioContext,
+  kind: DesignStudioAssetKind,
+  id: string,
+  folderType?: "folder" | "program",
+  pending = ctx.pending(),
+): Promise<Summary> {
+  let creation = findCreation(ctx, kind, id, pending);
+  let summary: Summary;
+  if (creation?.type === "designClone") {
+    assertAcyclicCloneSource(ctx, kind, id, pending);
+    let source = await simulatedSummary(ctx, kind, creation.sourceId, undefined, pending);
+    summary = {
+      ...source,
+      id: creation.provisionalId,
+      name: creation.name,
+      status: "draft",
+      createdAt: undefined,
+      updatedAt: undefined,
+    };
+  } else if (creation) summary = creationSummary(creation);
+  else {
+    let deleted = actionsFor(ctx, kind, id, pending).some(action =>
+      action.type === "designDeleteFolder" || action.type === "designLifecycle" && action.operation === "delete"
+    );
+    if (deleted) throw new Error(`Marketo ${kind} ${id} was deleted.`);
+    let physical = physicalId(ctx, id);
+    let raw = await readAsset(await ctx.client(), kind, physical, folderType);
+    if (!raw) throw new Error(`Marketo ${kind} ${id} was not found.`);
+    let returned = readId(raw);
+    if (returned !== physical) throw new Error(`Marketo returned asset ${returned} when ${physical} was requested.`);
+    summary = kind === "folder" ? normalizeFolder(raw) : normalize(kind, raw);
+    summary.id = id;
+  }
+  let overlaid = overlaySummary(summary, actionsFor(ctx, kind, id, pending));
+  if (!overlaid) throw new Error(`Marketo ${kind} ${id} was deleted.`);
+  return overlaid;
 }
 
 async function readAsset(client: MarketoClient, kind: DesignStudioAssetKind, id: number, folderType?: "folder" | "program") {
@@ -1040,14 +1089,19 @@ function handle(ctx: DesignStudioContext, kind: DesignStudioAssetKind, id: strin
   }
 }
 
-function assertAcyclicCloneSource(ctx: DesignStudioContext, kind: DesignStudioAssetKind, id: string): void {
+function assertAcyclicCloneSource(
+  ctx: DesignStudioContext,
+  kind: DesignStudioAssetKind,
+  id: string,
+  pending = ctx.pending(),
+): void {
   let visited: string[] = [];
   let current = id;
   while (true) {
     if (!pushLogicalId(ctx, visited, current)) {
       throw new Error(`Marketo ${kind} clone source cycle detected at ${current}.`);
     }
-    let creation = findCreation(ctx, kind, current);
+    let creation = findCreation(ctx, kind, current, pending);
     if (creation?.type !== "designClone") return;
     current = creation.sourceId;
   }
@@ -1215,6 +1269,7 @@ export class MarketoSnippetImpl extends AssetImpl {
     allowInput(content, "Snippet content update", ["html", "text"]);
     let html = content.html === undefined ? undefined : requireContent(content.html, "HTML content");
     let text = content.text === undefined ? undefined : requireContent(content.text, "Text content");
+    if (html === undefined && text === undefined) throw new Error("At least one snippet rendition is required.");
     return submitDesign(this.ctx, { type: "designContent", asset: this.kind, targetId: this.id, html, text });
   }
   approve() { return this.lifecycle("approve"); } unapprove() { return this.lifecycle("unapprove"); } discardDraft() { return this.lifecycle("discardDraft"); } delete() { return this.lifecycle("delete"); }
