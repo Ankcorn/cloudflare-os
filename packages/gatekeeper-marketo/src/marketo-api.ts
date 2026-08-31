@@ -1547,8 +1547,22 @@ export class MarketoClient {
   }
 
   async getList(listId: number): Promise<RawList | undefined> {
-    let result = await this.#result<RawList>(`/v1/lists/${listId}.json`);
-    return result[0];
+    let path = `/v1/lists/${listId}.json`;
+    let result = await this.#result<unknown>(path);
+    if (result.length === 0) return undefined;
+    if (result.length !== 1 || !isRecord(result[0]) || result[0].id !== listId) {
+      throw new MarketoError(`Marketo returned the wrong static list for exact read ${listId}.`, {
+        operation: path,
+      });
+    }
+    let list = result[0];
+    if ([list.name, list.programName, list.workspaceName, list.createdAt, list.updatedAt]
+      .some(value => value !== undefined && typeof value !== "string")) {
+      throw new MarketoError("Marketo returned a static list with an unexpected shape.", {
+        operation: path,
+      });
+    }
+    return list as RawList;
   }
 
   async getListMembers(listId: number, fields?: string[], nextPageToken?: string): Promise<MarketoPage<RawLead>> {

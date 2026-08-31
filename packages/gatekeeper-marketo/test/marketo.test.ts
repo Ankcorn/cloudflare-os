@@ -2545,6 +2545,36 @@ describe("person field normalization", () => {
   });
 });
 
+describe("exact static list reads", () => {
+  it("accepts only the requested well-formed list record", async () => {
+    let matching = clientReturning({ success: true, result: [{ id: 55, name: "List" }] }).client;
+    await expect(matching.getList(55)).resolves.toMatchObject({ id: 55, name: "List" });
+
+    let missing = clientReturning({ success: true, result: [] }).client;
+    await expect(missing.getList(55)).resolves.toBeUndefined();
+
+    for (let result of [
+      [null],
+      ["list"],
+      [{ id: "55" }],
+      [{ name: "Missing id" }],
+      [{ id: 56, name: "Foreign" }],
+      [{ id: 55 }, { id: 55 }],
+      [{ id: 55, name: { text: "List" } }],
+    ]) {
+      let notes: string[] = [];
+      let list = new MarketoStaticListImpl(
+        stubContext(clientReturning({ success: true, result }).client, notes),
+        55,
+      );
+      let error = await list.describe().catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.operation).toBe("/v1/lists/55.json");
+      expect(notes).toEqual([]);
+    }
+  });
+});
+
 describe("exact program reads", () => {
   it("accepts only the requested program record", async () => {
     let matching = clientReturning({ success: true, result: [{ id: 9900, name: "Program" }] }).client;
