@@ -1194,11 +1194,10 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       }
       if (action.type === "campaignLifecycle") {
         if (action.operation === "delete") throw notFound("smart campaign", id);
-        if (action.operation === "activate") continue;
         summary = {
           ...summary,
-          active: false,
-          status: "Inactive",
+          active: action.operation === "activate",
+          status: action.operation === "activate" ? "Active" : "Inactive",
         };
       }
     }

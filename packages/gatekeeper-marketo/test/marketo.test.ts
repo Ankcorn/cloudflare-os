@@ -1361,9 +1361,12 @@ describe("smart campaign management", () => {
       id: "~1",
       name: "Sweden campaign",
       type: "trigger",
-      active: false,
+      active: true,
       folder: { id: "20", type: "program" },
     });
+    await expect(clone.activate()).rejects.toThrow(/already active/);
+    await clone.deactivate();
+    expect(await clone.describe()).toMatchObject({ active: false, status: "Inactive" });
     expect(await clone.readSmartListRules()).toEqual({
       filterMatchType: "all",
       triggers: [{ id: 1, name: "Fills Out Form", type: "Activity" }],
@@ -1382,6 +1385,7 @@ describe("smart campaign management", () => {
       parent: { id: "20", type: "Program" },
     });
     expect(actions[1]).toMatchObject({ type: "campaignLifecycle", operation: "activate" });
+    expect(actions[2]).toMatchObject({ type: "campaignLifecycle", operation: "deactivate" });
   });
 
   it("includes source changes submitted before campaign cloning", async () => {

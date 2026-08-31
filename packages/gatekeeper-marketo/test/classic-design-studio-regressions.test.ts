@@ -30,6 +30,10 @@ function context(client: Partial<MarketoClient>, initial: DesignStudioAction[] =
   return { actions, ctx };
 }
 
+async function expectDeleted(operation: () => unknown): Promise<void> {
+  await expect(Promise.resolve().then(operation)).rejects.toThrow(/was deleted/);
+}
+
 describe("classic Design Studio regressions", () => {
   it("includes current inherited metadata in pending clone list summaries", async () => {
     let source = {
@@ -224,5 +228,86 @@ describe("classic Design Studio regressions", () => {
       expect.objectContaining({ id: "~2", workspaceName: "Default" }),
     ]);
     expect(getFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks every post-delete asset operation before provider or approval access", async () => {
+    let deleted: DesignStudioAction[] = [
+      { id: 1, type: "designDeleteFolder", targetId: "1" },
+      ...(["email", "emailTemplate", "landingPage", "landingPageTemplate", "form", "snippet"] as const)
+        .map((asset, index): DesignStudioAction => ({
+          id: index + 2,
+          type: "designLifecycle",
+          asset,
+          targetId: String(index + 2),
+          operation: "delete",
+        })),
+    ];
+    let { ctx } = context({}, deleted);
+    let provider = vi.fn(async () => ({} as MarketoClient));
+    let submit = vi.fn();
+    ctx.client = provider;
+    ctx.submitDesign = submit;
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let folder = studio.getFolder("1", "folder");
+    let email = studio.getEmail("2");
+    let emailTemplate = studio.getEmailTemplate("3");
+    let landingPage = studio.getLandingPage("4");
+    let landingPageTemplate = studio.getLandingPageTemplate("5");
+    let form = studio.getForm("6");
+    let snippet = studio.getSnippet("7");
+    for (let operation of [
+      () => folder.describe(), () => folder.updateMetadata({ name: "No" }), () => folder.delete(),
+      () => email.describe(), () => email.getContent(), () => email.updateMetadata({ name: "No" }),
+      () => email.updateContent("main", { html: "No" }), () => email.approve(), () => email.unapprove(),
+      () => email.discardDraft(), () => email.delete(),
+      () => emailTemplate.describe(), () => emailTemplate.getContent(),
+      () => emailTemplate.updateMetadata({ name: "No" }), () => emailTemplate.updateContent("No"),
+      () => emailTemplate.approve(), () => emailTemplate.unapprove(), () => emailTemplate.discardDraft(),
+      () => emailTemplate.delete(),
+      () => landingPage.describe(), () => landingPage.getContent(),
+      () => landingPage.updateMetadata({ name: "No" }), () => landingPage.approve(),
+      () => landingPage.unapprove(), () => landingPage.discardDraft(), () => landingPage.delete(),
+      () => landingPageTemplate.describe(), () => landingPageTemplate.getContent(),
+      () => landingPageTemplate.updateMetadata({ name: "No" }), () => landingPageTemplate.updateContent("No"),
+      () => landingPageTemplate.approve(), () => landingPageTemplate.unapprove(),
+      () => landingPageTemplate.discardDraft(), () => landingPageTemplate.delete(),
+      () => form.describe(), () => form.getFields(), () => form.updateMetadata({ name: "No" }),
+      () => form.approve(), () => form.discardDraft(), () => form.delete(),
+      () => snippet.describe(), () => snippet.getContent(), () => snippet.updateMetadata({ name: "No" }),
+      () => snippet.updateContent({ html: "No" }), () => snippet.approve(), () => snippet.unapprove(),
+      () => snippet.discardDraft(), () => snippet.delete(),
+    ]) await expectDeleted(operation);
+
+    expect(provider).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("guards deleted asset dependencies, but allows work after rejection", async () => {
+    let initial: DesignStudioAction[] = [
+      { id: 1, type: "designLifecycle", asset: "email", targetId: "10", operation: "delete" },
+      { id: 2, type: "designLifecycle", asset: "emailTemplate", targetId: "11", operation: "delete" },
+      { id: 3, type: "designDeleteFolder", targetId: "12" },
+    ];
+    let { actions, ctx } = context({}, initial);
+    let provider = vi.fn(async () => ({} as MarketoClient));
+    let submit = vi.fn();
+    ctx.client = provider;
+    ctx.submitDesign = submit;
+    let studio = new MarketoDesignStudioImpl(ctx);
+
+    await expect(studio.cloneEmail("10", "Clone", { id: "20", type: "folder" }))
+      .rejects.toThrow(/was deleted/);
+    await expect(studio.createEmail({ id: "20", type: "folder" }, {
+      name: "Email", templateId: "11", subject: "S", fromName: "F",
+      fromEmail: "from@example.com", replyEmail: "reply@example.com",
+    })).rejects.toThrow(/was deleted/);
+    await expect(studio.createSnippet({ id: "12", type: "folder" }, { name: "Snippet" }))
+      .rejects.toThrow(/was deleted/);
+    expect(provider).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+
+    actions.splice(0);
+    await studio.getEmail("10").updateMetadata({ name: "Allowed" });
+    expect(submit).toHaveBeenCalledOnce();
   });
 });

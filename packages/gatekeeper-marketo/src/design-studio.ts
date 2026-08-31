@@ -357,6 +357,13 @@ function actionsFor(
   });
 }
 
+function assertNotDeleted(ctx: DesignStudioContext, kind: DesignStudioAssetKind, id: string): void {
+  let deleted = actionsFor(ctx, kind, id).some(action =>
+    action.type === "designDeleteFolder" || action.type === "designLifecycle" && action.operation === "delete"
+  );
+  if (deleted) throw new Error(`Marketo ${kind} ${id} was deleted.`);
+}
+
 function sameLogicalId(ctx: DesignStudioContext, first: string, second: string): boolean {
   if (first === second) return true;
   let firstReal = ctx.resolveId(first);
@@ -412,6 +419,7 @@ function logicalFolder(
       ? `Provisional Marketo asset ${id} is not an ordinary folder.`
       : `Provisional Marketo asset ${id} is not a program.`);
   }
+  if (expected === "folder") assertNotDeleted(ctx, "folder", id);
   return { id, type: folder.type === "program" ? "Program" : "Folder" };
 }
 
@@ -663,11 +671,13 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   }
   async createEmail(destination: MarketoDesignStudioFolderRef, input: MarketoCreateEmailInput): Promise<MarketoEmail> {
     let value = createInput(input, ["name", "templateId", "subject", "fromName", "fromEmail", "replyEmail", "description"]);
+    let templateId = logicalId(value.templateId);
+    assertNotDeleted(this.#ctx, "emailTemplate", templateId);
     return await this.#create("email", destination, {
       name: requiredText(value.name, "Email name"), description: optionalText(value, "description"),
       subject: requiredText(value.subject, "subject"), fromName: requiredText(value.fromName, "fromName"),
       fromEmail: requiredText(value.fromEmail, "fromEmail"), replyEmail: requiredText(value.replyEmail, "replyEmail"),
-      templateId: logicalId(value.templateId),
+      templateId,
     }) as MarketoEmailImpl;
   }
   async createEmailTemplate(destination: MarketoDesignStudioFolderRef, input: MarketoCreateEmailTemplateInput): Promise<MarketoEmailTemplate> {
@@ -679,9 +689,11 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   }
   async createLandingPage(destination: MarketoDesignStudioFolderRef, input: MarketoCreateLandingPageInput): Promise<MarketoLandingPage> {
     let value = createInput(input, ["name", "templateId", "description"]);
+    let templateId = logicalId(value.templateId);
+    assertNotDeleted(this.#ctx, "landingPageTemplate", templateId);
     return await this.#create("landingPage", destination, {
       name: requiredText(value.name, "Landing page name"), description: optionalText(value, "description"),
-      templateId: logicalId(value.templateId),
+      templateId,
     }) as MarketoLandingPageImpl;
   }
   async createLandingPageTemplate(destination: MarketoDesignStudioFolderRef, input: MarketoCreateLandingPageTemplateInput): Promise<MarketoLandingPageTemplate> {
@@ -721,6 +733,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   }
   async #clone(kind: Exclude<DesignStudioAssetKind, "folder" | "file">, sourceId: string, name: string, destination: MarketoDesignStudioFolderRef) {
     let source = logicalId(sourceId);
+    assertNotDeleted(this.#ctx, kind, source);
     let parent = logicalFolder(this.#ctx, destination);
     let cloneName = requiredText(name, "Clone name");
     assertDurablePayload({ source, parent, name: cloneName });
@@ -1069,23 +1082,23 @@ abstract class AssetImpl extends RpcTarget {
   }
 
   protected assertReadable(): void {
-    let deleted = actionsFor(this.ctx, this.kind, this.id).some(action =>
-      action.type === "designDeleteFolder" || action.type === "designLifecycle" && action.operation === "delete"
-    );
-    if (deleted) throw new Error(`Marketo ${this.kind} ${this.id} was deleted.`);
+    assertNotDeleted(this.ctx, this.kind, this.id);
   }
 
   protected async summary(): Promise<Summary> {
+    this.assertReadable();
     let summary = await simulatedSummary(this.ctx, this.kind, this.id, this.folderType);
     await this.ctx.observe(`Read Marketo ${this.kind} ${this.id}`, `Read Design Studio ${this.kind} \`${this.id}\`.`);
     return summary;
   }
 
   protected async metadata(patch: DesignStudioMetadata): Promise<void> {
+    this.assertReadable();
     await submitDesign(this.ctx, { type: "designMetadata", asset: this.kind, targetId: this.id, patch });
   }
 
   protected lifecycle(operation: "approve" | "unapprove" | "discardDraft" | "delete"): Promise<void> {
+    this.assertReadable();
     if (this.kind === "folder" || this.kind === "file") throw new Error("This asset has no approval lifecycle.");
     return submitDesign(this.ctx, { type: "designLifecycle", asset: this.kind, targetId: this.id, operation });
   }
@@ -1194,6 +1207,7 @@ export class MarketoDesignStudioFolderImpl extends AssetImpl {
   }
   async delete(): Promise<void> {
     if ((await this.describe()).type === "program") throw new Error("Program folders cannot be deleted through Design Studio.");
+    this.assertReadable();
     await submitDesign(this.ctx, { type: "designDeleteFolder", targetId: this.id });
   }
 }
@@ -1223,6 +1237,7 @@ export class MarketoEmailImpl extends AssetImpl {
     return this.metadata(metadataPatch(patch, ["name", "description", "preHeader", "subject", "fromName", "fromEmail", "replyEmail"]));
   }
   updateContent(sectionId: string, update: MarketoEmailContentUpdate) {
+    this.assertReadable();
     allowInput(update, "Email content update", ["html", "text"]);
     let html = requireContent(update.html, "HTML content");
     let text = update.text === undefined ? undefined : requireContent(update.text, "Text content");
@@ -1263,7 +1278,10 @@ abstract class TemplateImpl extends AssetImpl {
     return content ?? "";
   }
   updateMetadata(patch: MarketoDesignStudioMetadataPatch) { return this.metadata(basicMetadataPatch(patch)); }
-  updateContent(content: string) { return submitDesign(this.ctx, { type: "designContent", asset: this.kind as "emailTemplate" | "landingPageTemplate", targetId: this.id, content: requireContent(content) }); }
+  updateContent(content: string) {
+    this.assertReadable();
+    return submitDesign(this.ctx, { type: "designContent", asset: this.kind as "emailTemplate" | "landingPageTemplate", targetId: this.id, content: requireContent(content) });
+  }
   approve() { return this.lifecycle("approve"); } unapprove() { return this.lifecycle("unapprove"); } discardDraft() { return this.lifecycle("discardDraft"); } delete() { return this.lifecycle("delete"); }
 }
 
@@ -1341,6 +1359,7 @@ export class MarketoSnippetImpl extends AssetImpl {
   }
   updateMetadata(patch: MarketoDesignStudioMetadataPatch) { return this.metadata(basicMetadataPatch(patch)); }
   updateContent(content: MarketoSnippetContent) {
+    this.assertReadable();
     allowInput(content, "Snippet content update", ["html", "text"]);
     let html = content.html === undefined ? undefined : requireContent(content.html, "HTML content");
     let text = content.text === undefined ? undefined : requireContent(content.text, "Text content");
@@ -1355,6 +1374,7 @@ export class MarketoFileImpl extends AssetImpl {
   protected kind = "file" as const;
   async describe(): Promise<MarketoFileSummary> { return await this.summary() as MarketoFileSummary; }
   async updateContent(data: Uint8Array, mimeType: string) {
+    this.assertReadable();
     let file = requireFile(data);
     let digest = await sha256(file);
     let fileName = (await this.describe()).name;
