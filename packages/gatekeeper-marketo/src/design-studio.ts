@@ -91,6 +91,11 @@ function requiredText(value: unknown, label: string): string {
   return result;
 }
 
+function normalizeMimeType(value: unknown): string {
+  let mimeType = requiredText(value, "MIME type");
+  return requiredText(new Blob([], { type: mimeType }).type, "MIME type");
+}
+
 function requireContent(value: unknown, label = "content"): string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${label} cannot be empty.`);
   if (new TextEncoder().encode(value).byteLength > MAX_TEXT_BYTES) {
@@ -771,7 +776,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let digest = await sha256(data);
     return await this.#create("file", destination, {
       name: requiredText(value.name, "File name"), description: optionalText(value, "description"),
-      mimeType: requiredText(value.mimeType, "MIME type"), data, sha256: digest,
+      mimeType: normalizeMimeType(value.mimeType), data, sha256: digest,
     }) as MarketoFileImpl;
   }
   async #clone(kind: Exclude<DesignStudioAssetKind, "folder" | "file">, sourceId: string, name: string, destination: MarketoDesignStudioFolderRef) {

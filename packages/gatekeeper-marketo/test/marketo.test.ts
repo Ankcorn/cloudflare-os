@@ -2449,7 +2449,7 @@ describe("Design Studio simulation", () => {
       { id: "10", type: "folder" },
       {
         name: "note.txt",
-        mimeType: "text/plain",
+        mimeType: "TEXT/PLAIN",
         data: new TextEncoder().encode("first"),
       },
     );
@@ -2458,10 +2458,12 @@ describe("Design Studio simulation", () => {
     expect(action).toMatchObject({
       type: "designCreate",
       input: {
+        mimeType: "text/plain",
         sha256: "a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",
       },
     });
     let description = describeAction(action);
+    expect(description.description).toContain("mimeType:\n\n    text/plain");
     expect(description.description).toContain("byteCount:\n\n    5");
     expect(description.description).toContain(
       "sha256:\n\n    a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e",

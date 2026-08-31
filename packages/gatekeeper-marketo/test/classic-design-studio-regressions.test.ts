@@ -250,6 +250,29 @@ describe("classic Design Studio regressions", () => {
     expect(createFile).not.toHaveBeenCalled();
   });
 
+  it("still rejects a genuinely mismatched MIME type after file creation", async () => {
+    await expect(executeDesignStudioAction({
+      id: 1,
+      type: "designCreate",
+      asset: "file",
+      provisionalId: "~1",
+      parent: { id: "10", type: "Folder" },
+      input: {
+        name: "note.txt",
+        mimeType: "text/plain",
+        data: new Uint8Array([1]),
+      },
+    }, {
+      createFile: async () => [{ id: 20 }],
+      getFile: async () => ({
+        id: 20,
+        name: "note.txt",
+        mimeType: "application/octet-stream",
+        folder: { id: 10, type: "Folder" },
+      }),
+    } as unknown as MarketoClient, Number, () => {})).rejects.toThrow(/could not verify created file/);
+  });
+
   it("accepts Adobe's uppercase folder discriminator without weakening identity checks", async () => {
     let action = {
       id: 1,
