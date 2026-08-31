@@ -1552,7 +1552,7 @@ describe("program management", () => {
   const channels = [{
     id: 1,
     name: "Email Send",
-    applicableProgramType: "Email",
+    applicableProgramType: "email_batch",
     progressionStatuses: [{ name: "Member" }, { name: "Success" }],
   }];
   const tagTypes = [{
@@ -1564,13 +1564,28 @@ describe("program management", () => {
 
   it("discovers channels and tag definitions through observations", async () => {
     let notes: string[] = [];
-    let { ctx } = programContext({ getChannels: async () => channels, getTagTypes: async () => tagTypes });
+    let { ctx } = programContext({
+      getChannels: async () => [
+        ...channels,
+        { name: "Default", applicableProgramType: "program" },
+        { name: "Engagement", applicableProgramType: "nurture" },
+        { name: "Event", applicableProgramType: "event" },
+        { name: "Webinar", applicableProgramType: "webinar" },
+        { name: "Future", applicableProgramType: "future_type" },
+      ],
+      getTagTypes: async () => tagTypes,
+    });
     ctx.observe = async (title, description) => { notes.push(title, description); };
     let session = new MarketoSessionImpl(ctx);
 
-    expect(await session.getChannels()).toEqual([{
-      name: "Email Send", programType: "Email", statuses: ["Member", "Success"],
-    }]);
+    expect(await session.getChannels()).toEqual([
+      { name: "Email Send", programType: "Email", statuses: ["Member", "Success"] },
+      { name: "Default", programType: "Default", statuses: [] },
+      { name: "Engagement", programType: "Engagement", statuses: [] },
+      { name: "Event", programType: "Event", statuses: [] },
+      { name: "Webinar", programType: "EventWithWebinar", statuses: [] },
+      { name: "Future", programType: "future_type", statuses: [] },
+    ]);
     expect(await session.getTagTypes()).toEqual([{
       name: "Region", applicableProgramTypes: ["Email"], required: true, values: ["EMEA", "AMER"],
     }]);

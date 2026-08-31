@@ -1789,7 +1789,9 @@ export class MarketoSessionImpl extends RpcTarget {
     let channels = await (await this.#ctx.client()).getChannels();
     let result = channels.flatMap(channel => channel.name ? [{
       name: channel.name,
-      programType: channel.applicableProgramType,
+      programType: channel.applicableProgramType === undefined
+        ? undefined
+        : programTypeName(channel.applicableProgramType),
       statuses: channel.progressionStatuses?.flatMap(status => status.name ? [status.name] : []) ?? [],
     }] : []);
     await this.#ctx.observe("List Marketo program channels", `Read ${result.length} program channel(s).`);

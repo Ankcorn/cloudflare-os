@@ -191,7 +191,7 @@ export type MarketoProgramTag = {
 export type MarketoProgramChannel = {
   /** Channel name to pass to {@link MarketoSession.createProgram}. */
   name: string;
-  /** Program type to which this channel applies. */
+  /** Program type to which this channel applies. Unrecognized Marketo values are preserved. */
   programType?: string;
   /** Ordered member progression statuses configured on the channel. */
   statuses: string[];
