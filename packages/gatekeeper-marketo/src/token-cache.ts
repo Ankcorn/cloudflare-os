@@ -89,6 +89,7 @@ export class MarketoTokenCache extends DurableObject<Env> {
     let now = Date.now();
     let failure = this.ctx.storage.kv.get<CachedFailure>("refreshFailure");
     if (!forceRefresh && failure && failure.retryAfter > now) {
+      if (cached && cached.expiresAt > now && isTransientTokenError(failure.error)) return cached;
       throw unwrapTokenCacheResult<never>({ ok: false, error: failure.error });
     }
     if (!forceRefresh && cached && cached.expiresAt > now &&
@@ -107,7 +108,15 @@ export class MarketoTokenCache extends DurableObject<Env> {
       .finally(() => {
         this.#inflight = undefined;
       });
-    return await this.#inflight;
+    try {
+      return await this.#inflight;
+    } catch (error) {
+      if (!forceRefresh && cached && cached.expiresAt > Date.now() &&
+          isTransientTokenError(serializeTokenError(error))) {
+        return cached;
+      }
+      throw error;
+    }
   }
 
   async #refresh(creds: MarketoCredentials, previous?: CachedToken): Promise<CachedToken> {
@@ -128,6 +137,11 @@ export class MarketoTokenCache extends DurableObject<Env> {
     this.ctx.storage.kv.delete("refreshFailure");
     return token;
   }
+}
+
+function isTransientTokenError(error: TokenCacheError): boolean {
+  return error.kind === "network" ||
+    (error.kind === "provider" && (error.status === 429 || (error.status ?? 0) >= 500));
 }
 
 function serializeTokenError(error: unknown): TokenCacheError {

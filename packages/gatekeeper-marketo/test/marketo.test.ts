@@ -4134,6 +4134,69 @@ describe("token cache RPC protocol", () => {
     expect(calls).toBe(3);
   });
 
+  it("serves an unexpired cached token when proactive refresh fails transiently", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      if (++calls > 1) throw new Error("Identity unavailable");
+      return Response.json({ access_token: "cached-token", expires_in: 300 });
+    });
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    now += 181_000;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    now += 29_999;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    expect(calls).toBe(2);
+    now++;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    expect(calls).toBe(3);
+  });
+
+  it("stops serving a fallback token at its actual expiry", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      if (++calls > 1) throw new Error("Identity unavailable");
+      return Response.json({ access_token: "cached-token", expires_in: 300 });
+    });
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    now += 291_000;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    now += 9_000;
+    await expect(stub.getToken(creds)).resolves.toEqual({
+      ok: false,
+      error: { kind: "network" },
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("does not fall back to a cached token for a forced refresh", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      if (++calls > 1) throw new Error("Identity unavailable");
+      return Response.json({ access_token: "cached-token", expires_in: 300 });
+    });
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("cached-token");
+    await expect(stub.getToken(creds, true)).resolves.toEqual({
+      ok: false,
+      error: { kind: "network" },
+    });
+    expect(calls).toBe(2);
+  });
+
   it.each([0, -1, 0.5])("rejects an access token with an unusable %s-second lifetime", async expiresIn => {
     vi.stubGlobal("fetch", async () => Response.json({
       access_token: "already-expired-token",
