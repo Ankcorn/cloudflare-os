@@ -3839,6 +3839,31 @@ describe("Email Designer action lifecycle", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("keeps a successful create with a malformed response uncertain", async () => {
+    let action: EmailDesignerAction = {
+      id: 1,
+      type: "designerCreate",
+      asset: "designerEmail",
+      provisionalId: "~1",
+      body: { name: "Created email", appData: { workspaceId: "1", folderId: "10" } },
+    };
+    let mutationCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      mutationCalls++;
+      return Response.json({ success: true, result: [null] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/unexpected shape/);
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+      await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
+    });
+    expect(mutationCalls).toBe(1);
+  });
 });
 
 describe("smart campaign action lifecycle", () => {

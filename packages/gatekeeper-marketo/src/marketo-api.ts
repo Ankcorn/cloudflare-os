@@ -516,7 +516,16 @@ export class MarketoClient {
     if (!Array.isArray(envelope.result)) {
       throw new MarketoError("Marketo returned a designer result with an unexpected shape.", { operation: path });
     }
-    return envelope.result.map((item, index) => parse(item, `designer result ${index + 1}`));
+    return envelope.result.map((item, index) => {
+      try {
+        return parse(item, `designer result ${index + 1}`);
+      } catch (error) {
+        if (error instanceof MarketoError && error.operation === undefined) {
+          throw new MarketoError(error.message, { operation: path, cause: error });
+        }
+        throw error;
+      }
+    });
   }
 
   async #designerPage<T>(path: string, query: Query, parse: (value: unknown, label: string) => T): Promise<RawDesignerPage<T>> {
