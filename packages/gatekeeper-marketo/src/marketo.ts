@@ -957,7 +957,7 @@ export class MarketoGatekeeperImpl
       throw new Error("This Marketo action was already dispatched and cannot be repeated.");
     }
     this.#validateActionReferences(pending.action, true);
-    if (pending.action.type === "designClone") this.#validateCloneSourceReady(pending.action);
+    if (isDesignStudioAction(pending.action)) this.#validateDesignMutationOrder(pending.action);
     if (isCampaignAction(pending.action)) this.#validateCampaignMutationOrder(pending.action);
     if (isProgramAction(pending.action)) this.#validateProgramMutationOrder(pending.action);
     if (isEmailDesignerAction(pending.action)) this.#validateDesignerMutationOrder(pending.action);
@@ -1266,19 +1266,20 @@ export class MarketoGatekeeperImpl
     }
   }
 
-  #validateCloneSourceReady(action: Extract<DesignStudioAction, { type: "designClone" }>): void {
+  #validateDesignMutationOrder(action: DesignStudioAction): void {
+    let target = action.type === "designClone"
+      ? action.sourceId
+      : "targetId" in action ? action.targetId : undefined;
+    if (target === undefined) return;
+    let kind = action.type === "designDeleteFolder" ? "folder" : action.asset;
     for (let actionId of this.#pendingIndex()) {
       let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
       if (!pending || !isDesignStudioAction(pending) || pending.id >= action.id ||
-          pending.type !== "designMetadata" && pending.type !== "designContent" && pending.type !== "designLifecycle" ||
-          pending.asset !== action.asset) continue;
-      let target = pending.targetId;
-      let sameSource = target === action.sourceId;
-      let targetId = this.#resolveLogicalId(target);
-      let sourceId = this.#resolveLogicalId(action.sourceId);
-      sameSource ||= targetId !== undefined && targetId === sourceId;
-      if (sameSource) {
-        throw new Error(`Marketo ${action.asset} source ${action.sourceId} has an earlier pending mutation.`);
+          action.type === "designClone" &&
+            (pending.type === "designCreate" || pending.type === "designClone")) continue;
+      if (this.#actionReferences(pending).some(reference =>
+        reference.kind === kind && this.#sameLogicalIdentity(reference.id, target))) {
+        throw new Error(`Marketo ${kind} ${target} has an earlier pending mutation.`);
       }
     }
   }

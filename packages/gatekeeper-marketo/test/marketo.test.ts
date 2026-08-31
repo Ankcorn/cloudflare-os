@@ -4395,7 +4395,7 @@ describe("Design Studio action lifecycle", () => {
     let stub = await designActionGatekeeper(actions, { "~1": 31 });
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(2)).rejects.toThrow(/source 31 has an earlier pending mutation/);
+      await expect(instance.applyAction(2)).rejects.toThrow(/emailTemplate 31 has an earlier pending mutation/);
       expect(state.storage.kv.get("applying:2")).toBeUndefined();
       expect(paths).toEqual([]);
 
@@ -4406,6 +4406,122 @@ describe("Design Studio action lifecycle", () => {
     expect(paths).toEqual([
       "/rest/asset/v1/emailTemplate/31/content.json",
       "/rest/asset/v1/emailTemplate/31/clone.json",
+    ]);
+  });
+
+  it("applies classic asset and folder mutations in submission order", async () => {
+    let actions: DesignStudioAction[] = [
+      { id: 1, type: "designMetadata", asset: "emailTemplate", targetId: "31", patch: { name: "First" } },
+      { id: 2, type: "designContent", asset: "emailTemplate", targetId: "31", content: "second" },
+      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "approve" },
+      { id: 4, type: "designMetadata", asset: "folder", targetId: "40", patch: { name: "Folder" } },
+      { id: 5, type: "designDeleteFolder", targetId: "40" },
+    ];
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      paths.push(path);
+      return Response.json({ success: true, result: [{ id: path.includes("folder/40") ? 40 : 31 }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(3)).rejects.toThrow(/emailTemplate 31 has an earlier pending mutation/);
+      await expect(instance.applyAction(2)).rejects.toThrow(/emailTemplate 31 has an earlier pending mutation/);
+      await expect(instance.applyAction(5)).rejects.toThrow(/folder 40 has an earlier pending mutation/);
+      expect(paths).toEqual([]);
+      for (let id of [1, 2, 3, 4, 5]) await instance.applyAction(id);
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
+    });
+    expect(paths).toEqual([
+      "/rest/asset/v1/emailTemplate/31.json",
+      "/rest/asset/v1/emailTemplate/31/content.json",
+      "/rest/asset/v1/emailTemplate/31/approveDraft.json",
+      "/rest/asset/v1/folder/40.json",
+      "/rest/asset/v1/folder/40/delete.json",
+    ]);
+  });
+
+  it("applies a clone before later mutations of its source", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1,
+        type: "designClone",
+        asset: "emailTemplate",
+        provisionalId: "~1",
+        sourceId: "31",
+        parent: { id: "10", type: "Folder" },
+        name: "Snapshot",
+      },
+      { id: 2, type: "designMetadata", asset: "emailTemplate", targetId: "31", patch: { name: "Later" } },
+      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "delete" },
+    ];
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      paths.push(path);
+      return Response.json({ success: true, result: [{ id: path.includes("clone") ? 32 : 31 }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/emailTemplate 31 has an earlier pending mutation/);
+      await expect(instance.applyAction(3)).rejects.toThrow(/emailTemplate 31 has an earlier pending mutation/);
+      expect(paths).toEqual([]);
+      for (let id of [1, 2, 3]) await instance.applyAction(id);
+    });
+    expect(paths).toEqual([
+      "/rest/asset/v1/emailTemplate/31/clone.json",
+      "/rest/asset/v1/emailTemplate/31.json",
+      "/rest/asset/v1/emailTemplate/31/delete.json",
+    ]);
+  });
+
+  it("protects folders and templates referenced by earlier creates", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1,
+        type: "designCreate",
+        asset: "snippet",
+        provisionalId: "~1",
+        parent: { id: "10", type: "Folder" },
+        input: { name: "Child" },
+      },
+      { id: 2, type: "designDeleteFolder", targetId: "10" },
+      {
+        id: 3,
+        type: "designCreate",
+        asset: "email",
+        provisionalId: "~2",
+        parent: { id: "11", type: "Folder" },
+        input: { name: "Email", templateId: "20" },
+      },
+      { id: 4, type: "designContent", asset: "emailTemplate", targetId: "20", content: "Later" },
+    ];
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      paths.push(path);
+      let id = path.endsWith("/snippets.json") ? 101 : path.endsWith("/emails.json") ? 102
+        : path.includes("folder/10") ? 10 : 20;
+      return Response.json({ success: true, result: [{ id }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/folder 10 has an earlier pending mutation/);
+      await expect(instance.applyAction(4)).rejects.toThrow(/emailTemplate 20 has an earlier pending mutation/);
+      expect(paths).toEqual([]);
+      for (let id of [1, 2, 3, 4]) await instance.applyAction(id);
+    });
+    expect(paths).toEqual([
+      "/rest/asset/v1/snippets.json",
+      "/rest/asset/v1/folder/10/delete.json",
+      "/rest/asset/v1/emails.json",
+      "/rest/asset/v1/emailTemplate/20/content.json",
     ]);
   });
 
