@@ -96,7 +96,12 @@ import {
   isBusinessObjectAction,
   type BusinessObjectAction,
 } from "./business-object-actions";
-import { BUSINESS_OBJECTS, type BusinessObjectContext } from "./business-objects";
+import {
+  BUSINESS_OBJECTS,
+  businessObjectPermissionDenied,
+  businessObjectSchemaAccess,
+  type BusinessObjectContext,
+} from "./business-objects";
 import type { MarketoBusinessObjectAccess, MarketoBusinessObjectKind } from "./types";
 import {
   makeSessionContext,
@@ -840,6 +845,9 @@ type MarketoGatekeeperImplProps = {
 type PendingRow = { action: MarketoAction };
 type ApplyingState = "preparing" | "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
+/** How long a provider-derived business-object restriction suppresses another safe access probe. */
+export const BUSINESS_OBJECT_RESTRICTION_TTL_MS = 5 * 60 * 1000;
+type BusinessObjectRestriction = { version: 1; expiresAt: number };
 type LogicalKind = DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind;
 type LogicalReference = { id: string; kind: LogicalKind };
 
@@ -1096,6 +1104,14 @@ export class MarketoGatekeeperImpl
     let landingPageTemplateId: number | undefined;
     try {
       client = await this.#client();
+      if (isBusinessObjectAction(pending.action)) {
+        let access = await this.#probeBusinessObjectAccess(pending.action.kind, client);
+        if (access !== "read-write") {
+          this.#removePending(actionId);
+          this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
+          throw new Error("This Marketo business object is read-only or unavailable; nothing was dispatched.");
+        }
+      }
       landingPageTemplateId = await this.#preflightClassicAsset(pending.action, client);
       await this.#preflightDesignerReferences(pending.action, client);
       await client.prepare();
@@ -1339,20 +1355,65 @@ export class MarketoGatekeeperImpl
   }
 
   #businessObjectAccess(kind: MarketoBusinessObjectKind): MarketoBusinessObjectAccess {
-    if (kind === "opportunityRole" && this.ctx.storage.kv.get("businessObjects:opportunityRoleUnavailable")) {
+    if (kind === "opportunityRole" &&
+        this.#businessObjectRestrictionActive("businessObjects:opportunityRoleUnavailable")) {
       return "unavailable";
     }
-    if (kind !== "namedAccount" && this.ctx.storage.kv.get("businessObjects:nativeCrmReadOnly")) {
+    if (kind !== "namedAccount" &&
+        this.#businessObjectRestrictionActive("businessObjects:nativeCrmReadOnly")) {
       return "read-only";
     }
     return "read-write";
   }
 
   #setBusinessObjectAccess(kind: MarketoBusinessObjectKind, access: MarketoBusinessObjectAccess): void {
+    let restriction: BusinessObjectRestriction = {
+      version: 1,
+      expiresAt: Date.now() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+    };
     if (access === "unavailable" && kind === "opportunityRole") {
-      this.ctx.storage.kv.put("businessObjects:opportunityRoleUnavailable", true);
+      this.ctx.storage.kv.put("businessObjects:opportunityRoleUnavailable", restriction);
     } else if (access === "read-only" && kind !== "namedAccount") {
-      this.ctx.storage.kv.put("businessObjects:nativeCrmReadOnly", true);
+      this.ctx.storage.kv.put("businessObjects:nativeCrmReadOnly", restriction);
+    } else if (access === "read-write") {
+      if (kind === "opportunityRole") {
+        this.ctx.storage.kv.delete("businessObjects:opportunityRoleUnavailable");
+      }
+      if (kind !== "namedAccount") {
+        this.ctx.storage.kv.delete("businessObjects:nativeCrmReadOnly");
+      }
+    }
+  }
+
+  #businessObjectRestrictionActive(key: string): boolean {
+    let stored = this.ctx.storage.kv.get<BusinessObjectRestriction | true>(key);
+    if (stored === true) {
+      // Bound restrictions written by older workers from the first read after deployment.
+      this.ctx.storage.kv.put<BusinessObjectRestriction>(key, {
+        version: 1,
+        expiresAt: Date.now() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+      });
+      return true;
+    }
+    if (stored?.version === 1 && Number.isFinite(stored.expiresAt) && stored.expiresAt > Date.now()) {
+      return true;
+    }
+    if (stored !== undefined) this.ctx.storage.kv.delete(key);
+    return false;
+  }
+
+  async #probeBusinessObjectAccess(
+    kind: MarketoBusinessObjectKind,
+    client: MarketoClient,
+  ): Promise<MarketoBusinessObjectAccess> {
+    try {
+      let access = businessObjectSchemaAccess(kind, await client.describeBusinessObject(kind));
+      this.#setBusinessObjectAccess(kind, access);
+      return access;
+    } catch (error) {
+      if (kind !== "opportunityRole" || !businessObjectPermissionDenied(error)) throw error;
+      this.#setBusinessObjectAccess(kind, "unavailable");
+      return "unavailable";
     }
   }
 

@@ -85,6 +85,7 @@ import {
   type SessionContext,
 } from "../src/session";
 import {
+  BUSINESS_OBJECT_RESTRICTION_TTL_MS,
   MarketoGatekeeperImpl,
   MarketoUserImpl,
   readConnectBody,
@@ -7109,7 +7110,10 @@ describe("Design Studio action lifecycle", () => {
 });
 
 describe("action dispatch lifecycle", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   const ACTION: MarketoAction = {
     id: 17,
@@ -7216,7 +7220,9 @@ describe("action dispatch lifecycle", () => {
     ];
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({ success: true, result: [{ marketoGUID: "g-2", status: "deleted" }] }));
+      : url.includes("/describe.json")
+        ? Response.json({ success: true, result: [{ name: "Opportunity", fields: [] }] })
+        : Response.json({ success: true, result: [{ marketoGUID: "g-2", status: "deleted" }] }));
     stub = await campaignActionGatekeeper(distinct);
     await runInDurableObject(stub, async instance => {
       await expect(instance.applyAction(2)).resolves.toBeUndefined();
@@ -7716,10 +7722,20 @@ describe("action dispatch lifecycle", () => {
     });
   });
 
-  it("makes Adobe 1018 terminal, caches native CRM read-only, and blocks later approvals", async () => {
+  it("bounds native CRM restrictions and recovers through a safe dispatch probe", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let now = new Date("2026-08-31T12:00:00Z");
+    vi.setSystemTime(now);
+    let mutationCalls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
-      return Response.json({ success: false, errors: [{ code: "1018", message: "CRM Enabled" }] });
+      if (url.includes("/describe.json")) {
+        return Response.json({ success: true, result: [{ name: "Company", fields: [] }] });
+      }
+      mutationCalls++;
+      return mutationCalls === 1
+        ? Response.json({ success: false, errors: [{ code: "1018", message: "CRM Enabled" }] })
+        : Response.json({ success: true, result: [{ id: 7, status: "updated" }] });
     });
     let action: BusinessObjectAction = {
       id: 18,
@@ -7736,7 +7752,10 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed.*cannot be retried/);
       expect(state.storage.kv.get(`pending:${action.id}`)).toBeUndefined();
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
-      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBe(true);
+      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toEqual({
+        version: 1,
+        expiresAt: now.getTime() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+      });
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed/);
       await expect(instance.rejectAction(action.id)).resolves.toBeUndefined();
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
@@ -7750,6 +7769,89 @@ describe("action dispatch lifecycle", () => {
       expect(approvals).toBe(0);
       await session.getBusinessObject("namedAccount").upsert([{ name: "Allowed" }]);
       expect(approvals).toBe(1);
+
+      vi.advanceTimersByTime(BUSINESS_OBJECT_RESTRICTION_TTL_MS + 1);
+      await session.getBusinessObject("company").upsert([{ externalCompanyId: "company-2" }]);
+      expect(approvals).toBe(2);
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBeUndefined();
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(mutationCalls).toBe(2);
+  });
+
+  it("does not use an expired read-only restriction as permission to dispatch", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let now = new Date("2026-08-31T13:00:00Z");
+    vi.setSystemTime(now);
+    let mutationCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (url.includes("/describe.json")) {
+        return Response.json({
+          success: true,
+          result: [{ name: "Company", crmManaged: true, fields: [] }],
+        });
+      }
+      mutationCalls++;
+      return Response.json({ success: true, result: [{ id: 7, status: "updated" }] });
+    });
+    let action: BusinessObjectAction = {
+      id: 22, type: "businessObjectUpsert", kind: "company",
+      records: [{ externalCompanyId: "company-1" }], action: "createOrUpdate",
+      matchBy: "dedupeFields", changedFields: [],
+    };
+    let stub = await actionGatekeeper(action);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.kv.put("businessObjects:nativeCrmReadOnly", {
+        version: 1,
+        expiresAt: now.getTime() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+      });
+      vi.advanceTimersByTime(BUSINESS_OBJECT_RESTRICTION_TTL_MS + 1);
+      await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was dispatched/);
+      expect(state.storage.kv.get(`pending:${action.id}`)).toBeUndefined();
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
+      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toMatchObject({
+        version: 1,
+        expiresAt: Date.now() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+      });
+    });
+    expect(mutationCalls).toBe(0);
+  });
+
+  it("does not immediately retry unavailable access and recovers after expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-31T14:00:00Z"));
+    let describeCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (!url.includes("/opportunities/roles/describe.json")) {
+        throw new Error(`Unexpected Marketo request: ${url}`);
+      }
+      describeCalls++;
+      return describeCalls === 1
+        ? Response.json({ success: false, errors: [{ code: "603", message: "Access denied" }] })
+        : Response.json({
+            success: true,
+            result: [{ name: "Opportunity Role", fields: [] }],
+          });
+    });
+    let stub = await actionGatekeeper(ACTION);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue(async () => {})) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      let roles = session.getBusinessObject("opportunityRole");
+      expect((await roles.describe()).access).toBe("unavailable");
+      expect((await roles.describe()).access).toBe("unavailable");
+      expect(describeCalls).toBe(1);
+
+      vi.advanceTimersByTime(BUSINESS_OBJECT_RESTRICTION_TTL_MS + 1);
+      expect((await roles.describe()).access).toBe("read-write");
+      expect(describeCalls).toBe(2);
+      expect(state.storage.kv.get("businessObjects:opportunityRoleUnavailable")).toBeUndefined();
       session[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
@@ -7758,7 +7860,9 @@ describe("action dispatch lifecycle", () => {
   it("also makes case-varied success-envelope per-record 1018 skips terminal", async () => {
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({
+      : url.includes("/describe.json")
+        ? Response.json({ success: true, result: [{ name: "Company", fields: [] }] })
+        : Response.json({
           success: true,
           result: [{ status: "Skipped", reasons: [{ code: "1018", message: "CRM Enabled" }] }],
         }));
@@ -7771,7 +7875,7 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed.*cannot be retried/);
       expect(state.storage.kv.get(`pending:${action.id}`)).toBeUndefined();
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
-      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBe(true);
+      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toMatchObject({ version: 1 });
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed/);
     });
   });
@@ -7784,7 +7888,9 @@ describe("action dispatch lifecycle", () => {
   ])("keeps malformed business-object results uncertain", async result => {
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({ success: true, result }));
+      : url.includes("/describe.json")
+        ? Response.json({ success: true, result: [{ name: "Company", fields: [] }] })
+        : Response.json({ success: true, result }));
     let action: BusinessObjectAction = {
       id: 21, type: "businessObjectDelete", kind: "company",
       records: [{ id: 7 }], matchBy: "idField", changedFields: ["id"],
@@ -7803,6 +7909,9 @@ describe("action dispatch lifecycle", () => {
   it("does not treat Named Account 1018 as native CRM evidence", async () => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (url.includes("/describe.json")) {
+        return Response.json({ success: true, result: [{ name: "Named Account", fields: [] }] });
+      }
       return Response.json({ success: false, errors: [{ code: "1018", message: "Rejected" }] });
     });
     let action: BusinessObjectAction = {

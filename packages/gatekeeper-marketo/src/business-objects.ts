@@ -54,8 +54,19 @@ export type BusinessObjectContext = {
   dispose(): void;
 };
 
-function permissionDenied(error: unknown): boolean {
+/** Whether Marketo denied access to a standard business-object endpoint. */
+export function businessObjectPermissionDenied(error: unknown): boolean {
   return error instanceof MarketoError && (error.code === "603" || error.status === 403);
+}
+
+/** Derive write access from an authoritative standard business-object schema. */
+export function businessObjectSchemaAccess(
+  kind: MarketoBusinessObjectKind,
+  raw: RawBusinessObjectSchema,
+): MarketoBusinessObjectAccess {
+  return kind !== "namedAccount" && (raw.crmManaged || raw.fields?.some(field => field.crmManaged))
+    ? "read-only"
+    : "read-write";
 }
 
 function metadata(raw: RawCustomObjectField): MarketoFieldMetadata | undefined {
@@ -134,16 +145,14 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
     try {
       raw = await (await this.ctx.client()).describeBusinessObject(this.kind);
     } catch (error) {
-      if (this.kind !== "opportunityRole" || !permissionDenied(error)) throw error;
+      if (this.kind !== "opportunityRole" || !businessObjectPermissionDenied(error)) throw error;
       this.ctx.setBusinessObjectAccess(this.kind, "unavailable");
       await this.ctx.observe("Marketo opportunity roles unavailable", "The connected role cannot describe opportunity roles.");
       return this.unavailableSchema();
     }
     if (!raw) throw new MarketoError(`Marketo did not return the ${this.kind} schema.`);
-    if (this.kind !== "namedAccount" && (raw.crmManaged || raw.fields?.some(field => field.crmManaged))) {
-      this.ctx.setBusinessObjectAccess(this.kind, "read-only");
-      access = "read-only";
-    }
+    access = businessObjectSchemaAccess(this.kind, raw);
+    this.ctx.setBusinessObjectAccess(this.kind, access);
     let groups = raw.searchableFields ?? [];
     let searchable = new Set(groups.flat());
     let fields = (raw.fields ?? []).flatMap(field => {
@@ -212,7 +221,7 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
       await this.ctx.observe(`Read ${count} Marketo ${this.kind} record(s)`, `Queried one page using ${"dedupeKeys" in query.filter ? "compound dedupe keys" : `field ${query.filter.field}`}; ${count} record(s) returned.`);
       return { records, moreResult: page.moreResult, nextPageToken: page.nextPageToken };
     } catch (error) {
-      if (this.kind === "opportunityRole" && permissionDenied(error)) {
+      if (this.kind === "opportunityRole" && businessObjectPermissionDenied(error)) {
         this.ctx.setBusinessObjectAccess(this.kind, "unavailable");
         throw new Error("Marketo opportunity roles are unavailable to this connection.", { cause: error });
       }
