@@ -40,6 +40,21 @@ export type DesignStudioCreateInput = {
   enableMunchkin?: boolean;
 };
 
+type DesignStudioCloneAction = {
+  id: number;
+  type: "designClone";
+  provisionalId: string;
+  sourceId: string;
+  parent: { id: string; type: "Folder" | "Program" };
+  name: string;
+} & (
+  | { asset: "landingPage"; templateId: string }
+  | {
+      asset: Exclude<DesignStudioAssetKind, "folder" | "file" | "landingPage">;
+      templateId?: never;
+    }
+);
+
 export type DesignStudioAction =
   | {
       id: number;
@@ -49,15 +64,7 @@ export type DesignStudioAction =
       parent: { id: string; type: "Folder" | "Program" };
       input: DesignStudioCreateInput;
     }
-  | {
-      id: number;
-      type: "designClone";
-      asset: Exclude<DesignStudioAssetKind, "folder" | "file">;
-      provisionalId: string;
-      sourceId: string;
-      parent: { id: string; type: "Folder" | "Program" };
-      name: string;
-    }
+  | DesignStudioCloneAction
   | {
       id: number;
       type: "designMetadata";
@@ -149,7 +156,8 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         title: `Clone Marketo ${label(action.asset)}`,
         description:
           `Clone Marketo ${label(action.asset)}:\n\n${codeBlock(action.sourceId)}\n\nas:\n\n` +
-          `${codeBlock(action.name)}\n\nin ${action.parent.type.toLowerCase()}:\n\n${codeBlock(action.parent.id)}`,
+          `${codeBlock(action.name)}\n\nin ${action.parent.type.toLowerCase()}:\n\n${codeBlock(action.parent.id)}` +
+          (action.templateId ? `\n\nusing landing-page template:\n\n${codeBlock(action.templateId)}` : ""),
       };
     case "designMetadata":
       return {
@@ -310,7 +318,10 @@ export async function executeDesignStudioAction(
     switch (action.asset) {
       case "email": created = await client.cloneEmail(id, clone); break;
       case "emailTemplate": created = await client.cloneEmailTemplate(id, clone); break;
-      case "landingPage": created = await client.cloneLandingPage(id, clone); break;
+      case "landingPage": created = await client.cloneLandingPage(id, {
+        ...clone,
+        template: resolve(required(action.templateId, "landing-page template")),
+      }); break;
       case "landingPageTemplate": created = await client.cloneLandingPageTemplate(id, clone); break;
       case "form": created = await client.cloneForm(id, clone); break;
       case "snippet": created = await client.cloneSnippet(id, clone); break;
@@ -398,5 +409,6 @@ export function actionReferences(action: DesignStudioAction, id: string): boolea
   if ("targetId" in action && action.targetId === id) return true;
   if (action.type === "designClone" && action.sourceId === id) return true;
   if ((action.type === "designCreate" || action.type === "designClone") && action.parent.id === id) return true;
-  return action.type === "designCreate" && action.input.templateId === id;
+  return action.type === "designCreate" && action.input.templateId === id ||
+    action.type === "designClone" && action.templateId === id;
 }

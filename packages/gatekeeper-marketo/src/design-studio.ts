@@ -685,13 +685,46 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       mimeType: requiredText(value.mimeType, "MIME type"), data, sha256: digest,
     }) as MarketoFileImpl;
   }
+  async #landingPageTemplate(sourceId: string): Promise<string> {
+    let creation = findCreation(this.#ctx, "landingPage", sourceId);
+    let templateId = creation?.type === "designCreate"
+      ? creation.input.templateId
+      : creation?.type === "designClone" ? creation.templateId : undefined;
+    if (creation) {
+      if (!templateId) throw new Error(`Pending landing page ${sourceId} has no template.`);
+      return templateId;
+    }
+
+    let physical = physicalId(this.#ctx, sourceId);
+    let source = await (await this.#ctx.client()).getLandingPage(physical);
+    if (!source || source.id !== physical) {
+      throw new Error(`Marketo returned the wrong landing page for clone source ${sourceId}.`);
+    }
+    if (!Number.isSafeInteger(source.template) || Number(source.template) <= 0) {
+      throw new Error(`Marketo landing page ${sourceId} has no valid template.`);
+    }
+    await this.#ctx.observe(
+      "Read Marketo landing page template",
+      `Read the template used by landing page \`${sourceId}\` before cloning it.`,
+    );
+    return String(source.template);
+  }
   async #clone(kind: Exclude<DesignStudioAssetKind, "folder" | "file">, sourceId: string, name: string, destination: MarketoDesignStudioFolderRef) {
     let source = logicalId(sourceId);
     let parent = logicalFolder(this.#ctx, destination);
     let cloneName = requiredText(name, "Clone name");
     assertDurablePayload({ source, parent, name: cloneName });
     let provisionalId = this.#ctx.allocateProvisional();
-    await submitDesign(this.#ctx, { type: "designClone", asset: kind, provisionalId, sourceId: source, parent, name: cloneName });
+    if (kind === "landingPage") {
+      await submitDesign(this.#ctx, {
+        type: "designClone", asset: kind, provisionalId, sourceId: source, parent, name: cloneName,
+        templateId: await this.#landingPageTemplate(source),
+      });
+    } else {
+      await submitDesign(this.#ctx, {
+        type: "designClone", asset: kind, provisionalId, sourceId: source, parent, name: cloneName,
+      });
+    }
     return handle(this.#ctx, kind, provisionalId);
   }
   async cloneEmail(sourceId: string, name: string, destination: MarketoDesignStudioFolderRef): Promise<MarketoEmail> { return await this.#clone("email", sourceId, name, destination) as MarketoEmailImpl; }

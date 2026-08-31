@@ -1272,6 +1272,15 @@ export class MarketoGatekeeperImpl
     if (action.type === "designClone") {
       this.#validateLogicalReference(action.sourceId, action.asset, ready);
       this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
+      if (action.asset === "landingPage" && !action.templateId) {
+        throw new Error("A landing-page clone is missing its source template.");
+      }
+      if (action.asset !== "landingPage" && action.templateId !== undefined) {
+        throw new Error("Only a Marketo landing-page clone can specify a landing-page template.");
+      }
+      if (action.templateId) {
+        this.#validateLogicalReference(action.templateId, "landingPageTemplate", ready);
+      }
     }
     if (action.type === "designCreate") {
       this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
@@ -1426,6 +1435,9 @@ export class MarketoGatekeeperImpl
           : action.type === "designDeleteFolder" ? "folder" : action.asset });
     }
     if (action.type === "designClone") references.push({ id: action.sourceId, kind: action.asset });
+    if (action.type === "designClone" && action.templateId) {
+      references.push({ id: action.templateId, kind: "landingPageTemplate" });
+    }
     if (action.type === "designCreate" || action.type === "designClone") {
       references.push({ id: action.parent.id, kind: action.parent.type === "Program" ? "program" : "folder" });
     }

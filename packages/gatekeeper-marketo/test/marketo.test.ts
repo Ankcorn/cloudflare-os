@@ -1611,7 +1611,7 @@ describe("Design Studio simulation", () => {
   it("recursively simulates pending landing-page and form clone chains", async () => {
     let getLandingPageContent = vi.fn();
     let getFormFields = vi.fn();
-    let { ctx } = designContext({ getLandingPageContent, getFormFields });
+    let { ctx, actions } = designContext({ getLandingPageContent, getFormFields });
     let studio = new MarketoDesignStudioImpl(ctx);
     let page = await studio.createLandingPage(
       { id: "10", type: "folder" },
@@ -1620,6 +1620,11 @@ describe("Design Studio simulation", () => {
     let pageClone = await studio.cloneLandingPage(
       (await page.describe()).id,
       "Page clone",
+      { id: "10", type: "folder" },
+    );
+    await studio.cloneLandingPage(
+      (await pageClone.describe()).id,
+      "Second page clone",
       { id: "10", type: "folder" },
     );
     let form = await studio.createForm({ id: "10", type: "folder" }, { name: "Form" });
@@ -1631,8 +1636,52 @@ describe("Design Studio simulation", () => {
 
     expect(await pageClone.getContent()).toEqual([]);
     expect(await formClone.getFields()).toEqual([]);
+    expect(actions.filter(action =>
+      action.type === "designClone" && action.asset === "landingPage"
+    )).toMatchObject([
+      { sourceId: "~1", templateId: "20" },
+      { sourceId: "~2", templateId: "20" },
+    ]);
     expect(getLandingPageContent).not.toHaveBeenCalled();
     expect(getFormFields).not.toHaveBeenCalled();
+  });
+
+  it("captures a physical landing page's template before queuing its clone", async () => {
+    let getLandingPage = vi.fn(async () => ({ id: 31, name: "Source", template: 20 }));
+    let { ctx, actions } = designContext({ getLandingPage });
+    let observe = vi.fn();
+    ctx.observe = observe;
+
+    await new MarketoDesignStudioImpl(ctx).cloneLandingPage(
+      "31",
+      "Clone",
+      { id: "10", type: "folder" },
+    );
+
+    expect(getLandingPage).toHaveBeenCalledWith(31);
+    expect(observe).toHaveBeenCalledWith(
+      "Read Marketo landing page template",
+      "Read the template used by landing page `31` before cloning it.",
+    );
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      type: "designClone",
+      asset: "landingPage",
+      sourceId: "31",
+      templateId: "20",
+    });
+  });
+
+  it("rejects invalid physical landing-page clone sources before queueing", async () => {
+    for (let source of [undefined, { id: 32, template: 20 }, { id: 31, template: 0 }]) {
+      let { ctx, actions } = designContext({ getLandingPage: async () => source });
+      await expect(new MarketoDesignStudioImpl(ctx).cloneLandingPage(
+        "31",
+        "Clone",
+        { id: "10", type: "folder" },
+      )).rejects.toThrow(/wrong landing page|no valid template/);
+      expect(actions).toEqual([]);
+    }
   });
 
   it("rejects unknown and incorrectly typed Design Studio create and metadata fields", async () => {
@@ -4737,6 +4786,75 @@ describe("provisional id kind safety", () => {
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("sends the captured source template when cloning a landing page", async () => {
+    let action: DesignStudioAction = {
+      id: 1,
+      type: "designClone",
+      asset: "landingPage",
+      provisionalId: "~1",
+      sourceId: "31",
+      parent: { id: "10", type: "Folder" },
+      name: "Clone",
+      templateId: "20",
+    };
+    let submitted: URLSearchParams | undefined;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      submitted = new URLSearchParams(String(init?.body));
+      return Response.json({ success: true, result: [{ id: 88 }] });
+    });
+    let stub = await designActionGatekeeper([action]);
+
+    await runInDurableObject(stub, instance => instance.applyAction(1));
+
+    expect(submitted?.get("template")).toBe("20");
+    expect(submitted?.get("name")).toBe("Clone");
+    expect(submitted?.get("folder")).toBe(JSON.stringify({ id: 10, type: "Folder" }));
+  });
+
+  it("rejects malformed landing-page clone actions before dispatch", async () => {
+    let actions = [
+      {
+        id: 1,
+        type: "designClone",
+        asset: "landingPage",
+        provisionalId: "~1",
+        sourceId: "31",
+        parent: { id: "10", type: "Folder" },
+        name: "Missing template",
+      },
+      {
+        id: 2,
+        type: "designClone",
+        asset: "email",
+        provisionalId: "~2",
+        sourceId: "32",
+        parent: { id: "10", type: "Folder" },
+        name: "Wrong template kind",
+        templateId: "20",
+      },
+    ] as unknown as DesignStudioAction[];
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      writes++;
+      return Response.json({ success: true, result: [{ id: 88 }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/missing its source template/);
+      await expect(instance.applyAction(2)).rejects.toThrow(/Only a Marketo landing-page clone/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:2")).toBeUndefined();
+    });
+    expect(writes).toBe(0);
+  });
+
   it("forces insert-only semantics when an approved file creation reaches Marketo", async () => {
     let action: DesignStudioAction = {
       id: 1,
@@ -5019,6 +5137,46 @@ describe("Design Studio action lifecycle", () => {
       for (let id of [1, 2, 3]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
       expect(state.storage.kv.get("pending:4")).toBeDefined();
     });
+  });
+
+  it("orders and rejects landing-page clones with provisional templates", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1,
+        type: "designCreate",
+        asset: "landingPageTemplate",
+        provisionalId: "~1",
+        parent: { id: "10", type: "Folder" },
+        input: { name: "Template" },
+      },
+      {
+        id: 2,
+        type: "designClone",
+        asset: "landingPage",
+        provisionalId: "~2",
+        sourceId: "31",
+        parent: { id: "10", type: "Folder" },
+        name: "Page clone",
+        templateId: "~1",
+      },
+    ];
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      writes++;
+      return Response.json({ success: true, result: [{ id: 88 }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/still pending creation/);
+      expect(state.storage.kv.get("applying:2")).toBeUndefined();
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
+    });
+    expect(writes).toBe(0);
   });
 
   it("marks a create ambiguous when a follow-up fails after Marketo assigned its id", async () => {
