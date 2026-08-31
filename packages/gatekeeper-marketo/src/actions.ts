@@ -89,12 +89,8 @@ export type MarketoActionInput = MarketoAction extends infer T
     : never
   : never;
 
-const MAX_LISTED_IDS = 20;
-
-function summarizeIds(ids: number[]): string {
-  if (ids.length <= MAX_LISTED_IDS) return ids.join(", ");
-  return `${ids.slice(0, MAX_LISTED_IDS).join(", ")} … (+${ids.length - MAX_LISTED_IDS} more)`;
-}
+/** Maximum UTF-8 size of the complete approval description submitted to the Workshop. */
+export const MAX_APPROVAL_DESCRIPTION_BYTES = 128 * 1024;
 
 function escapeMarkdown(value: string): string {
   let controls = new Set("\\`*_{}[]()#+.!|>~-");
@@ -168,7 +164,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Add ${action.personIds.length} to list "${action.listName}"`,
         description:
           `Add **${action.personIds.length}** person(s) to static list ` +
-          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${summarizeIds(action.personIds)}`,
+          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}`,
         implementsRevert: false,
       };
 
@@ -178,7 +174,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Remove ${action.personIds.length} from list "${action.listName}"`,
         description:
           `Remove **${action.personIds.length}** person(s) from static list ` +
-          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${summarizeIds(action.personIds)}\n\n` +
+          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}\n\n` +
           `Removing someone from a list can stop campaigns that depend on that membership.`,
         implementsRevert: false,
       };
@@ -190,7 +186,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         description:
           `Set program membership status to **${escapeMarkdown(action.status)}** for **${action.personIds.length}** ` +
           `person(s) in program **${escapeMarkdown(action.programName)}** (${action.programId}).\n\n` +
-          `Person ids: ${summarizeIds(action.personIds)}\n\n` +
+          `Person ids: ${action.personIds.join(", ")}\n\n` +
           `Progression changes can trigger campaigns listening for that status.`,
         implementsRevert: false,
       };
@@ -204,7 +200,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
           `against **${action.personIds.length}** person(s).\n\n` +
           `This executes the campaign's real flow steps, which may **send email or SMS to real ` +
           `people**, change field values, and trigger downstream campaigns. It cannot be undone.\n\n` +
-          `Person ids: ${summarizeIds(action.personIds)}` +
+          `Person ids: ${action.personIds.join(", ")}` +
           (action.tokens?.length
             ? `\n\nToken overrides:\n${tokenDetails(action.tokens)}`
             : ""),
@@ -247,6 +243,18 @@ export function describeAction(action: MarketoAction): ActionDescription {
         implementsRevert: false,
       };
   }
+}
+
+/** Render an approval and reject it rather than submitting an incomplete oversized description. */
+export function describeActionForSubmission(action: MarketoAction): ActionDescription {
+  let description = describeAction(action);
+  let bytes = new TextEncoder().encode(description.description).byteLength;
+  if (bytes > MAX_APPROVAL_DESCRIPTION_BYTES) {
+    throw new Error(
+      `The complete Marketo approval description must not exceed ${MAX_APPROVAL_DESCRIPTION_BYTES} UTF-8 bytes; split the action into smaller batches or payloads.`,
+    );
+  }
+  return description;
 }
 
 /** Perform the action against Marketo. Throws on failure so the overseer can offer a retry. */

@@ -31,24 +31,15 @@ function label(kind: MarketoBusinessObjectKind): string {
   })[kind];
 }
 
-const MAX_DESCRIBED_RECORDS = 10;
-const MAX_KEY_VALUE_LENGTH = 80;
-
 function escapeMarkdown(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
     .replace(/[\\`*_{}[\]()#+.!|~-]/g, "\\$&");
 }
 
-function keyValue(value: unknown): string {
-  let serialized = typeof value === "string"
-    ? JSON.stringify(value)
-    : typeof value === "number" || typeof value === "boolean" || value === null
-      ? String(value)
-      : "[complex value]";
-  let bounded = serialized.length > MAX_KEY_VALUE_LENGTH
-    ? `${serialized.slice(0, MAX_KEY_VALUE_LENGTH)}...`
-    : serialized;
-  return escapeMarkdown(bounded);
+function codeBlock(value: unknown): string {
+  let serialized = JSON.stringify(value, null, 2);
+  if (serialized === undefined) serialized = String(value);
+  return serialized.split("\n").map(line => `    ${line}`).join("\n");
 }
 
 function matchFields(action: BusinessObjectAction): string[] {
@@ -68,14 +59,12 @@ function matchFields(action: BusinessObjectAction): string[] {
 
 function targetDetails(action: BusinessObjectAction): string {
   let keys = matchFields(action);
-  let records = action.records.slice(0, MAX_DESCRIBED_RECORDS).map((record, index) =>
-    `- Record ${index + 1}: ${keys.map(key => `${escapeMarkdown(key)} = ${keyValue(record[key])}`).join(", ")}`
-  );
-  if (action.records.length > records.length) records.push(`- ... and ${action.records.length - records.length} more record(s)`);
-  return `\n\nTargets:\n${records.join("\n")}`;
+  return `\n\nTargets and submitted values:\n\n${action.records.map((record, index) =>
+    `Record ${index + 1} (${keys.map(key => escapeMarkdown(key)).join(" + ")}):\n\n${codeBlock(record)}`
+  ).join("\n\n")}`;
 }
 
-/** Render a data-minimizing approval description for a business-object mutation. */
+/** Render every target and submitted value for a business-object mutation. */
 export function describeBusinessObjectAction(action: BusinessObjectAction): ActionDescription {
   let object = label(action.kind);
   let count = action.records.length;
@@ -85,8 +74,7 @@ export function describeBusinessObjectAction(action: BusinessObjectAction): Acti
     title: `${operation} ${count} Marketo ${object} record(s)`,
     description:
       `${operation} **${count}** Marketo ${object} record(s), matching by **${action.matchBy}**.\n\n` +
-      `${action.type === "businessObjectUpsert" ? "Changed fields" : "Key fields"}: ${fields}. ` +
-      "Only bounded match-key values needed to identify targets are shown." +
+      `${action.type === "businessObjectUpsert" ? "Changed fields" : "Key fields"}: ${fields}.` +
       targetDetails(action),
     awaitDecision: true,
     implementsRevert: false,

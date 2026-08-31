@@ -161,13 +161,54 @@ function escape(value: string): string {
   return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
 }
 
+function codeBlock(value: unknown): string {
+  let serialized = value === undefined ? "(none)" : JSON.stringify(value, null, 2);
+  if (serialized === undefined) serialized = String(value);
+  return serialized.split("\n").map(line => `    ${line}`).join("\n");
+}
+
+function createDescription(action: Extract<EmailDesignerAction, { type: "designerCreate" }>, name: string): string {
+  let body = action.body;
+  return [
+    `Create a new Marketo Email Designer ${name} with these exact values:`,
+    "",
+    "Name:",
+    "",
+    codeBlock(body.name),
+    "",
+    "Description:",
+    "",
+    codeBlock(body.description),
+    "",
+    "Destination (workspace and folder or program):",
+    "",
+    codeBlock(body.appData),
+    "",
+    "Template ID:",
+    "",
+    codeBlock(body.templateId),
+    "",
+    "Content:",
+    "",
+    codeBlock(body.data),
+    "",
+    "Delivery headers:",
+    "",
+    codeBlock(body.headers),
+    "",
+    "Delivery or fragment settings:",
+    "",
+    codeBlock(body.settings),
+  ].join("\n");
+}
+
 export function describeEmailDesignerAction(action: EmailDesignerAction): ActionDescription {
   let name = label(action.asset);
   let target = "targetId" in action ? action.targetId : undefined;
   let base = { awaitDecision: false, implementsRevert: false } as const;
   switch (action.type) {
     case "designerCreate":
-      return { ...base, title: `Create Marketo designer ${name}`, description: `Create a new Marketo Email Designer ${name} named **${escape(String(action.body.name ?? ""))}**.` };
+      return { ...base, title: `Create Marketo designer ${name}`, description: createDescription(action, name) };
     case "designerClone":
       return { ...base, title: `Clone Marketo designer ${name}`, description: `Clone ${name} \`${escape(action.sourceId)}\` as **${escape(action.name)}** in the source asset's snapshotted location and configuration.` };
     case "designerUpdate":

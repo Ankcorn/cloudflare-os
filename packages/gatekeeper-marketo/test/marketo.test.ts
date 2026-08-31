@@ -3484,7 +3484,7 @@ describe("standard CRM business objects", () => {
     expect(submitted).toEqual([]);
   });
 
-  it("submits data-minimizing, decision-gated upserts and deletes", async () => {
+  it("submits complete, decision-gated upserts and deletes", async () => {
     let submitted: MarketoActionInput[] = [];
     let { ctx } = businessContext({}, submitted);
     let object = new MarketoBusinessObjectImpl(ctx, "company");
@@ -3496,24 +3496,23 @@ describe("standard CRM business objects", () => {
     expect(description.description).toContain("company");
     expect(description.description).toContain("dedupeFields");
     expect(description.description).toContain("`company`, `industry`");
-    expect(description.description).not.toContain("Secret Corp");
-    expect(description.description).toContain('externalCompanyId = "secret\\-id"');
+    expect(description.description).toContain("Secret Corp");
+    expect(description.description).toContain('"externalCompanyId": "secret-id"');
     let deletion = describeAction({ ...submitted[1]!, id: 2 } as MarketoAction);
-    expect(deletion.description).toContain("id = 9");
+    expect(deletion.description).toContain('"id": 9');
     let bounded = describeAction({
       id: 3, type: "businessObjectDelete", kind: "company", matchBy: "idField",
       records: Array.from({ length: 20 }, (_, id) => ({ id: id + 1 })), changedFields: ["id"],
     });
-    expect(bounded.description).toContain("and 10 more record(s)");
-    expect(bounded.description).not.toContain("id = 11");
+    expect(bounded.description).toContain("Record 20");
+    expect(bounded.description).toContain('"id": 20');
     let privateFields = describeAction({
       id: 4, type: "businessObjectUpsert", kind: "company", matchBy: "dedupeFields",
       records: [{ externalCompanyId: "<target>*".repeat(20), company: "Never display this" }],
       action: "createOrUpdate", changedFields: ["company"],
     });
-    expect(privateFields.description).toContain("&lt;target&gt;\\*");
-    expect(privateFields.description).toContain("\\.\\.\\.");
-    expect(privateFields.description).not.toContain("Never display this");
+    expect(privateFields.description).toContain("<target>*".repeat(20));
+    expect(privateFields.description).toContain("Never display this");
   });
 
   it("caches native CRM read-only and exempts named accounts", async () => {

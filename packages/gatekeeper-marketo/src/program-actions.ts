@@ -1,5 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
-import type { MarketoClient, MarketoProgramTag, RawAssetId, RawProgram } from "./marketo-api";
+import { parseMarketoDate, type MarketoClient, type MarketoProgramTag, type RawAssetId, type RawProgram } from "./marketo-api";
 
 type ProgramPatch = {
   name?: string;
@@ -40,7 +40,17 @@ export type ProgramAction =
       targetId: string;
       programName: string;
       programType?: string;
-      operation: "approve" | "unapprove" | "delete";
+      operation: "approve";
+      startDate: string;
+      endDate: string;
+    }
+  | {
+      id: number;
+      type: "programLifecycle";
+      targetId: string;
+      programName: string;
+      programType?: string;
+      operation: "unapprove" | "delete";
     };
 
 /** Program action before the gatekeeper assigns its approval id. */
@@ -105,12 +115,23 @@ export function describeProgramAction(action: ProgramAction): ActionDescription 
         awaitDecision: action.operation === "approve",
         title: `${action.operation} Marketo program ${action.programName}`,
         description: action.operation === "approve"
-          ? `**Approve Email Program ${escapeMarkdown(action.programName)} (${code(action.targetId)}).** It may send its configured email to real people at the program start date.`
+          ? `**Approve Email Program ${escapeMarkdown(action.programName)} (${code(action.targetId)}).** It may send its configured email to real people.\n\nExact approved schedule:\n- Start: ${action.startDate}\n- End: ${action.endDate}`
           : action.operation === "delete"
             ? `**Permanently delete program ${escapeMarkdown(action.programName)} (${code(action.targetId)}).** This cannot be undone.`
             : `Unapprove Email Program **${escapeMarkdown(action.programName)}** (${code(action.targetId)}) so it will not run as scheduled.`,
       };
   }
+}
+
+/** Whether Marketo still reports the exact Email Program dates captured for approval. */
+export function matchesProgramApprovalDates(
+  action: Extract<ProgramAction, { type: "programLifecycle"; operation: "approve" }>,
+  program: RawProgram | undefined,
+  targetId = Number(action.targetId),
+): boolean {
+  return Boolean(program && program.id === targetId &&
+    parseMarketoDate(program.startDate)?.toISOString() === action.startDate &&
+    parseMarketoDate(program.endDate)?.toISOString() === action.endDate);
 }
 
 function resultId(result: (RawProgram | RawAssetId)[], operation: string): number {

@@ -206,7 +206,7 @@ export const INSTANCE_RESOURCE: SupportedResource = {
   title: "Marketo Instance",
   description:
     "Full access to the Marketo instance: people, lists, programs, campaigns, activities, " +
-    "and custom objects.",
+    "standard and custom business objects, and all Design Studio assets.",
   icon: MARKETO_ICON,
 };
 
@@ -214,7 +214,9 @@ export const INSTANCE_RESOURCE: SupportedResource = {
 export const PROGRAM_RESOURCE: SupportedResource = {
   urlPattern: `${ANY_INSTANCE_ORIGIN}/_resource/program/:programId`,
   title: "Marketo Program",
-  description: "Access to one Marketo program: its members, tokens, and membership statuses.",
+  description:
+    "Access to one Marketo program: read members and tokens; change membership statuses, metadata, " +
+    "tags, and Email Program dates; approve or unapprove Email Programs; and permanently delete the program.",
   icon: MARKETO_ICON,
 };
 

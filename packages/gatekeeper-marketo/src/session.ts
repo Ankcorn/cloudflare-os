@@ -900,6 +900,7 @@ export class MarketoProgramImpl extends RpcTarget {
     await this.#ctx.submitProgram({
       type: "programLifecycle", targetId: this.#programId, programName: summary.name,
       programType: summary.type, operation: "approve",
+      startDate: summary.startDate.toISOString(), endDate: summary.endDate.toISOString(),
     });
   }
 

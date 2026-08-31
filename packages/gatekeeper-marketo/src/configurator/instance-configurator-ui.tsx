@@ -17,7 +17,7 @@ export default {
 
   render() {
     return <Section>
-      <p>Grants access to every person, list, program, campaign, and custom object available to this Marketo connection.</p>
+      <p>Grants access to every person, list, program, campaign, standard and custom business object, and Design Studio asset available to this Marketo connection, including write and deletion authority where the connected role permits it.</p>
     </Section>;
   },
 } satisfies ConfiguratorUISpec<MarketoInstanceConfiguratorRpc, MarketoInstanceConfiguratorValues>;

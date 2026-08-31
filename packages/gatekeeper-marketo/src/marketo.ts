@@ -53,7 +53,7 @@ import {
   assertActionResults,
   assertActionResultIdentity,
   assertApplied,
-  describeAction,
+  describeActionForSubmission,
   expectedActionResults,
   executeAction,
   MarketoActionResultError,
@@ -75,6 +75,7 @@ import {
 import {
   executeProgramAction,
   isProgramAction,
+  matchesProgramApprovalDates,
   type ProgramAction,
 } from "./program-actions";
 import { MarketoDesignStudioImpl } from "./design-studio";
@@ -879,7 +880,7 @@ export class MarketoGatekeeperImpl
         return {
           url: buildInstanceUrl(origin),
           title: "Marketo",
-          snippet: `Full access to the Marketo instance at ${host}.`,
+          snippet: `Full access to people, programs, campaigns, business objects, and Design Studio at ${host}.`,
           suggestedBindingName: "MARKETO",
           tsType: "MarketoSession",
         };
@@ -901,7 +902,7 @@ export class MarketoGatekeeperImpl
         return {
           url: buildProgramUrl(origin, id),
           title: `Program: ${name}`,
-          snippet: `Marketo program "${name}" — its members, tokens, and membership statuses.`,
+          snippet: `Marketo program "${name}" — members, tokens, statuses, metadata, tags, dates, approval, and deletion.`,
           suggestedBindingName: "MARKETO_PROGRAM",
           tsType: "MarketoProgram",
         };
@@ -952,10 +953,11 @@ export class MarketoGatekeeperImpl
         let id = this.#nextActionId();
         let action = { ...body, id } as MarketoAction;
         this.#validateActionReferences(action, false);
+        let description = describeActionForSubmission(action);
         this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, { action });
         this.ctx.storage.kv.put("pending:index", [...index, id]);
         try {
-          await queue.submitAction(id, describeAction(action)).catch(error => { throw error; });
+          await queue.submitAction(id, description).catch(error => { throw error; });
         } catch (e) {
           this.#removePending(id);
           throw e;
@@ -1081,7 +1083,7 @@ export class MarketoGatekeeperImpl
     let landingPageTemplateId: number | undefined;
     try {
       client = await this.#client();
-      landingPageTemplateId = await this.#preflightClassicClone(pending.action, client);
+      landingPageTemplateId = await this.#preflightClassicAsset(pending.action, client);
       await this.#preflightDesignerReferences(pending.action, client);
       await client.prepare();
       if (!this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)) {
@@ -1549,12 +1551,22 @@ export class MarketoGatekeeperImpl
     }
   }
 
-  async #preflightClassicClone(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
+  async #preflightClassicAsset(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
     if (isCampaignAction(action) && action.type === "campaignClone") {
       let id = this.#requireLogicalId(action.sourceId);
       let source = await client.getSmartCampaign(id);
       if (!source || source.id !== id) {
         throw new DesignerPreDispatchError(`Marketo smart campaign ${action.sourceId} was not found; nothing was dispatched.`);
+      }
+      return;
+    }
+    if (isProgramAction(action) && action.type === "programLifecycle" && action.operation === "approve") {
+      let id = this.#requireLogicalId(action.targetId);
+      let program = await client.getProgram(id);
+      if (!matchesProgramApprovalDates(action, program, id)) {
+        throw new DesignerPreDispatchError(
+          "The Marketo Email Program start or end date changed after approval; nothing was dispatched.",
+        );
       }
       return;
     }
