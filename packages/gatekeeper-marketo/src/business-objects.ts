@@ -51,6 +51,7 @@ export type BusinessObjectContext = {
   submitBusinessObject(action: BusinessObjectActionInput): Promise<void>;
   getBusinessObjectAccess(kind: MarketoBusinessObjectKind): MarketoBusinessObjectAccess;
   setBusinessObjectAccess(kind: MarketoBusinessObjectKind, access: MarketoBusinessObjectAccess): void;
+  dispose(): void;
 };
 
 function permissionDenied(error: unknown): boolean {
@@ -98,8 +99,21 @@ function fieldsFor(kind: MarketoBusinessObjectKind, matchBy: MarketoBusinessObje
 
 @validateRpc()
 export class MarketoBusinessObjectImpl extends RpcTarget {
-  constructor(private readonly ctx: BusinessObjectContext, private readonly kind: MarketoBusinessObjectKind) {
+  private disposed = false;
+
+  constructor(
+    private readonly ctx: BusinessObjectContext,
+    private readonly kind: MarketoBusinessObjectKind,
+    private readonly ownsContext = false,
+  ) {
     super();
+  }
+
+  [Symbol.dispose](): void {
+    if (this.ownsContext && !this.disposed) {
+      this.disposed = true;
+      this.ctx.dispose();
+    }
   }
 
   async describe(): Promise<MarketoBusinessObjectSchema> {

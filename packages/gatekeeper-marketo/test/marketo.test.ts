@@ -890,6 +890,7 @@ function stubContext(client: Partial<MarketoClient>, notes?: string[]): SessionC
     client: async () => client as MarketoClient,
     observe: async (summary: string, detail: string) => { notes?.push(summary, detail); },
     submit: async () => {},
+    retain: () => {},
     dispose: () => {},
   };
 }
@@ -2992,6 +2993,7 @@ describe("whole-instance listings", () => {
       }) as never,
       observe: async () => {},
       submit: async () => {},
+      retain: () => {},
       dispose: () => {},
     };
     let session = new MarketoSessionImpl(ctx);
@@ -3132,6 +3134,7 @@ function businessContext(client: Partial<MarketoClient>, submitted: MarketoActio
     submitBusinessObject: async action => void submitted.push(action),
     getBusinessObjectAccess: kind => access.get(kind) ?? "read-write",
     setBusinessObjectAccess: (kind, value) => void access.set(kind, value),
+    dispose: () => {},
   };
   return { ctx, access };
 }
@@ -4205,6 +4208,7 @@ describe("campaign kind pre-validation", () => {
         }) as never,
         observe: async () => {},
         submit: async action => void submitted.push(action),
+        retain: () => {},
         dispose: () => {},
       },
       7800,
@@ -4238,6 +4242,7 @@ describe("campaign kind pre-validation", () => {
         }) as never,
         observe: async () => {},
         submit: async action => void submitted.push(action),
+        retain: () => {},
         dispose: () => {},
       },
       7800,

@@ -90,8 +90,17 @@ export type SessionContext = {
   observe(title: string, description: string): Promise<void>;
   /** Queue a write for approval. Resolves once submitted, not once applied. */
   submit(action: MarketoActionInput): Promise<void>;
+  /** Acquire another owner before handing this context to an independently-lived capability. */
+  retain(): void;
+  /** Release one owner. The ApprovalQueue stub is disposed with the final owner. */
   dispose(): void;
 };
+
+/** Acquire and return a context for an independently-lived child capability. */
+export function retainSessionContext<T extends SessionContext>(ctx: T): T {
+  ctx.retain();
+  return ctx;
+}
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -367,11 +376,21 @@ async function readActivities(
 export class MarketoPersonImpl extends RpcTarget {
   #ctx: SessionContext;
   #lookup: MarketoPersonLookup;
+  #ownsContext: boolean;
+  #disposed = false;
 
-  constructor(ctx: SessionContext, lookup: MarketoPersonLookup) {
+  constructor(ctx: SessionContext, lookup: MarketoPersonLookup, ownsContext = false) {
     super();
     this.#ctx = ctx;
     this.#lookup = lookup;
+    this.#ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   async #resolveId(): Promise<number | undefined> {
@@ -463,6 +482,7 @@ export class MarketoStaticListImpl extends RpcTarget {
   #ctx: SessionContext;
   #listId: number;
   #ownsContext: boolean;
+  #disposed = false;
 
   constructor(ctx: SessionContext, listId: number, ownsContext = false) {
     super();
@@ -472,7 +492,10 @@ export class MarketoStaticListImpl extends RpcTarget {
   }
 
   [Symbol.dispose](): void {
-    if (this.#ownsContext) this.#ctx.dispose();
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   async #name(): Promise<string> {
@@ -604,6 +627,7 @@ export class MarketoProgramImpl extends RpcTarget {
   #programId: string;
   #ownsContext: boolean;
   #channels: Promise<RawChannel[]> | undefined;
+  #disposed = false;
 
   constructor(ctx: SessionContext | CampaignContext, programId: number | string, ownsContext = false) {
     super();
@@ -613,7 +637,10 @@ export class MarketoProgramImpl extends RpcTarget {
   }
 
   [Symbol.dispose](): void {
-    if (this.#ownsContext) this.#ctx.dispose();
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   #sameProgram(left: string, right: string): boolean {
@@ -716,9 +743,22 @@ export class MarketoProgramImpl extends RpcTarget {
   }
 
   async getTokens(): Promise<MarketoToken[]> {
+    this.#rejectPendingDeletion();
+    let pendingCreation = this.#pendingCreation();
+    if (pendingCreation?.type === "programClone") {
+      throw new Error(`Program ${this.#programId} is pending cloning; its tokens are not readable until creation finishes.`);
+    }
+    if (pendingCreation) {
+      await this.#ctx.observe(
+        `Read 0 tokens from pending Marketo program ${this.#programId}`,
+        `Program \`${this.#programId}\` is pending creation and has no My Tokens yet.`,
+      );
+      return [];
+    }
     let raw = await onHandle("program", this.#programId, async () => {
       return await (await this.#ctx.client()).getProgramTokens(requireResolvedId(this.#ctx, this.#programId, "Program"));
     });
+    this.#rejectPendingDeletion();
     // A token without a name can't be referenced as {{my.*}}, so it is of no use to a caller.
     // Marketo reports names bare here; they are qualified once on the way out so that what a
     // caller reads is the form they would paste into a template. The campaign endpoints accept
@@ -746,7 +786,19 @@ export class MarketoProgramImpl extends RpcTarget {
     moreResult: boolean;
     nextPageToken?: string;
   }> {
+    this.#rejectPendingDeletion();
     let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    let pendingCreation = this.#pendingCreation();
+    if (pendingCreation?.type === "programClone") {
+      throw new Error(`Program ${this.#programId} is pending cloning; its members are not readable until creation finishes.`);
+    }
+    if (pendingCreation) {
+      await this.#ctx.observe(
+        `Read 0 members of pending Marketo program ${this.#programId}`,
+        `Program \`${this.#programId}\` is pending creation and has no members yet.`,
+      );
+      return { members: [], moreResult: false };
+    }
     let page = await onHandle("program", this.#programId, async () => {
       return await (await this.#ctx.client()).getProgramMembers(
         requireResolvedId(this.#ctx, this.#programId, "Program"),
@@ -754,6 +806,7 @@ export class MarketoProgramImpl extends RpcTarget {
         pageToken,
       );
     });
+    this.#rejectPendingDeletion();
     await this.#ctx.observe(
       `Read ${page.result.length} members of Marketo program ${this.#programId}`,
       `Read **${page.result.length}** member record(s) from program \`${this.#programId}\`.`,
@@ -768,6 +821,23 @@ export class MarketoProgramImpl extends RpcTarget {
       moreResult: page.moreResult,
       nextPageToken: page.nextPageToken,
     };
+  }
+
+  #pendingCreation(): Extract<ProgramAction, { type: "programCreate" | "programClone" }> | undefined {
+    return this.#ctx.pendingProgram().find((action): action is Extract<
+      ProgramAction,
+      { type: "programCreate" | "programClone" }
+    > =>
+      (action.type === "programCreate" || action.type === "programClone") &&
+      action.provisionalId === this.#programId
+    );
+  }
+
+  #rejectPendingDeletion(): void {
+    if (this.#actions().some(action =>
+      action.type === "programLifecycle" && action.operation === "delete")) {
+      throw notFound("program", this.#programId);
+    }
   }
 
   async setMemberStatus(personIds: number[], status: string): Promise<void> {
@@ -858,11 +928,21 @@ export class MarketoProgramImpl extends RpcTarget {
 export class MarketoSmartCampaignImpl extends RpcTarget {
   #ctx: CampaignContext;
   #campaignId: string;
+  #ownsContext: boolean;
+  #disposed = false;
 
-  constructor(ctx: SessionContext | CampaignContext, campaignId: string | number) {
+  constructor(ctx: SessionContext | CampaignContext, campaignId: string | number, ownsContext = false) {
     super();
     this.#ctx = managementContext(ctx);
     this.#campaignId = requireLogicalId(String(campaignId), "campaign");
+    this.#ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   #sameCampaign(left: string, right: string): boolean {
@@ -1153,11 +1233,21 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
 export class MarketoCustomObjectImpl extends RpcTarget {
   #ctx: SessionContext;
   #apiName: string;
+  #ownsContext: boolean;
+  #disposed = false;
 
-  constructor(ctx: SessionContext, apiName: string) {
+  constructor(ctx: SessionContext, apiName: string, ownsContext = false) {
     super();
     this.#ctx = ctx;
     this.#apiName = apiName;
+    this.#ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   async describe(): Promise<MarketoCustomObjectSchema> {
@@ -1276,6 +1366,7 @@ function requireTokens(tokens: { name: string; value: string }[] | undefined): v
 @validateRpc()
 export class MarketoSessionImpl extends RpcTarget {
   #ctx: WholeInstanceContext;
+  #disposed = false;
 
   constructor(ctx: SessionContext | CampaignContext | WholeInstanceContext) {
     super();
@@ -1286,11 +1377,14 @@ export class MarketoSessionImpl extends RpcTarget {
     if (!["company", "opportunity", "opportunityRole", "salesPerson", "namedAccount"].includes(kind)) {
       throw new Error(`Unsupported Marketo business object: ${String(kind)}.`);
     }
-    return new MarketoBusinessObjectImpl(this.#ctx, kind);
+    return new MarketoBusinessObjectImpl(retainSessionContext(this.#ctx), kind, true);
   }
 
   [Symbol.dispose](): void {
-    this.#ctx.dispose();
+    if (!this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
   }
 
   async describePersonFields(): Promise<MarketoFieldMetadata[]> {
@@ -1314,7 +1408,11 @@ export class MarketoSessionImpl extends RpcTarget {
     if (!lookup?.field || lookup.value === undefined || lookup.value === null) {
       throw new Error("A lookup { field, value } is required.");
     }
-    return new MarketoPersonImpl(this.#ctx, { field: lookup.field, value: String(lookup.value) });
+    return new MarketoPersonImpl(
+      retainSessionContext(this.#ctx),
+      { field: lookup.field, value: String(lookup.value) },
+      true,
+    );
   }
 
   async findPeople(
@@ -1362,7 +1460,7 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getStaticList(id: number): MarketoStaticListImpl {
-    return new MarketoStaticListImpl(this.#ctx, requireId(id, "list"));
+    return new MarketoStaticListImpl(retainSessionContext(this.#ctx), requireId(id, "list"), true);
   }
 
   async findProgramsByName(name: string): Promise<MarketoProgramSummary[]> {
@@ -1385,7 +1483,11 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getProgram(id: MarketoProgramId): MarketoProgramImpl {
-    return new MarketoProgramImpl(this.#ctx, requireLogicalId(String(id), "program"));
+    return new MarketoProgramImpl(
+      retainSessionContext(this.#ctx),
+      requireLogicalId(String(id), "program"),
+      true,
+    );
   }
 
   async getChannels(): Promise<MarketoProgramChannel[]> {
@@ -1445,7 +1547,7 @@ export class MarketoSessionImpl extends RpcTarget {
       parentId,
       input: { name, type, channel, description, tags, ...dates },
     });
-    return new MarketoProgramImpl(this.#ctx, provisionalId);
+    return new MarketoProgramImpl(retainSessionContext(this.#ctx), provisionalId, true);
   }
 
   async cloneProgram(
@@ -1465,7 +1567,7 @@ export class MarketoSessionImpl extends RpcTarget {
     await this.#ctx.submitProgram({
       type: "programClone", provisionalId, sourceId: source, parentId, name, description,
     });
-    return new MarketoProgramImpl(this.#ctx, provisionalId);
+    return new MarketoProgramImpl(retainSessionContext(this.#ctx), provisionalId, true);
   }
 
   async listSmartCampaigns(filter: MarketoNameFilter & { requestableOnly?: boolean } = {}): Promise<{
@@ -1483,7 +1585,11 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getSmartCampaign(id: string | number): MarketoSmartCampaignImpl {
-    return new MarketoSmartCampaignImpl(this.#ctx, requireLogicalId(String(id), "campaign"));
+    return new MarketoSmartCampaignImpl(
+      retainSessionContext(this.#ctx),
+      requireLogicalId(String(id), "campaign"),
+      true,
+    );
   }
 
   async createSmartCampaign(
@@ -1503,7 +1609,7 @@ export class MarketoSessionImpl extends RpcTarget {
       name,
       description,
     });
-    return new MarketoSmartCampaignImpl(this.#ctx, provisionalId);
+    return new MarketoSmartCampaignImpl(retainSessionContext(this.#ctx), provisionalId, true);
   }
 
   async cloneSmartCampaign(
@@ -1527,7 +1633,7 @@ export class MarketoSessionImpl extends RpcTarget {
       name,
       description,
     });
-    return new MarketoSmartCampaignImpl(this.#ctx, provisionalId);
+    return new MarketoSmartCampaignImpl(retainSessionContext(this.#ctx), provisionalId, true);
   }
 
   async getActivityTypes(): Promise<MarketoActivityType[]> {
@@ -1570,11 +1676,11 @@ export class MarketoSessionImpl extends RpcTarget {
 
   getCustomObject(apiName: string): MarketoCustomObjectImpl {
     if (!apiName?.trim()) throw new Error("A custom object API name is required.");
-    return new MarketoCustomObjectImpl(this.#ctx, apiName);
+    return new MarketoCustomObjectImpl(retainSessionContext(this.#ctx), apiName, true);
   }
 
   getDesignStudio(): MarketoDesignStudioImpl {
-    return new MarketoDesignStudioImpl(this.#ctx);
+    return new MarketoDesignStudioImpl(retainSessionContext(this.#ctx), true);
   }
 
   async getApiUsage(): Promise<MarketoApiUsage> {
@@ -1796,6 +1902,7 @@ export function makeSessionContext(options: {
   approvalQueue: RpcStub<ApprovalQueue>;
   submit(action: MarketoActionInput): Promise<void>;
 }): SessionContext {
+  let owners = 1;
   return {
     client: options.client,
     observe: async (title, description) => {
@@ -1805,6 +1912,13 @@ export function makeSessionContext(options: {
       });
     },
     submit: options.submit,
-    dispose: () => options.approvalQueue[Symbol.dispose](),
+    retain: () => {
+      if (owners === 0) throw new Error("Cannot retain a disposed Marketo session context.");
+      owners++;
+    },
+    dispose: () => {
+      if (owners === 0) throw new Error("Marketo session context was released too many times.");
+      if (--owners === 0) options.approvalQueue[Symbol.dispose]();
+    },
   };
 }

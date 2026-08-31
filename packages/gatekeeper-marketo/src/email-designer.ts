@@ -16,7 +16,7 @@ import type {
 } from "./types";
 import type { DesignerAssetKind, RawDesignerAsset } from "./marketo-api";
 import { parseMarketoDate } from "./marketo-api";
-import type { SessionContext } from "./session";
+import { retainSessionContext, type SessionContext } from "./session";
 import {
   designerCloneSnapshot,
   updateDesignerCloneSnapshot,
@@ -286,7 +286,18 @@ async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, asset
 @validateRpc()
 export class MarketoEmailDesignerImpl extends RpcTarget {
   #ctx: EmailDesignerContext;
-  constructor(ctx: EmailDesignerContext) { super(); this.#ctx = ctx; }
+  #ownsContext: boolean;
+  #disposed = false;
+  constructor(ctx: EmailDesignerContext, ownsContext = false) {
+    super(); this.#ctx = ctx; this.#ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
+  }
 
   async listWorkspaces() {
     let raw = await (await this.#ctx.client()).getWorkspaces();
@@ -320,9 +331,9 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
       pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
   }
 
-  getEmail(assetId: string) { return new MarketoDesignerEmailImpl(this.#ctx, id(assetId, "designer email id", this.#ctx, "designerEmail")); }
-  getEmailTemplate(assetId: string) { return new MarketoDesignerEmailTemplateImpl(this.#ctx, id(assetId, "designer template id", this.#ctx, "designerTemplate")); }
-  getFragment(assetId: string) { return new MarketoDesignerFragmentImpl(this.#ctx, id(assetId, "designer fragment id", this.#ctx, "designerFragment")); }
+  getEmail(assetId: string) { let value = id(assetId, "designer email id", this.#ctx, "designerEmail"); return new MarketoDesignerEmailImpl(retainSessionContext(this.#ctx), value, true); }
+  getEmailTemplate(assetId: string) { let value = id(assetId, "designer template id", this.#ctx, "designerTemplate"); return new MarketoDesignerEmailTemplateImpl(retainSessionContext(this.#ctx), value, true); }
+  getFragment(assetId: string) { let value = id(assetId, "designer fragment id", this.#ctx, "designerFragment"); return new MarketoDesignerFragmentImpl(retainSessionContext(this.#ctx), value, true); }
 
   async createEmail(input: MarketoCreateDesignerEmailInput) {
     let value = only(input, "Designer email create input", ["location", "name", "description", "headers", "content", "templateId", "settings"]);
@@ -352,7 +363,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
   async #create(kind: EmailDesignerKind, body: Record<string, unknown>) {
     let provisionalId = this.#ctx.allocateProvisional();
     await submitDesigner(this.#ctx, { type: "designerCreate", asset: kind, provisionalId, body });
-    return designerHandle(this.#ctx, kind, provisionalId);
+    return designerHandle(this.#ctx, kind, provisionalId, true);
   }
 }
 
@@ -360,7 +371,18 @@ abstract class DesignerAssetImpl extends RpcTarget {
   protected ctx: EmailDesignerContext;
   protected assetId: string;
   protected abstract kind: EmailDesignerKind;
-  constructor(ctx: EmailDesignerContext, assetId: string) { super(); this.ctx = ctx; this.assetId = assetId; }
+  private ownsContext: boolean;
+  private disposed = false;
+  constructor(ctx: EmailDesignerContext, assetId: string, ownsContext = false) {
+    super(); this.ctx = ctx; this.assetId = assetId; this.ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.ownsContext && !this.disposed) {
+      this.disposed = true;
+      this.ctx.dispose();
+    }
+  }
 
   protected async detail(): Promise<Record<string, unknown>> {
     let result = await summary(this.ctx, this.kind, this.assetId);
@@ -383,7 +405,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
     await this.ctx.observe(`Read Marketo designer ${this.kind} clone source`, `Resolved dependencies for designer asset ${this.assetId}.`);
     await submitDesigner(this.ctx, { type: "designerClone", asset: this.kind, provisionalId, sourceId: this.assetId,
       name: text(name, "Clone name"), description: optionalText(description, "description"), sourceSnapshot });
-    return designerHandle(this.ctx, this.kind, provisionalId);
+    return designerHandle(this.ctx, this.kind, provisionalId, true);
   }
 
   protected async lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
@@ -467,8 +489,14 @@ export class MarketoDesignerFragmentImpl extends DesignerAssetImpl {
   async clone(name: string, description?: string) { return await this.cloneAsset(name, description) as MarketoDesignerFragmentImpl; }
 }
 
-function designerHandle(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string): DesignerAssetImpl {
-  if (kind === "designerEmail") return new MarketoDesignerEmailImpl(ctx, assetId);
-  if (kind === "designerTemplate") return new MarketoDesignerEmailTemplateImpl(ctx, assetId);
-  return new MarketoDesignerFragmentImpl(ctx, assetId);
+function designerHandle(
+  ctx: EmailDesignerContext,
+  kind: EmailDesignerKind,
+  assetId: string,
+  ownsContext = false,
+): DesignerAssetImpl {
+  if (ownsContext) retainSessionContext(ctx);
+  if (kind === "designerEmail") return new MarketoDesignerEmailImpl(ctx, assetId, ownsContext);
+  if (kind === "designerTemplate") return new MarketoDesignerEmailTemplateImpl(ctx, assetId, ownsContext);
+  return new MarketoDesignerFragmentImpl(ctx, assetId, ownsContext);
 }

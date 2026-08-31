@@ -994,15 +994,20 @@ export class MarketoGatekeeperImpl
     };
 
     let { kind, resourceId } = this.ctx.props;
-    switch (kind) {
-      case "instance":
-        return new MarketoSessionImpl(ctx);
-      case "design-studio":
-        return new MarketoDesignStudioImpl(ctx, true);
-      case "program":
-        return new MarketoProgramImpl(ctx, requireResourceId("program", resourceId), true);
-      case "list":
-        return new MarketoStaticListImpl(ctx, requireResourceId("list", resourceId), true);
+    try {
+      switch (kind) {
+        case "instance":
+          return new MarketoSessionImpl(ctx);
+        case "design-studio":
+          return new MarketoDesignStudioImpl(ctx, true);
+        case "program":
+          return new MarketoProgramImpl(ctx, requireResourceId("program", resourceId), true);
+        case "list":
+          return new MarketoStaticListImpl(ctx, requireResourceId("list", resourceId), true);
+      }
+    } catch (error) {
+      sessionCtx.dispose();
+      throw error;
     }
   }
 

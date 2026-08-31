@@ -52,7 +52,7 @@ import type {
   DesignStudioCreateInput,
   DesignStudioMetadata,
 } from "./design-studio-actions";
-import type { SessionContext } from "./session";
+import { retainSessionContext, type SessionContext } from "./session";
 import { MarketoEmailDesignerImpl, type EmailDesignerContext } from "./email-designer";
 
 type Summary = {
@@ -549,6 +549,7 @@ function matches(summary: Summary, options: MarketoDesignStudioListOptions): boo
 export class MarketoDesignStudioImpl extends RpcTarget {
   #ctx: DesignStudioContext;
   #ownsContext: boolean;
+  #disposed = false;
 
   constructor(ctx: DesignStudioContext, ownsContext = false) {
     super();
@@ -556,10 +557,18 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     this.#ownsContext = ownsContext;
   }
 
-  [Symbol.dispose](): void { if (this.#ownsContext) this.#ctx.dispose(); }
+  [Symbol.dispose](): void {
+    if (this.#ownsContext && !this.#disposed) {
+      this.#disposed = true;
+      this.#ctx.dispose();
+    }
+  }
 
   getEmailDesigner(): MarketoEmailDesignerImpl {
-    return new MarketoEmailDesignerImpl(this.#ctx as DesignStudioContext & EmailDesignerContext);
+    return new MarketoEmailDesignerImpl(
+      retainSessionContext(this.#ctx as DesignStudioContext & EmailDesignerContext),
+      true,
+    );
   }
 
   async listFolders(options: MarketoDesignStudioFolderListOptions = {}) {
@@ -611,14 +620,15 @@ export class MarketoDesignStudioImpl extends RpcTarget {
 
   getFolder(id: string, type: "folder" | "program") {
     if (type !== "folder" && type !== "program") throw new Error("Folder type must be folder or program.");
-    return new MarketoDesignStudioFolderImpl(this.#ctx, logicalId(id), type);
+    let validatedId = logicalId(id);
+    return new MarketoDesignStudioFolderImpl(retainSessionContext(this.#ctx), validatedId, type, true);
   }
   async #create(kind: DesignStudioAssetKind, destination: MarketoDesignStudioFolderRef, input: DesignStudioCreateInput) {
     let parent = logicalFolder(this.#ctx, destination);
     assertDurablePayload({ parent, input });
     let provisionalId = this.#ctx.allocateProvisional();
     await submitDesign(this.#ctx, { type: "designCreate", asset: kind, provisionalId, parent, input });
-    return handle(this.#ctx, kind, provisionalId, kind === "folder" ? "folder" : undefined);
+    return handle(this.#ctx, kind, provisionalId, kind === "folder" ? "folder" : undefined, true);
   }
   async createFolder(destination: MarketoDesignStudioFolderRef, name: string, description?: string): Promise<MarketoDesignStudioFolder> {
     let metadata = { description };
@@ -693,7 +703,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     await submitDesign(this.#ctx, {
       type: "designClone", asset: kind, provisionalId, sourceId: source, parent, name: cloneName,
     });
-    return handle(this.#ctx, kind, provisionalId);
+    return handle(this.#ctx, kind, provisionalId, undefined, true);
   }
   async cloneEmail(sourceId: string, name: string, destination: MarketoDesignStudioFolderRef): Promise<MarketoEmail> { return await this.#clone("email", sourceId, name, destination) as MarketoEmailImpl; }
   async cloneEmailTemplate(sourceId: string, name: string, destination: MarketoDesignStudioFolderRef): Promise<MarketoEmailTemplate> { return await this.#clone("emailTemplate", sourceId, name, destination) as MarketoEmailTemplateImpl; }
@@ -702,24 +712,24 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   async cloneForm(sourceId: string, name: string, destination: MarketoDesignStudioFolderRef): Promise<MarketoForm> { return await this.#clone("form", sourceId, name, destination) as MarketoFormImpl; }
   async cloneSnippet(sourceId: string, name: string, destination: MarketoDesignStudioFolderRef): Promise<MarketoSnippet> { return await this.#clone("snippet", sourceId, name, destination) as MarketoSnippetImpl; }
   listEmails(options?: MarketoDesignStudioListOptions) { return this.#list("email", options); }
-  getEmail(id: string) { return new MarketoEmailImpl(this.#ctx, logicalId(id)); }
+  getEmail(id: string) { let value = logicalId(id); return new MarketoEmailImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listEmailTemplates(options?: MarketoDesignStudioListOptions) { return this.#list("emailTemplate", options); }
-  getEmailTemplate(id: string) { return new MarketoEmailTemplateImpl(this.#ctx, logicalId(id)); }
+  getEmailTemplate(id: string) { let value = logicalId(id); return new MarketoEmailTemplateImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listLandingPages(options?: MarketoDesignStudioListOptions) { return this.#list("landingPage", options); }
-  getLandingPage(id: string) { return new MarketoLandingPageImpl(this.#ctx, logicalId(id)); }
+  getLandingPage(id: string) { let value = logicalId(id); return new MarketoLandingPageImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listLandingPageTemplates(options?: MarketoDesignStudioListOptions) { return this.#list("landingPageTemplate", options); }
-  getLandingPageTemplate(id: string) { return new MarketoLandingPageTemplateImpl(this.#ctx, logicalId(id)); }
+  getLandingPageTemplate(id: string) { let value = logicalId(id); return new MarketoLandingPageTemplateImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listForms(options?: MarketoDesignStudioListOptions) { return this.#list("form", options); }
-  getForm(id: string) { return new MarketoFormImpl(this.#ctx, logicalId(id)); }
+  getForm(id: string) { let value = logicalId(id); return new MarketoFormImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listSnippets(options?: MarketoDesignStudioListOptions) { return this.#list("snippet", options); }
-  getSnippet(id: string) { return new MarketoSnippetImpl(this.#ctx, logicalId(id)); }
+  getSnippet(id: string) { let value = logicalId(id); return new MarketoSnippetImpl(retainSessionContext(this.#ctx), value, undefined, true); }
   listFiles(options: MarketoDesignStudioFileListOptions = {}) {
     if ("status" in options && options.status !== undefined) {
       throw new Error("status is not supported when listing Design Studio files.");
     }
     return this.#list("file", options);
   }
-  getFile(id: string) { return new MarketoFileImpl(this.#ctx, logicalId(id)); }
+  getFile(id: string) { let value = logicalId(id); return new MarketoFileImpl(retainSessionContext(this.#ctx), value, undefined, true); }
 
   async #list(kind: Exclude<DesignStudioAssetKind, "folder">, options: MarketoDesignStudioListOptions = {}) {
     let upstreamPaged = options.name === undefined || kind === "landingPage" || kind === "snippet";
@@ -997,8 +1007,17 @@ abstract class AssetImpl extends RpcTarget {
   protected id: string;
   protected abstract kind: DesignStudioAssetKind;
   protected folderType?: "folder" | "program";
-  constructor(ctx: DesignStudioContext, id: string, folderType?: "folder" | "program") {
-    super(); this.ctx = ctx; this.id = id; this.folderType = folderType;
+  private ownsContext: boolean;
+  private disposed = false;
+  constructor(ctx: DesignStudioContext, id: string, folderType?: "folder" | "program", ownsContext = false) {
+    super(); this.ctx = ctx; this.id = id; this.folderType = folderType; this.ownsContext = ownsContext;
+  }
+
+  [Symbol.dispose](): void {
+    if (this.ownsContext && !this.disposed) {
+      this.disposed = true;
+      this.ctx.dispose();
+    }
   }
 
   protected assertReadable(): void {
@@ -1076,16 +1095,23 @@ async function readAsset(client: MarketoClient, kind: DesignStudioAssetKind, id:
   }
 }
 
-function handle(ctx: DesignStudioContext, kind: DesignStudioAssetKind, id: string, folderType?: "folder" | "program"): AssetImpl {
+function handle(
+  ctx: DesignStudioContext,
+  kind: DesignStudioAssetKind,
+  id: string,
+  folderType?: "folder" | "program",
+  ownsContext = false,
+): AssetImpl {
+  if (ownsContext) retainSessionContext(ctx);
   switch (kind) {
-    case "folder": return new MarketoDesignStudioFolderImpl(ctx, id, folderType ?? "folder");
-    case "email": return new MarketoEmailImpl(ctx, id);
-    case "emailTemplate": return new MarketoEmailTemplateImpl(ctx, id);
-    case "landingPage": return new MarketoLandingPageImpl(ctx, id);
-    case "landingPageTemplate": return new MarketoLandingPageTemplateImpl(ctx, id);
-    case "form": return new MarketoFormImpl(ctx, id);
-    case "snippet": return new MarketoSnippetImpl(ctx, id);
-    case "file": return new MarketoFileImpl(ctx, id);
+    case "folder": return new MarketoDesignStudioFolderImpl(ctx, id, folderType ?? "folder", ownsContext);
+    case "email": return new MarketoEmailImpl(ctx, id, undefined, ownsContext);
+    case "emailTemplate": return new MarketoEmailTemplateImpl(ctx, id, undefined, ownsContext);
+    case "landingPage": return new MarketoLandingPageImpl(ctx, id, undefined, ownsContext);
+    case "landingPageTemplate": return new MarketoLandingPageTemplateImpl(ctx, id, undefined, ownsContext);
+    case "form": return new MarketoFormImpl(ctx, id, undefined, ownsContext);
+    case "snippet": return new MarketoSnippetImpl(ctx, id, undefined, ownsContext);
+    case "file": return new MarketoFileImpl(ctx, id, undefined, ownsContext);
   }
 }
 
