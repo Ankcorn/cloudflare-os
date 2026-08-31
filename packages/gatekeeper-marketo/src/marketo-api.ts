@@ -1940,7 +1940,7 @@ export class MarketoClient {
   async deleteCustomObject(
     apiName: string,
     input: Record<string, unknown>[],
-    deleteBy = "dedupeFields",
+    deleteBy: "dedupeFields" | "idField" = "dedupeFields",
   ): Promise<RawSyncResult[]> {
     return await this.#result<RawSyncResult>(
       `/v1/customobjects/${encodeURIComponent(apiName)}/delete.json`,

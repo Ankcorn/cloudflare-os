@@ -70,7 +70,13 @@ type ExistingMarketoAction =
       tokens?: { name: string; value: string }[];
     }
   | { id: number; type: "customObjectUpsert"; apiName: string; records: Record<string, unknown>[] }
-  | { id: number; type: "customObjectDelete"; apiName: string; records: Record<string, unknown>[] };
+  | {
+      id: number;
+      type: "customObjectDelete";
+      apiName: string;
+      records: Record<string, unknown>[];
+      deleteBy: "dedupeFields" | "idField";
+    };
 
 /** Every action persisted by a Marketo binding. */
 export type MarketoAction = ExistingMarketoAction | DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction | BusinessObjectAction;
@@ -236,7 +242,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Delete ${action.records.length} ${action.apiName} record(s)`,
         description:
           `**Permanently delete ${action.records.length}** record(s) of custom object ` +
-          `${escapeMarkdown(action.apiName)}. This cannot be undone.\n\n` +
+          `${escapeMarkdown(action.apiName)} by ${action.deleteBy ?? "dedupeFields"}. This cannot be undone.\n\n` +
           recordDetails(action.records),
         implementsRevert: false,
       };
@@ -289,7 +295,7 @@ export async function executeAction(
       return await client.syncCustomObject(action.apiName, action.records);
 
     case "customObjectDelete":
-      return await client.deleteCustomObject(action.apiName, action.records);
+      return await client.deleteCustomObject(action.apiName, action.records, action.deleteBy ?? "dedupeFields");
   }
 }
 

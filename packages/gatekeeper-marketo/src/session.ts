@@ -1159,7 +1159,21 @@ export class MarketoCustomObjectImpl extends RpcTarget {
 
   async delete(records: Record<string, unknown>[]): Promise<void> {
     requireRecords(records);
-    await this.#ctx.submit({ type: "customObjectDelete", apiName: this.#apiName, records });
+    let guidRecords = records.filter(record => Object.hasOwn(record, "marketoGUID"));
+    if (guidRecords.length > 0 && guidRecords.length !== records.length) {
+      throw new Error("Delete custom objects entirely by marketoGUID or entirely by dedupe fields.");
+    }
+    let deleteBy: "idField" | "dedupeFields" =
+      guidRecords.length === records.length ? "idField" : "dedupeFields";
+    if (deleteBy === "idField") {
+      records = records.map(record => {
+        if (typeof record.marketoGUID !== "string" || !record.marketoGUID.trim()) {
+          throw new Error("Each marketoGUID must be a non-empty string.");
+        }
+        return { marketoGUID: record.marketoGUID };
+      });
+    }
+    await this.#ctx.submit({ type: "customObjectDelete", apiName: this.#apiName, records, deleteBy });
   }
 }
 

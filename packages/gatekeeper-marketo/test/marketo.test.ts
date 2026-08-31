@@ -23,6 +23,7 @@ import { connectPageHtml } from "../src/connect-ui";
 import {
   assertApplied,
   describeAction,
+  executeAction,
   type MarketoAction,
   type MarketoActionInput,
 } from "../src/actions";
@@ -2331,6 +2332,8 @@ describe("Design Studio simulation", () => {
 });
 
 describe("custom object normalization", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   // A custom object field names itself at the top level, unlike a person field, which nests the
   // API name under `rest`/`soap`. Reading it as a person field yields a field with no name.
   const SCHEMA = {
@@ -2362,6 +2365,77 @@ describe("custom object normalization", () => {
     expect(byName.get("sourceID")?.searchable).toBe(true);
     expect(byName.get("createdAt")?.searchable).toBe(false);
     expect(schema.searchableFields).toEqual(["sourceID", "marketoGUID", "leadID"]);
+  });
+
+  it("deletes GUID-only records explicitly by marketoGUID", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = makeSessionContext({
+      client: async () => ({}) as MarketoClient,
+      approvalQueue: {} as never,
+      submit: async action => void submitted.push(action),
+    });
+    let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
+
+    await object.delete([{ marketoGUID: "guid-1", ignored: "secret" }]);
+    expect(submitted).toEqual([{
+      type: "customObjectDelete",
+      apiName: "orderStatus",
+      deleteBy: "idField",
+      records: [{ marketoGUID: "guid-1" }],
+    }]);
+    await expect(object.delete([{ marketoGUID: "guid-2" }, { sourceID: "source" }]))
+      .rejects.toThrow(/entirely by marketoGUID/);
+    await expect(object.delete([{ marketoGUID: "" }])).rejects.toThrow(/non-empty string/);
+    expect(submitted).toHaveLength(1);
+  });
+
+  it("sends GUID deletion using Marketo's idField mode", async () => {
+    let body: unknown;
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ success: true, result: [{ marketoGUID: "guid-1", status: "deleted" }] });
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    await client.deleteCustomObject("orderStatus", [{ marketoGUID: "guid-1" }], "idField");
+
+    expect(body).toEqual({ deleteBy: "idField", input: [{ marketoGUID: "guid-1" }] });
+  });
+
+  it("describes legacy queued custom-object deletes as dedupe-field actions", () => {
+    let description = describeAction({
+      id: 1,
+      type: "customObjectDelete",
+      apiName: "orderStatus",
+      records: [{ sourceID: "source-1" }],
+    } as unknown as MarketoAction);
+    expect(description.description).toContain("by dedupeFields");
+    expect(description.description).not.toContain("undefined");
+  });
+
+  it("executes new and legacy custom-object deletes with the correct mode", async () => {
+    let modes: string[] = [];
+    let client = {
+      deleteCustomObject: async (_apiName: string, _records: Record<string, unknown>[], mode: string) => {
+        modes.push(mode);
+        return [];
+      },
+    } as unknown as MarketoClient;
+    await executeAction({
+      id: 1,
+      type: "customObjectDelete",
+      apiName: "orderStatus",
+      records: [{ marketoGUID: "guid-1" }],
+      deleteBy: "idField",
+    }, client);
+    await executeAction({
+      id: 2,
+      type: "customObjectDelete",
+      apiName: "orderStatus",
+      records: [{ sourceID: "source-1" }],
+    } as unknown as Parameters<typeof executeAction>[0], client);
+
+    expect(modes).toEqual(["idField", "dedupeFields"]);
   });
 });
 

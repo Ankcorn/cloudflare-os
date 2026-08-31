@@ -1662,7 +1662,10 @@ export interface MarketoCustomObject {
   /** Create or update records. */
   createOrUpdate(records: Record<string, unknown>[]): Promise<void>;
 
-  /** Delete records by dedupe key or id fields. */
+  /**
+   * Delete records by complete dedupe keys, or by providing a non-empty `marketoGUID` on every
+   * record. A batch cannot mix the two modes.
+   */
   delete(records: Record<string, unknown>[]): Promise<void>;
 }
 
