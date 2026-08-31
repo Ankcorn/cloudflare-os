@@ -3395,6 +3395,45 @@ describe("Marketo request encoding", () => {
     expect(`${error.message}\n${error.stack}`).not.toContain(marker);
   });
 
+  it("rejects redirects for Identity credentials and API bearer tokens", async () => {
+    let requests: RequestInit[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      requests.push(init ?? {});
+      return requests.length === 1
+        ? Response.json({ access_token: "token", expires_in: 3600 })
+        : Response.json({ success: true, result: [] });
+    });
+
+    await fetchAccessToken({ endpoint: ORIGIN, clientId: "client", clientSecret: "secret" });
+    await new MarketoClient(ORIGIN, { getToken: async () => "token" })
+      .getLeads("email", ["a@example.com"]);
+
+    expect(requests).toHaveLength(2);
+    expect(requests.every(request => request.redirect === "error")).toBe(true);
+  });
+
+  it("sanitizes redirect failures without retrying writes", async () => {
+    let calls = 0;
+    let marker = "redirected-to-attacker";
+    vi.stubGlobal("fetch", async () => {
+      calls++;
+      throw new Error(marker);
+    });
+
+    let identityError = await fetchAccessToken({
+      endpoint: ORIGIN, clientId: "client", clientSecret: "secret",
+    }).catch(error => error);
+    expect(identityError.message).toBe("Could not reach the Marketo Identity endpoint.");
+    expect(`${identityError.message}\n${identityError.stack}`).not.toContain(marker);
+
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "token" });
+    let apiError = await client.syncLeads([{ email: "a@example.com" }], "createOnly", "email")
+      .catch(error => error);
+    expect(apiError.message).toBe("Could not reach the Marketo API.");
+    expect(`${apiError.message}\n${apiError.stack}`).not.toContain(marker);
+    expect(calls).toBe(2);
+  });
+
   it("withholds provider-controlled API error text", async () => {
     let marker = "customer-data-marker";
     let { client } = clientReturning({

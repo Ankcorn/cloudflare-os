@@ -332,7 +332,7 @@ export async function fetchAccessToken(
 
   let response: Response;
   try {
-    response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(30_000) });
   } catch {
     throw new MarketoError("Could not reach the Marketo Identity endpoint.");
   }
@@ -403,6 +403,7 @@ export class MarketoClient {
           : undefined;
       let init: RequestInit = {
         method: options?.method ?? "GET",
+        redirect: "error",
         headers: {
           // Marketo is removing `access_token` query-parameter auth on 2026-07-31; the
           // Authorization header is the only supported form going forward.
