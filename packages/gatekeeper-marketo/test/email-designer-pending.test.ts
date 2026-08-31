@@ -51,7 +51,9 @@ describe("Email Designer pending-state simulation", () => {
       },
       {
         id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "source",
-        name: "Cloned", sourceSnapshot: designerCloneSnapshot({}),
+        name: "Cloned", sourceSnapshot: designerCloneSnapshot({
+          templateId: "template-1", appData: { workspaceId: "1", folderId: "10" },
+        }),
       },
     ]);
     let designer = new MarketoEmailDesignerImpl(ctx);
@@ -101,6 +103,7 @@ describe("Email Designer pending-state simulation", () => {
         items: [{ id: "email-1", name: "Delete me", appData: { workspaceId: "1" } }],
         totalItems: 1, currentPage: 0, pageSize: 50,
       }),
+      getDesignerAsset: async () => ({ id: "email-1", name: "Delete me", appData: { workspaceId: "1" } }),
     }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
 
     expect(await new MarketoEmailDesignerImpl(ctx).listEmails("1")).toMatchObject({ items: [], totalItems: 0 });
@@ -181,7 +184,99 @@ describe("Email Designer pending-state simulation", () => {
 
     expect(first).toMatchObject({ items: [{ id: "a" }, { id: "b", name: "Bravo" }], totalItems: 4 });
     expect(second).toMatchObject({ items: [{ id: "c", name: "Updated Charlie" }, { id: "d" }], totalItems: 4 });
-    expect(requestedPages).toEqual([0, 1, 2, 0, 1, 2]);
+    expect(requestedPages).toEqual([0, 0, 1, 2]);
+  });
+
+  it("uses the persisted clone snapshot without rereading later source state", async () => {
+    let sourceReads = 0;
+    let snapshot = designerCloneSnapshot({
+      templateId: "~template",
+      appData: { workspaceId: "1", folderId: "~folder" },
+      data: { html: { body: "<p>At clone time</p>" } },
+    });
+    let { ctx } = context({
+      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 50 }),
+      getDesignerAsset: async () => {
+        sourceReads++;
+        return { id: "source", data: { html: { body: "Later live content" } } };
+      },
+    }, [
+      { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "source", patch: { name: "Before clone" } },
+      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~clone", sourceId: "source", name: "Copy", sourceSnapshot: snapshot },
+      { id: 3, type: "designerUpdate", asset: "designerEmail", targetId: "source", patch: { data: { html: { body: "After clone" } } } },
+    ], value => value === "~template" ? "template-42" : value);
+    ctx.resolveAssetId = value => value === "~folder" ? 17 : undefined;
+
+    let result = await new MarketoDesignerEmailImpl(ctx, "~clone").describe();
+
+    expect(result).toMatchObject({
+      name: "Copy",
+      templateId: "template-42",
+      folderId: "17",
+      content: { html: "<p>At clone time</p>" },
+      status: "draft",
+    });
+    expect(sourceReads).toBe(0);
+  });
+
+  it("rejects every post-delete operation before provider or approval access", async () => {
+    let providerReads = 0;
+    let providerWrites = 0;
+    let { ctx } = context({
+      getDesignerAsset: async () => {
+        providerReads++;
+        return { id: "email-1" };
+      },
+      getDesignerAssetUsedBy: async () => {
+        providerReads++;
+        return { result: [] };
+      },
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    ctx.submitDesigner = async () => { providerWrites++; };
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+
+    await expect(email.update({ name: "No" })).rejects.toThrow(/was deleted/);
+    await expect(email.clone("No")).rejects.toThrow(/was deleted/);
+    await expect(email.approve()).rejects.toThrow(/was deleted/);
+    expect(() => email.delete()).toThrow(/was deleted/);
+    await expect(email.getUsedBy()).rejects.toThrow(/was deleted/);
+    expect(providerReads).toBe(0);
+    expect(providerWrites).toBe(0);
+
+    await expect(email.describe()).rejects.toThrow(/was deleted/);
+    expect(providerReads).toBe(1);
+  });
+
+  it("merges a page without materializing an upstream collection over 1000 rows", async () => {
+    let requestedPages: number[] = [];
+    let { ctx } = context({
+      filterDesignerAssets: async (_kind, options) => {
+        let pageIndex = options.pageIndex ?? 0;
+        let pageSize = options.pageSize ?? 50;
+        requestedPages.push(pageIndex);
+        let start = pageIndex * pageSize;
+        return {
+          items: Array.from({ length: Math.min(pageSize, 1_500 - start) }, (_, offset) => ({
+            id: `email-${start + offset}`,
+            name: `Email ${start + offset}`,
+            status: "draft",
+            appData: { workspaceId: "1" },
+          })),
+          totalItems: 1_500,
+          currentPage: pageIndex,
+          pageSize,
+        };
+      },
+      getDesignerAsset: async () => ({
+        id: "email-1200", name: "Email 1200", status: "draft", appData: { workspaceId: "1" },
+      }),
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1200" }]);
+
+    let result = await new MarketoEmailDesignerImpl(ctx).listEmails("1", { pageSize: 20 });
+
+    expect(result).toMatchObject({ pageIndex: 0, pageSize: 20, totalItems: 1_499 });
+    expect(result.items).toHaveLength(20);
+    expect(requestedPages).toEqual([0]);
   });
 
   it("preserves untouched content channels and text fields across partial updates", async () => {

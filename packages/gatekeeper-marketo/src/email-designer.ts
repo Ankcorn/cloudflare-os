@@ -19,6 +19,8 @@ import { parseMarketoDate } from "./marketo-api";
 import { retainSessionContext, type SessionContext } from "./session";
 import {
   designerCloneSnapshot,
+  designerCloneSnapshotRecord,
+  resolveDesignerCloneSnapshot,
   updateDesignerCloneSnapshot,
   type DesignerCloneSnapshot,
   type EmailDesignerAction,
@@ -31,6 +33,7 @@ export type EmailDesignerContext = SessionContext & {
   allocateProvisional(): string;
   logicalKind(id: string): DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind | undefined;
   pendingDesigner(): EmailDesignerAction[];
+  resolveAssetId?(id: string): number | undefined;
   resolveDesignerId(id: string): string | undefined;
   submitDesigner(action: EmailDesignerActionInput): Promise<void>;
 };
@@ -38,7 +41,6 @@ export type EmailDesignerContext = SessionContext & {
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_ARRAY_ITEMS = 100;
 const MAX_DURABLE_PAYLOAD_BYTES = 1280 * 1024;
-const MAX_FILTER_RESULTS = 1_000;
 const DESIGNER_PAGE_SIZE = 50;
 
 function path(kind: EmailDesignerKind): DesignerAssetKind {
@@ -277,34 +279,43 @@ function matchesList(
   return true;
 }
 
-function sortDesignerItems(items: Record<string, unknown>[], sortKey: string | undefined, sortOrder: "ASC" | "DESC" | undefined): void {
-  if (sortKey === undefined) return;
+function compareDesignerItems(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+  sortKey: string,
+  sortOrder: "ASC" | "DESC" | undefined,
+): number {
   let direction = sortOrder === "DESC" ? -1 : 1;
-  items.sort((left, right) => {
-    let a = left[sortKey];
-    let b = right[sortKey];
-    if (a === b) return String(left.id).localeCompare(String(right.id)) * direction;
-    if (a === undefined) return direction;
-    if (b === undefined) return -direction;
-    let first = a instanceof Date ? a.getTime() : a;
-    let second = b instanceof Date ? b.getTime() : b;
-    if (typeof first === "number" && typeof second === "number") return (first - second) * direction;
-    return String(first).localeCompare(String(second)) * direction;
-  });
+  let a = left[sortKey];
+  let b = right[sortKey];
+  if (a === b) return String(left.id).localeCompare(String(right.id)) * direction;
+  if (a === undefined) return direction;
+  if (b === undefined) return -direction;
+  let first = a instanceof Date ? a.getTime() : a;
+  let second = b instanceof Date ? b.getTime() : b;
+  if (typeof first === "number" && typeof second === "number") return (first - second) * direction;
+  return String(first).localeCompare(String(second)) * direction;
 }
 
-async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity, seen = new Set<string>()): Promise<Record<string, unknown>> {
-  if (seen.has(assetId)) throw new Error(`Designer ${kind} ${assetId} has a circular clone dependency.`);
-  seen.add(assetId);
+async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity): Promise<Record<string, unknown>> {
   let creation = ctx.pendingDesigner().find(action => action.id < before && action.asset === kind &&
     (action.type === "designerCreate" || action.type === "designerClone") && action.provisionalId === assetId);
   let base: Record<string, unknown>;
   if (creation?.type === "designerCreate") {
     base = normalize({ id: assetId, ...(creation.body as RawDesignerAsset), status: "draft" }, assetId, true);
   } else if (creation?.type === "designerClone") {
-    base = { ...(await summary(ctx, kind, creation.sourceId, creation.id, seen)), id: assetId, name: creation.name,
-      ...(creation.description === undefined ? {} : { description: creation.description }), status: "draft",
-      createdAt: undefined, modifiedAt: undefined };
+    let resolved = resolveDesignerCloneSnapshot(
+      creation.sourceSnapshot,
+      value => ctx.resolveDesignerId(value) ?? value,
+      value => ctx.resolveAssetId?.(value) ?? value,
+    );
+    base = normalize({
+      id: assetId,
+      ...designerCloneSnapshotRecord(resolved) as RawDesignerAsset,
+      name: creation.name,
+      ...(creation.description === undefined ? {} : { description: creation.description }),
+      status: "draft",
+    }, assetId, true);
   } else {
     let physical = ctx.resolveDesignerId(assetId);
     if (physical === undefined) throw new Error(`Designer ${kind} ${assetId} is still pending creation.`);
@@ -370,34 +381,6 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
     }
 
-    let upstream = new Map<string, RawDesignerAsset>();
-    let fetchedResults = 0;
-    for (let upstreamPage = 0; ; upstreamPage++) {
-      let raw = await client.filterDesignerAssets(path(kind), {
-        ...query, pageIndex: upstreamPage, pageSize: DESIGNER_PAGE_SIZE,
-      });
-      if (raw.totalItems !== undefined && raw.totalItems > MAX_FILTER_RESULTS ||
-          fetchedResults + (raw.items?.length ?? 0) > MAX_FILTER_RESULTS) {
-        throw new Error(`Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
-      }
-      let page = raw.items ?? [];
-      fetchedResults += page.length;
-      for (let item of page) {
-        let assetId = item.id === undefined ? undefined : String(item.id);
-        if (!assetId) throw new Error("Marketo returned a designer asset without an id.");
-        if (!upstream.has(assetId)) upstream.set(assetId, item);
-      }
-      if (raw.totalItems !== undefined && upstream.size >= raw.totalItems) break;
-      if (page.length === 0 && raw.totalItems !== undefined) {
-        throw new Error("Marketo returned invalid designer paging state.");
-      }
-      let effectivePageSize = raw.pageSize && raw.pageSize > 0 ? raw.pageSize : DESIGNER_PAGE_SIZE;
-      if (page.length < effectivePageSize) break;
-      if (fetchedResults === MAX_FILTER_RESULTS) {
-        throw new Error(`Marketo returned at least ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
-      }
-    }
-
     let candidateIds: string[] = [];
     for (let action of pending) {
       let candidate = action.type === "designerCreate" || action.type === "designerClone"
@@ -405,44 +388,91 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         : action.targetId;
       if (!candidateIds.some(existing => same(this.#ctx, existing, candidate))) candidateIds.push(candidate);
     }
-    let candidates = new Map<string, { item: Record<string, unknown> | null; isCreation: boolean }>();
+    let candidates = new Map<string, {
+      logicalId: string;
+      item: Record<string, unknown> | null;
+      isCreation: boolean;
+      originalMatches: boolean;
+    }>();
     for (let candidateId of candidateIds) {
       let key = this.#ctx.resolveDesignerId(candidateId) ?? candidateId;
       let isCreation = pending.some(action =>
         (action.type === "designerCreate" || action.type === "designerClone") && same(this.#ctx, action.provisionalId, candidateId));
+      let first = actions(this.#ctx, kind, candidateId)[0];
+      let original = isCreation || !first ? undefined : await summary(this.#ctx, kind, candidateId, first.id);
+      let originalMatches = original === undefined ? false : matchesList(original, workspace, { ...options, status });
       if (actions(this.#ctx, kind, candidateId).some(action => action.type === "designerDelete")) {
-        candidates.set(key, { item: null, isCreation });
+        candidates.set(key, { logicalId: candidateId, item: null, isCreation, originalMatches });
       } else {
-        candidates.set(key, { item: await summary(this.#ctx, kind, candidateId), isCreation });
+        candidates.set(key, {
+          logicalId: candidateId,
+          item: await summary(this.#ctx, kind, candidateId),
+          isCreation,
+          originalMatches,
+        });
       }
     }
 
-    let includedCandidates = new Set<string>();
+    let matchingCandidates = [...candidates.entries()].filter(([, candidate]) =>
+      candidate.item && matchesList(candidate.item, workspace, { ...options, status }));
+    let seen = new Set<string>();
+    let encounteredCandidates = new Set<string>();
     let merged: Record<string, unknown>[] = [];
-    for (let item of upstream.values()) {
-      let normalized = normalize(item);
-      let key = this.#ctx.resolveDesignerId(String(normalized.id)) ?? String(normalized.id);
-      if (!candidates.has(key)) {
-        merged.push(normalized);
-        continue;
+    let upstreamTotal: number | undefined;
+    let exhausted = false;
+    let upstreamPage = 0;
+    let end = (pageIndex + 1) * pageSize;
+    while (!exhausted && (options.sortKey === undefined
+      ? merged.length < end
+      : merged.length < end + candidates.size)) {
+      let raw = await client.filterDesignerAssets(path(kind), {
+        ...query, pageIndex: upstreamPage++, pageSize: DESIGNER_PAGE_SIZE,
+      });
+      upstreamTotal ??= raw.totalItems;
+      let page = raw.items ?? [];
+      let seenBefore = seen.size;
+      for (let item of page) {
+        let assetId = item.id === undefined ? undefined : String(item.id);
+        if (!assetId) throw new Error("Marketo returned a designer asset without an id.");
+        let key = this.#ctx.resolveDesignerId(assetId) ?? assetId;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        let candidate = candidates.get(key);
+        if (candidate) {
+          encounteredCandidates.add(key);
+          if (options.sortKey === undefined && candidate.item &&
+              matchesList(candidate.item, workspace, { ...options, status })) merged.push(candidate.item);
+        } else {
+          merged.push(normalize(item));
+        }
       }
-      let candidate = candidates.get(key)?.item;
-      includedCandidates.add(key);
-      if (candidate) merged.push(candidate);
+      let effectivePageSize = raw.pageSize && raw.pageSize > 0 ? raw.pageSize : DESIGNER_PAGE_SIZE;
+      if (page.length >= effectivePageSize && seen.size === seenBefore) {
+        throw new Error("Marketo returned invalid designer paging state.");
+      }
+      exhausted = page.length < effectivePageSize || page.length === 0 ||
+        raw.totalItems !== undefined && seen.size >= raw.totalItems;
     }
-    for (let [key, candidate] of candidates) {
-      // Exact reads cannot determine whether an existing asset was created by the API user.
-      if (candidate.item && !includedCandidates.has(key) && (candidate.isCreation || !options.isCreatedByMe)) {
-        merged.push(candidate.item);
+    if (options.sortKey !== undefined) {
+      merged.push(...matchingCandidates.flatMap(([key, candidate]) =>
+        candidate.isCreation || !options.isCreatedByMe || encounteredCandidates.has(key) ? [candidate.item!] : []));
+      merged.sort((left, right) => compareDesignerItems(left, right, options.sortKey!, options.sortOrder));
+    } else if (exhausted) {
+      for (let [key, candidate] of matchingCandidates) {
+        if (!encounteredCandidates.has(key) && (candidate.isCreation || !options.isCreatedByMe)) {
+          merged.push(candidate.item!);
+        }
       }
     }
-    let items = merged.filter(item => matchesList(item, workspace, { ...options, status }));
-    sortDesignerItems(items, options.sortKey, options.sortOrder);
-    if (items.length > MAX_FILTER_RESULTS) {
-      throw new Error(`Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
+    let totalItems = options.isCreatedByMe || options.isModifiedByMe ? undefined : upstreamTotal;
+    if (totalItems !== undefined) {
+      for (let [key, candidate] of candidates) {
+        let resolvedCreation = candidate.isCreation && key !== candidate.logicalId;
+        let finalMatches = Boolean(candidate.item && matchesList(candidate.item, workspace, { ...options, status }));
+        if (!resolvedCreation) totalItems += Number(finalMatches) - Number(candidate.originalMatches);
+      }
     }
-    let totalItems = items.length;
-    items = items.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
+    let items = merged.slice(pageIndex * pageSize, end);
     await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
     return { items, totalItems, pageIndex, pageSize };
   }
@@ -507,13 +537,21 @@ abstract class DesignerAssetImpl extends RpcTarget {
     return result;
   }
 
+  private assertNotDeleted(): void {
+    if (actions(this.ctx, this.kind, this.assetId).some(action => action.type === "designerDelete")) {
+      throw new Error(`Marketo designer asset ${this.assetId} was deleted.`);
+    }
+  }
+
   protected async submitUpdate(patch: Record<string, unknown>) {
+    this.assertNotDeleted();
     patch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
     if (Object.keys(patch).length === 0) throw new Error("A non-empty update is required.");
     await submitDesigner(this.ctx, { type: "designerUpdate", asset: this.kind, targetId: this.assetId, patch });
   }
 
   protected async cloneAsset(name: string, description?: string) {
+    this.assertNotDeleted();
     let provisionalId = this.ctx.allocateProvisional();
     let source = await summary(this.ctx, this.kind, this.assetId);
     let sourceSnapshot = source.cloneSnapshot as DesignerCloneSnapshot | undefined;
@@ -525,6 +563,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
   }
 
   protected async lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
+    this.assertNotDeleted();
     let physical = this.ctx.resolveDesignerId(this.assetId);
     if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
     let raw = await (await this.ctx.client()).getDesignerAsset(path(this.kind), physical);
@@ -543,9 +582,13 @@ abstract class DesignerAssetImpl extends RpcTarget {
   approve() { return this.lifecycle("approve"); }
   unapprove() { return this.lifecycle("unapprove"); }
   discardDraft() { return this.lifecycle("discard"); }
-  delete() { return submitDesigner(this.ctx, { type: "designerDelete", asset: this.kind, targetId: this.assetId }); }
+  delete() {
+    this.assertNotDeleted();
+    return submitDesigner(this.ctx, { type: "designerDelete", asset: this.kind, targetId: this.assetId });
+  }
 
   async getUsedBy(pageIndex = 0, pageSize = 20) {
+    this.assertNotDeleted();
     if (!Number.isSafeInteger(pageIndex) || pageIndex < 0) throw new Error("pageIndex must be a non-negative integer.");
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("pageSize must be between 1 and 50.");
     let physical = this.ctx.resolveDesignerId(this.assetId);

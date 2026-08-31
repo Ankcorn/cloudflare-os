@@ -54,7 +54,8 @@ function jsonValue(value: unknown): unknown {
   return value;
 }
 
-function snapshotRecord(snapshot: DesignerCloneSnapshot): Record<DesignerCloneField, unknown> {
+/** Convert a persisted clone snapshot back to its clone-relevant source fields. */
+export function designerCloneSnapshotRecord(snapshot: DesignerCloneSnapshot): Record<DesignerCloneField, unknown> {
   return Object.fromEntries(SOURCE_COMPARISON_FIELDS.map(field => [
     field,
     snapshot[field].present ? snapshot[field].value : undefined,
@@ -116,9 +117,9 @@ export function designerCloneSnapshot(source: Record<string, unknown>): Designer
 export function resolveDesignerCloneSnapshot(
   snapshot: DesignerCloneSnapshot,
   resolveDesigner: (id: string) => string,
-  resolveAsset: (id: string) => number,
+  resolveAsset: (id: string) => number | string,
 ): DesignerCloneSnapshot {
-  return designerCloneSnapshot(resolvedBody(snapshotRecord(snapshot), resolveDesigner, resolveAsset));
+  return designerCloneSnapshot(resolvedBody(designerCloneSnapshotRecord(snapshot), resolveDesigner, resolveAsset));
 }
 
 /** Apply a simulated designer update to an approval snapshot. */
@@ -126,7 +127,7 @@ export function updateDesignerCloneSnapshot(
   snapshot: DesignerCloneSnapshot,
   patch: Record<string, unknown>,
 ): DesignerCloneSnapshot {
-  let source = snapshotRecord(snapshot);
+  let source = designerCloneSnapshotRecord(snapshot);
   for (let field of SOURCE_COMPARISON_FIELDS) {
     if (patch[field] === undefined) continue;
     if (field === "data") {
@@ -194,7 +195,7 @@ function createDescription(action: Extract<EmailDesignerAction, { type: "designe
 }
 
 function cloneDescription(action: Extract<EmailDesignerAction, { type: "designerClone" }>, name: string): string {
-  let inherited = snapshotRecord(action.sourceSnapshot);
+  let inherited = designerCloneSnapshotRecord(action.sourceSnapshot);
   return [
     `Clone Marketo Email Designer ${name} ${markdownCode(action.sourceId)} with these exact values:`,
     "",
@@ -391,7 +392,7 @@ export async function executeEmailDesignerAction(
 function resolvedBody(
   body: Record<string, unknown>,
   resolveDesigner: (id: string) => string,
-  resolveAsset: (id: string) => number,
+  resolveAsset: (id: string) => number | string,
 ): Record<string, unknown> {
   let result = { ...body };
   if (typeof result.templateId === "string" && result.templateId.startsWith("~")) {
@@ -419,7 +420,7 @@ function appDataReferences(body: Record<string, unknown>, id: string): boolean {
 export function emailDesignerActionReferences(action: EmailDesignerAction, id: string): boolean {
   if ("targetId" in action && action.targetId === id) return true;
   if (action.type === "designerClone") {
-    let source = snapshotRecord(action.sourceSnapshot);
+    let source = designerCloneSnapshotRecord(action.sourceSnapshot);
     return Boolean(action.sourceId === id || source.templateId === id ||
       source.appData && typeof source.appData === "object" &&
       (Reflect.get(source.appData, "folderId") === id || Reflect.get(source.appData, "programId") === id));

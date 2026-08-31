@@ -988,6 +988,7 @@ export class MarketoGatekeeperImpl
       pendingDesigner: () => this.#pendingIndex()
         .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action)
         .filter((action): action is EmailDesignerAction => Boolean(action && isEmailDesignerAction(action))),
+      resolveAssetId: id => this.#resolveLogicalId(id),
       resolveDesignerId: id => this.#resolveDesignerId(id),
       submitDesigner: async body => await sessionCtx.submit(body),
       submitBusinessObject: async body => await sessionCtx.submit(body),
