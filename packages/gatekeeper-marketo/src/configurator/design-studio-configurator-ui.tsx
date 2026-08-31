@@ -8,6 +8,13 @@ import type {
 export default {
   initial: {},
 
+  async initialValuesFromResourceUrl({ resourceUrl, ui }) {
+    if (new URL(resourceUrl).href !== new URL(await ui.resourceUrl()).href) {
+      throw new Error("This resource belongs to a different Marketo instance. Select its account instead.");
+    }
+    return {};
+  },
+
   isReady() {
     return true;
   },

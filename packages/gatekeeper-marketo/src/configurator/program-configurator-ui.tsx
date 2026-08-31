@@ -7,6 +7,16 @@ import type {
 export default {
   initial: { programId: null },
 
+  async initialValuesFromResourceUrl({ resourceUrl, ui }) {
+    let programId = new URL(resourceUrl).pathname.split("/").at(-1);
+    if (!programId) throw new Error("Invalid Marketo program URL.");
+    programId = decodeURIComponent(programId);
+    if (new URL(resourceUrl).href !== new URL(await ui.resourceUrl(programId)).href) {
+      throw new Error("This resource belongs to a different Marketo instance. Select its account instead.");
+    }
+    return { programId };
+  },
+
   isReady({ values }) {
     return Boolean(values.programId);
   },

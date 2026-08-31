@@ -7,6 +7,16 @@ import type {
 export default {
   initial: { listId: null },
 
+  async initialValuesFromResourceUrl({ resourceUrl, ui }) {
+    let listId = new URL(resourceUrl).pathname.split("/").at(-1);
+    if (!listId) throw new Error("Invalid Marketo list URL.");
+    listId = decodeURIComponent(listId);
+    if (new URL(resourceUrl).href !== new URL(await ui.resourceUrl(listId)).href) {
+      throw new Error("This resource belongs to a different Marketo instance. Select its account instead.");
+    }
+    return { listId };
+  },
+
   isReady({ values }) {
     return Boolean(values.listId);
   },
