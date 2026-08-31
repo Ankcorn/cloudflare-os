@@ -384,6 +384,39 @@ describe("Email Designer pending-state simulation", () => {
     expect(sourceReads).toBe(0);
   });
 
+  it.each([
+    ["approve", "draft", "approved"],
+    ["unapprove", "approved", "draft"],
+  ] as const)("snapshots a pending %s before a later clone", async (operation, sourceState, targetState) => {
+    let raw = {
+      id: "email-1",
+      name: "Source",
+      status: sourceState,
+      state: sourceState,
+      contentId: "content-1",
+      associatedStates: [{ contentId: "content-1", state: sourceState }],
+      data: { html: { body: "<p>Source</p>" } },
+    };
+    let { actions, ctx } = context({ getDesignerAsset: async () => raw });
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+
+    await email[operation]();
+    await email.clone("Copy");
+
+    let clone = actions[1] as Extract<EmailDesignerAction, { type: "designerClone" }>;
+    expect(clone.sourceSnapshot).toEqual(designerCloneSnapshot({
+      ...raw,
+      status: targetState,
+      state: targetState,
+      associatedStates: [{ contentId: "content-1", state: targetState }],
+    }));
+    expect(raw).toMatchObject({
+      status: sourceState,
+      state: sourceState,
+      associatedStates: [{ contentId: "content-1", state: sourceState }],
+    });
+  });
+
   it("rejects every post-delete operation before provider or approval access", async () => {
     let providerReads = 0;
     let providerWrites = 0;

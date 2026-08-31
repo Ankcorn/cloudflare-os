@@ -270,7 +270,18 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
       if (patch.templateId !== undefined) result.templateId = patch.templateId;
     }
     if (action.type === "designerLifecycle") {
-      result.status = action.operation === "approve" || action.operation === "discard" ? "approved" : "draft";
+      let state = action.operation === "approve" || action.operation === "discard" ? "approved" : "draft";
+      result.status = state;
+      if (result.cloneSnapshot && (action.operation === "approve" || action.operation === "unapprove")) {
+        result.cloneSnapshot = updateDesignerCloneSnapshot(
+          result.cloneSnapshot as DesignerCloneSnapshot,
+          {
+            status: state,
+            state,
+            associatedStates: [{ contentId: action.contentId, state }],
+          },
+        );
+      }
     }
     if (action.type === "designerDelete") throw new Error(`Marketo designer asset ${result.id} was deleted.`);
   }

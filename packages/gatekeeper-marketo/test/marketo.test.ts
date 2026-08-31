@@ -5946,6 +5946,74 @@ describe("Email Designer action lifecycle", () => {
     });
   });
 
+  it.each([
+    ["approve", "draft", "approved"],
+    ["unapprove", "approved", "draft"],
+  ] as const)("preflights a clone after its pending source %s dispatches", async (operation, sourceState, targetState) => {
+    let configuration = {
+      appType: "marketo",
+      data: { html: { body: "<p>Source</p>" } },
+      headers: { subject: "Source" },
+      settings: { isOperational: false },
+      contentId: "content-1",
+    };
+    let actions: EmailDesignerAction[] = [
+      {
+        id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-A",
+        operation, contentId: "content-1", sourceState,
+      },
+      {
+        id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
+        sourceId: "email-A", name: "Copy", sourceSnapshot: designerCloneSnapshot({
+          ...configuration,
+          status: targetState,
+          state: targetState,
+          associatedStates: [{ contentId: "content-1", state: targetState }],
+        }),
+      },
+    ];
+    let state = sourceState;
+    let writes: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (init?.body) {
+        writes.push(path);
+        if (path.endsWith("/state/transition")) {
+          state = targetState;
+          return Response.json({ success: true, result: [{ contentId: "content-1", status: state }] });
+        }
+        return Response.json({ success: true, result: [{ id: "email-B" }] });
+      }
+      let result = path.endsWith("/email-B") ? {
+        id: "email-B", name: "Copy",
+        appType: configuration.appType,
+        data: configuration.data,
+        headers: configuration.headers,
+        settings: configuration.settings,
+      } : {
+        id: "email-A", name: "Source", ...configuration,
+        status: state,
+        state,
+        associatedStates: [{ contentId: "content-1", state }],
+      };
+      return Response.json({ success: true, result: [result] });
+    });
+    let stub = await emailDesignerActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, storage) => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/earlier pending mutation/);
+      expect(writes).toEqual([]);
+      await instance.applyAction(1);
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+      expect(storage.storage.kv.get("designerProvisional:~1")).toBe("email-B");
+    });
+    expect(writes).toEqual([
+      "/rest/asset/v2/email/state/transition",
+      "/rest/asset/v2/email/clone",
+    ]);
+  });
+
   it("resolves provisional folder and template references through a dependent designer clone", async () => {
     let logicalConfiguration = {
       appType: "marketo",
