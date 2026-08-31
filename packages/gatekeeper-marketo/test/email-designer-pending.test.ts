@@ -83,6 +83,56 @@ describe("Email Designer pending-state simulation", () => {
     expect(observations).toBe(0);
   });
 
+  it("validates every upstream row against list filters when pending actions exist", async () => {
+    let cases: {
+      kind: "email" | "fragment";
+      workspace: string;
+      folderId?: string;
+      name?: string;
+      status?: string;
+      templateId?: string;
+      fragmentType?: string;
+      options: { folderId?: string; name?: string; status?: string[]; templateId?: string; fragmentType?: string };
+    }[] = [
+      { kind: "email", workspace: "2", options: {} },
+      { kind: "email", workspace: "1", folderId: "11", options: { folderId: "10" } },
+      { kind: "email", workspace: "1", folderId: "10", name: "Other", options: { name: "Expected" } },
+      { kind: "email", workspace: "1", folderId: "10", status: "approved", options: { status: ["draft"] } },
+      { kind: "email", workspace: "1", folderId: "10", templateId: "template-2", options: { templateId: "template-1" } },
+      { kind: "fragment", workspace: "1", folderId: "10", fragmentType: "web", options: { fragmentType: "email" } },
+    ];
+
+    for (let [index, testCase] of cases.entries()) {
+      let observations = 0;
+      let asset: EmailDesignerAction["asset"] = testCase.kind === "fragment" ? "designerFragment" : "designerEmail";
+      let { ctx } = context({
+        getDesignerAsset: async () => ({
+          id: "pending-target", name: "Expected", status: "draft", templateId: "template-1",
+          appData: { workspaceId: "1", folderId: "10" }, settings: { fragmentType: "email" },
+        }),
+        filterDesignerAssets: async () => ({
+          items: [{
+            id: `asset-${index}`,
+            name: "name" in testCase ? testCase.name : "Expected",
+            status: "status" in testCase ? testCase.status : "draft",
+            templateId: "templateId" in testCase ? testCase.templateId : "template-1",
+            appData: { workspaceId: testCase.workspace, folderId: testCase.folderId },
+            settings: { fragmentType: "fragmentType" in testCase ? testCase.fragmentType : "email" },
+          }],
+          totalItems: 1, currentPage: 0, pageSize: 50,
+        }),
+      }, [{ id: 1, type: "designerDelete", asset, targetId: "pending-target" }]);
+      ctx.observe = async () => { observations++; };
+      let designer = new MarketoEmailDesignerImpl(ctx);
+
+      let listing = testCase.kind === "fragment"
+        ? designer.listFragments("1", testCase.options)
+        : designer.listEmails("1", testCase.options);
+      await expect(listing).rejects.toThrow(/outside the requested list filters/);
+      expect(observations).toBe(0);
+    }
+  });
+
   it("includes pending creates and clones that match list filters", async () => {
     let { ctx } = context({
       filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 50 }),

@@ -3088,10 +3088,11 @@ export type RawCampaign = {
 export type RawCampaignAsset = {
   id?: number;
   name?: string;
+  programName?: string;
   description?: string;
   type?: string;
   status?: string;
-  folder?: { id?: number; value?: number; type?: string };
+  folder?: { id?: number; value?: number; type?: string; folderName?: string };
   workspace?: string;
   isActive?: boolean;
   isRequestable?: boolean;

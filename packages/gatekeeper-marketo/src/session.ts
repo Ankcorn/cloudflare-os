@@ -153,7 +153,7 @@ function normalizeCampaign(
     description: campaign.description,
     type: campaign.type,
     status: campaign.status,
-    programName: campaign.programName,
+    programName: campaign.programName ?? (folderType === "program" ? campaign.folder?.folderName : undefined),
     folder: folderId !== undefined && (folderType === "folder" || folderType === "program")
       ? { id: String(folderId), type: folderType }
       : undefined,
@@ -251,7 +251,9 @@ function overlayCampaign(
     if (action.type === "campaignMetadata") Object.assign(result, action.patch);
     if (action.type === "campaignLifecycle") {
       if (action.operation === "delete") return null;
-      if (action.operation === "deactivate") Object.assign(result, { active: false, status: "Inactive" });
+      Object.assign(result, action.operation === "activate"
+        ? { active: true, status: "Active" }
+        : { active: false, status: "Inactive" });
     }
   }
   return result;
@@ -279,7 +281,10 @@ function isCampaignMatch(
   if (filter.requestableOnly && !summary.requestable) return false;
   let name = summary.name.toLocaleLowerCase();
   if (filter.name !== undefined && name !== filter.name.trim().toLocaleLowerCase()) return false;
-  if (filter.nameContains !== undefined && !name.includes(filter.nameContains.trim().toLocaleLowerCase())) return false;
+  if (filter.nameContains !== undefined) {
+    let needle = filter.nameContains.trim().toLocaleLowerCase();
+    if (!name.includes(needle) && !summary.programName?.toLocaleLowerCase().includes(needle)) return false;
+  }
   return true;
 }
 

@@ -3225,6 +3225,37 @@ describe("whole-instance listings", () => {
     expect(calls).toEqual([undefined, "upstream-2"]);
   });
 
+  it("preserves program-name substring matches through campaign overlays", async () => {
+    let actions: CampaignAction[] = [
+      { id: 1, type: "campaignMetadata", targetId: "1", campaignName: "Old", patch: { name: "Renamed" } },
+      {
+        id: 2, type: "campaignLifecycle", targetId: "2", campaignName: "Activate me",
+        campaignType: "trigger", operation: "activate",
+      },
+    ];
+    let { ctx } = campaignContext({
+      getCampaigns: async () => ({
+        result: [{ id: 3, name: "Unrelated", programName: "Weekly Digest" }],
+        moreResult: false,
+      }),
+      getSmartCampaign: async id => ({
+        id,
+        name: id === 1 ? "Old" : "Activate me",
+        folder: { type: "Program", value: 10, folderName: "Weekly Digest" },
+        type: id === 2 ? "trigger" : "batch",
+        isActive: false,
+      }),
+    }, actions);
+
+    let page = await new MarketoSessionImpl(ctx).listSmartCampaigns({ nameContains: "Digest" });
+
+    expect(page.campaigns).toEqual([
+      expect.objectContaining({ id: 1, name: "Renamed", programName: "Weekly Digest" }),
+      expect.objectContaining({ id: 2, active: true, status: "Active", programName: "Weekly Digest" }),
+      expect.objectContaining({ id: 3, name: "Unrelated", programName: "Weekly Digest" }),
+    ]);
+  });
+
   it("returns one page and passes the continuation token through", async () => {
     let seen: (string | undefined)[] = [];
     let session = new MarketoSessionImpl(stubContext({

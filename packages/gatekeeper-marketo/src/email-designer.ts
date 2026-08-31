@@ -453,6 +453,10 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
       let page = raw.items ?? [];
       let seenBefore = seen.size;
       for (let item of page) {
+        let normalized = normalize(item);
+        if (!matchesList(normalized, workspace, { ...options, status })) {
+          throw new Error("Marketo returned a designer asset outside the requested list filters.");
+        }
         let assetId = item.id === undefined ? undefined : String(item.id);
         if (!assetId) throw new Error("Marketo returned a designer asset without an id.");
         let key = this.#ctx.resolveDesignerId(assetId) ?? assetId;
@@ -464,7 +468,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
           if (options.sortKey === undefined && candidate.item &&
               matchesList(candidate.item, workspace, { ...options, status })) merged.push(candidate.item);
         } else {
-          merged.push(normalize(item));
+          merged.push(normalized);
         }
       }
       let effectivePageSize = raw.pageSize && raw.pageSize > 0 ? raw.pageSize : DESIGNER_PAGE_SIZE;
