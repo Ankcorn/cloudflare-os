@@ -2446,7 +2446,7 @@ describe("Design Studio simulation", () => {
 
     expect(ids).toEqual(["1", "2", "3"]);
     expect(pages).toBe(3);
-    expect(getFoldersByName).toHaveBeenCalledTimes(3);
+    expect(getFoldersByName).toHaveBeenCalledTimes(6);
   });
 
   it("overlays pending folder renames and deletions in rooted exact-name lists", async () => {
@@ -2557,7 +2557,7 @@ describe("Design Studio simulation", () => {
       folderId: { id, type: "Program" },
       folderType: "Folder",
     }));
-    let getFoldersByName = vi.fn(async () => []);
+    let getFoldersByName = vi.fn(async (_name: string, _options: { type?: "Folder" | "Program" }) => []);
     let { ctx, actions } = designContext({ getFolder, getFoldersByName });
     let studio = new MarketoDesignStudioImpl(ctx);
 
@@ -2567,11 +2567,10 @@ describe("Design Studio simulation", () => {
     await expect(program.delete()).rejects.toThrow(/Program folders cannot be deleted/);
     expect(actions).toEqual([]);
     await studio.listFolders({ name: "Child", root: { id: "10", type: "program" } });
-    expect(getFoldersByName).toHaveBeenCalledWith("Child", {
-      type: "Program",
-      root: { id: 10, type: "Program" },
-      workspace: undefined,
-    });
+    expect(getFoldersByName.mock.calls.map(([, options]) => options)).toEqual([
+      { type: "Folder", root: { id: 10, type: "Program" }, workspace: undefined },
+      { type: "Program", root: { id: 10, type: "Program" }, workspace: undefined },
+    ]);
   });
 
   it("accepts only explicit folder discriminators and gives nested types precedence", async () => {

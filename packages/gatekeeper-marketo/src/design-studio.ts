@@ -43,6 +43,7 @@ import type {
   MarketoFolderRef,
   RawDesignStudioAsset,
   RawFile,
+  RawFolder,
 } from "./marketo-api";
 import { ASSET_PAGE_MAX, parseMarketoDate } from "./marketo-api";
 import type {
@@ -587,17 +588,37 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let physicalRoot = root ? this.#ctx.resolveId(root.id) : undefined;
     let rootRef = root && physicalRoot !== undefined ? { id: physicalRoot, type: root.type } : undefined;
     let browse = options.name === undefined || validated.maxDepth !== undefined;
-    let raw = root && physicalRoot === undefined ? [] : browse
-      ? await client.getFolders({ root: rootRef, maxDepth: validated.maxDepth, workspace: validated.workspace, offset, maxReturn: batchSize })
-      : await client.getFoldersByName(name ?? "", {
-          type: root?.type,
-          root: rootRef,
-          workspace: validated.workspace,
-        });
+    let raw: RawFolder[];
+    let upstreamCount = 0;
+    let upstreamHasMore = false;
+    if (root && physicalRoot === undefined) {
+      raw = [];
+    } else if (browse) {
+      let page = await folderBrowsePage(
+        client,
+        rootRef,
+        root ? (validated.maxDepth ?? DEFAULT_FOLDER_DEPTH) + 1 : validated.maxDepth,
+        validated.workspace,
+        offset,
+        batchSize,
+      );
+      raw = page.raw;
+      upstreamCount = page.consumed;
+      upstreamHasMore = page.hasMore;
+    } else {
+      let types = ["Folder", "Program"] as const;
+      let pages = await Promise.all(types.map(type => client.getFoldersByName(name ?? "", {
+        type, root: rootRef, workspace: validated.workspace,
+      })));
+      raw = pages.flatMap((page, index) => page.filter(item => normalizeFolder(item).type === types[index]!.toLowerCase()));
+      upstreamCount = raw.length;
+    }
+    if (physicalRoot !== undefined) raw = raw.filter(item => readId(item) !== physicalRoot);
     let upstream = raw.map(item => normalizeFolder(item))
       .map(item => overlaySummary(item, actionsFor(this.#ctx, "folder", item.id, pending))).filter(notNull)
       .filter(item => name === undefined || item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    let candidateIds = state.pending ?? pendingFolderIds(this.#ctx, root, validated.maxDepth, pending);
+    let candidateIds = (state.pending ?? pendingFolderIds(this.#ctx, root, validated.maxDepth, pending))
+      .filter(id => !root || !sameLogicalId(this.#ctx, id, root.id));
     let candidateBatch = pendingFolderBatch(this.#ctx, candidateIds, maxReturn, pending);
     let candidates = await pendingFolderSummaries(
       this.#ctx, client, candidateBatch, root, physicalRoot, validated.maxDepth, validated.workspace, pending,
@@ -612,8 +633,8 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       candidates,
       candidateIds.slice(candidateBatch.length),
       upstream,
-      raw.length,
-      browse && raw.length === batchSize,
+      upstreamCount,
+      upstreamHasMore,
       pageState,
       resolvedMask(this.#ctx, pageState.masked),
       maxReturn,
@@ -789,6 +810,29 @@ export class MarketoDesignStudioImpl extends RpcTarget {
 }
 
 function notNull<T>(value: T | null): value is T { return value !== null; }
+
+async function folderBrowsePage(
+  client: MarketoClient,
+  root: MarketoFolderRef | undefined,
+  maxDepth: number | undefined,
+  workspace: string | undefined,
+  offset: number,
+  maxReturn: number,
+): Promise<{ raw: RawFolder[]; consumed: number; hasMore: boolean }> {
+  let raw: RawFolder[] = [];
+  let consumed = 0;
+  let hasMore = false;
+  let attempts = root ? 2 : 1;
+  while (attempts-- > 0 && raw.length < maxReturn) {
+    let requested = maxReturn - raw.length;
+    let page = await client.getFolders({ root, maxDepth, workspace, offset: offset + consumed, maxReturn: requested });
+    consumed += page.length;
+    raw.push(...(root ? page.filter(item => readId(item) !== root.id) : page));
+    hasMore = page.length === requested;
+    if (!hasMore) break;
+  }
+  return { raw, consumed, hasMore };
+}
 
 function statusValue(status: string | undefined): MarketoAssetStatus | undefined {
   if (status === undefined) return undefined;

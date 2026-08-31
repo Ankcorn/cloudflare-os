@@ -258,7 +258,8 @@ async function verifyCreatedAsset(
   }
   if (asset === "form") { expected.locale = input.locale; expected.language = input.language; }
   if (asset === "file") expected.mimeType = input.mimeType;
-  if (!created || created.id !== id || created.name !== input.name || folderId !== parent.id || folder?.type !== parent.type ||
+  if (!created || created.id !== id || created.name !== input.name || folderId !== parent.id ||
+      (asset !== "file" && folder?.type !== parent.type) ||
       Object.entries(expected).some(([key, value]) => value !== undefined && actual?.[key] !== value)) {
     throw new Error(`Marketo could not verify created ${asset} ${id} against the approved request.`);
   }

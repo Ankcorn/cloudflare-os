@@ -91,12 +91,80 @@ describe("classic Design Studio regressions", () => {
     expect(result.items.map(item => item.id)).toEqual(["11"]);
     expect(getFolders).toHaveBeenCalledWith({
       root: { id: 10, type: "Folder" },
-      maxDepth: 1,
+      maxDepth: 2,
       workspace: undefined,
       offset: 0,
       maxReturn: 200,
     });
     expect(getFoldersByName).not.toHaveBeenCalled();
+  });
+
+  it("queries both folder result types independently of the root type", async () => {
+    let getFoldersByName = vi.fn(async (_name: string, options: { type?: "Folder" | "Program" }) =>
+      options.type === "Folder"
+        ? [{ id: 11, name: "Target", folderId: { id: 11, type: "Folder" }, parent: { id: 10, type: "Program" } }]
+        : [{ id: 12, name: "Target", folderId: { id: 12, type: "Program" }, parent: { id: 10, type: "Program" } }]);
+    let { ctx } = context({ getFoldersByName });
+
+    let result = await new MarketoDesignStudioImpl(ctx).listFolders({
+      name: "Target",
+      root: { id: "10", type: "program" },
+    });
+
+    expect(result.items.map(item => [item.id, item.type])).toEqual([["11", "folder"], ["12", "program"]]);
+    expect(getFoldersByName.mock.calls.map(([, options]) => options)).toEqual([
+      { type: "Folder", root: { id: 10, type: "Program" }, workspace: undefined },
+      { type: "Program", root: { id: 10, type: "Program" }, workspace: undefined },
+    ]);
+  });
+
+  it("excludes a rooted browse result before depth and page-size semantics", async () => {
+    let records = [
+      { id: 10, name: "Root", folderId: { id: 10, type: "Folder" } },
+      { id: 11, name: "Child one", folderId: { id: 11, type: "Folder" }, parent: { id: 10, type: "Folder" } },
+      { id: 12, name: "Child two", folderId: { id: 12, type: "Folder" }, parent: { id: 10, type: "Folder" } },
+    ];
+    let getFolders = vi.fn(async ({ offset = 0, maxReturn = 200 }: {
+      offset?: number; maxReturn?: number; maxDepth?: number;
+    }) =>
+      records.slice(offset, offset + maxReturn));
+    let { ctx } = context({ getFolders });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let options = { root: { id: "10", type: "folder" } as const, maxDepth: 20, maxResults: 1 };
+
+    let first = await studio.listFolders(options);
+    let second = await studio.listFolders({ ...options, pageToken: first.nextPageToken });
+
+    expect(first.items.map(item => item.id)).toEqual(["11"]);
+    expect(second.items.map(item => item.id)).toEqual(["12"]);
+    expect(getFolders.mock.calls.map(([request]) => [request.offset, request.maxReturn, request.maxDepth]))
+      .toEqual([[0, 1, 21], [1, 1, 21], [2, 1, 21]]);
+  });
+
+  it("verifies a created file by parent id without treating its category as the parent type", async () => {
+    let recordCreation = vi.fn();
+    await executeDesignStudioAction({
+      id: 1,
+      type: "designCreate",
+      asset: "file",
+      provisionalId: "~1",
+      parent: { id: "10", type: "Program" },
+      input: {
+        name: "logo.png",
+        mimeType: "image/png",
+        data: new Uint8Array([1]),
+      },
+    }, {
+      createFile: async () => [{ id: 20 }],
+      getFile: async () => ({
+        id: 20,
+        name: "logo.png",
+        mimeType: "image/png",
+        folder: { id: 10, type: "Images" },
+      }),
+    } as unknown as MarketoClient, Number, recordCreation);
+
+    expect(recordCreation).toHaveBeenCalledWith("~1", 20);
   });
 
   it("rejects file status filters in the API type and at runtime", () => {
