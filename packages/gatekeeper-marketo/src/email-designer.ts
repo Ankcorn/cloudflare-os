@@ -201,6 +201,21 @@ function normalize(
   return result;
 }
 
+function listSummary(item: Record<string, unknown>): MarketoDesignerAssetSummary {
+  return {
+    id: String(item.id),
+    name: String(item.name ?? ""),
+    description: item.description as string | undefined,
+    status: item.status as string | undefined,
+    workspaceId: item.workspaceId as string | undefined,
+    folderId: item.folderId as string | undefined,
+    createdBy: item.createdBy as string | undefined,
+    createdAt: item.createdAt as Date | undefined,
+    modifiedBy: item.modifiedBy as string | undefined,
+    modifiedAt: item.modifiedAt as Date | undefined,
+  };
+}
+
 function actions(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity): EmailDesignerAction[] {
   return ctx.pendingDesigner().filter(action => action.id < before && action.asset === kind && (
     (action.type === "designerCreate" || action.type === "designerClone") && action.provisionalId === assetId ||
@@ -376,9 +391,15 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     if (pending.length === 0) {
       let raw = await client.filterDesignerAssets(path(kind), { ...query, pageIndex, pageSize });
       let items = (raw.items ?? []).map(item => normalize(item));
+      if (raw.currentPage !== pageIndex) {
+        throw new Error(`Marketo returned designer page ${String(raw.currentPage)} when page ${pageIndex} was requested.`);
+      }
+      if (items.some(item => !matchesList(item, workspace, { ...options, status }))) {
+        throw new Error("Marketo returned a designer asset outside the requested list filters.");
+      }
       await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
-      return { items, totalItems: raw.totalItems,
-        pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
+      return { items: items.map(listSummary), totalItems: raw.totalItems,
+        pageIndex: raw.currentPage, pageSize: raw.pageSize ?? pageSize };
     }
 
     let candidateIds: string[] = [];
@@ -472,7 +493,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         if (!resolvedCreation) totalItems += Number(finalMatches) - Number(candidate.originalMatches);
       }
     }
-    let items = merged.slice(pageIndex * pageSize, end);
+    let items = merged.slice(pageIndex * pageSize, end).map(listSummary);
     await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
     return { items, totalItems, pageIndex, pageSize };
   }

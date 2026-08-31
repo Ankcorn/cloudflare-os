@@ -1204,7 +1204,14 @@ describe("new Email Designer", () => {
         requests.push({ kind, options });
         let page = options.pageIndex ?? 0;
         return {
-          items: [{ id: `${kind}-${page}-1`, name: "First" }, { id: `${kind}-${page}-2`, name: "Second" }],
+          items: [1, 2].map(index => ({
+            id: `${kind}-${page}-${index}`,
+            name: options.name ?? (index === 1 ? "First" : "Second"),
+            status: options.status?.[0] ?? "draft",
+            appData: { workspaceId: options.workspaceId, folderId: options.folderId },
+            templateId: options.templateId,
+            settings: { fragmentType: options.fragmentType },
+          })),
           totalItems: 4,
           currentPage: page,
           pageSize: options.pageSize,
@@ -1223,7 +1230,7 @@ describe("new Email Designer", () => {
     await designer.listFragments("1", { fragmentType: "email" });
 
     expect(first).toMatchObject({
-      items: [{ id: "email-0-1", name: "First" }, { id: "email-0-2", name: "Second" }],
+      items: [{ id: "email-0-1", name: "First" }, { id: "email-0-2", name: "First" }],
       totalItems: 4, pageIndex: 0, pageSize: 2,
     });
     expect(second.items.map(item => item.id)).toEqual(["email-1-1", "email-1-2"]);
@@ -2698,13 +2705,13 @@ describe("custom object normalization", () => {
       describeCustomObject: async () => SCHEMA,
       queryCustomObjectByDedupeKeys: async (apiName, input, fields) => {
         requests.push({ apiName, input, fields });
-        return [{ marketoGUID: "g1" }];
+        return [{ marketoGUID: "g1", sourceID: "source-1", leadID: 7 }];
       },
     }), "orderStatus");
 
     await expect(object.queryByDedupeKeys([
       { sourceID: "source-1", leadID: 7, ignored: "not sent" },
-    ], ["status"])).resolves.toEqual([{ marketoGUID: "g1" }]);
+    ], ["status"])).resolves.toEqual([{ marketoGUID: "g1", sourceID: "source-1", leadID: 7 }]);
     expect(requests).toEqual([{
       apiName: "orderStatus",
       input: [{ sourceID: "source-1", leadID: 7 }],
@@ -2712,6 +2719,26 @@ describe("custom object normalization", () => {
     }]);
     await expect(object.queryByDedupeKeys([{ sourceID: "source-1" }]))
       .rejects.toThrow(/leadID/);
+  });
+
+  it("rejects custom-object rows outside scalar and compound filter keys before observation", async () => {
+    let notes: string[] = [];
+    let scalar = new MarketoCustomObjectImpl(stubContext({
+      queryCustomObject: async () => [{ marketoGUID: "g1", sourceID: "other" }],
+    }, notes), "orderStatus");
+    await expect(scalar.query("sourceID", ["requested"]))
+      .rejects.toThrow(/outside the requested filter/);
+    expect(notes).toEqual([]);
+
+    let compound = new MarketoCustomObjectImpl(stubContext({
+      describeCustomObject: async () => SCHEMA,
+      queryCustomObjectByDedupeKeys: async () => [
+        { marketoGUID: "g1", sourceID: "source-1", leadID: 8 },
+      ],
+    }, notes), "orderStatus");
+    await expect(compound.queryByDedupeKeys([{ sourceID: "source-1", leadID: 7 }]))
+      .rejects.toThrow(/outside the requested dedupe keys/);
+    expect(notes).toEqual([]);
   });
 
   it("deletes GUID-only records explicitly by marketoGUID", async () => {
@@ -3702,6 +3729,28 @@ describe("standard CRM business objects", () => {
     expect(submitted).toEqual([]);
   });
 
+  it("rejects standard-object rows outside scalar and compound filter keys before observation", async () => {
+    let notes: string[] = [];
+    let { ctx } = businessContext({
+      queryBusinessObject: async () => ({ result: [{ id: 9 }], moreResult: false }),
+    }, [], notes);
+    await expect(new MarketoBusinessObjectImpl(ctx, "company").query({
+      filter: { field: "id", values: [7] },
+    })).rejects.toThrow(/outside the requested filter/);
+    expect(notes).toEqual([]);
+
+    let compound = businessContext({
+      queryBusinessObject: async () => ({
+        result: [{ externalOpportunityId: "o-1", leadId: 7, role: "Influencer" }],
+        moreResult: false,
+      }),
+    }, [], notes);
+    await expect(new MarketoBusinessObjectImpl(compound.ctx, "opportunityRole").query({
+      filter: { dedupeKeys: [{ externalOpportunityId: "o-1", leadId: 7, role: "Decision Maker" }] },
+    })).rejects.toThrow(/outside the requested filter/);
+    expect(notes).toEqual([]);
+  });
+
   it("submits complete, decision-gated upserts and deletes", async () => {
     let submitted: MarketoActionInput[] = [];
     let { ctx } = businessContext({}, submitted);
@@ -3908,8 +3957,8 @@ describe("filter reads", () => {
   it("returns every custom-object page through query", async () => {
     let bodies: string[] = [];
     let envelopes = [
-      { success: true, result: [{ marketoGUID: "g1" }], moreResult: true, nextPageToken: "objects-2" },
-      { success: true, result: [{ marketoGUID: "g2" }], moreResult: false },
+      { success: true, result: [{ marketoGUID: "g1", sourceID: "1" }], moreResult: true, nextPageToken: "objects-2" },
+      { success: true, result: [{ marketoGUID: "g2", sourceID: "1" }], moreResult: false },
     ];
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
       bodies.push(String(init.body));

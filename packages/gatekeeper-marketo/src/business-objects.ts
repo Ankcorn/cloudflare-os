@@ -97,6 +97,13 @@ function fieldsFor(kind: MarketoBusinessObjectKind, matchBy: MarketoBusinessObje
   return matchBy === "idField" ? [object.idField] : object.dedupeFields;
 }
 
+function sameFilterValue(actual: unknown, requested: unknown): boolean {
+  if (actual === requested) return true;
+  let scalar = (value: unknown) =>
+    typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+  return scalar(actual) && scalar(requested) && String(actual) === String(requested);
+}
+
 @validateRpc()
 export class MarketoBusinessObjectImpl extends RpcTarget {
   private disposed = false;
@@ -180,6 +187,15 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
     }
     try {
       let page = await (await this.ctx.client()).queryBusinessObject(this.kind, query);
+      let filter = query.filter;
+      let matches = "dedupeKeys" in filter
+        ? (record: Record<string, unknown>) => filter.dedupeKeys.some(key =>
+          BUSINESS_OBJECTS[this.kind].dedupeFields.every(field => sameFilterValue(record[field], key[field])))
+        : (record: Record<string, unknown>) => filter.values.some(value =>
+          sameFilterValue(record[filter.field], value));
+      if (page.result.some(record => !matches(record))) {
+        throw new MarketoError(`Marketo returned a ${this.kind} record outside the requested filter.`);
+      }
       let count = page.result.length;
       await this.ctx.observe(`Read ${count} Marketo ${this.kind} record(s)`, `Queried one page using ${"dedupeKeys" in query.filter ? "compound dedupe keys" : `field ${query.filter.field}`}; ${count} record(s) returned.`);
       return { records: page.result, moreResult: page.moreResult, nextPageToken: page.nextPageToken };

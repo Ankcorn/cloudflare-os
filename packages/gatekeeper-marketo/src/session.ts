@@ -1314,6 +1314,10 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       values,
       fields,
     );
+    let requested = new Set(values.map(String));
+    if (records.some(record => !isRequestedFilterValue(record[field], requested))) {
+      throw new MarketoError("Marketo returned a custom-object record outside the requested filter.");
+    }
     await this.#ctx.observe(
       `Read ${records.length} \`${this.#apiName}\` record(s)`,
       `Queried custom object \`${this.#apiName}\` where \`${field}\` matches ` +
@@ -1355,6 +1359,10 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       input,
       fields,
     );
+    if (records.some(record => !input.some(key => dedupeFields.every(field =>
+      sameFilterValue(record[field], key[field]))))) {
+      throw new MarketoError("Marketo returned a custom-object record outside the requested dedupe keys.");
+    }
     await this.#ctx.observe(
       `Read ${records.length} \`${this.#apiName}\` record(s)`,
       `Queried custom object \`${this.#apiName}\` by ${keys.length} compound dedupe key(s); ` +
@@ -1386,6 +1394,18 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     }
     await this.#ctx.submit({ type: "customObjectDelete", apiName: this.#apiName, records, deleteBy });
   }
+}
+
+function sameFilterValue(actual: unknown, requested: unknown): boolean {
+  if (actual === requested) return true;
+  let scalar = (value: unknown) =>
+    typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+  return scalar(actual) && scalar(requested) && String(actual) === String(requested);
+}
+
+function isRequestedFilterValue(actual: unknown, requested: Set<string>): boolean {
+  return (typeof actual === "string" || typeof actual === "number" || typeof actual === "boolean") &&
+    requested.has(String(actual));
 }
 
 function requireRecords(records: Record<string, unknown>[]): void {

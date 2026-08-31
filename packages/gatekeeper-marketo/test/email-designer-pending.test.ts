@@ -37,6 +37,52 @@ function context(
 }
 
 describe("Email Designer pending-state simulation", () => {
+  it("returns summary-only list items", async () => {
+    let { ctx } = context({
+      filterDesignerAssets: async () => ({
+        items: [{
+          id: "email-1", name: "Email", appData: { workspaceId: "1", folderId: "10" },
+          headers: { subject: "Secret" }, data: { html: { body: "Secret body" } },
+          settings: { isOperational: true }, templateId: "template-1",
+        }],
+        totalItems: 1, currentPage: 0, pageSize: 20,
+      }),
+    });
+
+    let item = (await new MarketoEmailDesignerImpl(ctx).listEmails("1")).items[0];
+    expect(item).toEqual({
+      id: "email-1", name: "Email", description: undefined, status: undefined,
+      workspaceId: "1", folderId: "10", createdBy: undefined, createdAt: undefined,
+      modifiedBy: undefined, modifiedAt: undefined,
+    });
+    expect(item).not.toHaveProperty("content");
+    expect(item).not.toHaveProperty("headers");
+    expect(item).not.toHaveProperty("settings");
+  });
+
+  it("rejects unrelated direct-list rows and provider pages before observation", async () => {
+    let observations = 0;
+    let { ctx } = context({
+      filterDesignerAssets: async () => ({
+        items: [{ id: "email-1", name: "Wrong", appData: { workspaceId: "other" } }],
+        totalItems: 1, currentPage: 0, pageSize: 20,
+      }),
+    });
+    ctx.observe = async () => { observations++; };
+    let designer = new MarketoEmailDesignerImpl(ctx);
+
+    await expect(designer.listEmails("1", { name: "Expected" }))
+      .rejects.toThrow(/outside the requested list filters/);
+    expect(observations).toBe(0);
+
+    ctx.client = async () => ({
+      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 1, pageSize: 20 }),
+    }) as unknown as MarketoClient;
+    await expect(designer.listEmails("1", { pageIndex: 0 }))
+      .rejects.toThrow(/page 1 when page 0 was requested/);
+    expect(observations).toBe(0);
+  });
+
   it("includes pending creates and clones that match list filters", async () => {
     let { ctx } = context({
       filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 50 }),
