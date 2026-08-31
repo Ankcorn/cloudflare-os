@@ -4425,16 +4425,19 @@ class OverseerImpl implements AgentHooks {
       // #inScopeGatekeepers), so a live collaborator session verified before it existed must not
       // survive into a workspace that has it. Sever those sessions and wait for them to drain
       // before publishing the record: a stale build session must never see this id, and because
-      // the record is unreachable until the put below, there is nothing else to mark or enforce.
+      // the record is unreachable until then, there is nothing else to mark or enforce.
       // (A vendorless spec -- aiModel/agentSpawner -- is in nobody's observer scope: no sever.)
       //
       // Note that ensureAmbientCapsules() calls this from inside open(): the opening session
       // isn't registered yet, so the sever can't reach it -- that in-flight window is what the
-      // scope epoch covers (see OverseerDurableObject.open()).
-      await this.severCollaboratorSessions("build",
-          "Gadget restarted because a new connection was added.");
+      // scope epoch and pending-widening gate inside runBuildScopeWidening cover (see
+      // OverseerDurableObject.open()).
+      await this.runBuildScopeWidening(
+          "Gadget restarted because a new connection was added.",
+          () => this.storage.gatekeepers.put(gatekeeperRecord));
+    } else {
+      this.storage.gatekeepers.put(gatekeeperRecord);
     }
-    this.storage.gatekeepers.put(gatekeeperRecord);
 
     return new GatekeeperClientImpl<any>(this, id, facet);
   }
@@ -5137,6 +5140,61 @@ class OverseerImpl implements AgentHooks {
   // sessions actually dying.
   #drainingGatekeepers = new Map<number, Promise<void>>();
 
+  // Monotonic per-role verification-scope epochs, bumped in the same synchronous block as the
+  // write that makes a widened scope reachable. Severing covers live sessions, but an open still
+  // parked in ensureObserver (the config modal, verifier RPCs) has no session object yet, so
+  // severing cannot reach it; instead open() snapshots this before verifying and re-verifies if
+  // it moved (see OverseerDurableObject.open()).
+  #scopeEpoch: Record<CollaboratorRole, number> = {build: 0, use: 0};
+
+  // In-progress scope widenings whose widened capability is not yet reachable. Currently only
+  // "build" has a producer: addGatekeeper() holds its record unpublished while stale sessions
+  // drain, so a fresh open verifying during that drain would pass without seeing the new
+  // connection -- becoming exactly the stale session the sever just removed -- with no epoch move
+  // to catch it (the bump lands only at publish). open() parks on these before verifying and
+  // treats "one was pending when I finished" like an epoch move. ("use" widenings need no gate:
+  // their writes are already visible when the drain starts, so a verification that overlaps one
+  // either sees the widened scope or the epoch move.)
+  #pendingScopeWidenings: Record<CollaboratorRole, Set<Promise<void>>> = {
+    build: new Set(), use: new Set(),
+  };
+
+  getScopeEpoch(role: CollaboratorRole): number {
+    return this.#scopeEpoch[role];
+  }
+
+  hasPendingScopeWidening(role: CollaboratorRole): boolean {
+    return this.#pendingScopeWidenings[role].size > 0;
+  }
+
+  // Wait for the widenings currently pending for `role`. A single pass, not a loop: correctness
+  // comes from open()'s post-verification re-check (epoch move or still-pending widening), this
+  // just avoids spending open()'s retry budget while a drain is visibly in progress.
+  async settlePendingScopeWidenings(role: CollaboratorRole): Promise<void> {
+    if (this.#pendingScopeWidenings[role].size > 0) {
+      await Promise.allSettled(this.#pendingScopeWidenings[role]);
+    }
+  }
+
+  // Run one "build" scope widening: sever the stale build collaborator sessions, wait for them
+  // to drain, and only then run `publish` (the write that makes the widened capability
+  // reachable), bumping the build epoch in the same synchronous block as the publish -- an
+  // in-flight open's paired (epoch snapshot, scope read) then observes both or neither, which is
+  // what makes its epoch re-check sound. The pending-widening gate covers the drain window
+  // itself, when the epoch hasn't moved yet (see #pendingScopeWidenings).
+  async runBuildScopeWidening(reason: string, publish: () => void): Promise<void> {
+    let gate = Promise.withResolvers<void>();
+    this.#pendingScopeWidenings.build.add(gate.promise);
+    try {
+      await this.severCollaboratorSessions("build", reason);
+      this.#scopeEpoch.build++;
+      publish();
+    } finally {
+      this.#pendingScopeWidenings.build.delete(gate.promise);
+      gate.resolve();
+    }
+  }
+
   // The gatekeeper ids currently in "use" observer scope: vendor-backed connections bound by some
   // non-provisional gadget. Mirrors #inScopeGatekeepers("use"), except that a legacy record with
   // no creationSpec is skipped rather than thrown on: this feeds the widening diff around the
@@ -5174,6 +5232,11 @@ class OverseerImpl implements AgentHooks {
   // widens nothing for them.
   severUseScopeWidening(widenedIds: number[], reason: string): Promise<void> {
     if (widenedIds.length === 0) return Promise.resolve();
+    // The widening writes landed in the caller's same synchronous block, so bump the "use" epoch
+    // now (even if no session gets severed below -- an in-flight open is precisely the session
+    // the registry can't see): an open whose verification straddled the writes observes the move
+    // and re-verifies against the widened scope.
+    this.#scopeEpoch.use++;
     let drain = Promise.withResolvers<void>();
     for (let id of widenedIds) {
       this.#drainingGatekeepers.set(id, drain.promise);
@@ -8561,7 +8624,31 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
       // role is confirmed, so it never reveals gatekeeper or resource metadata to an unauthorized
       // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
-      await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      //
+      // Retried under the role's scope epoch: this open has no session object yet, so a scope
+      // widening landing mid-verification cannot sever it. Instead, if the epoch moved across the
+      // verification -- or a widening's publish is still pending (see settlePendingScopeWidenings)
+      // -- verification re-runs against the now-wider scope, prompting incrementally for just the
+      // new bindings. Bounded so an owner adding connections in a tight loop can't park a
+      // collaborator's open forever.
+      const MAX_SCOPE_EPOCH_RETRIES = 4;
+      let verified = false;
+      for (let attempt = 0; attempt < MAX_SCOPE_EPOCH_RETRIES; attempt++) {
+        await this.impl.settlePendingScopeWidenings(role);
+        let epochBefore = this.impl.getScopeEpoch(role);
+        await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+        // Everything from this re-check through the session interface's registration below is
+        // synchronous, so a widening can't slip between passing here and joining the registry.
+        if (this.impl.getScopeEpoch(role) === epochBefore &&
+            !this.impl.hasPendingScopeWidening(role)) {
+          verified = true;
+          break;
+        }
+      }
+      if (!verified) {
+        throw new Error(
+            "The workspace's connections changed repeatedly while opening it. Please try again.");
+      }
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
