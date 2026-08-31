@@ -1782,6 +1782,39 @@ describe("program management", () => {
       .rejects.toThrow(/could not verify created program/);
   });
 
+  it("verifies program tags by unique tag type rather than response order", async () => {
+    let action: ProgramAction = {
+      id: 1, type: "programCreate", provisionalId: "~1", parentId: "10",
+      input: {
+        name: "Program", type: "Default", channel: "Web",
+        tags: [
+          { tagType: "Region", tagValue: "EMEA" },
+          { tagType: "Department", tagValue: "Sales" },
+        ],
+      },
+    };
+    let verify = (tags: { tagType: string; tagValue: string }[]) => executeProgramAction(action, {
+      createProgram: async () => [{ id: 77 }],
+      getProgram: async () => ({
+        id: 77, name: "Program", type: "Default", channel: "Web",
+        folder: { value: 10, type: "Folder" }, tags,
+      }),
+    } as never, Number, () => {});
+
+    await expect(verify([
+      { tagType: "Department", tagValue: "Sales" },
+      { tagType: "Region", tagValue: "EMEA" },
+    ])).resolves.toBeUndefined();
+    await expect(verify([
+      { tagType: "Department", tagValue: "Marketing" },
+      { tagType: "Region", tagValue: "EMEA" },
+    ])).rejects.toThrow(/could not verify created program/);
+    await expect(verify([
+      { tagType: "Region", tagValue: "EMEA" },
+      { tagType: "Region", tagValue: "EMEA" },
+    ])).rejects.toThrow(/could not verify created program/);
+  });
+
   it("still rejects a meaningful clone verification difference", async () => {
     let cloneClient = {
       cloneProgram: async () => [{ id: 77 }],

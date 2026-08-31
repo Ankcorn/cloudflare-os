@@ -251,6 +251,31 @@ describe("classic Design Studio regressions", () => {
     expect(recordCreation).toHaveBeenCalledWith("~1", 20);
   });
 
+  it("accepts Adobe's uppercase folder discriminator without weakening identity checks", async () => {
+    let action = {
+      id: 1,
+      type: "designCreate",
+      asset: "folder",
+      provisionalId: "~1",
+      parent: { id: "10", type: "Folder" },
+      input: { name: "Child" },
+    } as const;
+    let verify = (created: { id: number; name: string; parent: { id: number; type: string } }) =>
+      executeDesignStudioAction(action, {
+        createFolder: async () => [{ id: 20 }],
+        getFolder: async () => created,
+      } as unknown as MarketoClient, Number, () => {});
+
+    await expect(verify({ id: 20, name: "Child", parent: { id: 10, type: "FOLDER" } }))
+      .resolves.toBeUndefined();
+    await expect(verify({ id: 20, name: "Other", parent: { id: 10, type: "FOLDER" } }))
+      .rejects.toThrow(/could not verify created folder/);
+    await expect(verify({ id: 20, name: "Child", parent: { id: 11, type: "FOLDER" } }))
+      .rejects.toThrow(/could not verify created folder/);
+    await expect(verify({ id: 20, name: "Child", parent: { id: 10, type: "PROGRAM" } }))
+      .rejects.toThrow(/could not verify created folder/);
+  });
+
   it("rejects file status filters in the API type and at runtime", () => {
     expectTypeOf<Parameters<MarketoDesignStudio["listFiles"]>[0]>()
       .toEqualTypeOf<MarketoDesignStudioFileListOptions | undefined>();

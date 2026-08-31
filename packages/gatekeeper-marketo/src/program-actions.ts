@@ -146,6 +146,22 @@ function resultId(result: (RawProgram | RawAssetId)[], operation: string): numbe
   return Number(id);
 }
 
+function normalizedProgramTags(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  let tags: MarketoProgramTag[] = [];
+  let types = new Set<string>();
+  for (let tag of value) {
+    if (typeof tag !== "object" || tag === null) return undefined;
+    let tagType = Reflect.get(tag, "tagType");
+    let tagValue = Reflect.get(tag, "tagValue");
+    if (typeof tagType !== "string" || typeof tagValue !== "string" || types.has(tagType)) return undefined;
+    types.add(tagType);
+    tags.push({ tagType, tagValue });
+  }
+  tags.sort((left, right) => left.tagType < right.tagType ? -1 : left.tagType > right.tagType ? 1 : 0);
+  return JSON.stringify(tags);
+}
+
 async function verifyCreatedProgram(
   client: MarketoClient,
   id: number,
@@ -158,11 +174,13 @@ async function verifyCreatedProgram(
     let expectedDate = parseMarketoDate(expected);
     return actualDate !== undefined && expectedDate !== undefined && actualDate.getTime() === expectedDate.getTime();
   };
+  let approvedTags = approved.tags === undefined ? undefined : normalizedProgramTags(approved.tags);
+  let createdTags = normalizedProgramTags(created?.tags ?? []);
   let matches =
     (approved.description === undefined || created?.description === approved.description) &&
     (approved.type === undefined || created?.type === approved.type) &&
     (approved.channel === undefined || created?.channel === approved.channel) &&
-    (approved.tags === undefined || JSON.stringify(created?.tags ?? []) === JSON.stringify(approved.tags)) &&
+    (approved.tags === undefined || approvedTags !== undefined && createdTags === approvedTags) &&
     (approved.startDate === undefined || matchesDate(created?.startDate, approved.startDate)) &&
     (approved.endDate === undefined || matchesDate(created?.endDate, approved.endDate));
   if (!created || created.id !== id || created.name !== approved.name ||
