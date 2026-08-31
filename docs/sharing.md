@@ -158,6 +158,8 @@ Two precautions surround the abort (`OverseerImpl.scheduleRevocationRestart`): t
 
 Note this is only needed for removals/downgrades. Granting or raising access never strands anyone, and `prohibitAllSharing` cannot strand a session either: an observation that would set that flag is *blocked* (rather than applied) if the gadget is already shared, so the flag only ever flips to true on a gadget with no other sessions to evict.
 
+The other event that can invalidate live sessions -- the owner *widening* a collaborator role's observer verification scope by adding a connection or binding one into a gadget -- deliberately does **not** use the whole-DO abort. It would disconnect the owner as a side effect of their own routine action, and adding connections is common where removals are rare. Instead the Overseer severs exactly the affected role's collaborator sessions, per session, using the same `notifyClosed` signal the abort produces (`OverseerImpl.severCollaboratorSessions`), and holds the widened capability unreachable until the severed sessions have drained; see edge case 5 in `observers.md` for the full mechanism (drain barrier, draining marks, scope epochs). The whole-DO abort remains that path's fallback when a severed session fails to drain.
+
 ## Future work
 
 - **More permission levels.** Beyond `build` and `use`, planned levels include: chat-only (can create chats but not merge to mainline) and read-only.

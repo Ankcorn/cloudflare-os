@@ -404,9 +404,22 @@ already in the JSDoc in `gatekeeper.ts`; add anything missing there rather than 
    model in `sharing.ts`.
 4. **`prohibitAllSharing` interaction** — unchanged and still authoritative: if set, no non-owner
    can open at all (`overseer.ts:2770`). Observer checks only matter when sharing is allowed.
-5. **Owner adds a new binding after sharing** — existing observers see an incremental modal for
-   just the new binding on their next open, and may be denied if they lack access to the new
-   resource (inherent to the security model).
+5. **Owner adds a new connection or binding after sharing** — widening a role's verification
+   scope severs exactly that role's live collaborator sessions, per session, leaving the owner
+   connected: the Overseer disposes its dup of each affected session's `notifyClosed` stub
+   *without calling it* (the same signal a DO restart produces), which kills that client's
+   WebSocket and with it the capnweb session's export table -- every capability the session held.
+   The widening waits for the severed sessions to actually drain (their disposers run back in the
+   DO) before the widened capability becomes reachable: a new connection's record stays
+   unpublished until the drain settles (`addGatekeeper`), and a newly bound or newly promoted
+   edge's gatekeeper -- whose write can't be held back -- is marked draining and awaited in
+   `startGatekeeperSession`. An open still in flight during a widening has no session to sever
+   (it may be parked in the config modal), so `open()` snapshots a per-role *scope epoch* and
+   re-verifies if it moved: on their next open, the collaborator sees an incremental modal for
+   just the new binding, and may be denied if they lack access to the new resource (inherent to
+   the security model). If a severed session fails to drain (a wedged intermediary), the widening
+   falls back to `scheduleRevocationRestart()`'s whole-DO abort -- the degraded path, never the
+   happy one.
 6. **Performance** — `ensureObserver` does one `getVerifier` + one `addObserver` per in-scope
    gatekeeper per open. Parallelize with `Promise.all` and pipe the verifier promise straight into
    `addObserver`. Expensive gatekeepers cache on their side.
