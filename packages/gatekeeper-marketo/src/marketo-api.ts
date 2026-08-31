@@ -229,6 +229,14 @@ function formBody(values: Record<string, FormValue>): URLSearchParams {
   return form;
 }
 
+function commaSeparatedFilterValues(values: unknown[]): string {
+  let text = values.map(String);
+  if (text.some(value => value.includes(","))) {
+    throw new Error("Marketo filter values cannot contain commas.");
+  }
+  return text.join(",");
+}
+
 function folderJson(folder: MarketoFolderRef): string {
   return JSON.stringify(folder);
 }
@@ -1482,7 +1490,7 @@ export class MarketoClient {
   async getLeads(filterType: string, filterValues: string[], fields?: string[]): Promise<RawLead[]> {
     return await this.#filterResults<RawLead>("/v1/leads.json", {
       filterType,
-      filterValues: filterValues.join(","),
+      filterValues: commaSeparatedFilterValues(filterValues),
       ...(fields?.length ? { fields: fields.join(",") } : {}),
     });
   }
@@ -1900,7 +1908,7 @@ export class MarketoClient {
     let path = `/v1/customobjects/${encodeURIComponent(apiName)}.json`;
     let records = await this.#filterResults<Record<string, unknown>>(path, {
       filterType,
-      filterValues: filterValues.join(","),
+      filterValues: commaSeparatedFilterValues(filterValues),
       ...(fields?.length ? { fields: fields.join(",") } : {}),
     });
     return records.filter(record => {
@@ -1973,7 +1981,7 @@ export class MarketoClient {
     }
     return await this.#page(path, filterRead({
       filterType: request.filter.field,
-      filterValues: request.filter.values.map(String).join(","),
+      filterValues: commaSeparatedFilterValues(request.filter.values),
       ...common,
     }));
   }

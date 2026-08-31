@@ -1034,7 +1034,8 @@ export interface MarketoSession {
    * limit). `field` must be searchable. Only the requested `fields` (plus `id`) are
    * returned; if omitted, a small default set is used.
    *
-   * `values` must be non-empty; an empty list throws rather than returning `[]`.
+   * `values` must be non-empty and individual values cannot contain commas; an empty list throws
+   * rather than returning `[]`.
    */
   findPeople(
     field: string,
@@ -1649,7 +1650,8 @@ export interface MarketoCustomObject {
    * representations as errors rather than as "no match": querying an
    * `integer` field for `"abc"`, or for a number above 2147483647, is an error, not an empty
    * result. Check the field's `dataType` in `describe()` and format accordingly. A well-typed
-   * value that matches nothing returns `[]`.
+   * value that matches nothing returns `[]`. Individual values cannot contain commas because
+   * Marketo reserves commas as its filter-value delimiter.
    */
   query(
     field: string,
@@ -1669,7 +1671,10 @@ export interface MarketoBusinessObject {
   /** Read field, key, searchable-group, and effective access metadata. */
   describe(): Promise<MarketoBusinessObjectSchema>;
 
-  /** Query one bounded page by field values or complete compound dedupe keys. */
+  /**
+   * Query one bounded page by field values or complete compound dedupe keys. Individual field
+   * values cannot contain commas because Marketo reserves commas as its filter-value delimiter.
+   */
   query(query: MarketoBusinessObjectQuery): Promise<MarketoBusinessObjectPage>;
 
   /**

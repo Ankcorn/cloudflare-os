@@ -3176,6 +3176,25 @@ describe("filter reads", () => {
     await client.queryCustomObject("orderStatus", "sourceID", ["1"]);
     expect(calls[0]).toContain("_method=GET");
   });
+
+  it("rejects literal commas in every comma-delimited filter API", async () => {
+    let fetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetches++;
+      return Response.json({ success: true, result: [] });
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+    let requests = [
+      () => client.getLeads("company", ["Acme, Inc."]),
+      () => client.queryCustomObject("orderStatus", "sourceID", ["north,west"]),
+      () => client.queryBusinessObject("company", {
+        filter: { field: "name", values: ["Acme, Inc."] },
+      }),
+    ];
+
+    for (let request of requests) await expect(request()).rejects.toThrow(/cannot contain commas/);
+    expect(fetches).toBe(0);
+  });
 });
 
 describe("Marketo request encoding", () => {
