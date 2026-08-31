@@ -276,34 +276,9 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
       includeArchived: options.includeArchived, isCreatedByMe: options.isCreatedByMe,
       isModifiedByMe: options.isModifiedByMe, templateId: options.templateId, fragmentType: options.fragmentType,
     });
-    let items = (raw.items ?? []).map(item => normalize(item))
-      .filter(item => !actions(this.#ctx, kind, item.id).some(action => action.type === "designerDelete"))
-      .map(item => overlay(item, actions(this.#ctx, kind, item.id)) as MarketoDesignerAssetSummary);
-    let injected = 0;
-    if (pageIndex === 0) {
-      let pending: Extract<EmailDesignerAction, { type: "designerCreate" | "designerClone" }>[] = [];
-      for (let action of this.#ctx.pendingDesigner()) {
-        if (action.asset !== kind || action.type !== "designerCreate" && action.type !== "designerClone") continue;
-        pending.push(action);
-      }
-      for (let offset = 0; offset < pending.length; offset += pageSize) {
-        let candidates = await Promise.all(pending.slice(offset, offset + pageSize).map(async action =>
-          action.type === "designerCreate"
-            ? normalize({ id: action.provisionalId, ...(action.body as RawDesignerAsset), status: "draft" })
-            : await summary(this.#ctx, kind, action.provisionalId) as MarketoDesignerAssetSummary));
-        for (let candidate of candidates) {
-          if (candidate.workspaceId === workspace && (!options.name || candidate.name === options.name) &&
-              (!options.folderId || candidate.folderId === options.folderId) &&
-              !items.some(item => same(this.#ctx, item.id, candidate.id))) {
-            items.unshift(candidate);
-            injected++;
-          }
-        }
-      }
-    }
-    items = items.slice(0, pageSize);
+    let items = (raw.items ?? []).map(item => normalize(item));
     await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
-    return { items, totalItems: raw.totalItems === undefined ? undefined : raw.totalItems + injected,
+    return { items, totalItems: raw.totalItems,
       pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
   }
 

@@ -27,6 +27,8 @@ export class MarketoError extends Error {
   readonly status: number | undefined;
   /** The API path that failed — context for a caller that didn't make the request itself. */
   readonly operation: string | undefined;
+  /** True when Marketo returned an explicit unsuccessful response envelope. */
+  readonly isProviderRejection: boolean;
   /** True for codes meaning the token is expired (602) or invalid (601), per Marketo's docs.
    * Callers should refresh the token and retry once. */
   readonly isAuthError: boolean;
@@ -45,6 +47,7 @@ export class MarketoError extends Error {
       status?: number;
       operation?: string;
       notFound?: boolean;
+      providerRejection?: boolean;
       cause?: unknown;
     },
   ) {
@@ -53,6 +56,7 @@ export class MarketoError extends Error {
     this.code = options?.code;
     this.status = options?.status;
     this.operation = options?.operation;
+    this.isProviderRejection = options?.providerRejection === true;
     this.isAuthError =
       this.code === "601" ||
       this.code === "602" ||
@@ -91,6 +95,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function oauthErrorCode(value: unknown): string | undefined {
+  let code = optionalString(value);
+  return code === "invalid_client" || code === "unauthorized_client" || code === "invalid_grant"
+    ? code
+    : undefined;
+}
+
+function marketoErrorCode(value: unknown): string | undefined {
+  let code = optionalString(value);
+  return code && /^\d{3,6}$/.test(code) ? code : undefined;
+}
+
+function providerFailure(message: string, status: number | undefined, code?: string): string {
+  let details = [code ? `code ${code}` : undefined, status === undefined ? undefined : `HTTP ${status}`]
+    .filter(value => value !== undefined);
+  return details.length === 0 ? `${message}.` : `${message} (${details.join("; ")}).`;
 }
 
 function parseEnvelope<T>(value: unknown): MarketoEnvelope<T> | undefined {
@@ -303,8 +325,8 @@ export async function fetchAccessToken(
   let response: Response;
   try {
     response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  } catch (e) {
-    throw new MarketoError(`Could not reach Marketo Identity endpoint: ${errorText(e)}`, { cause: e });
+  } catch {
+    throw new MarketoError("Could not reach the Marketo Identity endpoint.");
   }
 
   let raw: unknown = await response.json().catch(() => undefined);
@@ -312,12 +334,8 @@ export async function fetchAccessToken(
   let accessToken = optionalString(body?.access_token);
 
   if (!response.ok || !accessToken) {
-    let code = optionalString(body?.error);
-    let detail =
-      optionalString(body?.error_description) ??
-      code ??
-      `HTTP ${response.status}`;
-    throw new MarketoError(`Marketo authentication failed: ${detail}`, {
+    let code = oauthErrorCode(body?.error);
+    throw new MarketoError(providerFailure("Marketo authentication failed", response.status, code), {
       code,
       status: response.status,
     });
@@ -333,10 +351,6 @@ export async function fetchAccessToken(
   };
 }
 
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 // ---------------------------------------------------------------------------
 // Client
 
@@ -346,7 +360,8 @@ export class MarketoClient {
   #tokens: TokenProvider;
 
   constructor(endpoint: string, tokens: TokenProvider) {
-    this.#endpoint = endpoint.replace(/\/+$/, "");
+    while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+    this.#endpoint = endpoint;
     this.#tokens = tokens;
   }
 
@@ -396,10 +411,9 @@ export class MarketoClient {
       let response: Response;
       try {
         response = await fetch(url, init);
-      } catch (e) {
-        throw new MarketoError(`Marketo request failed: ${errorText(e)}`, {
+      } catch {
+        throw new MarketoError("Could not reach the Marketo API.", {
           operation: path,
-          cause: e,
         });
       }
 
@@ -416,10 +430,12 @@ export class MarketoClient {
       }
       if (envelope.success === false) {
         let first = envelope.errors?.[0];
-        throw new MarketoError(first?.message ?? "Marketo request failed", {
-          code: first?.code,
+        let code = marketoErrorCode(first?.code);
+        throw new MarketoError(providerFailure("Marketo request failed", response.status, code), {
+          code,
           status: response.status,
           operation: path,
+          providerRejection: true,
         });
       }
       if (!response.ok) {
@@ -1866,8 +1882,9 @@ export class MarketoClient {
       // business data, so it is raised here instead. Real records always carry a marketoGUID.
       let reasons = rejectionReasons(record);
       if (!reasons) return true;
-      throw new MarketoError(reasons.map(r => r.message ?? "Rejected").join("; "), {
-        code: reasons.find(r => r.code)?.code,
+      let code = reasons.map(reason => marketoErrorCode(reason.code)).find(value => value !== undefined);
+      throw new MarketoError(providerFailure("Marketo rejected the custom-object query", undefined, code), {
+        code,
         operation: path,
       });
     });

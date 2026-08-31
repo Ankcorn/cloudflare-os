@@ -170,7 +170,9 @@ export function parseCredentials(
 }
 
 export function getBaseUrl(env: Env): string {
-  return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/marketo").replace(/\/+$/, "");
+  let baseUrl = env.BASE_URL ?? "http://localhost:8787/gatekeeper/marketo";
+  while (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
+  return baseUrl;
 }
 
 export function getBasePath(env: Env): string {

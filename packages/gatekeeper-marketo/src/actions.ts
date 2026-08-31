@@ -350,16 +350,19 @@ export function assertApplied(results: RawSyncResult[], expected = results.lengt
   }
   let skipped = results.filter(r => r.status === "skipped");
   if (skipped.length === 0) return;
-  let reasons = [
-    ...new Set(skipped.flatMap(r => (r.reasons ?? []).map(x => x.message).filter(Boolean))),
+  let codes = [
+    ...new Set(skipped.flatMap(r => (r.reasons ?? [])
+      .map(reason => reason.code)
+      .filter((code): code is string => typeof code === "string" && /^\d{3,6}$/.test(code)))),
   ];
+  let detail = codes.length > 0 ? ` (Marketo code${codes.length === 1 ? "" : "s"}: ${codes.join(", ")})` : "";
   let partial = skipped.length < results.length;
   throw new MarketoActionResultError(
     partial
       ? `Marketo applied ${results.length - skipped.length} of ${results.length} record(s) and declined ${skipped.length}` +
-          (reasons.length ? `: ${reasons.join("; ")}` : ".")
+          `${detail}.`
       : `Marketo declined all ${results.length} record(s), so nothing was changed` +
-          (reasons.length ? `: ${reasons.join("; ")}` : "."),
+          `${detail}.`,
     partial ? "partial" : "none",
   );
 }

@@ -240,15 +240,15 @@ describe("connect endpoint", () => {
 
     expect(await post({ endpoint: ORIGIN, clientSecret: "s" })).toMatchObject({
       status: 400,
-      error: expect.stringMatching(/Client ID is required/),
+      error: "Invalid connection details.",
     });
     expect(await post({ endpoint: ORIGIN, clientId: "i" })).toMatchObject({
       status: 400,
-      error: expect.stringMatching(/Client Secret is required/),
+      error: "Invalid connection details.",
     });
     expect(await post({ endpoint: "https://evil.example", clientId: "i", clientSecret: "s" })).toMatchObject({
       status: 400,
-      error: expect.stringMatching(/not a Marketo REST host/),
+      error: "Invalid connection details.",
     });
   });
 });
@@ -977,33 +977,54 @@ describe("new Email Designer", () => {
     expect(notes.join(" ")).toMatch(/dependency/);
   });
 
-  it("lists later matching clones with page-sized summary concurrency", async () => {
-    let active = 0;
-    let peak = 0;
+  it("preserves server pagination and forwards filters while pending changes stay handle-scoped", async () => {
+    let requests: { kind: string; options: Record<string, unknown> }[] = [];
     let { ctx } = emailDesignerContext({
-      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 2 }),
-      getDesignerAsset: async (_path, assetId) => {
-        active++;
-        peak = Math.max(peak, active);
-        await Promise.resolve();
-        active--;
-        return { id: assetId, name: `Source ${assetId}`, appData: { workspaceId: assetId === "C" ? "1" : "2" } };
+      filterDesignerAssets: async (kind, options) => {
+        requests.push({ kind, options });
+        let page = options.pageIndex ?? 0;
+        return {
+          items: [{ id: `${kind}-${page}-1`, name: "First" }, { id: `${kind}-${page}-2`, name: "Second" }],
+          totalItems: 4,
+          currentPage: page,
+          pageSize: options.pageSize,
+        };
       },
+      getDesignerAsset: async (_path, assetId) => ({ id: assetId, name: "Server name" }),
     }, [
-      { id: 1, type: "designerClone", asset: "designerEmail", provisionalId: "~1", sourceId: "A", name: "First" },
-      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "B", name: "Second" },
-      { id: 3, type: "designerClone", asset: "designerEmail", provisionalId: "~3", sourceId: "C", name: "Matching clone" },
       {
-        id: 4, type: "designerCreate", asset: "designerEmail", provisionalId: "~4",
+        id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
         body: { name: "Local create", appData: { workspaceId: "1", folderId: "10" } },
       },
+      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-0-1", name: "Clone" },
+      { id: 3, type: "designerUpdate", asset: "designerEmail", targetId: "email-0-1", patch: { name: "Updated" } },
+      { id: 4, type: "designerDelete", asset: "designerEmail", targetId: "email-0-2" },
     ]);
+    let designer = new MarketoEmailDesignerImpl(ctx);
 
-    expect(await new MarketoEmailDesignerImpl(ctx).listEmails("1", { pageSize: 2 })).toMatchObject({
-      items: [{ id: "~4", name: "Local create" }, { id: "~3", name: "Matching clone" }],
-      totalItems: 2,
+    let first = await designer.listEmails("1", {
+      folderId: "10", folderType: "Folder", name: "First", status: ["draft"], pageSize: 2,
+      sortKey: "name", sortOrder: "ASC", includeArchived: true, isCreatedByMe: true,
+      isModifiedByMe: false, templateId: "template-1",
     });
-    expect(peak).toBe(2);
+    let second = await designer.listEmails("1", { pageIndex: 1, pageSize: 2 });
+    await designer.listFragments("1", { fragmentType: "email" });
+
+    expect(first).toMatchObject({
+      items: [{ id: "email-0-1", name: "First" }, { id: "email-0-2", name: "Second" }],
+      totalItems: 4, pageIndex: 0, pageSize: 2,
+    });
+    expect(second.items.map(item => item.id)).toEqual(["email-1-1", "email-1-2"]);
+    expect(requests[0]).toEqual({
+      kind: "email",
+      options: {
+        workspaceId: "1", folderId: "10", folderType: "Folder", name: "First", status: ["draft"],
+        pageIndex: 0, pageSize: 2, sortKey: "name", sortOrder: "ASC", includeArchived: true,
+        isCreatedByMe: true, isModifiedByMe: false, templateId: "template-1", fragmentType: undefined,
+      },
+    });
+    expect(requests[2]?.options.fragmentType).toBe("email");
+    expect(await designer.getEmail("~1").describe()).toMatchObject({ id: "~1", name: "Local create" });
   });
 
   it("exposes the designer from a Design Studio-scoped handle", () => {
@@ -2695,8 +2716,9 @@ describe("custom object query envelopes", () => {
       success: true,
       result: [{ reasons: [{ code: "1003", message: "Invalid value for field 'sourceID'" }] }],
     });
-    await expect(client.queryCustomObject("orderStatus", "sourceID", ["bad"]))
-      .rejects.toThrow(/Invalid value for field 'sourceID'/);
+    let error = await client.queryCustomObject("orderStatus", "sourceID", ["bad"]).catch(value => value);
+    expect(error.message).toMatch(/code 1003/);
+    expect(error.message).not.toContain("sourceID");
   });
 
   it("carries the upstream code on the raised error", async () => {
@@ -3117,8 +3139,9 @@ describe("Marketo request encoding", () => {
   });
 
   it("classifies Identity endpoint invalid_client responses as credential failures", async () => {
+    let marker = "secret-credential-marker";
     vi.stubGlobal("fetch", async () => Response.json(
-      { error: "invalid_client", error_description: "Bad client credentials" },
+      { error: "invalid_client", error_description: `Bad client credentials: ${marker}` },
       { status: 400 },
     ));
     let error = await fetchAccessToken({
@@ -3128,6 +3151,38 @@ describe("Marketo request encoding", () => {
     }).catch(value => value);
     expect(error).toBeInstanceOf(MarketoError);
     expect(error.isAuthError).toBe(true);
+    expect(error.code).toBe("invalid_client");
+    expect(error.status).toBe(400);
+    expect(error.message).toBe("Marketo authentication failed (code invalid_client; HTTP 400).");
+    expect(`${error.message}\n${error.stack}`).not.toContain(marker);
+  });
+
+  it("withholds arbitrary Identity error values", async () => {
+    let marker = "secretcredentialmarker";
+    vi.stubGlobal("fetch", async () => Response.json({ error: marker }, { status: 400 }));
+    let error = await fetchAccessToken({
+      endpoint: ORIGIN,
+      clientId: "client",
+      clientSecret: "secret",
+    }).catch(value => value);
+    expect(error).toBeInstanceOf(MarketoError);
+    expect(error.code).toBeUndefined();
+    expect(`${error.message}\n${error.stack}`).not.toContain(marker);
+  });
+
+  it("withholds provider-controlled API error text", async () => {
+    let marker = "customer-data-marker";
+    let { client } = clientReturning({
+      success: false,
+      errors: [{ code: "1003", message: `Rejected value ${marker}` }],
+    });
+    let error = await client.getLeads("email", ["a@example.com"]).catch(value => value);
+    expect(error).toBeInstanceOf(MarketoError);
+    expect(error.code).toBe("1003");
+    expect(error.isProviderRejection).toBe(true);
+    expect(error.operation).toBe("/v1/leads.json");
+    expect(error.message).toBe("Marketo request failed (code 1003; HTTP 200).");
+    expect(`${error.message}\n${error.stack}`).not.toContain(marker);
   });
 });
 
@@ -3271,16 +3326,16 @@ describe("fully declined actions do not count as applied", () => {
       assertApplied([
         { id: 999999999, status: "skipped", reasons: [{ code: "1004", message: "Lead not found" }] },
       ]),
-    ).toThrow(/declined all 1 record\(s\).*Lead not found/);
+    ).toThrow(/declined all 1 record\(s\).*Marketo code: 1004/);
   });
 
-  it("reports each distinct reason once", () => {
+  it("reports each distinct provider code once without provider text", () => {
     expect(() =>
       assertApplied([
         { status: "skipped", reasons: [{ code: "1013", message: "Record not found" }] },
         { status: "skipped", reasons: [{ code: "1013", message: "Record not found" }] },
       ]),
-    ).toThrow(/declined all 2 record\(s\), so nothing was changed: Record not found$/);
+    ).toThrow(/declined all 2 record\(s\), so nothing was changed \(Marketo code: 1013\)\.$/);
   });
 
   it("reports partial success so it is not presented as fully applied", () => {
@@ -4260,7 +4315,7 @@ describe("Design Studio action lifecycle", () => {
     let stub = await designActionGatekeeper(actions);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(1)).rejects.toThrow("Content rejected");
+      await expect(instance.applyAction(1)).rejects.toThrow("Marketo request failed (code 1003; HTTP 200).");
       expect(state.storage.kv.get("provisional:~1")).toBe(88);
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
       expect(state.storage.kv.get("pending:1")).toBeDefined();
@@ -4293,7 +4348,7 @@ describe("Design Studio action lifecycle", () => {
     let stub = await designActionGatekeeper([action]);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(1)).rejects.toThrow("Text rejected");
+      await expect(instance.applyAction(1)).rejects.toThrow("Marketo request failed (code 1003; HTTP 200).");
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
       expect(state.storage.kv.get("pending:1")).toBeDefined();
     });
@@ -4456,9 +4511,30 @@ describe("action dispatch lifecycle", () => {
     let stub = await actionGatekeeper(ACTION);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Lead not found");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Marketo request failed (code 1004; HTTP 200).");
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBeUndefined();
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Lead not found");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Marketo request failed (code 1004; HTTP 200).");
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("allows retry after an explicit rejection with an unsafe code", async () => {
+    let calls = 0;
+    let marker = "customersecretmarker";
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      calls++;
+      return Response.json({ success: false, errors: [{ code: marker, message: marker }] });
+    });
+    let stub = await actionGatekeeper(ACTION);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      let error = await instance.applyAction(ACTION.id).catch(value => value);
+      expect(`${error.message}\n${error.stack}`).not.toContain(marker);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBeUndefined();
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Marketo request failed (HTTP 200).");
     });
     expect(calls).toBe(2);
   });
@@ -4473,27 +4549,27 @@ describe("action dispatch lifecycle", () => {
     let stub = await actionGatekeeper(ACTION);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("connection lost");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Could not reach the Marketo API.");
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
       await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
     });
   });
 
-  it("treats HTTP 408 as ambiguous even though it is a 4xx response", async () => {
+  it.each([408, 500])("treats HTTP %i responses as ambiguous even with a numeric code", async status => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
       return Response.json(
-        { success: false, errors: [{ message: "Request timeout" }] },
-        { status: 408 },
+        { success: false, errors: [{ code: "1003", message: "Request timeout" }] },
+        { status },
       );
     });
     let stub = await actionGatekeeper(ACTION);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Request timeout");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(`Marketo request failed (code 1003; HTTP ${status}).`);
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
     });
@@ -4596,7 +4672,7 @@ describe("action dispatch lifecycle", () => {
     };
     let stub = await actionGatekeeper(action);
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(action.id)).rejects.toThrow("Rejected");
+      await expect(instance.applyAction(action.id)).rejects.toThrow("Marketo request failed (code 1018; HTTP 200).");
       expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBeUndefined();
       expect(state.storage.kv.get(`applying:${action.id}`)).toBeUndefined();
       expect(state.storage.kv.get(`pending:${action.id}`)).toBeDefined();

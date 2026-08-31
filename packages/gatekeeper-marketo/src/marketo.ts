@@ -217,8 +217,8 @@ export default {
       }
       let body: unknown = JSON.parse(text);
       creds = parseCredentials(body, env, existingCredentials);
-    } catch (e) {
-      return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 400);
+    } catch {
+      return jsonResponse({ error: "Invalid connection details." }, 400);
     }
 
     // Prove the credentials work before storing them, so a typo surfaces here rather than as a
@@ -240,20 +240,17 @@ export default {
 /**
  * Turn a failed token fetch into something the person filling in the form can act on.
  *
- * A `status` means Marketo answered and refused, which is a credentials problem; its own wording
- * ("Bad client credentials") never says which field is wrong, so the hint names all three. No
- * status means the request never got a reply, which is an endpoint or connectivity problem — that
- * message already explains itself, so it is passed through unwrapped.
+ * A `status` means Marketo answered and refused, which is a credentials problem. Provider and
+ * transport messages are deliberately omitted because they can echo submitted credentials.
  */
 function describeCredentialFailure(e: unknown): string {
-  let detail = e instanceof Error ? e.message : String(e);
   if (e instanceof MarketoError && e.status !== undefined) {
     return (
-      `Marketo rejected these credentials (${detail}). Check the Client ID and Client Secret, ` +
+      "Marketo rejected these credentials. Check the Client ID and Client Secret, " +
       "and that they belong to the instance endpoint above."
     );
   }
-  return detail;
+  return "Could not reach the Marketo Identity endpoint. Check the instance endpoint and retry.";
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +358,7 @@ export class UserAccount extends DurableObject<Env> {
         let props: MarketoUserImplProps = { userObjectId: this.ctx.id.toString() };
         await callback.complete(this.ctx.exports.MarketoUserImpl({ props }));
       }
-    } catch (e) {
+    } catch {
       if (previousCredentials) {
         this.ctx.storage.kv.put("credentials", previousCredentials);
       } else {
@@ -373,7 +370,7 @@ export class UserAccount extends DurableObject<Env> {
       }
       return {
         kind: "error",
-        message: `Failed to notify the Workshop: ${e instanceof Error ? e.message : String(e)}`,
+        message: "Failed to notify the Workshop. Please retry.",
       };
     }
 
@@ -1040,7 +1037,8 @@ export class MarketoGatekeeperImpl
       let definitive =
         e instanceof MarketoError &&
         (e.operation === undefined ||
-          e.code !== undefined ||
+          (e.status === undefined || e.status < 400) &&
+            (e.isProviderRejection || e.code !== undefined) ||
           (e.status !== undefined && e.status >= 400 && e.status < 500 && e.status !== 408));
       if (isDesignStudioAction(pending.action) && (
         pending.action.type === "designCreate" && this.#resolveLogicalId(pending.action.provisionalId) !== undefined ||

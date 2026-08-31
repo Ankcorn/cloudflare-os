@@ -81,8 +81,7 @@ result is retained as uncertain rather than retried automatically.
 - Paged Lead Database methods make one data request per page and return `moreResult` with
   `nextPageToken`. The first activity page also requests a paging token. Marketo omits
   `moreResult` on some Lead Database endpoints and can return a token on the final page, so the
-  client treats an empty page as the terminal signal for those endpoints. Design Studio listings
-  may also read individual pending assets to simulate queued writes.
+  client treats an empty page as the terminal signal for those endpoints.
 - Campaign and static-list listings accept exact `name` or substring `nameContains` filters.
   Substring searches omit resources that belong to no program. Campaign searches may also match
   the containing program's name.
