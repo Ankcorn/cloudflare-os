@@ -76,7 +76,7 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         title: `Clone Marketo smart campaign ${action.name}`,
         description:
           `Clone smart campaign ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in ` +
-          `${action.parent.type.toLowerCase()} ${code(action.parent.id)}. The clone includes the source campaign's smart-list rules and flow steps.` +
+          `${action.parent.type.toLowerCase()} ${code(action.parent.id)}. The clone uses the source campaign's current smart-list rules and flow steps when dispatched.` +
           (action.description ? `\n\nDescription: ${escapeMarkdown(action.description)}` : ""),
       };
     case "campaignMetadata":
@@ -119,29 +119,47 @@ function folder(parent: { id: string; type: "Folder" | "Program" }, resolve: Res
   return { id: resolve(parent.id), type: parent.type };
 }
 
+async function verifyCreatedCampaign(client: MarketoClient, id: number, name: string, description: string | undefined, parent: MarketoFolderRef): Promise<void> {
+  let created = await client.getSmartCampaign(id);
+  let folderId = created?.folder?.id ?? created?.folder?.value;
+  if (!created || created.id !== id || created.name !== name || folderId !== parent.id ||
+      created.folder?.type !== parent.type || description !== undefined && created.description !== description) {
+    throw new Error(`Marketo could not verify created smart campaign ${id} against the approved request.`);
+  }
+}
+
 /** Execute one approved campaign-management action. */
 export async function executeCampaignAction(
   action: CampaignAction,
   client: MarketoClient,
   resolve: ResolveId,
   recordCreation: RecordCreation,
+  recordCandidate: (realId: number) => void = () => {},
 ): Promise<void> {
   if (action.type === "campaignCreate") {
+    let parent = folder(action.parent, resolve);
     let result = await client.createSmartCampaign({
       name: action.name,
       description: action.description,
-      folder: folder(action.parent, resolve),
+      folder: parent,
     });
-    recordCreation(action.provisionalId, resultId(result, "smart campaign creation"));
+    let id = resultId(result, "smart campaign creation");
+    recordCandidate(id);
+    await verifyCreatedCampaign(client, id, action.name, action.description, parent);
+    recordCreation(action.provisionalId, id);
     return;
   }
   if (action.type === "campaignClone") {
+    let parent = folder(action.parent, resolve);
     let result = await client.cloneSmartCampaign(resolve(action.sourceId), {
       name: action.name,
       description: action.description,
-      folder: folder(action.parent, resolve),
+      folder: parent,
     });
-    recordCreation(action.provisionalId, resultId(result, "smart campaign clone"));
+    let id = resultId(result, "smart campaign clone");
+    recordCandidate(id);
+    await verifyCreatedCampaign(client, id, action.name, action.description, parent);
+    recordCreation(action.provisionalId, id);
     return;
   }
 

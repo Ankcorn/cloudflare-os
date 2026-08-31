@@ -310,6 +310,85 @@ export class MarketoActionResultError extends Error {
   }
 }
 
+const MIN_SCHEDULE_DELAY_MS = 5 * 60 * 1000;
+const MAX_SCHEDULE_DELAY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+
+/** Revalidate time-sensitive approved inputs immediately before dispatch. */
+export function validateActionForDispatch(action: MarketoAction, now = Date.now()): void {
+  if (action.type !== "campaignSchedule") return;
+  let delay = new Date(action.runAt).getTime() - now;
+  if (!Number.isFinite(delay) || delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
+    throw new Error("The approved Marketo campaign run time is no longer between 5 minutes and 2 years from dispatch.");
+  }
+}
+
+function identityError(action: MarketoAction): never {
+  throw new MarketoActionResultError(
+    `Marketo returned a result that does not identify the approved target for ${action.type}, so its outcome is uncertain.`,
+    "uncertain",
+  );
+}
+
+function resultStatus(result: RawSyncResult): string {
+  if (typeof result.status !== "string" || result.status.length === 0) {
+    throw new MarketoActionResultError(
+      "Marketo returned a per-record result without a status, so its outcome is uncertain.",
+      "uncertain",
+    );
+  }
+  return result.status.toLowerCase();
+}
+
+/** Correlate result identities and endpoint statuses with the approved request where Marketo supplies them. */
+export function assertActionResultIdentity(action: MarketoAction, results: RawSyncResult[]): void {
+  let expected: (number | string | undefined)[] | undefined;
+  let identity: "id" | "marketoGUID" = "id";
+  let statuses: string[] | undefined;
+  switch (action.type) {
+    case "updatePerson": expected = [action.personId]; statuses = ["updated", "skipped"]; break;
+    case "deletePerson": expected = [action.personId]; statuses = ["deleted", "skipped"]; break;
+    case "listAdd": expected = action.personIds; statuses = ["added", "skipped"]; break;
+    case "listRemove": expected = action.personIds; statuses = ["removed", "skipped"]; break;
+    case "programStatus": expected = action.personIds; statuses = ["updated", "skipped"]; break;
+    case "campaignTrigger": statuses = ["triggered", "queued", "skipped"]; break;
+    case "campaignSchedule": statuses = ["scheduled", "queued", "skipped"]; break;
+    case "upsertPeople":
+      statuses = ["created", "updated", "skipped"];
+      if (action.lookupField === "id") expected = action.records.map(record => record.id as number | undefined);
+      break;
+    case "customObjectUpsert":
+      statuses = ["created", "updated", "skipped"];
+      if (action.records.every(record => typeof record.marketoGUID === "string")) {
+        identity = "marketoGUID";
+        expected = action.records.map(record => record.marketoGUID as string);
+      }
+      break;
+    case "customObjectDelete":
+      statuses = ["deleted", "skipped"];
+      if (action.deleteBy === "idField") {
+        identity = "marketoGUID";
+        expected = action.records.map(record => record.marketoGUID as string | undefined);
+      }
+      break;
+    case "businessObjectUpsert":
+    case "businessObjectDelete": {
+      statuses = action.type === "businessObjectDelete" ? ["deleted", "skipped"] : ["created", "updated", "skipped"];
+      if (action.matchBy === "idField") {
+        identity = action.kind === "company" || action.kind === "salesPerson" ? "id" : "marketoGUID";
+        expected = action.records.map(record => record[identity] as number | string | undefined);
+      }
+      break;
+    }
+  }
+  for (let [index, result] of results.entries()) {
+    let status = resultStatus(result);
+    if (statuses && !statuses.includes(status)) identityError(action);
+    // Marketo commonly omits identity fields for skipped rows. Exact result count and ordering
+    // still correlate them with the input, and no target mutation was reported for that row.
+    if (expected && status !== "skipped" && result[identity] !== expected[index]) identityError(action);
+  }
+}
+
 /** Number of per-record outcomes expected from an action. */
 export function expectedActionResults(action: MarketoAction): number {
   if (isDesignStudioAction(action)) return 1;
@@ -348,7 +427,7 @@ export function assertActionResults(
       if (value.id !== undefined && (!Number.isSafeInteger(value.id) || Number(value.id) <= 0)) return true;
       if (value.marketoGUID !== undefined &&
           (typeof value.marketoGUID !== "string" || value.marketoGUID.length === 0)) return true;
-      if (value.status !== undefined && (typeof value.status !== "string" || value.status.length === 0)) return true;
+      if (typeof value.status !== "string" || value.status.length === 0) return true;
       if (value.reasons !== undefined && (
         !Array.isArray(value.reasons) ||
         value.reasons.some(reason => {
@@ -376,7 +455,7 @@ export function assertActionResults(
 /** Fail unless Marketo reports a complete, non-skipped result. */
 export function assertApplied(results: unknown[], expected = results.length): void {
   assertActionResults(results, expected);
-  let skipped = results.filter(r => r.status === "skipped");
+  let skipped = results.filter(r => resultStatus(r) === "skipped");
   if (skipped.length === 0) return;
   let codes = [
     ...new Set(skipped.flatMap(r => (r.reasons ?? [])

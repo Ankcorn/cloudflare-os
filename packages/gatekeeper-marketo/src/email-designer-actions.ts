@@ -3,11 +3,24 @@ import type { DesignerAssetKind, MarketoClient, RawDesignerAsset } from "./marke
 
 export type EmailDesignerKind = "designerEmail" | "designerTemplate" | "designerFragment";
 
+const INHERITED_CLONE_FIELDS = [
+  "templateId", "appType", "appData", "data", "headers", "settings",
+] as const;
+const SOURCE_COMPARISON_FIELDS = [
+  "templateId", "appType", "appData", "data", "headers", "settings",
+  "contentId", "associatedStates", "state", "status",
+] as const;
+type DesignerCloneField = typeof SOURCE_COMPARISON_FIELDS[number];
+type DesignerSnapshotValue = { present: false } | { present: true; value: unknown };
+
+/** Clone-relevant Email Designer source state captured when approval is submitted. */
+export type DesignerCloneSnapshot = { [K in DesignerCloneField]: DesignerSnapshotValue };
+
 export type EmailDesignerAction =
   | { id: number; type: "designerCreate"; asset: EmailDesignerKind; provisionalId: string; body: Record<string, unknown> }
-  | { id: number; type: "designerClone"; asset: EmailDesignerKind; provisionalId: string; sourceId: string; name: string; description?: string }
+  | { id: number; type: "designerClone"; asset: EmailDesignerKind; provisionalId: string; sourceId: string; name: string; description?: string; sourceSnapshot: DesignerCloneSnapshot }
   | { id: number; type: "designerUpdate"; asset: EmailDesignerKind; targetId: string; patch: Record<string, unknown> }
-  | { id: number; type: "designerLifecycle"; asset: EmailDesignerKind; targetId: string; operation: "createDraft" | "approve" | "unapprove" | "discard" }
+  | { id: number; type: "designerLifecycle"; asset: EmailDesignerKind; targetId: string; operation: "createDraft" | "approve" | "unapprove" | "discard"; contentId: string; sourceState: "draft" | "approved" }
   | { id: number; type: "designerDelete"; asset: EmailDesignerKind; targetId: string };
 
 export type EmailDesignerActionInput = EmailDesignerAction extends infer T
@@ -18,12 +31,104 @@ export function isEmailDesignerAction(action: { type: string }): action is Email
   return action.type.startsWith("designer");
 }
 
+/** A designer preflight failure proves that no mutating request was sent. */
+export class DesignerPreDispatchError extends Error {}
+
 function path(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
 }
 
 function label(kind: EmailDesignerKind): string {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "email template" : "fragment";
+}
+
+function jsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(jsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).toSorted().flatMap(key => {
+      let item = Reflect.get(value, key);
+      return item === undefined ? [] : [[key, jsonValue(item)]];
+    }));
+  }
+  return value;
+}
+
+function snapshotRecord(snapshot: DesignerCloneSnapshot): Record<DesignerCloneField, unknown> {
+  return Object.fromEntries(SOURCE_COMPARISON_FIELDS.map(field => [
+    field,
+    snapshot[field].present ? snapshot[field].value : undefined,
+  ])) as Record<DesignerCloneField, unknown>;
+}
+
+/** Build a stable, JSON-safe snapshot while preserving absent top-level fields. */
+export function designerCloneSnapshot(source: Record<string, unknown>): DesignerCloneSnapshot {
+  let normalized: Record<string, unknown> = {
+    ...source,
+    templateId: source.templateId === undefined ? undefined : String(source.templateId),
+    appData: source.appData && typeof source.appData === "object" && !Array.isArray(source.appData)
+      ? {
+          ...source.appData as object,
+          workspaceId: Reflect.get(source.appData, "workspaceId") === undefined
+            ? undefined : String(Reflect.get(source.appData, "workspaceId")),
+          folderId: Reflect.get(source.appData, "folderId") === undefined
+            ? undefined : String(Reflect.get(source.appData, "folderId")),
+          programId: Reflect.get(source.appData, "programId") === undefined
+            ? undefined : String(Reflect.get(source.appData, "programId")),
+        }
+      : source.appData,
+  };
+  return Object.fromEntries(SOURCE_COMPARISON_FIELDS.map(field => [
+    field,
+    normalized[field] === undefined
+      ? { present: false }
+      : { present: true, value: jsonValue(normalized[field]) },
+  ])) as DesignerCloneSnapshot;
+}
+
+/** Resolve provisional asset references captured inside a clone snapshot. */
+export function resolveDesignerCloneSnapshot(
+  snapshot: DesignerCloneSnapshot,
+  resolveDesigner: (id: string) => string,
+  resolveAsset: (id: string) => number,
+): DesignerCloneSnapshot {
+  return designerCloneSnapshot(resolvedBody(snapshotRecord(snapshot), resolveDesigner, resolveAsset));
+}
+
+/** Apply a simulated designer update to an approval snapshot. */
+export function updateDesignerCloneSnapshot(
+  snapshot: DesignerCloneSnapshot,
+  patch: Record<string, unknown>,
+): DesignerCloneSnapshot {
+  let source = snapshotRecord(snapshot);
+  for (let field of SOURCE_COMPARISON_FIELDS) {
+    if (patch[field] === undefined) continue;
+    if (["appData", "headers", "settings"].includes(field) && source[field] && patch[field] &&
+        typeof source[field] === "object" && typeof patch[field] === "object" &&
+        !Array.isArray(source[field]) && !Array.isArray(patch[field])) {
+      source[field] = { ...source[field] as object, ...patch[field] as object };
+    } else {
+      source[field] = patch[field];
+    }
+  }
+  return designerCloneSnapshot(source);
+}
+
+/** Whether an exact source read still matches the approved clone snapshot. */
+export function matchesDesignerCloneSnapshot(
+  source: Record<string, unknown>,
+  snapshot: DesignerCloneSnapshot,
+): boolean {
+  return JSON.stringify(designerCloneSnapshot(source)) === JSON.stringify(snapshot);
+}
+
+/** Whether clone-inherited configuration matches an approved source snapshot. */
+export function matchesDesignerCloneConfiguration(
+  asset: Record<string, unknown>,
+  sourceSnapshot: DesignerCloneSnapshot,
+): boolean {
+  let createdSnapshot = designerCloneSnapshot(asset);
+  return INHERITED_CLONE_FIELDS.every(field =>
+    JSON.stringify(createdSnapshot[field]) === JSON.stringify(sourceSnapshot[field]));
 }
 
 function escape(value: string): string {
@@ -38,7 +143,7 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
     case "designerCreate":
       return { ...base, title: `Create Marketo designer ${name}`, description: `Create a new Marketo Email Designer ${name} named **${escape(String(action.body.name ?? ""))}**.` };
     case "designerClone":
-      return { ...base, title: `Clone Marketo designer ${name}`, description: `Clone ${name} \`${escape(action.sourceId)}\` as **${escape(action.name)}** in the source asset's current location.` };
+      return { ...base, title: `Clone Marketo designer ${name}`, description: `Clone ${name} \`${escape(action.sourceId)}\` as **${escape(action.name)}** in the source asset's snapshotted location and configuration.` };
     case "designerUpdate":
       return { ...base, title: `Update Marketo designer ${name}`, description: `Update draft fields on ${name} \`${escape(target ?? "")}\`:\n\n    ${escape(JSON.stringify(action.patch))}` };
     case "designerLifecycle": {
@@ -53,7 +158,7 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
         ...base,
         awaitDecision: action.operation === "discard",
         title: `${action.operation} Marketo designer ${name}`,
-        description: `${action.operation} ${name} \`${escape(target ?? "")}\`.${risk}`,
+        description: `${action.operation} ${name} \`${escape(target ?? "")}\` using its snapshotted ${action.sourceState} content \`${escape(action.contentId)}\`.${risk}`,
       };
     }
     case "designerDelete":
@@ -78,13 +183,52 @@ function assertTargetResult(
   targetId: string,
   operation: string,
   expectedStatus?: string,
+  contentIdentity = false,
 ): void {
   let returned = result[0];
-  if (result.length !== 1 || returned?.id === undefined || String(returned.id) !== targetId) {
+  let returnedId = contentIdentity ? returned?.contentId : returned?.id;
+  if (result.length !== 1 || returnedId === undefined || String(returnedId) !== targetId) {
     throw new Error(`Marketo returned an invalid result for designer ${operation} on ${targetId}.`);
   }
   if (expectedStatus !== undefined && (returned.status ?? returned.state)?.toLowerCase() !== expectedStatus) {
     throw new Error(`Marketo returned an invalid status for designer ${operation} on ${targetId}.`);
+  }
+}
+
+function containsApproved(actual: unknown, expected: unknown): boolean {
+  if (expected === undefined) return true;
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && actual.length === expected.length &&
+      expected.every((item, index) => containsApproved(actual[index], item));
+  }
+  if (expected && typeof expected === "object") {
+    return Boolean(actual && typeof actual === "object" && !Array.isArray(actual)) &&
+      Object.entries(expected).every(([key, value]) => containsApproved(Reflect.get(actual as object, key), value));
+  }
+  return actual === expected;
+}
+
+async function verifyCreation(
+  client: MarketoClient,
+  kind: DesignerAssetKind,
+  id: string,
+  approved: Record<string, unknown>,
+  inherited?: DesignerCloneSnapshot,
+): Promise<void> {
+  let created = await client.getDesignerAsset(kind, id);
+  let comparable = created && {
+    ...created,
+    templateId: created.templateId === undefined ? undefined : String(created.templateId),
+    appData: created.appData && {
+      ...created.appData,
+      workspaceId: created.appData.workspaceId === undefined ? undefined : String(created.appData.workspaceId),
+      folderId: created.appData.folderId === undefined ? undefined : String(created.appData.folderId),
+      programId: created.appData.programId === undefined ? undefined : String(created.appData.programId),
+    },
+  };
+  if (!created || String(created.id) !== id || !containsApproved(comparable, approved) ||
+      inherited && !matchesDesignerCloneConfiguration(created as Record<string, unknown>, inherited)) {
+    throw new Error(`Marketo could not verify the created designer asset ${id} against the approved request.`);
   }
 }
 
@@ -94,22 +238,31 @@ export async function executeEmailDesignerAction(
   resolveDesigner: (id: string) => string,
   resolveAsset: (id: string) => number,
   recordCreation: (provisionalId: string, realId: string, kind: EmailDesignerKind) => void,
+  recordCandidate: (realId: string) => void = () => {},
 ): Promise<void> {
   let kind = path(action.asset);
   if (action.type === "designerCreate") {
-    recordCreation(
-      action.provisionalId,
-      createdId(await client.createDesignerAsset(kind, resolvedBody(action.body, resolveDesigner, resolveAsset))),
-      action.asset,
-    );
+    let body = resolvedBody(action.body, resolveDesigner, resolveAsset);
+    let id = createdId(await client.createDesignerAsset(kind, body));
+    recordCandidate(id);
+    await verifyCreation(client, kind, id, body);
+    recordCreation(action.provisionalId, id, action.asset);
     return;
   }
   if (action.type === "designerClone") {
+    let sourceId = resolveDesigner(action.sourceId);
+    let sourceSnapshot = resolveDesignerCloneSnapshot(action.sourceSnapshot, resolveDesigner, resolveAsset);
     let result = await client.cloneDesignerAsset(kind, {
-      assetId: resolveDesigner(action.sourceId),
+      assetId: sourceId,
       newAsset: { name: action.name, description: action.description },
     });
-    recordCreation(action.provisionalId, createdId(result), action.asset);
+    let created = createdId(result);
+    recordCandidate(created);
+    await verifyCreation(client, kind, created, {
+      name: action.name,
+      description: action.description,
+    }, sourceSnapshot);
+    recordCreation(action.provisionalId, created, action.asset);
     return;
   }
   let id = resolveDesigner(action.targetId);
@@ -130,10 +283,11 @@ export async function executeEmailDesignerAction(
     action.operation === "createDraft" ? "create_draft" : action.operation;
   let expectedStatus = action.operation === "approve" || action.operation === "discard" ? "approved" : "draft";
   assertTargetResult(
-    await client.transitionDesignerAsset(kind, { contentId: id, action: operation }),
-    id,
+    await client.transitionDesignerAsset(kind, { contentId: action.contentId, action: operation }),
+    action.contentId,
     action.operation,
     expectedStatus,
+    true,
   );
 }
 
@@ -167,7 +321,12 @@ function appDataReferences(body: Record<string, unknown>, id: string): boolean {
 /** Whether an action depends on a logical designer, folder, or program ID. */
 export function emailDesignerActionReferences(action: EmailDesignerAction, id: string): boolean {
   if ("targetId" in action && action.targetId === id) return true;
-  if (action.type === "designerClone" && action.sourceId === id) return true;
+  if (action.type === "designerClone") {
+    let source = snapshotRecord(action.sourceSnapshot);
+    return Boolean(action.sourceId === id || source.templateId === id ||
+      source.appData && typeof source.appData === "object" &&
+      (Reflect.get(source.appData, "folderId") === id || Reflect.get(source.appData, "programId") === id));
+  }
   if (action.type === "designerCreate") {
     return action.body.templateId === id || appDataReferences(action.body, id);
   }

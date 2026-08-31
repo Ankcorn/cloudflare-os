@@ -369,6 +369,7 @@ export async function fetchAccessToken(
 export class MarketoClient {
   #endpoint: string;
   #tokens: TokenProvider;
+  #preparedToken?: string;
 
   constructor(endpoint: string, tokens: TokenProvider) {
     while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
@@ -378,7 +379,8 @@ export class MarketoClient {
 
   /** Resolve authentication before a side-effecting request is marked as dispatched. */
   async prepare(): Promise<void> {
-    await this.#tokens.getToken();
+    this.#preparedToken = undefined;
+    this.#preparedToken = await this.#tokens.getToken();
   }
 
   /** Perform a REST call, unwrapping Marketo's envelope. Retries once on an expired/invalid
@@ -460,8 +462,10 @@ export class MarketoClient {
     };
 
     let run = async (): Promise<MarketoEnvelope<T>> => {
+      let preparedToken = this.#preparedToken;
+      this.#preparedToken = undefined;
       try {
-        return await attempt(await this.#tokens.getToken());
+        return await attempt(preparedToken ?? await this.#tokens.getToken());
       } catch (e) {
         if (e instanceof MarketoError && e.isAuthError) {
           try {
@@ -2608,6 +2612,7 @@ export type RawWorkspace = {
 /** Raw Email Designer asset after validation at the Marketo client boundary. */
 export type RawDesignerAsset = {
   id?: string | number;
+  contentId?: string;
   name?: string;
   description?: string;
   status?: string;
@@ -2644,6 +2649,7 @@ export type RawDesignerAsset = {
   };
   templateId?: string | number;
   metadata?: { createdBy?: string; createdAt?: string; modifiedBy?: string; modifiedAt?: string };
+  associatedStates?: { contentId?: string; state?: string }[];
 };
 
 /** Clone request shared by the three designer asset kinds. */
@@ -2751,8 +2757,11 @@ function parseDesignerAsset(value: unknown, label: string): RawDesignerAsset {
   let headers = item.headers === undefined ? undefined : designerRecord(item.headers, `${label} headers`);
   let settings = item.settings === undefined ? undefined : designerRecord(item.settings, `${label} settings`);
   let metadata = item.metadata === undefined ? undefined : designerRecord(item.metadata, `${label} metadata`);
+  let associatedStates = item.associatedStates === undefined ? undefined : item.associatedStates;
+  if (associatedStates !== undefined && !Array.isArray(associatedStates)) throw designerShapeError(`${label} associated states`);
   return {
     id: designerId(item.id, `${label} id`),
+    contentId: designerString(item.contentId, `${label} contentId`),
     name: designerString(item.name, `${label} name`),
     description: designerString(item.description, `${label} description`),
     status: designerString(item.status, `${label} status`),
@@ -2800,6 +2809,13 @@ function parseDesignerAsset(value: unknown, label: string): RawDesignerAsset {
       modifiedBy: designerString(metadata.modifiedBy, `${label} modifiedBy`),
       modifiedAt: designerString(metadata.modifiedAt, `${label} modifiedAt`),
     },
+    associatedStates: associatedStates?.map((associatedState, index) => {
+      let state = designerRecord(associatedState, `${label} associated state ${index + 1}`);
+      return {
+        contentId: designerString(state.contentId, `${label} associated state contentId`),
+        state: designerString(state.state, `${label} associated state state`),
+      };
+    }),
   };
 }
 

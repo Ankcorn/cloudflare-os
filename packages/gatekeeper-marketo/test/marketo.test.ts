@@ -22,14 +22,18 @@ import {
 import { connectPageHtml } from "../src/connect-ui";
 import {
   assertApplied,
+  assertActionResultIdentity,
   describeAction,
   executeAction,
+  validateActionForDispatch,
   type MarketoAction,
   type MarketoActionInput,
 } from "../src/actions";
 import type { DesignStudioAction, DesignStudioActionInput } from "../src/design-studio-actions";
 import {
+  designerCloneSnapshot,
   emailDesignerActionReferences,
+  resolveDesignerCloneSnapshot,
   type EmailDesignerAction,
   type EmailDesignerActionInput,
 } from "../src/email-designer-actions";
@@ -859,6 +863,30 @@ function emailDesignerContext(client: Partial<MarketoClient>, initial: EmailDesi
 }
 
 describe("new Email Designer", () => {
+  it("snapshots the operation-specific associated content id for lifecycle approvals", async () => {
+    let { ctx, actions } = emailDesignerContext({
+      getDesignerAsset: async () => ({
+        id: "email-1",
+        associatedStates: [
+          { contentId: "draft-1", state: "draft" },
+          { contentId: "approved-1", state: "approved" },
+        ],
+      }),
+    });
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+    await email.approve();
+    await email.discardDraft();
+    await email.unapprove();
+    await email.createDraft();
+
+    expect(actions).toMatchObject([
+      { operation: "approve", contentId: "draft-1", sourceState: "draft" },
+      { operation: "discard", contentId: "draft-1", sourceState: "draft" },
+      { operation: "unapprove", contentId: "approved-1", sourceState: "approved" },
+      { operation: "createDraft", contentId: "approved-1", sourceState: "approved" },
+    ]);
+  });
+
   it("creates a fully-specified email provisionally and simulates follow-up updates", async () => {
     let { ctx, actions } = emailDesignerContext({});
     let designer = new MarketoEmailDesignerImpl(ctx);
@@ -902,6 +930,59 @@ describe("new Email Designer", () => {
       headers: { subject: "New subject", fromEmail: "team@example.com" },
       content: { html: "<p>Hello</p>", text: "Hello" },
     });
+  });
+
+  it("binds designer clone approval to the complete simulated source snapshot", async () => {
+    let raw = {
+      id: "email-1",
+      name: "Source",
+      status: "draft",
+      appType: "marketo",
+      appData: { editorType: "email", workspaceId: 1, folderId: 10 },
+      data: { html: { body: "<p>Old</p>" }, text: { body: "Old", syncFromHtml: false } },
+      headers: { subject: "Old", fromEmail: "team@example.com" },
+      settings: { enableUrlTracking: true, isOperational: false },
+      templateId: 20,
+      metadata: { modifiedAt: "2026-01-01T00:00:00Z" },
+      contentId: "draft-1",
+      associatedStates: [{ state: "draft", contentId: "draft-1" }],
+      state: "draft",
+    };
+    let { ctx, actions } = emailDesignerContext({ getDesignerAsset: async () => raw });
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+    await email.update({
+      content: { html: "<p>New</p>" },
+      headers: { subject: "New" },
+      settings: { isOperational: true },
+    });
+    await email.clone("Copy", "Approved description");
+
+    expect(actions[1]).toMatchObject({ type: "designerClone", name: "Copy", description: "Approved description" });
+    expect((actions[1] as Extract<EmailDesignerAction, { type: "designerClone" }>).sourceSnapshot)
+      .toEqual(designerCloneSnapshot({
+        appType: "marketo",
+        appData: { editorType: "email", workspaceId: 1, folderId: 10 },
+        data: { html: { body: "<p>New</p>" } },
+        headers: { subject: "New", fromEmail: "team@example.com" },
+        settings: { enableUrlTracking: true, isOperational: true },
+        templateId: 20,
+        contentId: "draft-1",
+        associatedStates: [{ state: "draft", contentId: "draft-1" }],
+        state: "draft",
+        status: "draft",
+      }));
+  });
+
+  it("resolves every provisional location reference in a designer clone snapshot", () => {
+    let resolved = resolveDesignerCloneSnapshot(designerCloneSnapshot({
+      templateId: "~1",
+      appData: { folderId: "~2", programId: "~3", workspaceId: "4" },
+    }), id => id === "~1" ? "template-A" : id, id => id === "~2" ? 22 : id === "~3" ? 33 : Number(id));
+
+    expect(resolved).toEqual(designerCloneSnapshot({
+      templateId: "template-A",
+      appData: { folderId: "22", programId: "33", workspaceId: "4" },
+    }));
   });
 
   it("omits raw editor context and refuses arbitrary context and fragment-type writes", async () => {
@@ -997,7 +1078,7 @@ describe("new Email Designer", () => {
         id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
         body: { name: "Local create", appData: { workspaceId: "1", folderId: "10" } },
       },
-      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-0-1", name: "Clone" },
+      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-0-1", name: "Clone", sourceSnapshot: designerCloneSnapshot({}) },
       { id: 3, type: "designerUpdate", asset: "designerEmail", targetId: "email-0-1", patch: { name: "Updated" } },
       { id: 4, type: "designerDelete", asset: "designerEmail", targetId: "email-0-2" },
     ]);
@@ -1036,15 +1117,15 @@ describe("new Email Designer", () => {
   });
 
   it("describes publication, discard, and deletion risks and tracks dependencies", () => {
-    let approve = describeAction({ id: 1, type: "designerLifecycle", asset: "designerFragment", targetId: "f", operation: "approve" });
-    let discard = describeAction({ id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "discard" });
+    let approve = describeAction({ id: 1, type: "designerLifecycle", asset: "designerFragment", targetId: "f", operation: "approve", contentId: "f-draft", sourceState: "draft" });
+    let discard = describeAction({ id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "discard", contentId: "e-draft", sourceState: "draft" });
     let remove = describeAction({ id: 3, type: "designerDelete", asset: "designerTemplate", targetId: "t" });
     expect(approve.description).toMatch(/every inheriting/);
     expect(discard).toMatchObject({ awaitDecision: true });
     expect(discard.description).toMatch(/cannot be recovered/);
     expect(remove.description).toMatch(/irreversible.*depend/i);
     expect(emailDesignerActionReferences({ id: 4, type: "designerCreate", asset: "designerEmail", provisionalId: "~2", body: { templateId: "~1" } }, "~1")).toBe(true);
-    expect(emailDesignerActionReferences({ id: 5, type: "designerClone", asset: "designerEmail", provisionalId: "~3", sourceId: "~2", name: "Copy" }, "~2")).toBe(true);
+    expect(emailDesignerActionReferences({ id: 5, type: "designerClone", asset: "designerEmail", provisionalId: "~3", sourceId: "~2", name: "Copy", sourceSnapshot: designerCloneSnapshot({}) }, "~2")).toBe(true);
     expect(emailDesignerActionReferences({ id: 6, type: "designerCreate", asset: "designerEmail", provisionalId: "~4", body: { appData: { workspaceId: "1", programId: "~3" } } }, "~3")).toBe(true);
     expect(emailDesignerActionReferences({ id: 7, type: "designerUpdate", asset: "designerEmail", targetId: "email", patch: { appData: { folderId: "~4" } } }, "~4")).toBe(true);
   });
@@ -1139,7 +1220,7 @@ describe("smart campaign management", () => {
     expect(actions[1]).toMatchObject({ type: "campaignLifecycle", operation: "activate" });
   });
 
-  it("snapshots clone simulation before later source mutations", async () => {
+  it("resolves clone simulation from the source's current state", async () => {
     let { ctx } = campaignContext({
       getSmartCampaign: async () => ({ id: 7, name: "Source", description: "Original", type: "batch" }),
     });
@@ -1148,7 +1229,7 @@ describe("smart campaign management", () => {
     let clone = await session.cloneSmartCampaign("7", { id: "10", type: "folder" }, { name: "Clone" });
     await source.updateMetadata({ description: "Later source change" });
 
-    expect(await clone.describe()).toMatchObject({ name: "Clone", description: "Original" });
+    expect(await clone.describe()).toMatchObject({ name: "Clone", description: "Later source change" });
     expect(await source.describe()).toMatchObject({ description: "Later source change" });
   });
 
@@ -1237,6 +1318,7 @@ describe("smart campaign management", () => {
         calls.push(["update", id, patch]);
         return [{ id }];
       },
+      getSmartCampaign: async (id: number) => ({ id, name: "Campaign", folder: { id: 10, type: "Folder" } }),
     } as never;
     let resolved = new Map<string, number>([["10", 10]]);
     await executeCampaignAction(
@@ -1382,7 +1464,7 @@ describe("program management", () => {
     expect(designerActions[0]).toMatchObject({ body: { appData: { programId } } });
   });
 
-  it("clones into ordinary folders and snapshots the source before later mutations", async () => {
+  it("clones into ordinary folders and resolves the source's current state", async () => {
     let { ctx } = programContext({
       getProgram: async () => ({
         id: 7, name: "Template", description: "Original", type: "Default", channel: "Web",
@@ -1393,7 +1475,7 @@ describe("program management", () => {
     let clone = await session.cloneProgram("7", { id: "10", type: "folder" }, { name: "Copy" });
     await session.getProgram("7").updateMetadata({ description: "Later" });
 
-    expect(await clone.describe()).toMatchObject({ id: "~1", name: "Copy", description: "Original" });
+    expect(await clone.describe()).toMatchObject({ id: "~1", name: "Copy", description: "Later" });
     await expect(session.cloneProgram("7", { id: "20", type: "program" }, { name: "Bad" }))
       .rejects.toThrow(/ordinary folder/);
   });
@@ -1438,6 +1520,9 @@ describe("program management", () => {
     let client = {
       createProgram: async (input: unknown) => { calls.push(["create", input]); return [{ id: 77 }]; },
       updateProgram: async (id: number, patch: unknown) => { calls.push(["update", id, patch]); return [{ id }]; },
+      getProgram: async (id: number) => ({
+        id, name: "Program", type: "Default", channel: "Web", folder: { value: 10, type: "Folder" },
+      }),
     } as never;
     let resolved = new Map<string, number>([["10", 10]]);
     await executeProgramAction({
@@ -1589,7 +1674,7 @@ describe("Design Studio simulation", () => {
     expect(getSnippetContent).not.toHaveBeenCalled();
   });
 
-  it("clones the overlaid content of a real source with a pending update", async () => {
+  it("resolves cloned content from the source's current pending state", async () => {
     let getEmailTemplateContent = vi.fn(async () => ({ id: 31, content: "<html>old</html>" }));
     let { ctx } = designContext({ getEmailTemplateContent }, [{
       id: 1,
@@ -1598,13 +1683,15 @@ describe("Design Studio simulation", () => {
       targetId: "31",
       content: "<html>pending</html>",
     }]);
-    let clone = await new MarketoDesignStudioImpl(ctx).cloneEmailTemplate(
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let clone = await studio.cloneEmailTemplate(
       "31",
       "Clone",
       { id: "10", type: "folder" },
     );
+    await studio.getEmailTemplate("31").updateContent("<html>later</html>");
 
-    expect(await clone.getContent()).toBe("<html>pending</html>");
+    expect(await clone.getContent()).toBe("<html>later</html>");
     expect(getEmailTemplateContent).toHaveBeenCalledWith(31);
   });
 
@@ -1638,50 +1725,27 @@ describe("Design Studio simulation", () => {
     expect(await formClone.getFields()).toEqual([]);
     expect(actions.filter(action =>
       action.type === "designClone" && action.asset === "landingPage"
-    )).toMatchObject([
-      { sourceId: "~1", templateId: "20" },
-      { sourceId: "~2", templateId: "20" },
-    ]);
+    )).toMatchObject([{ sourceId: "~1" }, { sourceId: "~2" }]);
     expect(getLandingPageContent).not.toHaveBeenCalled();
     expect(getFormFields).not.toHaveBeenCalled();
   });
 
-  it("captures a physical landing page's template before queuing its clone", async () => {
+  it("queues a physical landing-page clone without snapshotting its template", async () => {
     let getLandingPage = vi.fn(async () => ({ id: 31, name: "Source", template: 20 }));
     let { ctx, actions } = designContext({ getLandingPage });
-    let observe = vi.fn();
-    ctx.observe = observe;
-
     await new MarketoDesignStudioImpl(ctx).cloneLandingPage(
       "31",
       "Clone",
       { id: "10", type: "folder" },
     );
 
-    expect(getLandingPage).toHaveBeenCalledWith(31);
-    expect(observe).toHaveBeenCalledWith(
-      "Read Marketo landing page template",
-      "Read the template used by landing page `31` before cloning it.",
-    );
+    expect(getLandingPage).not.toHaveBeenCalled();
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({
       type: "designClone",
       asset: "landingPage",
       sourceId: "31",
-      templateId: "20",
     });
-  });
-
-  it("rejects invalid physical landing-page clone sources before queueing", async () => {
-    for (let source of [undefined, { id: 32, template: 20 }, { id: 31, template: 0 }]) {
-      let { ctx, actions } = designContext({ getLandingPage: async () => source });
-      await expect(new MarketoDesignStudioImpl(ctx).cloneLandingPage(
-        "31",
-        "Clone",
-        { id: "10", type: "folder" },
-      )).rejects.toThrow(/wrong landing page|no valid template/);
-      expect(actions).toEqual([]);
-    }
   });
 
   it("rejects unknown and incorrectly typed Design Studio create and metadata fields", async () => {
@@ -3689,6 +3753,77 @@ describe("Marketo request encoding", () => {
     expect(notifications).toBe(1);
   });
 
+  it("reserves a prepared token for exactly the next request", async () => {
+    let now = Date.now();
+    let lookups = 0;
+    let lookupCountsAtFetch: number[] = [];
+    vi.stubGlobal("fetch", async () => {
+      lookupCountsAtFetch.push(lookups);
+      return Response.json({ success: true, result: [{ status: "scheduled" }] });
+    });
+    let client = new MarketoClient(ORIGIN, {
+      getToken: async () => {
+        lookups++;
+        if (lookups > 1) now += 2 * 60 * 1000;
+        return `token-${lookups}`;
+      },
+    });
+    let action: MarketoAction = {
+      id: 1, type: "campaignSchedule", campaignId: 7, campaignName: "Campaign",
+      runAt: new Date(now + 5 * 60 * 1000 + 1).toISOString(),
+    };
+
+    await client.prepare();
+    validateActionForDispatch(action, now);
+    await client.scheduleCampaign(7, new Date(action.runAt));
+    expect(lookupCountsAtFetch).toEqual([1]);
+
+    await client.getLeads("email", ["person@example.com"]);
+    expect(lookupCountsAtFetch).toEqual([1, 2]);
+  });
+
+  it("refreshes once when a prepared token is rejected", async () => {
+    let refreshes: (boolean | undefined)[] = [];
+    let requests = 0;
+    vi.stubGlobal("fetch", async () => ++requests === 1
+      ? Response.json({ success: false, errors: [{ code: "601" }] }, { status: 401 })
+      : Response.json({ success: true, result: [{ id: 7, status: "updated" }] }));
+    let client = new MarketoClient(ORIGIN, {
+      getToken: async force => {
+        refreshes.push(force);
+        return force ? "fresh" : "prepared";
+      },
+    });
+
+    await client.prepare();
+    await expect(client.syncLeads([{ id: 7 }], "updateOnly", "id"))
+      .resolves.toEqual([{ id: 7, status: "updated" }]);
+    expect(refreshes).toEqual([undefined, true]);
+    expect(requests).toBe(2);
+  });
+
+  it("does not retain an older reservation when prepare fails", async () => {
+    let lookups = 0;
+    let authorization: string | null = null;
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      authorization = new Headers(init?.headers).get("Authorization");
+      return Response.json({ success: true, result: [] });
+    });
+    let client = new MarketoClient(ORIGIN, {
+      getToken: async () => {
+        lookups++;
+        if (lookups === 2) throw new Error("lookup failed");
+        return lookups === 1 ? "old" : "fresh";
+      },
+    });
+
+    await client.prepare();
+    await expect(client.prepare()).rejects.toThrow("lookup failed");
+    await client.getLeads("email", ["person@example.com"]);
+    expect(authorization).toBe("Bearer fresh");
+    expect(lookups).toBe(3);
+  });
+
   it("classifies Identity endpoint invalid_client responses as credential failures", async () => {
     let marker = "secret-credential-marker";
     vi.stubGlobal("fetch", async () => Response.json(
@@ -4453,8 +4588,12 @@ describe("Email Designer action lifecycle", () => {
     await runInDurableObject(stub, async (instance, state) => {
       state.storage.kv.put("provisionalKind:~1", "program");
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([5, 6, 7]);
-      for (let id of [1, 2, 3, 4]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3, 4, 5, 6, 7]);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      for (let id of [2, 3, 4]) {
+        expect(state.storage.kv.get(`pending:${id}`)).toBeDefined();
+        expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
+      }
       for (let id of [5, 6, 7]) expect(state.storage.kv.get(`pending:${id}`)).toBeDefined();
     });
   });
@@ -4480,8 +4619,9 @@ describe("Email Designer action lifecycle", () => {
     let stub = await campaignActionGatekeeper(actions);
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([6]);
-      for (let id of [1, 2, 3, 4, 5]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3, 4, 5, 6]);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      for (let id of [2, 3, 4, 5]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
       expect(state.storage.kv.get("pending:6")).toBeDefined();
     });
   });
@@ -4489,13 +4629,17 @@ describe("Email Designer action lifecycle", () => {
   it("requires same-asset updates and clones to apply in submission order", async () => {
     let actions: EmailDesignerAction[] = [
       { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-A", patch: { name: "First" } },
-      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~1", sourceId: "email-A", name: "Copy" },
+      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~1", sourceId: "email-A", name: "Copy", sourceSnapshot: designerCloneSnapshot({}) },
     ];
     let requests: { path: string; body: unknown }[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
-      requests.push({ path, body: JSON.parse(String(init?.body)) });
+      if (!init?.body) {
+        let id = path.endsWith("/email-A") ? "email-A" : "email-B";
+        return Response.json({ success: true, result: [{ id, name: id === "email-A" ? "First" : "Copy" }] });
+      }
+      requests.push({ path, body: JSON.parse(String(init.body)) });
       return Response.json({ success: true, result: [{ id: path.endsWith("/clone") ? "email-B" : "email-A" }] });
     });
     let stub = await emailDesignerActionGatekeeper(actions);
@@ -4524,9 +4668,8 @@ describe("Email Designer action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
-      expect(state.storage.kv.get("pending:2")).toBeUndefined();
-      expect(state.storage.kv.get("pending:3")).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3]);
+      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
     });
   });
 
@@ -4598,20 +4741,254 @@ describe("Email Designer action lifecycle", () => {
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [] },
       { action: { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "e" }, result: [{}] },
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [{ id: "other" }] },
-      { action: { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "approve" }, result: [{ id: "e", status: "draft" }] },
+      { action: { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "approve", contentId: "e-draft", sourceState: "draft" }, result: [{ contentId: "e-draft", status: "draft" }] },
     ];
     for (let { action, result } of cases) {
-      vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
-        ? Response.json({ access_token: "token", expires_in: 3600 })
-        : Response.json({ success: true, result }));
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        if (action.type === "designerLifecycle" && !init?.body) {
+          return Response.json({ success: true, result: [{
+            id: "e", associatedStates: [{ contentId: "e-draft", state: "draft" }],
+          }] });
+        }
+        return Response.json({ success: true, result });
+      });
       let stub = await emailDesignerActionGatekeeper([action]);
       await runInDurableObject(stub, async (instance, state) => {
-        await expect(instance.applyAction(1)).rejects.toThrow(/invalid/);
+        await expect(instance.applyAction(1)).rejects.toThrow(/invalid|wrong designer asset/);
         expect(state.storage.kv.get("applying:1")).toBe("uncertain");
         expect(state.storage.kv.get("pending:1")).toBeDefined();
       });
       vi.unstubAllGlobals();
     }
+  });
+
+  it("accepts a clone with new lifecycle identities and draft state", async () => {
+    let inherited = {
+      appType: "marketo",
+      appData: { workspaceId: "1" },
+      data: { html: { body: "<p>Approved</p>" } },
+      headers: { subject: "Approved" },
+      settings: { isOperational: false },
+    };
+    let source = {
+      id: "email-A",
+      name: "Source",
+      ...inherited,
+      contentId: "source-approved",
+      associatedStates: [{ contentId: "source-approved", state: "approved" }],
+      state: "approved",
+      status: "approved",
+    };
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
+      sourceId: "email-A", name: "Copy", sourceSnapshot: designerCloneSnapshot(source),
+    };
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (init?.body) return Response.json({ success: true, result: [{ id: "email-B" }] });
+      return Response.json({ success: true, result: [path.endsWith("/email-A") ? source : {
+        id: "email-B",
+        name: "Copy",
+        ...inherited,
+        contentId: "clone-draft",
+        associatedStates: [{ contentId: "clone-draft", state: "draft" }],
+        state: "draft",
+        status: "draft",
+      }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).resolves.toBeUndefined();
+      expect(state.storage.kv.get("designerProvisional:~1")).toBe("email-B");
+      expect(state.storage.kv.get("applying:1")).toBe("applied");
+    });
+  });
+
+  it("resolves provisional folder and template references through a dependent designer clone", async () => {
+    let logicalConfiguration = {
+      appType: "marketo",
+      appData: { workspaceId: "1", folderId: "~1" },
+      data: { html: { body: "<p>Source</p>" } },
+      headers: { subject: "Source" },
+      settings: { isOperational: false },
+      templateId: "~2",
+    };
+    let resolvedConfiguration = {
+      ...logicalConfiguration,
+      appData: { workspaceId: "1", folderId: "11" },
+      templateId: "template-A",
+    };
+    let actions: MarketoAction[] = [
+      {
+        id: 1, type: "designCreate", asset: "folder", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" }, input: { name: "Folder" },
+      },
+      {
+        id: 2, type: "designerCreate", asset: "designerTemplate", provisionalId: "~2",
+        body: { name: "Template", appType: "marketo", appData: { workspaceId: "1", folderId: "~1" } },
+      },
+      {
+        id: 3, type: "designerCreate", asset: "designerEmail", provisionalId: "~3",
+        body: { name: "Source", ...logicalConfiguration },
+      },
+      {
+        id: 4, type: "designerClone", asset: "designerEmail", provisionalId: "~4",
+        sourceId: "~3", name: "Copy",
+        sourceSnapshot: designerCloneSnapshot({ ...logicalConfiguration, status: "draft" }),
+      },
+    ];
+    let template = {
+      id: "template-A", name: "Template", appType: "marketo",
+      appData: { workspaceId: "1", folderId: "11" },
+      contentId: "template-draft", state: "draft", status: "draft",
+    };
+    let source = {
+      id: "email-A", name: "Source", ...resolvedConfiguration,
+      contentId: "source-draft",
+      associatedStates: [{ contentId: "source-draft", state: "draft" }],
+      state: "draft", status: "draft",
+    };
+    let writes: { path: string; body: unknown }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (init?.body) {
+        writes.push({
+          path,
+          body: path.includes("/asset/v2/") ? JSON.parse(String(init.body)) : new URLSearchParams(String(init.body)),
+        });
+        let id = path.endsWith("/folders.json") ? 11
+          : path.endsWith("/emailtemplate") ? "template-A"
+            : path.endsWith("/clone") ? "email-B" : "email-A";
+        return Response.json({ success: true, result: [{ id }] });
+      }
+      let result = path.endsWith("/folder/11.json")
+        ? { id: 11, name: "Folder", parent: { id: 10, type: "Folder" } }
+        : path.endsWith("/emailtemplate/template-A") ? template
+          : path.endsWith("/email/email-A") ? source : {
+        id: "email-B", name: "Copy", ...resolvedConfiguration,
+        contentId: "clone-draft",
+        associatedStates: [{ contentId: "clone-draft", state: "draft" }],
+        state: "draft", status: "draft",
+      };
+      return Response.json({ success: true, result: [result] });
+    });
+    let stub = await emailDesignerActionGatekeeper(actions);
+    await runInDurableObject(stub, async (instance, state) => {
+      for (let id of [2, 3, 4]) {
+        await expect(instance.applyAction(id)).rejects.toThrow(/still pending creation|earlier pending mutation/);
+      }
+      expect(writes).toEqual([]);
+      for (let id of [1, 2, 3, 4]) await instance.applyAction(id);
+      expect(state.storage.kv.get("provisional:~1")).toBe(11);
+      expect(state.storage.kv.get("designerProvisional:~2")).toBe("template-A");
+      expect(state.storage.kv.get("designerProvisional:~3")).toBe("email-A");
+      expect(state.storage.kv.get("designerProvisional:~4")).toBe("email-B");
+      expect(state.storage.kv.get("applying:4")).toBe("applied");
+    });
+    expect(writes.map(write => write.path)).toEqual([
+      "/rest/asset/v1/folders.json",
+      "/rest/asset/v2/emailtemplate",
+      "/rest/asset/v2/email",
+      "/rest/asset/v2/email/clone",
+    ]);
+    expect(writes[2]?.body).toMatchObject({ templateId: "template-A", appData: { folderId: "11" } });
+    expect(writes[3]?.body).toEqual({ assetId: "email-A", newAsset: { name: "Copy" } });
+  });
+
+  it("does not map a designer clone when its exact read has the wrong template", async () => {
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
+      sourceId: "email-A", name: "Copy", sourceSnapshot: designerCloneSnapshot({ templateId: "template-A" }),
+    };
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (!init?.body) {
+        if (path.endsWith("/emailtemplate/template-A")) {
+          return Response.json({ success: true, result: [{ id: "template-A" }] });
+        }
+        return Response.json({ success: true, result: [{
+          id: path.endsWith("/email-A") ? "email-A" : "email-B",
+          name: path.endsWith("/email-A") ? "Source" : "Copy",
+          templateId: path.endsWith("/email-A") ? "template-A" : "template-B",
+        }] });
+      }
+      return Response.json({ success: true, result: [{ id: "email-B" }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/could not verify the created designer asset/);
+      expect(state.storage.kv.get("designerProvisional:~1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+    });
+  });
+
+  it.each([
+    ["content", { data: { html: { body: "<p>Changed</p>" } } }],
+    ["content id", { contentId: "changed-content" }],
+    ["associated states", { associatedStates: [{ contentId: "changed-content", state: "draft" }] }],
+    ["state", { state: "draft" }],
+    ["status", { status: "draft" }],
+  ])("rejects a designer clone before dispatch when snapshotted source %s changed", async (_label, changed) => {
+    let approved = {
+      appType: "marketo",
+      appData: { workspaceId: "1", folderId: "10" },
+      data: { html: { body: "<p>Approved</p>" } },
+      headers: { subject: "Approved" },
+      settings: { isOperational: false },
+      contentId: "approved-content",
+      associatedStates: [{ contentId: "approved-content", state: "approved" }],
+      state: "approved",
+      status: "approved",
+    };
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
+      sourceId: "email-A", name: "Copy",
+      sourceSnapshot: designerCloneSnapshot(approved),
+    };
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (init?.body) writes++;
+      return Response.json({ success: true, result: [{ id: "email-A", ...approved, ...changed }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/clone source changed after approval/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+    });
+    expect(writes).toBe(0);
+  });
+
+  it("does not map a designer create whose exact read omits an approved location", async () => {
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
+      body: { name: "Email", templateId: "template-A", appData: { workspaceId: "1", folderId: "10" } },
+    };
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (!init?.body && path.endsWith("/emailtemplate/template-A")) {
+        return Response.json({ success: true, result: [{ id: "template-A" }] });
+      }
+      if (!init?.body && path.endsWith("/folder/10.json")) {
+        return Response.json({ success: true, result: [{ id: 10, name: "Folder" }] });
+      }
+      return init?.body
+        ? Response.json({ success: true, result: [{ id: "email-A" }] })
+        : Response.json({ success: true, result: [{
+            id: "email-A", name: "Email", templateId: "template-A", appData: { workspaceId: "1" },
+          }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/could not verify the created designer asset/);
+      expect(state.storage.kv.get("designerProvisional:~1")).toBeUndefined();
+    });
   });
 
   it("keeps a successful create with a malformed response uncertain", async () => {
@@ -4626,6 +5003,9 @@ describe("Email Designer action lifecycle", () => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       mutationCalls++;
+      if (new URL(url).pathname.endsWith("/folder/10.json")) {
+        return Response.json({ success: true, result: [{ id: 10, name: "Folder" }] });
+      }
       return Response.json({ success: true, result: [null] });
     });
     let stub = await emailDesignerActionGatekeeper([action]);
@@ -4636,12 +5016,31 @@ describe("Email Designer action lifecycle", () => {
       expect(state.storage.kv.get("pending:1")).toBeDefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
     });
-    expect(mutationCalls).toBe(1);
+    expect(mutationCalls).toBe(2);
   });
 });
 
 describe("smart campaign action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("rejects exact create reads with missing approved fields or the wrong parent type", async () => {
+    let action: CampaignAction = {
+      id: 1, type: "campaignCreate", provisionalId: "~1",
+      parent: { id: "10", type: "Folder" }, name: "Campaign", description: "Approved",
+    };
+    for (let created of [
+      { id: 31, name: "Campaign", description: "Approved" },
+      { id: 31, name: "Campaign", description: "Approved", folder: { id: 10, type: "Program" } },
+      { id: 31, name: "Campaign", folder: { id: 10, type: "Folder" } },
+    ]) {
+      let client = {
+        createSmartCampaign: async () => [{ id: 31 }],
+        getSmartCampaign: async () => created,
+      } as never;
+      await expect(executeCampaignAction(action, client, Number, () => {}))
+        .rejects.toThrow(/could not verify created smart campaign/);
+    }
+  });
 
   it("requires an earlier source mutation to apply before a campaign clone", async () => {
     let actions: CampaignAction[] = [
@@ -4668,7 +5067,10 @@ describe("smart campaign action lifecycle", () => {
       }
       let path = new URL(url).pathname;
       paths.push(path);
-      return Response.json({ success: true, result: [{ id: path.includes("/clone.json") ? 32 : 31 }] });
+      return Response.json({ success: true, result: [{
+        id: path.includes("/clone.json") || path.endsWith("/32.json") ? 32 : 31,
+        ...(path.endsWith("/32.json") ? { name: "Clone", folder: { id: 10, type: "Folder" } } : {}),
+      }] });
     });
     let stub = await campaignActionGatekeeper(actions);
 
@@ -4681,10 +5083,13 @@ describe("smart campaign action lifecycle", () => {
       await instance.applyAction(2);
       expect(state.storage.kv.get("provisional:~1")).toBe(32);
       expect(state.storage.kv.get("provisionalKind:~1")).toBe("campaign");
+      expect(state.storage.kv.get("creationCandidate:2")).toBeUndefined();
     });
     expect(paths).toEqual([
       "/rest/asset/v1/smartCampaign/31.json",
+      "/rest/asset/v1/smartCampaign/31.json",
       "/rest/asset/v1/smartCampaign/31/clone.json",
+      "/rest/asset/v1/smartCampaign/32.json",
     ]);
   });
 
@@ -4745,8 +5150,8 @@ describe("smart campaign action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
-      expect(state.storage.kv.get("pending:2")).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2]);
+      expect(state.storage.kv.get("dependencyBlocked:2")).toBe(1);
     });
   });
 
@@ -4771,7 +5176,8 @@ describe("smart campaign action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2]);
+      expect(state.storage.kv.get("dependencyBlocked:2")).toBe(1);
     });
   });
 
@@ -4838,8 +5244,8 @@ describe("smart campaign action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
-      for (let id of [1, 2, 3, 4]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3, 4]);
+      for (let id of [2, 3, 4]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
     });
   });
 });
@@ -4863,7 +5269,10 @@ describe("program action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
-      return Response.json({ success: true, result: [{ id: path.includes("/clone.json") ? 32 : 31 }] });
+      return Response.json({ success: true, result: [{
+        id: path.includes("/clone.json") || path.endsWith("/32.json") ? 32 : 31,
+        ...(path.endsWith("/32.json") ? { name: "Clone", folder: { value: 10, type: "Folder" } } : {}),
+      }] });
     });
     let stub = await campaignActionGatekeeper(actions);
 
@@ -4877,7 +5286,9 @@ describe("program action lifecycle", () => {
     });
     expect(paths).toEqual([
       "/rest/asset/v1/program/31.json",
+      "/rest/asset/v1/program/31.json",
       "/rest/asset/v1/program/31/clone.json",
+      "/rest/asset/v1/program/32.json",
     ]);
   });
 
@@ -4904,8 +5315,8 @@ describe("program action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
-      for (let id of [1, 2, 3, 4]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3, 4]);
+      for (let id of [2, 3, 4]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
     });
   });
 
@@ -4925,12 +5336,22 @@ describe("program action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       mutationCalls++;
       let path = new URL(url).pathname;
-      if (path.endsWith("/programs.json")) return Response.json({ success: true, result: [{ id: 100 }] });
-      if (path.includes("/asset/v2/email")) {
-        designerBody = JSON.parse(String(init?.body));
-        return Response.json({ success: true, result: [{ id: "email-1" }] });
+      if (path.endsWith("/programs.json") || path.endsWith("/program/100.json")) return Response.json({ success: true, result: [{
+        id: 100, name: "Program", type: "Default", channel: "Web", folder: { value: 10, type: "Folder" },
+      }] });
+      if (path.endsWith("/smartCampaigns.json") || path.endsWith("/smartCampaign/101.json")) {
+        return Response.json({ success: true, result: [{ id: 101, name: "Campaign", folder: { id: 100, type: "Program" } }] });
       }
-      return Response.json({ success: true, result: [{ id: path.endsWith("/snippets.json") ? 102 : 101 }] });
+      if (path.endsWith("/snippets.json") || path.endsWith("/snippet/102.json")) {
+        return Response.json({ success: true, result: [{ id: 102, name: "Snippet", folder: { id: 100, type: "Program" } }] });
+      }
+      if (path.includes("/asset/v2/email")) {
+        if (init?.body) designerBody = JSON.parse(String(init.body));
+        return Response.json({ success: true, result: [{
+          id: "email-1", name: "Email", appData: { workspaceId: "1", programId: "100" },
+        }] });
+      }
+      throw new Error(`Unexpected path ${path}`);
     });
     let stub = await campaignActionGatekeeper(actions);
     await runInDurableObject(stub, async (instance, state) => {
@@ -4943,7 +5364,7 @@ describe("program action lifecycle", () => {
       expect(state.storage.kv.get("provisionalKind:~3")).toBe("snippet");
       expect(state.storage.kv.get("provisionalKind:~4")).toBe("designerEmail");
     });
-    expect(mutationCalls).toBe(4);
+    expect(mutationCalls).toBe(9);
     expect(designerBody).toMatchObject({ appData: { programId: "100" } });
   });
 });
@@ -4982,7 +5403,7 @@ describe("provisional id kind safety", () => {
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("sends the captured source template when cloning a landing page", async () => {
+  it("reads and sends the landing page's current source template when cloning", async () => {
     let action: DesignStudioAction = {
       id: 1,
       type: "designClone",
@@ -4991,15 +5412,20 @@ describe("Design Studio action lifecycle", () => {
       sourceId: "31",
       parent: { id: "10", type: "Folder" },
       name: "Clone",
-      templateId: "20",
     };
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
-      submitted = new URLSearchParams(String(init?.body));
-      return Response.json({ success: true, result: [{ id: 88 }] });
+      let path = new URL(url).pathname;
+      if (init?.body) {
+        submitted = new URLSearchParams(String(init.body));
+        return Response.json({ success: true, result: [{ id: 88 }] });
+      }
+      return Response.json({ success: true, result: [path.endsWith("/31.json")
+        ? { id: 31, name: "Source", template: 20 }
+        : { id: 88, name: "Clone", template: 20, folder: { id: 10, type: "Folder" } }] });
     });
     let stub = await designActionGatekeeper([action]);
 
@@ -5010,45 +5436,26 @@ describe("Design Studio action lifecycle", () => {
     expect(submitted?.get("folder")).toBe(JSON.stringify({ id: 10, type: "Folder" }));
   });
 
-  it("rejects malformed landing-page clone actions before dispatch", async () => {
-    let actions = [
-      {
-        id: 1,
-        type: "designClone",
-        asset: "landingPage",
-        provisionalId: "~1",
-        sourceId: "31",
-        parent: { id: "10", type: "Folder" },
-        name: "Missing template",
-      },
-      {
-        id: 2,
-        type: "designClone",
-        asset: "email",
-        provisionalId: "~2",
-        sourceId: "32",
-        parent: { id: "10", type: "Folder" },
-        name: "Wrong template kind",
-        templateId: "20",
-      },
-    ] as unknown as DesignStudioAction[];
-    let writes = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("/identity/")) {
-        return Response.json({ access_token: "token", expires_in: 3600 });
-      }
-      writes++;
-      return Response.json({ success: true, result: [{ id: 88 }] });
-    });
-    let stub = await designActionGatekeeper(actions);
-
-    await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(1)).rejects.toThrow(/missing its source template/);
-      await expect(instance.applyAction(2)).rejects.toThrow(/Only a Marketo landing-page clone/);
-      expect(state.storage.kv.get("applying:1")).toBeUndefined();
-      expect(state.storage.kv.get("applying:2")).toBeUndefined();
-    });
-    expect(writes).toBe(0);
+  it("rejects missing, wrong-id, and template-less landing-page sources before cloning", async () => {
+    let action: DesignStudioAction = {
+      id: 1, type: "designClone", asset: "landingPage", provisionalId: "~1", sourceId: "31",
+      parent: { id: "10", type: "Folder" }, name: "Clone",
+    };
+    for (let source of [undefined, { id: 32, template: 20 }, { id: 31, template: 0 }]) {
+      let writes = 0;
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        if (init?.body) writes++;
+        return Response.json({ success: true, result: source ? [source] : [] });
+      });
+      let stub = await designActionGatekeeper([action]);
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.applyAction(1)).rejects.toThrow(/not found|no valid source template/);
+        expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      });
+      expect(writes).toBe(0);
+      vi.unstubAllGlobals();
+    }
   });
 
   it("forces insert-only semantics when an approved file creation reaches Marketo", async () => {
@@ -5070,8 +5477,10 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
-      submitted = init?.body as FormData;
-      return Response.json({ success: true, result: [{ id: 88 }] });
+      if (init?.body) submitted = init.body as FormData;
+      return Response.json({ success: true, result: [{
+        id: 88, name: "note.txt", mimeType: "text/plain", folder: { id: 10, type: "Folder" },
+      }] });
     });
     let stub = await designActionGatekeeper([action]);
 
@@ -5101,7 +5510,9 @@ describe("Design Studio action lifecycle", () => {
       }
       let path = new URL(url).pathname;
       paths.push(path);
-      return Response.json({ success: true, result: [{ id: path.endsWith("/folders.json") ? 101 : 101 }] });
+      return Response.json({ success: true, result: [{
+        id: 101, name: "Child", parent: { id: 10, type: "Folder" },
+      }] });
     });
     let stub = await designActionGatekeeper(actions);
 
@@ -5113,6 +5524,7 @@ describe("Design Studio action lifecycle", () => {
     });
     expect(paths).toEqual([
       "/rest/asset/v1/folders.json",
+      "/rest/asset/v1/folder/101.json",
       "/rest/asset/v1/folder/101.json",
     ]);
   });
@@ -5169,7 +5581,10 @@ describe("Design Studio action lifecycle", () => {
       }
       let path = new URL(url).pathname;
       paths.push(path);
-      return Response.json({ success: true, result: [{ id: path.includes("/clone.json") ? 32 : 31 }] });
+      return Response.json({ success: true, result: [{
+        id: path.includes("/clone.json") || path.includes("emailTemplate/32.json") ? 32 : 31,
+        ...(path.includes("emailTemplate/32.json") ? { name: "Clone", folder: { id: 10, type: "Folder" } } : {}),
+      }] });
     });
     let stub = await designActionGatekeeper(actions, { "~1": 31 });
 
@@ -5184,7 +5599,9 @@ describe("Design Studio action lifecycle", () => {
     });
     expect(paths).toEqual([
       "/rest/asset/v1/emailTemplate/31/content.json",
+      "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/clone.json",
+      "/rest/asset/v1/emailTemplate/32.json",
     ]);
   });
 
@@ -5241,7 +5658,10 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
-      return Response.json({ success: true, result: [{ id: path.includes("clone") ? 32 : 31 }] });
+      return Response.json({ success: true, result: [{
+        id: path.includes("clone") || path.includes("emailTemplate/32.json") ? 32 : 31,
+        ...(path.includes("emailTemplate/32.json") ? { name: "Snapshot", folder: { id: 10, type: "Folder" } } : {}),
+      }] });
     });
     let stub = await designActionGatekeeper(actions);
 
@@ -5252,7 +5672,9 @@ describe("Design Studio action lifecycle", () => {
       for (let id of [1, 2, 3]) await instance.applyAction(id);
     });
     expect(paths).toEqual([
+      "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/clone.json",
+      "/rest/asset/v1/emailTemplate/32.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/delete.json",
     ]);
@@ -5284,9 +5706,15 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
-      let id = path.endsWith("/snippets.json") ? 101 : path.endsWith("/emails.json") ? 102
+      let id = path.endsWith("/snippets.json") || path.includes("/snippet/101.json") ? 101
+        : path.endsWith("/emails.json") || path.includes("/email/102.json") ? 102
         : path.includes("folder/10") ? 10 : 20;
-      return Response.json({ success: true, result: [{ id }] });
+      let exact = path.includes("/snippet/101.json")
+        ? { name: "Child", folder: { id: 10, type: "Folder" } }
+        : path.includes("/email/102.json")
+          ? { name: "Email", template: 20, folder: { id: 11, type: "Folder" } }
+          : {};
+      return Response.json({ success: true, result: [{ id, ...exact }] });
     });
     let stub = await designActionGatekeeper(actions);
 
@@ -5298,8 +5726,10 @@ describe("Design Studio action lifecycle", () => {
     });
     expect(paths).toEqual([
       "/rest/asset/v1/snippets.json",
+      "/rest/asset/v1/snippet/101.json",
       "/rest/asset/v1/folder/10/delete.json",
       "/rest/asset/v1/emails.json",
+      "/rest/asset/v1/email/102.json",
       "/rest/asset/v1/emailTemplate/20/content.json",
     ]);
   });
@@ -5329,13 +5759,14 @@ describe("Design Studio action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([4]);
-      for (let id of [1, 2, 3]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3, 4]);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
       expect(state.storage.kv.get("pending:4")).toBeDefined();
     });
   });
 
-  it("orders and rejects landing-page clones with provisional templates", async () => {
+  it("does not persist or order landing-page clones by a snapshotted template", async () => {
     let actions: DesignStudioAction[] = [
       {
         id: 1,
@@ -5353,26 +5784,30 @@ describe("Design Studio action lifecycle", () => {
         sourceId: "31",
         parent: { id: "10", type: "Folder" },
         name: "Page clone",
-        templateId: "~1",
       },
     ];
     let writes = 0;
-    vi.stubGlobal("fetch", async (url: string) => {
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
-      writes++;
-      return Response.json({ success: true, result: [{ id: 88 }] });
+      let path = new URL(url).pathname;
+      if (init?.body) writes++;
+      if (path.endsWith("/landingPage/31.json")) {
+        return Response.json({ success: true, result: [{ id: 31, template: 20 }] });
+      }
+      return Response.json({ success: true, result: [{
+        id: 88, name: "Page clone", template: 20, folder: { id: 10, type: "Folder" },
+      }] });
     });
     let stub = await designActionGatekeeper(actions);
 
     await runInDurableObject(stub, async (instance, state) => {
-      await expect(instance.applyAction(2)).rejects.toThrow(/still pending creation/);
-      expect(state.storage.kv.get("applying:2")).toBeUndefined();
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
     });
-    expect(writes).toBe(0);
+    expect(writes).toBe(1);
   });
 
   it("marks a create ambiguous when a follow-up fails after Marketo assigned its id", async () => {
@@ -5406,7 +5841,7 @@ describe("Design Studio action lifecycle", () => {
 
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.applyAction(1)).rejects.toThrow("Marketo request failed (code 1003; HTTP 200).");
-      expect(state.storage.kv.get("provisional:~1")).toBe(88);
+      expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
       expect(state.storage.kv.get("pending:1")).toBeDefined();
       await expect(instance.applyAction(2)).rejects.toThrow(/~1 is still pending creation/);
@@ -5416,8 +5851,9 @@ describe("Design Studio action lifecycle", () => {
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
-      for (let id of [1, 2, 3]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3]);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
       expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
       expect(state.storage.kv.get("provisionalKind:~1")).toBeUndefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
@@ -5567,6 +6003,326 @@ describe("action dispatch lifecycle", () => {
     personIds: [7],
   };
 
+  it("orders conflicts consistently across non-asset action families", async () => {
+    let cases: MarketoAction[][] = [
+      [
+        { id: 1, type: "listAdd", listId: 5, listName: "Customers", personIds: [7] },
+        { id: 2, type: "listRemove", listId: 5, listName: "Customers", personIds: [7, 8] },
+      ],
+      [
+        { id: 1, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", operation: "deactivate" },
+        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+        { id: 2, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", operation: "deactivate" },
+      ],
+      [
+        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign", runAt: "2027-01-01T00:00:00.000Z" },
+        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "businessObjectDelete", kind: "company", records: [{ externalCompanyId: "acme" }], matchBy: "dedupeFields", changedFields: ["externalCompanyId"] },
+        { id: 2, type: "businessObjectUpsert", kind: "company", records: [{ externalCompanyId: "acme", name: "Acme" }], matchBy: "dedupeFields", action: "createOrUpdate", changedFields: ["name"] },
+      ],
+      [
+        { id: 1, type: "programStatus", programId: 31, programName: "Program", personIds: [7], status: "Member" },
+        { id: 2, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
+      ],
+      [
+        { id: 1, type: "customObjectUpsert", apiName: "orders", records: [{ orderId: "one" }] },
+        { id: 2, type: "customObjectDelete", apiName: "orders", records: [{ orderId: "two" }], deleteBy: "dedupeFields" },
+      ],
+      [
+        { id: 1, type: "upsertPeople", records: [{ email: "person@example.com" }], upsertAction: "createOrUpdate", lookupField: "email" },
+        { id: 2, type: "upsertPeople", records: [{ email: "person@example.com" }], upsertAction: "updateOnly", lookupField: "email" },
+      ],
+      [
+        { id: 1, type: "upsertPeople", records: [{ id: 7, email: "person@example.com" }], upsertAction: "updateOnly", lookupField: "email" },
+        { id: 2, type: "deletePerson", personId: 7 },
+      ],
+    ];
+    for (let actions of cases) {
+      let calls = 0;
+      vi.stubGlobal("fetch", async () => { calls++; throw new Error("No provider call expected"); });
+      let stub = await campaignActionGatekeeper(actions);
+      await runInDurableObject(stub, async instance => {
+        await expect(instance.applyAction(2)).rejects.toThrow(/earlier pending mutation/);
+      });
+      expect(calls).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("orders business-object records across id and dedupe strategies without aliasing incomplete identities", async () => {
+    let overlapping: BusinessObjectAction[] = [
+      { id: 1, type: "businessObjectDelete", kind: "company", records: [{ id: 7, externalCompanyId: "acme" }], matchBy: "idField", changedFields: ["id"] },
+      { id: 2, type: "businessObjectUpsert", kind: "company", records: [{ id: 7, externalCompanyId: "acme" }], matchBy: "dedupeFields", action: "createOrUpdate", changedFields: ["externalCompanyId"] },
+    ];
+    let stub = await campaignActionGatekeeper(overlapping);
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/earlier pending mutation/);
+    });
+
+    let distinct: BusinessObjectAction[] = [
+      { id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] },
+      { id: 2, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-2" }], matchBy: "idField", changedFields: ["marketoGUID"] },
+    ];
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [{ marketoGUID: "g-2", status: "deleted" }] }));
+    stub = await campaignActionGatekeeper(distinct);
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+    });
+  });
+
+  it("orders Email Designer template dependencies and classic destination dependencies", async () => {
+    let actions: MarketoAction[] = [
+      { id: 1, type: "designerUpdate", asset: "designerTemplate", targetId: "template-1", patch: { description: "new" } },
+      { id: 2, type: "designerCreate", asset: "designerEmail", provisionalId: "~1", body: { name: "Email", templateId: "template-1" } },
+      { id: 3, type: "designMetadata", asset: "folder", targetId: "10", patch: { name: "Renamed" } },
+      { id: 4, type: "designCreate", asset: "snippet", provisionalId: "~2", parent: { id: "10", type: "Folder" }, input: { name: "Snippet" } },
+      { id: 5, type: "designerClone", asset: "designerEmail", provisionalId: "~3", sourceId: "email-1", name: "Copy", sourceSnapshot: designerCloneSnapshot({ templateId: "template-1" }) },
+    ];
+    let stub = await campaignActionGatekeeper(actions);
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/designerTemplate template-1.*earlier pending/);
+      await expect(instance.applyAction(4)).rejects.toThrow(/folder 10.*earlier pending/);
+      await expect(instance.applyAction(5)).rejects.toThrow(/designerTemplate template-1.*earlier pending/);
+    });
+  });
+
+  it("keeps rejected content dependents rejectable without allowing stale dispatch", async () => {
+    let actions: DesignStudioAction[] = [
+      { id: 1, type: "designContent", asset: "emailTemplate", targetId: "31", content: "new" },
+      { id: 2, type: "designClone", asset: "emailTemplate", provisionalId: "~1", sourceId: "31", parent: { id: "10", type: "Folder" }, name: "Copy" },
+    ];
+    let stub = await designActionGatekeeper(actions);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get("pending:2")).toBeDefined();
+      expect(state.storage.kv.get("dependencyBlocked:2")).toBe(1);
+      await expect(instance.applyAction(2)).rejects.toThrow(/depends on an earlier rejected action/);
+      await expect(instance.rejectAction(2)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get("pending:2")).toBeUndefined();
+    });
+  });
+
+  it("rejects an expired campaign schedule before any provider request", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign",
+      runAt: new Date(Date.now() + 4 * 60 * 1000).toISOString(),
+    };
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => { calls++; throw new Error("No provider call expected"); });
+    let stub = await actionGatekeeper(action);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/no longer between 5 minutes and 2 years/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(calls).toBe(0);
+  });
+
+  it("revalidates a campaign schedule after credential preparation", async () => {
+    let now = Date.now();
+    let clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let action: MarketoAction = {
+      id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign",
+      runAt: new Date(now + 6 * 60 * 1000).toISOString(),
+    };
+    let campaignCalls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        now += 2 * 60 * 1000;
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      campaignCalls++;
+      return Response.json({ success: true, result: [{ status: "scheduled" }] });
+    });
+    let stub = await actionGatekeeper(action);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/no longer between 5 minutes and 2 years/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(campaignCalls).toBe(0);
+    clock.mockRestore();
+  });
+
+  it("validates designer update location and template references before dispatch", async () => {
+    for (let [patch, actualKind] of [
+      [{ appData: { folderId: "~9" } }, "program"],
+      [{ appData: { programId: "~9" } }, "folder"],
+      [{ templateId: "~9" }, "designerFragment"],
+    ] as const) {
+      let action = {
+        id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-1", patch,
+      } as unknown as EmailDesignerAction;
+      let calls = 0;
+      vi.stubGlobal("fetch", async () => { calls++; throw new Error("No provider call expected"); });
+      let stub = await campaignActionGatekeeper([action]);
+      await runInDurableObject(stub, async (instance, state) => {
+        state.storage.kv.put("provisionalKind:~9", actualKind);
+        await expect(instance.applyAction(1)).rejects.toThrow(/is not a/);
+        expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      });
+      expect(calls).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("remotely preflights physical designer and classic references while the action is retryable", async () => {
+    for (let [patch, expectedPath] of [
+      [{ templateId: "missing-template" }, "/rest/asset/v2/emailtemplate/missing-template"],
+      [{ appData: { folderId: "10" } }, "/rest/asset/v1/folder/10.json"],
+      [{ appData: { programId: "11" } }, "/rest/asset/v1/program/11.json"],
+    ] as const) {
+      let action = {
+        id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-1", patch,
+      } as unknown as EmailDesignerAction;
+      let paths: string[] = [];
+      let writes = 0;
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        paths.push(new URL(url).pathname);
+        if (init?.body) writes++;
+        return Response.json({ success: true, result: [] });
+      });
+      let stub = await campaignActionGatekeeper([action]);
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.applyAction(1)).rejects.toThrow(/not found/);
+        expect(state.storage.kv.get("applying:1")).toBeUndefined();
+        expect(state.storage.kv.get("pending:1")).toBeDefined();
+        await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      });
+      expect(paths).toEqual([expectedPath]);
+      expect(writes).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("exact-reads classic campaign and program clone sources before dispatch", async () => {
+    let cases: [MarketoAction, string][] = [
+      [{ id: 1, type: "campaignClone", provisionalId: "~1", sourceId: "31",
+        parent: { id: "10", type: "Folder" }, name: "Clone" }, "/rest/asset/v1/smartCampaign/31.json"],
+      [{ id: 1, type: "programClone", provisionalId: "~1", sourceId: "31",
+        parentId: "10", name: "Clone" }, "/rest/asset/v1/program/31.json"],
+    ];
+    for (let [action, expectedPath] of cases) {
+      let paths: string[] = [];
+      let writes = 0;
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        paths.push(new URL(url).pathname);
+        if (init?.body) writes++;
+        return Response.json({ success: true, result: [] });
+      });
+      let stub = await campaignActionGatekeeper([action]);
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.applyAction(1)).rejects.toThrow(/not found.*nothing was dispatched/);
+        expect(state.storage.kv.get("applying:1")).toBeUndefined();
+        expect(state.storage.kv.get("pending:1")).toBeDefined();
+      });
+      expect(paths).toEqual([expectedPath]);
+      expect(writes).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses and revalidates the approved Email Designer content id", async () => {
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
+      operation: "approve", contentId: "draft-7", sourceState: "draft",
+    };
+    let transitionBody: unknown;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (!init?.body) return Response.json({ success: true, result: [{
+        id: "email-1", associatedStates: [{ contentId: "draft-7", state: "draft" }],
+      }] });
+      transitionBody = JSON.parse(String(init.body));
+      return Response.json({ success: true, result: [{ id: "email-1", contentId: "draft-7", status: "approved" }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, instance => instance.applyAction(1));
+    expect(transitionBody).toEqual({ contentId: "draft-7", action: "approve" });
+  });
+
+  it("treats a changed Email Designer content id as definitively undispatched", async () => {
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
+      operation: "approve", contentId: "draft-old", sourceState: "draft",
+    };
+    let transitions = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (init?.body) transitions++;
+      return Response.json({ success: true, result: [{
+        id: "email-1", associatedStates: [{ contentId: "draft-new", state: "draft" }],
+      }] });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/content changed.*nothing was dispatched/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(transitions).toBe(0);
+  });
+
+  it("keeps a known-target mutation with the wrong returned id uncertain", async () => {
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [{ id: 8, status: "added" }] }));
+    let stub = await actionGatekeeper(ACTION);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/does not identify the approved target/);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
+    });
+  });
+
+  it("validates endpoint-specific target identities and statuses", () => {
+    let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
+      [{ id: 1, type: "deletePerson", personId: 7 }, [{ id: 8, status: "deleted" }]],
+      [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 8, status: "updated" }]],
+      [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ marketoGUID: "g-2", status: "deleted" }]],
+      [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ marketoGUID: "g-2", status: "deleted" }]],
+      [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7] }, [{ status: "scheduled" }]],
+    ];
+    for (let [action, results] of cases) {
+      expect(() => assertActionResultIdentity(action, results)).toThrow(/does not identify the approved target/);
+    }
+  });
+
+  it("requires statuses and normalizes their case for identity and skipped-result handling", () => {
+    expect(() => assertActionResultIdentity(ACTION, [{ id: 7 }])).toThrow(/without a status/);
+    expect(() => assertActionResultIdentity(ACTION, [{ id: 7, status: "Added" }])).not.toThrow();
+    expect(() => assertActionResultIdentity(ACTION, [{ status: "Skipped" }])).not.toThrow();
+    expect(() => assertApplied([{ status: "Skipped", reasons: [{ code: "1004" }] }]))
+      .toThrow(/declined all 1 record/);
+  });
+
+  it("does not map a provisional create when its exact follow-up read contradicts approval", async () => {
+    let action: CampaignAction = {
+      id: 1, type: "campaignCreate", provisionalId: "~1",
+      parent: { id: "10", type: "Folder" }, name: "Approved name",
+    };
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      return Response.json({ success: true, result: [{
+        id: 31,
+        ...(path.endsWith("/smartCampaign/31.json") ? { name: "Different name" } : {}),
+      }] });
+    });
+    let stub = await campaignActionGatekeeper([action]);
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/could not verify created smart campaign/);
+      expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+      expect(state.storage.kv.get("creationCandidate:1")).toBe(31);
+    });
+  });
+
   it("allows only one concurrent dispatch", async () => {
     let release: (() => void) | undefined;
     let dispatched = new Promise<void>(resolve => {
@@ -5585,7 +6341,7 @@ describe("action dispatch lifecycle", () => {
 
     await runInDurableObject(stub, async instance => {
       let first = instance.applyAction(ACTION.id);
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already (being prepared|dispatched)/);
       await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
       release?.();
       await first;
@@ -5593,6 +6349,31 @@ describe("action dispatch lifecycle", () => {
       await instance.applyAction(ACTION.id);
     });
     expect(calls).toBe(1);
+  });
+
+  it("recovers legacy persisted preparation state without treating it as dispatched", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      calls++;
+      return Response.json({ success: true, result: [{ id: 7, status: "added" }] });
+    });
+    let stub = await actionGatekeeper(ACTION);
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.kv.put(`applying:${ACTION.id}`, "preparing");
+      await expect(instance.applyAction(ACTION.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("applied");
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("deletes stale creation candidates when an action is definitively rejected", async () => {
+    let stub = await actionGatekeeper(ACTION);
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.kv.put(`creationCandidate:${ACTION.id}`, 99);
+      await instance.rejectAction(ACTION.id);
+      expect(state.storage.kv.get(`creationCandidate:${ACTION.id}`)).toBeUndefined();
+    });
   });
 
   it("allows retry after a definitive Marketo rejection", async () => {
@@ -5744,12 +6525,12 @@ describe("action dispatch lifecycle", () => {
     });
   });
 
-  it("also makes success-envelope per-record 1018 skips terminal", async () => {
+  it("also makes case-varied success-envelope per-record 1018 skips terminal", async () => {
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
       : Response.json({
           success: true,
-          result: [{ status: "skipped", reasons: [{ code: "1018", message: "CRM Enabled" }] }],
+          result: [{ status: "Skipped", reasons: [{ code: "1018", message: "CRM Enabled" }] }],
         }));
     let action: BusinessObjectAction = {
       id: 20, type: "businessObjectDelete", kind: "company",

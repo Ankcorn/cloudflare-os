@@ -46,11 +46,13 @@ import { makeClient, tokenCacheStub } from "./token-cache";
 import { logger } from "./logger";
 import {
   assertActionResults,
+  assertActionResultIdentity,
   assertApplied,
   describeAction,
   expectedActionResults,
   executeAction,
   MarketoActionResultError,
+  validateActionForDispatch,
   type MarketoAction,
   type MarketoActionInput,
 } from "./actions";
@@ -73,16 +75,21 @@ import {
 import { MarketoDesignStudioImpl } from "./design-studio";
 import type { EmailDesignerContext } from "./email-designer";
 import {
+  DesignerPreDispatchError,
   executeEmailDesignerAction,
   isEmailDesignerAction,
+  matchesDesignerCloneConfiguration,
+  matchesDesignerCloneSnapshot,
+  resolveDesignerCloneSnapshot,
   type EmailDesignerAction,
   type EmailDesignerKind,
 } from "./email-designer-actions";
 import {
   executeBusinessObjectAction,
   isBusinessObjectAction,
+  type BusinessObjectAction,
 } from "./business-object-actions";
-import type { BusinessObjectContext } from "./business-objects";
+import { BUSINESS_OBJECTS, type BusinessObjectContext } from "./business-objects";
 import type { MarketoBusinessObjectAccess, MarketoBusinessObjectKind } from "./types";
 import {
   makeSessionContext,
@@ -96,6 +103,8 @@ import {
   MarketoError,
   type MarketoClient,
   type MarketoCredentials,
+  type DesignerAssetKind,
+  type RawDesignerAsset,
   type RawList,
 } from "./marketo-api";
 import type { MarketoConfiguratorOption } from "./configurator/configurator-types";
@@ -734,10 +743,14 @@ type MarketoGatekeeperImplProps = {
 };
 
 type PendingRow = { action: MarketoAction };
-type ApplyingState = "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
+type ApplyingState = "preparing" | "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
 type LogicalKind = DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind;
 type LogicalReference = { id: string; kind: LogicalKind };
+
+function designerAssetKind(kind: EmailDesignerKind): DesignerAssetKind {
+  return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
+}
 
 @validateRpc()
 export class MarketoGatekeeperImpl
@@ -746,6 +759,8 @@ export class MarketoGatekeeperImpl
     MarketoSessionImpl | MarketoDesignStudioImpl | MarketoProgramImpl | MarketoStaticListImpl
   >
 {
+  #preparingActions = new Set<number>();
+
   /**
    * The account's credentials. Read on every operation rather than cached in props, so
    * disconnecting the account immediately stops existing bindings from working.
@@ -848,7 +863,7 @@ export class MarketoGatekeeperImpl
             this.#businessObjectAccess(body.kind) !== "read-write") {
           throw new Error("This Marketo business object is read-only or unavailable; no approval was submitted.");
         }
-        let index = this.#pendingIndex();
+        let index = this.#pendingIndexIncludingBlocked();
         if (index.length >= MAX_PENDING_ACTIONS) {
           throw new Error(`A Marketo binding cannot have more than ${MAX_PENDING_ACTIONS} pending actions.`);
         }
@@ -929,7 +944,16 @@ export class MarketoGatekeeperImpl
 
   async applyAction(actionId: number): Promise<void> {
     let state = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
+    if (state === "preparing") {
+      // Older workers persisted this retryable pre-dispatch state. No request was marked as
+      // dispatched, so recover it rather than permanently stranding the approval.
+      this.ctx.storage.kv.delete(`applying:${actionId}`);
+      state = undefined;
+    }
     if (state === "applied") return;
+    if (this.#preparingActions.has(actionId)) {
+      throw new Error("This Marketo action is already being prepared for dispatch.");
+    }
     if (state === "nothing-changed") {
       throw new Error("Marketo's native CRM sync made this action read-only; nothing was changed.");
     }
@@ -942,6 +966,9 @@ export class MarketoGatekeeperImpl
     if (!this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)) {
       throw new Error(`No queued Marketo action with id ${actionId}.`);
     }
+    if (this.ctx.storage.kv.get(`dependencyBlocked:${actionId}`)) {
+      throw new Error("This Marketo action depends on an earlier rejected action and cannot be dispatched; reject it to resolve the approval.");
+    }
 
     let queued = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
     if (queued && isBusinessObjectAction(queued) && this.#businessObjectAccess(queued.kind) !== "read-write") {
@@ -950,24 +977,36 @@ export class MarketoGatekeeperImpl
       throw new Error("This Marketo business object became read-only before dispatch; nothing was changed.");
     }
 
-    // Resolve authentication before claiming dispatch, since token failures cannot have applied
-    // the action and are safe to retry.
-    let client = await this.#client();
-    await client.prepare();
-
     let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
     if (!pending) throw new Error(`No queued Marketo action with id ${actionId}.`);
     if (this.ctx.storage.kv.get(`applying:${actionId}`)) {
       throw new Error("This Marketo action was already dispatched and cannot be repeated.");
     }
     this.#validateActionReferences(pending.action, true);
-    if (isDesignStudioAction(pending.action)) this.#validateDesignMutationOrder(pending.action);
-    if (isCampaignAction(pending.action)) this.#validateCampaignMutationOrder(pending.action);
-    if (isProgramAction(pending.action)) this.#validateProgramMutationOrder(pending.action);
-    if (isEmailDesignerAction(pending.action)) this.#validateDesignerMutationOrder(pending.action);
-    // Mark before dispatch. A timeout can happen after Marketo accepted the request, so an
-    // automatic retry could duplicate writes or campaign sends.
+    this.#validateMutationOrder(pending.action);
+    validateActionForDispatch(pending.action);
+    // Resolve authentication only after every local dispatch check. Token failures cannot have
+    // applied the action and remain safe to retry.
+    this.#preparingActions.add(actionId);
+    let client: MarketoClient;
+    let landingPageTemplateId: number | undefined;
+    try {
+      client = await this.#client();
+      landingPageTemplateId = await this.#preflightClassicClone(pending.action, client);
+      await this.#preflightDesignerReferences(pending.action, client);
+      await client.prepare();
+      if (!this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)) {
+        throw new Error("This Marketo action was rejected while dispatch was being prepared.");
+      }
+      validateActionForDispatch(pending.action);
+    } catch (error) {
+      this.#preparingActions.delete(actionId);
+      throw error;
+    }
+    // Mark before the side-effecting request. A timeout can happen after Marketo accepted it, so
+    // an automatic retry could duplicate writes or campaign sends.
     this.ctx.storage.kv.put(`applying:${actionId}`, "dispatching");
+    this.#preparingActions.delete(actionId);
 
     let results;
     try {
@@ -984,6 +1023,8 @@ export class MarketoGatekeeperImpl
               asset,
             );
           },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
+          landingPageTemplateId,
         );
         results = undefined;
       } else if (isCampaignAction(pending.action)) {
@@ -995,6 +1036,7 @@ export class MarketoGatekeeperImpl
             this.ctx.storage.kv.put(`provisional:${provisionalId}`, realId);
             this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, "campaign");
           },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
         );
         results = undefined;
       } else if (isProgramAction(pending.action)) {
@@ -1006,6 +1048,7 @@ export class MarketoGatekeeperImpl
             this.ctx.storage.kv.put(`provisional:${provisionalId}`, realId);
             this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, "program");
           },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
         );
         results = undefined;
       } else if (isEmailDesignerAction(pending.action)) {
@@ -1018,6 +1061,7 @@ export class MarketoGatekeeperImpl
             this.ctx.storage.kv.put(`designerProvisional:${provisionalId}`, realId);
             this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, kind);
           },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
         );
         results = undefined;
       } else if (isBusinessObjectAction(pending.action)) {
@@ -1039,6 +1083,7 @@ export class MarketoGatekeeperImpl
       // A parsed Marketo rejection is definitive. Transport and server failures are ambiguous:
       // Marketo may have accepted the write before the response was lost.
       let definitive =
+        e instanceof DesignerPreDispatchError ||
         e instanceof MarketoError &&
         (e.operation === undefined ||
           (e.status === undefined || e.status < 400) &&
@@ -1058,7 +1103,8 @@ export class MarketoGatekeeperImpl
            this.#resolveLogicalId(pending.action.provisionalId) !== undefined) definitive = false;
       if (isEmailDesignerAction(pending.action) &&
           (pending.action.type === "designerCreate" || pending.action.type === "designerClone") &&
-          this.#resolveDesignerId(pending.action.provisionalId) !== undefined) definitive = false;
+           this.#resolveDesignerId(pending.action.provisionalId) !== undefined) definitive = false;
+      if (this.ctx.storage.kv.get(`creationCandidate:${actionId}`) !== undefined) definitive = false;
       if (definitive) {
         this.ctx.storage.kv.delete(`applying:${actionId}`);
       } else {
@@ -1067,12 +1113,15 @@ export class MarketoGatekeeperImpl
       throw e;
     }
     try {
-      if (results) assertActionResults(results, expectedActionResults(pending.action));
+      if (results) {
+        assertActionResults(results, expectedActionResults(pending.action));
+        assertActionResultIdentity(pending.action, results);
+      }
       if (results && isBusinessObjectAction(pending.action) && pending.action.kind !== "namedAccount" &&
-          results.some(result => result.status === "skipped" && result.reasons?.some(reason => reason.code === "1018"))) {
+          results.some(result => result.status?.toLowerCase() === "skipped" && result.reasons?.some(reason => reason.code === "1018"))) {
         this.#setBusinessObjectAccess(pending.action.kind, "read-only");
         if (results.length === expectedActionResults(pending.action) && results.length > 0 &&
-            results.every(result => result.status === "skipped")) {
+            results.every(result => result.status?.toLowerCase() === "skipped")) {
           this.#removePending(actionId);
           this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
           throw new Error("Marketo's native CRM sync rejected this write; nothing was changed and it cannot be retried.");
@@ -1100,12 +1149,18 @@ export class MarketoGatekeeperImpl
 
   async rejectAction(actionId: number): Promise<void | { restart: true }> {
     let applying = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
-    if (applying === "dispatching" || applying === "applied") {
+    if (applying === "preparing") {
+      this.ctx.storage.kv.delete(`applying:${actionId}`);
+      applying = undefined;
+    }
+    if (this.#preparingActions.has(actionId) || applying === "dispatching" || applying === "applied") {
       throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
     }
     let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
     if (pending && (
-      isDesignStudioAction(pending) && (pending.type === "designCreate" || pending.type === "designClone") ||
+      isDesignStudioAction(pending) && (
+        pending.type === "designCreate" || pending.type === "designClone" || pending.type === "designContent"
+      ) ||
       isCampaignAction(pending) ||
       isProgramAction(pending) ||
       isEmailDesignerAction(pending)
@@ -1114,6 +1169,7 @@ export class MarketoGatekeeperImpl
       let purge = identity ? [identity] : [];
       let crossFamilyPurge = "provisionalId" in pending && identity ? [identity] : [];
       let provisionalIds: { id: string; designer: boolean }[] = [];
+      let blockedDependents = false;
       let recordProvisional = (action: MarketoAction) => {
         if ("provisionalId" in action) {
           provisionalIds.push({ id: action.provisionalId, designer: isEmailDesignerAction(action) });
@@ -1123,7 +1179,7 @@ export class MarketoGatekeeperImpl
       let changed = true;
       while (changed) {
         changed = false;
-        for (let id of this.#pendingIndex()) {
+        for (let id of this.#pendingIndexIncludingBlocked()) {
           let row = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action;
           if (!row || row.id <= pending.id ||
               !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row)) continue;
@@ -1141,7 +1197,8 @@ export class MarketoGatekeeperImpl
               changed = true;
             }
             recordProvisional(row);
-            this.#removePending(id);
+            this.ctx.storage.kv.put(`dependencyBlocked:${id}`, actionId);
+            blockedDependents = true;
           }
         }
       }
@@ -1151,7 +1208,8 @@ export class MarketoGatekeeperImpl
         this.ctx.storage.kv.delete(`provisionalKind:${provisional.id}`);
       }
       if (applying === undefined) this.ctx.storage.kv.delete(`applying:${actionId}`);
-      return { restart: true };
+      if (blockedDependents || "provisionalId" in pending || !isDesignStudioAction(pending)) return { restart: true };
+      return;
     }
     this.#removePending(actionId);
     if (applying === undefined) this.ctx.storage.kv.delete(`applying:${actionId}`);
@@ -1186,12 +1244,18 @@ export class MarketoGatekeeperImpl
   }
 
   #pendingIndex(): number[] {
+    return this.#pendingIndexIncludingBlocked().filter(id => !this.ctx.storage.kv.get(`dependencyBlocked:${id}`));
+  }
+
+  #pendingIndexIncludingBlocked(): number[] {
     return this.ctx.storage.kv.get<number[]>("pending:index") ?? [];
   }
 
   #removePending(actionId: number): void {
     this.ctx.storage.kv.delete(`pending:${actionId}`);
-    let index = this.#pendingIndex();
+    this.ctx.storage.kv.delete(`dependencyBlocked:${actionId}`);
+    this.ctx.storage.kv.delete(`creationCandidate:${actionId}`);
+    let index = this.#pendingIndexIncludingBlocked();
     if (index.includes(actionId)) this.ctx.storage.kv.put("pending:index", index.filter(id => id !== actionId));
   }
 
@@ -1274,39 +1338,12 @@ export class MarketoGatekeeperImpl
     if (action.type === "designClone") {
       this.#validateLogicalReference(action.sourceId, action.asset, ready);
       this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
-      if (action.asset === "landingPage" && !action.templateId) {
-        throw new Error("A landing-page clone is missing its source template.");
-      }
-      if (action.asset !== "landingPage" && action.templateId !== undefined) {
-        throw new Error("Only a Marketo landing-page clone can specify a landing-page template.");
-      }
-      if (action.templateId) {
-        this.#validateLogicalReference(action.templateId, "landingPageTemplate", ready);
-      }
     }
     if (action.type === "designCreate") {
       this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
       if (action.input.templateId) {
         let templateKind: LogicalKind = action.asset === "email" ? "emailTemplate" : "landingPageTemplate";
         this.#validateLogicalReference(action.input.templateId, templateKind, ready);
-      }
-    }
-  }
-
-  #validateDesignMutationOrder(action: DesignStudioAction): void {
-    let target = action.type === "designClone"
-      ? action.sourceId
-      : "targetId" in action ? action.targetId : undefined;
-    if (target === undefined) return;
-    let kind = action.type === "designDeleteFolder" ? "folder" : action.asset;
-    for (let actionId of this.#pendingIndex()) {
-      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
-      if (!pending || !isDesignStudioAction(pending) || pending.id >= action.id ||
-          action.type === "designClone" &&
-            (pending.type === "designCreate" || pending.type === "designClone")) continue;
-      if (this.#actionReferences(pending).some(reference =>
-        reference.kind === kind && this.#sameLogicalIdentity(reference.id, target))) {
-        throw new Error(`Marketo ${kind} ${target} has an earlier pending mutation.`);
       }
     }
   }
@@ -1319,27 +1356,6 @@ export class MarketoGatekeeperImpl
     }
   }
 
-  #validateCampaignMutationOrder(action: CampaignAction): void {
-    let target = action.type === "campaignClone"
-      ? action.sourceId
-      : "targetId" in action
-        ? action.targetId
-        : undefined;
-    if (target === undefined) return;
-    for (let actionId of this.#pendingIndex()) {
-      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
-      if (!pending || !isCampaignAction(pending) || pending.id >= action.id ||
-          pending.type !== "campaignMetadata" && pending.type !== "campaignLifecycle") continue;
-      let sameSource = pending.targetId === target;
-      let targetId = this.#resolveLogicalId(pending.targetId);
-      let sourceId = this.#resolveLogicalId(target);
-      sameSource ||= targetId !== undefined && targetId === sourceId;
-      if (sameSource) {
-        throw new Error(`Marketo smart campaign ${target} has an earlier pending mutation.`);
-      }
-    }
-  }
-
   #validateProgramReferences(action: ProgramAction, ready: boolean): void {
     if ("targetId" in action) this.#validateLogicalReference(action.targetId, "program", ready);
     if (action.type === "programClone") this.#validateLogicalReference(action.sourceId, "program", ready);
@@ -1348,31 +1364,24 @@ export class MarketoGatekeeperImpl
     }
   }
 
-  #validateProgramMutationOrder(action: ProgramAction): void {
-    let target = action.type === "programClone"
-      ? action.sourceId
-      : "targetId" in action ? action.targetId : undefined;
-    if (target === undefined) return;
-    for (let actionId of this.#pendingIndex()) {
-      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
-      if (!pending || !isProgramAction(pending) || pending.id >= action.id ||
-          pending.type !== "programUpdate" && pending.type !== "programLifecycle") continue;
-      if (this.#sameLogicalIdentity(pending.targetId, target)) {
-        throw new Error(`Marketo program ${target} has an earlier pending mutation.`);
-      }
-    }
-  }
-
   #validateDesignerReferences(action: EmailDesignerAction, ready: boolean): void {
+    if (action.type === "designerClone" && !this.#validDesignerCloneSnapshot(action.sourceSnapshot)) {
+      throw new Error("A persisted Marketo designer clone is missing its complete source snapshot.");
+    }
     let references: { id: string; kind: EmailDesignerKind }[] = [];
     if ("targetId" in action) references.push({ id: action.targetId, kind: action.asset });
     if (action.type === "designerClone") references.push({ id: action.sourceId, kind: action.asset });
     let templateId = action.type === "designerCreate" ? action.body.templateId
-      : action.type === "designerUpdate" ? action.patch.templateId : undefined;
+      : action.type === "designerUpdate" ? action.patch.templateId
+        : action.type === "designerClone" ? this.#designerCloneSnapshotValue(action, "templateId") : undefined;
     if (typeof templateId === "string") references.push({ id: templateId, kind: "designerTemplate" });
-    let appData = action.type === "designerCreate" && action.body.appData &&
-      typeof action.body.appData === "object" && !Array.isArray(action.body.appData)
-      ? Object.fromEntries(Object.entries(action.body.appData))
+    let body = action.type === "designerCreate" ? action.body
+      : action.type === "designerUpdate" ? action.patch
+        : action.type === "designerClone"
+          ? { appData: this.#designerCloneSnapshotValue(action, "appData") }
+          : undefined;
+    let appData = body?.appData && typeof body.appData === "object" && !Array.isArray(body.appData)
+      ? Object.fromEntries(Object.entries(body.appData))
       : undefined;
     if (typeof appData?.folderId === "string") this.#validateLogicalReference(appData.folderId, "folder", ready);
     if (typeof appData?.programId === "string") this.#validateLogicalReference(appData.programId, "program", ready);
@@ -1384,17 +1393,215 @@ export class MarketoGatekeeperImpl
     }
   }
 
-  #validateDesignerMutationOrder(action: EmailDesignerAction): void {
-    let target = action.type === "designerClone" ? action.sourceId : "targetId" in action ? action.targetId : undefined;
-    if (target === undefined) return;
-    for (let actionId of this.#pendingIndex()) {
-      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
-      if (!pending || !isEmailDesignerAction(pending) || pending.id >= action.id || pending.asset !== action.asset ||
-          pending.type === "designerCreate" || pending.type === "designerClone") continue;
-      if (this.#sameDesignerIdentity(pending.targetId, target)) {
-        throw new Error(`Marketo designer asset ${target} has an earlier pending mutation.`);
+  async #preflightDesignerReferences(action: MarketoAction, client: MarketoClient): Promise<void> {
+    if (!isEmailDesignerAction(action)) return;
+    let reads = new Map<string, Promise<RawDesignerAsset | undefined>>();
+    let requireDesigner = async (kind: EmailDesignerKind, id: string): Promise<RawDesignerAsset> => {
+      let physical = this.#requireDesignerId(id);
+      let key = `${kind}:${physical}`;
+      let pending = reads.get(key) ?? client.getDesignerAsset(designerAssetKind(kind), physical);
+      reads.set(key, pending);
+      let asset = await pending;
+      if (!asset || String(asset.id) !== physical) {
+        throw new DesignerPreDispatchError(`Marketo designer ${kind} ${id} was not found; nothing was dispatched.`);
+      }
+      return asset;
+    };
+
+    if (action.type === "designerClone") {
+      let source = await requireDesigner(action.asset, action.sourceId);
+      let snapshot = resolveDesignerCloneSnapshot(
+        action.sourceSnapshot,
+        id => this.#requireDesignerId(id),
+        id => this.#requireLogicalId(id),
+      );
+      let matches = action.sourceId.startsWith("~")
+        ? matchesDesignerCloneConfiguration(source as Record<string, unknown>, snapshot)
+        : matchesDesignerCloneSnapshot(source as Record<string, unknown>, snapshot);
+      if (!matches) {
+        throw new DesignerPreDispatchError("The Marketo designer clone source changed after approval; nothing was dispatched.");
       }
     }
+    if (action.type === "designerLifecycle") {
+      let current = await requireDesigner(action.asset, action.targetId);
+      let state = current.associatedStates?.find(item => item.state?.toLowerCase() === action.sourceState);
+      if (state?.contentId !== action.contentId) {
+        throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
+      }
+    }
+
+    let templateId = action.type === "designerCreate" ? action.body.templateId
+      : action.type === "designerUpdate" ? action.patch.templateId
+        : action.type === "designerClone" ? this.#designerCloneSnapshotValue(action, "templateId") : undefined;
+    if (typeof templateId === "string") await requireDesigner("designerTemplate", templateId);
+
+    let body = action.type === "designerCreate" ? action.body
+      : action.type === "designerUpdate" ? action.patch
+        : action.type === "designerClone"
+          ? { appData: this.#designerCloneSnapshotValue(action, "appData") }
+          : undefined;
+    let appData = body?.appData && typeof body.appData === "object" && !Array.isArray(body.appData)
+      ? body.appData : undefined;
+    let folderId = appData && Reflect.get(appData, "folderId");
+    if (typeof folderId === "string") {
+      let physical = this.#requireLogicalId(folderId);
+      let folder = await client.getFolder(physical, "Folder");
+      if (!folder || folder.id !== physical) {
+        throw new DesignerPreDispatchError(`Marketo folder ${folderId} was not found; nothing was dispatched.`);
+      }
+    }
+    let programId = appData && Reflect.get(appData, "programId");
+    if (typeof programId === "string") {
+      let physical = this.#requireLogicalId(programId);
+      let program = await client.getProgram(physical);
+      if (!program || program.id !== physical) {
+        throw new DesignerPreDispatchError(`Marketo program ${programId} was not found; nothing was dispatched.`);
+      }
+    }
+  }
+
+  async #preflightClassicClone(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
+    if (isCampaignAction(action) && action.type === "campaignClone") {
+      let id = this.#requireLogicalId(action.sourceId);
+      let source = await client.getSmartCampaign(id);
+      if (!source || source.id !== id) {
+        throw new DesignerPreDispatchError(`Marketo smart campaign ${action.sourceId} was not found; nothing was dispatched.`);
+      }
+      return;
+    }
+    if (isProgramAction(action) && action.type === "programClone") {
+      let id = this.#requireLogicalId(action.sourceId);
+      let source = await client.getProgram(id);
+      if (!source || source.id !== id) {
+        throw new DesignerPreDispatchError(`Marketo program ${action.sourceId} was not found; nothing was dispatched.`);
+      }
+      return;
+    }
+    if (!isDesignStudioAction(action) || action.type !== "designClone") return;
+
+    let id = this.#requireLogicalId(action.sourceId);
+    let source = action.asset === "email" ? await client.getEmail(id)
+      : action.asset === "emailTemplate" ? await client.getEmailTemplate(id)
+        : action.asset === "landingPage" ? await client.getLandingPage(id)
+          : action.asset === "landingPageTemplate" ? await client.getLandingPageTemplate(id)
+            : action.asset === "form" ? await client.getForm(id)
+              : await client.getSnippet(id);
+    if (!source || source.id !== id) {
+      throw new DesignerPreDispatchError(`Marketo ${action.asset} ${action.sourceId} was not found; nothing was dispatched.`);
+    }
+    if (action.asset !== "landingPage") return;
+    let template = Reflect.get(source, "template");
+    if (!Number.isSafeInteger(template) || Number(template) <= 0) {
+      throw new DesignerPreDispatchError(`Marketo landing page ${action.sourceId} has no valid source template; nothing was dispatched.`);
+    }
+    return Number(template);
+  }
+
+  #validDesignerCloneSnapshot(value: unknown): boolean {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    return [
+      "templateId", "appType", "appData", "data", "headers", "settings",
+      "contentId", "associatedStates", "state", "status",
+    ].every(field => {
+      let item = Reflect.get(value, field);
+      return item && typeof item === "object" && !Array.isArray(item) &&
+        typeof Reflect.get(item, "present") === "boolean";
+    });
+  }
+
+  #designerCloneSnapshotValue(
+    action: Extract<EmailDesignerAction, { type: "designerClone" }>,
+    field: string,
+  ): unknown {
+    let item = Reflect.get(action.sourceSnapshot, field);
+    return item && typeof item === "object" && Reflect.get(item, "present")
+      ? Reflect.get(item, "value") : undefined;
+  }
+
+  #validateMutationOrder(action: MarketoAction): void {
+    let resources = this.#actionResources(action);
+    for (let actionId of this.#pendingIndex()) {
+      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
+      if (!pending || pending.id >= action.id) continue;
+      let earlier = this.#actionResources(pending);
+      if (resources.some(resource => earlier.some(candidate =>
+        candidate.key === resource.key && (candidate.write || resource.write)))) {
+        let conflict = resources.find(resource => earlier.some(candidate =>
+          candidate.key === resource.key && (candidate.write || resource.write)))!;
+        throw new Error(`Marketo ${conflict.key.replace(":", " ")} has an earlier pending mutation.`);
+      }
+    }
+  }
+
+  #actionResources(action: MarketoAction): { key: string; write: boolean }[] {
+    let resources: { key: string; write: boolean }[] = [];
+    let add = (key: string, write: boolean) => {
+      let existing = resources.find(resource => resource.key === key);
+      if (existing) existing.write ||= write;
+      else resources.push({ key, write });
+    };
+    if (isDesignStudioAction(action) || isCampaignAction(action) || isProgramAction(action) || isEmailDesignerAction(action)) {
+      let identity = this.#actionIdentity(action);
+      if (identity) add(this.#referenceKey(identity), true);
+      for (let reference of this.#actionReferences(action)) {
+        add(this.#referenceKey(reference), identity !== undefined && this.#sameReference(reference, identity));
+      }
+      return resources;
+    }
+    if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
+      add(`campaign:${action.campaignId}`, true);
+      if (action.type === "campaignTrigger") {
+        for (let personId of action.personIds) add(`person:${personId}`, false);
+      }
+    } else if (action.type === "programStatus") {
+      add(`program:${action.programId}`, false);
+      for (let personId of action.personIds) {
+        add(`person:${personId}`, false);
+        add(`programStatus:${action.programId}:${personId}`, true);
+      }
+    } else if (action.type === "listAdd" || action.type === "listRemove") {
+      for (let personId of action.personIds) {
+        add(`person:${personId}`, false);
+        add(`list:${action.listId}:${personId}`, true);
+      }
+    } else if (isBusinessObjectAction(action)) {
+      for (let key of this.#businessObjectKeys(action)) add(key, true);
+    } else if (action.type === "updatePerson" || action.type === "deletePerson") {
+      add(`person:${action.personId}`, true);
+    } else if (action.type === "upsertPeople") {
+      for (let record of action.records) {
+        if (Number.isSafeInteger(record.id) && Number(record.id) > 0) add(`person:${record.id}`, true);
+        let lookup = record[action.lookupField];
+        if (this.#reliableIdentity(lookup)) {
+          add(`personLookup:${action.lookupField}:${JSON.stringify(lookup)}`, true);
+        }
+      }
+    } else if (action.type === "customObjectUpsert" || action.type === "customObjectDelete") {
+      add(`customObject:${action.apiName}`, true);
+    }
+    return resources;
+  }
+
+  #referenceKey(reference: LogicalReference): string {
+    let resolved = reference.kind.startsWith("designer")
+      ? this.#resolveDesignerId(reference.id)
+      : this.#resolveLogicalId(reference.id)?.toString();
+    return `${reference.kind}:${resolved ?? reference.id}`;
+  }
+
+  #businessObjectKeys(action: BusinessObjectAction): string[] {
+    let identities = [[BUSINESS_OBJECTS[action.kind].idField], BUSINESS_OBJECTS[action.kind].dedupeFields];
+    return action.records.flatMap(record => identities.flatMap(fields => {
+      let values = fields.map(field => record[field]);
+      if (values.some(value => value === undefined || value === null || value === "")) return [];
+      return [`businessObject:${action.kind}:${fields.join("+")}:${JSON.stringify(values)}`];
+    }));
+  }
+
+  #reliableIdentity(value: unknown): value is string | number | boolean {
+    return typeof value === "string" ? value.length > 0
+      : typeof value === "number" ? Number.isFinite(value)
+        : typeof value === "boolean";
   }
 
   #sameDesignerIdentity(first: string, second: string): boolean {
@@ -1431,15 +1638,14 @@ export class MarketoGatekeeperImpl
 
   #actionReferences(action: DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction): LogicalReference[] {
     let references: LogicalReference[] = [];
+    let identity = this.#actionIdentity(action);
+    if (identity) references.push(identity);
     if ("targetId" in action) {
       references.push({ id: action.targetId, kind: isCampaignAction(action) ? "campaign"
         : isProgramAction(action) ? "program"
           : action.type === "designDeleteFolder" ? "folder" : action.asset });
     }
     if (action.type === "designClone") references.push({ id: action.sourceId, kind: action.asset });
-    if (action.type === "designClone" && action.templateId) {
-      references.push({ id: action.templateId, kind: "landingPageTemplate" });
-    }
     if (action.type === "designCreate" || action.type === "designClone") {
       references.push({ id: action.parent.id, kind: action.parent.type === "Program" ? "program" : "folder" });
     }
@@ -1458,6 +1664,17 @@ export class MarketoGatekeeperImpl
       references.push({ id: action.parentId, kind: "folder" });
     }
     if (action.type === "designerClone") references.push({ id: action.sourceId, kind: action.asset });
+    if (action.type === "designerClone") {
+      let templateId = this.#designerCloneSnapshotValue(action, "templateId");
+      if (typeof templateId === "string") references.push({ id: templateId, kind: "designerTemplate" });
+      let appData = this.#designerCloneSnapshotValue(action, "appData");
+      if (appData && typeof appData === "object" && !Array.isArray(appData)) {
+        let folderId = Reflect.get(appData, "folderId");
+        let programId = Reflect.get(appData, "programId");
+        if (typeof folderId === "string") references.push({ id: folderId, kind: "folder" });
+        if (typeof programId === "string") references.push({ id: programId, kind: "program" });
+      }
+    }
     if (action.type === "designerCreate" || action.type === "designerUpdate") {
       let body = action.type === "designerCreate" ? action.body : action.patch;
       if (typeof body.templateId === "string") references.push({ id: body.templateId, kind: "designerTemplate" });

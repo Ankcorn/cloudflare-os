@@ -653,7 +653,7 @@ export class MarketoProgramImpl extends RpcTarget {
         endDate: parseMarketoDate(creation.input.endDate),
       };
     } else if (creation?.type === "programClone") {
-      let source = await this.#summary(creation.sourceId, seen, creation.id);
+      let source = await this.#summary(creation.sourceId, seen);
       summary = {
         ...source,
         id,
@@ -908,7 +908,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
         requestable: false,
       };
     } else if (creation?.type === "campaignClone") {
-      let source = await this.#summary(creation.sourceId, seen, creation.id);
+      let source = await this.#summary(creation.sourceId, seen);
       summary = {
         ...source,
         id,
@@ -999,7 +999,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       return { triggers: [], filters: [] };
     }
     if (creation?.type === "campaignClone") {
-      return await this.#smartListRules(creation.sourceId, seen, creation.id);
+      return await this.#smartListRules(creation.sourceId, seen, Number.POSITIVE_INFINITY);
     }
     let physicalId = this.#ctx.resolveId(id);
     if (physicalId === undefined) throw new Error(`Smart campaign ${id} is still pending creation.`);

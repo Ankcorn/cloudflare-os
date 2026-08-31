@@ -90,7 +90,7 @@ export function describeProgramAction(action: ProgramAction): ActionDescription 
       return {
         ...base,
         title: `Clone Marketo program ${action.name}`,
-        description: `Clone program ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in folder ${code(action.parentId)}.` +
+        description: `Clone program ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in folder ${code(action.parentId)}, using the source program's current contents when dispatched.` +
           (action.description === undefined ? "" : `\n\nDescription: ${escapeMarkdown(action.description)}`),
       };
     case "programUpdate":
@@ -121,28 +121,52 @@ function resultId(result: (RawProgram | RawAssetId)[], operation: string): numbe
   return Number(id);
 }
 
+async function verifyCreatedProgram(
+  client: MarketoClient,
+  id: number,
+  approved: { name: string; description?: string; type?: string; channel?: string; tags?: unknown; startDate?: string; endDate?: string },
+  parentId: number,
+): Promise<void> {
+  let created = await client.getProgram(id);
+  if (!created || created.id !== id || created.name !== approved.name ||
+      created.folder?.value !== parentId || created.folder.type !== "Folder" ||
+      Object.entries(approved).some(([key, value]) => value !== undefined &&
+        JSON.stringify(created[key as keyof typeof created]) !== JSON.stringify(value))) {
+    throw new Error(`Marketo could not verify created program ${id} against the approved request.`);
+  }
+}
+
 /** Execute one approved program-management action. */
 export async function executeProgramAction(
   action: ProgramAction,
   client: MarketoClient,
   resolve: (id: string) => number,
   recordCreation: (provisionalId: string, realId: number) => void,
+  recordCandidate: (realId: number) => void = () => {},
 ): Promise<void> {
   if (action.type === "programCreate") {
+    let parentId = resolve(action.parentId);
     let result = await client.createProgram({
       ...action.input,
-      folder: { id: resolve(action.parentId), type: "Folder" },
+      folder: { id: parentId, type: "Folder" },
     });
-    recordCreation(action.provisionalId, resultId(result, "program creation"));
+    let id = resultId(result, "program creation");
+    recordCandidate(id);
+    await verifyCreatedProgram(client, id, action.input, parentId);
+    recordCreation(action.provisionalId, id);
     return;
   }
   if (action.type === "programClone") {
+    let parentId = resolve(action.parentId);
     let result = await client.cloneProgram(resolve(action.sourceId), {
       name: action.name,
       description: action.description,
-      folder: { id: resolve(action.parentId), type: "Folder" },
+      folder: { id: parentId, type: "Folder" },
     });
-    recordCreation(action.provisionalId, resultId(result, "program clone"));
+    let id = resultId(result, "program clone");
+    recordCandidate(id);
+    await verifyCreatedProgram(client, id, { name: action.name, description: action.description }, parentId);
+    recordCreation(action.provisionalId, id);
     return;
   }
   let id = resolve(action.targetId);

@@ -47,13 +47,8 @@ type DesignStudioCloneAction = {
   sourceId: string;
   parent: { id: string; type: "Folder" | "Program" };
   name: string;
-} & (
-  | { asset: "landingPage"; templateId: string }
-  | {
-      asset: Exclude<DesignStudioAssetKind, "folder" | "file" | "landingPage">;
-      templateId?: never;
-    }
-);
+  asset: Exclude<DesignStudioAssetKind, "folder" | "file">;
+};
 
 export type DesignStudioAction =
   | {
@@ -156,8 +151,8 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         title: `Clone Marketo ${label(action.asset)}`,
         description:
           `Clone Marketo ${label(action.asset)}:\n\n${codeBlock(action.sourceId)}\n\nas:\n\n` +
-          `${codeBlock(action.name)}\n\nin ${action.parent.type.toLowerCase()}:\n\n${codeBlock(action.parent.id)}` +
-          (action.templateId ? `\n\nusing landing-page template:\n\n${codeBlock(action.templateId)}` : ""),
+          `${codeBlock(action.name)}\n\nin ${action.parent.type.toLowerCase()}:\n\n${codeBlock(action.parent.id)}. ` +
+          "The clone uses the source asset's current contents when it is dispatched.",
       };
     case "designMetadata":
       return {
@@ -225,12 +220,62 @@ function folderRef(parent: { id: string; type: "Folder" | "Program" }, resolve: 
   return { id: resolve(parent.id), type: parent.type };
 }
 
+async function verifyCreatedAsset(
+  client: MarketoClient,
+  asset: DesignStudioAssetKind,
+  id: number,
+  input: DesignStudioCreateInput,
+  parent: MarketoFolderRef,
+): Promise<void> {
+  let created = asset === "folder" ? await client.getFolder(id)
+    : asset === "email" ? await client.getEmail(id)
+      : asset === "emailTemplate" ? await client.getEmailTemplate(id)
+        : asset === "landingPage" ? await client.getLandingPage(id)
+          : asset === "landingPageTemplate" ? await client.getLandingPageTemplate(id)
+            : asset === "form" ? await client.getForm(id)
+              : asset === "snippet" ? await client.getSnippet(id)
+                : await client.getFile(id);
+  let folder = asset === "folder"
+    ? (created as RawFolder | undefined)?.parent
+    : (created as RawDesignStudioAsset | RawFile | undefined)?.folder;
+  let folderId = folder?.id ?? folder?.value;
+  let actual = created as Record<string, unknown> | undefined;
+  let expected: Record<string, unknown> = { description: input.description };
+  if ((asset === "email" || asset === "landingPage") && input.templateId !== undefined) {
+    expected.template = Number(input.templateId);
+  }
+  if (asset === "email") {
+    for (let field of ["subject", "fromName", "fromEmail", "replyEmail"] as const) {
+      if (input[field] === undefined) continue;
+      let headerValue = actual?.[field];
+      if (actual) {
+        actual[field] = (Array.isArray(headerValue) ? headerValue : [headerValue])
+          .map(part => part && typeof part === "object" ? Reflect.get(part, "value") : undefined)
+          .join("");
+      }
+      expected[field] = input[field];
+    }
+  }
+  if (asset === "landingPageTemplate") {
+    expected.templateType = input.templateType;
+    expected.enableMunchkin = input.enableMunchkin;
+  }
+  if (asset === "form") { expected.locale = input.locale; expected.language = input.language; }
+  if (asset === "file") expected.mimeType = input.mimeType;
+  if (!created || created.id !== id || created.name !== input.name || folderId !== parent.id || folder?.type !== parent.type ||
+      Object.entries(expected).some(([key, value]) => value !== undefined && actual?.[key] !== value)) {
+    throw new Error(`Marketo could not verify created ${asset} ${id} against the approved request.`);
+  }
+}
+
 /** Execute one approved Design Studio action. The caller records dispatch before invoking this. */
 export async function executeDesignStudioAction(
   action: DesignStudioAction,
   client: MarketoClient,
   resolve: ResolveId,
   recordCreation: RecordCreation,
+  recordCandidate: (realId: number) => void = () => {},
+  landingPageTemplateId?: number,
 ): Promise<void> {
   if (action.type === "designCreate") {
     let folder = folderRef(action.parent, resolve);
@@ -303,6 +348,8 @@ export async function executeDesignStudioAction(
       }
     }
     let id = resultId(created);
+    recordCandidate(id);
+    await verifyCreatedAsset(client, action.asset, id, input, folder);
     recordCreation(action.provisionalId, id);
     if (action.asset === "snippet") {
       if (input.html !== undefined) assertTargetResult(await client.updateSnippetContent(id, "HTML", input.html), id, "snippet HTML update");
@@ -320,13 +367,19 @@ export async function executeDesignStudioAction(
       case "emailTemplate": created = await client.cloneEmailTemplate(id, clone); break;
       case "landingPage": created = await client.cloneLandingPage(id, {
         ...clone,
-        template: resolve(required(action.templateId, "landing-page template")),
+        template: required(landingPageTemplateId, "landing-page source template"),
       }); break;
       case "landingPageTemplate": created = await client.cloneLandingPageTemplate(id, clone); break;
       case "form": created = await client.cloneForm(id, clone); break;
       case "snippet": created = await client.cloneSnippet(id, clone); break;
     }
-    recordCreation(action.provisionalId, resultId(created));
+    let createdId = resultId(created);
+    recordCandidate(createdId);
+    await verifyCreatedAsset(client, action.asset, createdId, {
+      name: action.name,
+      ...(action.asset === "landingPage" ? { templateId: String(landingPageTemplateId) } : {}),
+    }, clone.folder);
+    recordCreation(action.provisionalId, createdId);
     return;
   }
 
@@ -409,6 +462,5 @@ export function actionReferences(action: DesignStudioAction, id: string): boolea
   if ("targetId" in action && action.targetId === id) return true;
   if (action.type === "designClone" && action.sourceId === id) return true;
   if ((action.type === "designCreate" || action.type === "designClone") && action.parent.id === id) return true;
-  return action.type === "designCreate" && action.input.templateId === id ||
-    action.type === "designClone" && action.templateId === id;
+  return action.type === "designCreate" && action.input.templateId === id;
 }

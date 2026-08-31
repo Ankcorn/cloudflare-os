@@ -17,10 +17,13 @@ import type {
 import type { DesignerAssetKind, RawDesignerAsset } from "./marketo-api";
 import { parseMarketoDate } from "./marketo-api";
 import type { SessionContext } from "./session";
-import type {
-  EmailDesignerAction,
-  EmailDesignerActionInput,
-  EmailDesignerKind,
+import {
+  designerCloneSnapshot,
+  updateDesignerCloneSnapshot,
+  type DesignerCloneSnapshot,
+  type EmailDesignerAction,
+  type EmailDesignerActionInput,
+  type EmailDesignerKind,
 } from "./email-designer-actions";
 import type { DesignStudioAssetKind } from "./design-studio-actions";
 
@@ -156,10 +159,14 @@ function location(value: unknown, allowProgram: boolean, ctx: EmailDesignerConte
   return { workspaceId, programId };
 }
 
-function normalize(raw: RawDesignerAsset, fallbackId?: string): MarketoDesignerAssetSummary & Record<string, unknown> {
+function normalize(
+  raw: RawDesignerAsset,
+  fallbackId?: string,
+  includeCloneSnapshot = false,
+): MarketoDesignerAssetSummary & Record<string, unknown> {
   let assetId = raw.id === undefined ? fallbackId : String(raw.id);
   if (!assetId) throw new Error("Marketo returned a designer asset without an id.");
-  return {
+  let result: MarketoDesignerAssetSummary & Record<string, unknown> = {
     id: assetId,
     name: raw.name ?? "",
     description: raw.description,
@@ -184,6 +191,10 @@ function normalize(raw: RawDesignerAsset, fallbackId?: string): MarketoDesignerA
     modifiedBy: raw.metadata?.modifiedBy,
     modifiedAt: parseMarketoDate(raw.metadata?.modifiedAt),
   };
+  if (includeCloneSnapshot) {
+    result.cloneSnapshot = designerCloneSnapshot(raw as Record<string, unknown>);
+  }
+  return result;
 }
 
 function actions(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity): EmailDesignerAction[] {
@@ -204,6 +215,12 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
   for (let action of pending) {
     if (action.type === "designerUpdate") {
       let patch = action.patch;
+      if (result.cloneSnapshot) {
+        result.cloneSnapshot = updateDesignerCloneSnapshot(
+          result.cloneSnapshot as DesignerCloneSnapshot,
+          patch,
+        );
+      }
       if (patch.name !== undefined) result.name = patch.name;
       if (patch.description !== undefined) result.description = patch.description;
       if (patch.data !== undefined) result.content = normalize({ id: "x", data: patch.data as RawDesignerAsset["data"] }).content;
@@ -226,7 +243,7 @@ async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, asset
     (action.type === "designerCreate" || action.type === "designerClone") && action.provisionalId === assetId);
   let base: Record<string, unknown>;
   if (creation?.type === "designerCreate") {
-    base = normalize({ id: assetId, ...(creation.body as RawDesignerAsset), status: "draft" }, assetId);
+    base = normalize({ id: assetId, ...(creation.body as RawDesignerAsset), status: "draft" }, assetId, true);
   } else if (creation?.type === "designerClone") {
     base = { ...(await summary(ctx, kind, creation.sourceId, creation.id, seen)), id: assetId, name: creation.name,
       ...(creation.description === undefined ? {} : { description: creation.description }), status: "draft",
@@ -239,7 +256,7 @@ async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, asset
     if (raw.id === undefined || String(raw.id) !== physical) {
       throw new Error(`Marketo returned designer asset ${String(raw.id)} when ${physical} was requested.`);
     }
-    base = normalize(raw, assetId);
+    base = normalize(raw, assetId, true);
     base.id = assetId;
   }
   return overlay(base, actions(ctx, kind, assetId, before));
@@ -327,6 +344,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
   protected async detail(): Promise<Record<string, unknown>> {
     let result = await summary(this.ctx, this.kind, this.assetId);
     await this.ctx.observe(`Read Marketo designer ${this.kind}`, `Read designer asset ${this.assetId}.`);
+    delete result.cloneSnapshot;
     return result;
   }
 
@@ -338,13 +356,28 @@ abstract class DesignerAssetImpl extends RpcTarget {
 
   protected async cloneAsset(name: string, description?: string) {
     let provisionalId = this.ctx.allocateProvisional();
+    let source = await summary(this.ctx, this.kind, this.assetId);
+    let sourceSnapshot = source.cloneSnapshot as DesignerCloneSnapshot | undefined;
+    if (!sourceSnapshot) throw new Error("The Marketo designer clone source could not be snapshotted.");
+    await this.ctx.observe(`Read Marketo designer ${this.kind} clone source`, `Resolved dependencies for designer asset ${this.assetId}.`);
     await submitDesigner(this.ctx, { type: "designerClone", asset: this.kind, provisionalId, sourceId: this.assetId,
-      name: text(name, "Clone name"), description: optionalText(description, "description") });
+      name: text(name, "Clone name"), description: optionalText(description, "description"), sourceSnapshot });
     return designerHandle(this.ctx, this.kind, provisionalId);
   }
 
-  protected lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
-    return submitDesigner(this.ctx, { type: "designerLifecycle", asset: this.kind, targetId: this.assetId, operation });
+  protected async lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
+    let physical = this.ctx.resolveDesignerId(this.assetId);
+    if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
+    let raw = await (await this.ctx.client()).getDesignerAsset(path(this.kind), physical);
+    if (!raw || String(raw.id) !== physical) throw new Error(`Marketo designer asset ${this.assetId} was not found.`);
+    let sourceState: "draft" | "approved" = operation === "approve" || operation === "discard" ? "draft" : "approved";
+    let state = raw.associatedStates?.find(item => item.state?.toLowerCase() === sourceState);
+    if (!state?.contentId) throw new Error(`Marketo designer asset ${this.assetId} has no ${sourceState} content.`);
+    await this.ctx.observe(`Read Marketo designer ${sourceState} state`, `Resolved the content version for designer asset ${this.assetId}.`);
+    return await submitDesigner(this.ctx, {
+      type: "designerLifecycle", asset: this.kind, targetId: this.assetId, operation,
+      contentId: state.contentId, sourceState,
+    });
   }
 
   createDraft() { return this.lifecycle("createDraft"); }
