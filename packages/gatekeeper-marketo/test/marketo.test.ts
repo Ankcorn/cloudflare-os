@@ -1344,14 +1344,14 @@ describe("smart campaign management", () => {
     expect(actions[1]).toMatchObject({ type: "campaignLifecycle", operation: "activate" });
   });
 
-  it("resolves clone simulation from the source's current state", async () => {
+  it("includes source changes submitted before campaign cloning", async () => {
     let { ctx } = campaignContext({
       getSmartCampaign: async () => ({ id: 7, name: "Source", description: "Original", type: "batch" }),
     });
     let session = new MarketoSessionImpl(ctx);
     let source = session.getSmartCampaign("7");
-    let clone = await session.cloneSmartCampaign("7", { id: "10", type: "folder" }, { name: "Clone" });
     await source.updateMetadata({ description: "Later source change" });
+    let clone = await session.cloneSmartCampaign("7", { id: "10", type: "folder" }, { name: "Clone" });
 
     expect(await clone.describe()).toMatchObject({ name: "Clone", description: "Later source change" });
     expect(await source.describe()).toMatchObject({ description: "Later source change" });
@@ -1590,7 +1590,7 @@ describe("program management", () => {
     expect(designerActions[0]).toMatchObject({ body: { appData: { programId } } });
   });
 
-  it("clones into ordinary folders and resolves the source's current state", async () => {
+  it("clones into ordinary folders and includes prior source changes", async () => {
     let { ctx } = programContext({
       getProgram: async () => ({
         id: 7, name: "Template", description: "Original", type: "Default", channel: "Web",
@@ -1598,8 +1598,8 @@ describe("program management", () => {
       getChannels: async () => [{ name: "Web", applicableProgramType: "Default" }],
     });
     let session = new MarketoSessionImpl(ctx);
-    let clone = await session.cloneProgram("7", { id: "10", type: "folder" }, { name: "Copy" });
     await session.getProgram("7").updateMetadata({ description: "Later" });
+    let clone = await session.cloneProgram("7", { id: "10", type: "folder" }, { name: "Copy" });
 
     expect(await clone.describe()).toMatchObject({ id: "~1", name: "Copy", description: "Later" });
     await expect(session.cloneProgram("7", { id: "20", type: "program" }, { name: "Bad" }))
@@ -1800,7 +1800,7 @@ describe("Design Studio simulation", () => {
     expect(getSnippetContent).not.toHaveBeenCalled();
   });
 
-  it("resolves cloned content from the source's current pending state", async () => {
+  it("resolves cloned content from the source's state at submission", async () => {
     let getEmailTemplateContent = vi.fn(async () => ({ id: 31, content: "<html>old</html>" }));
     let { ctx } = designContext({ getEmailTemplateContent }, [{
       id: 1,
@@ -1810,6 +1810,7 @@ describe("Design Studio simulation", () => {
       content: "<html>pending</html>",
     }]);
     let studio = new MarketoDesignStudioImpl(ctx);
+    await studio.getEmailTemplate("31").updateContent("<html>before</html>");
     let clone = await studio.cloneEmailTemplate(
       "31",
       "Clone",
@@ -1817,7 +1818,7 @@ describe("Design Studio simulation", () => {
     );
     await studio.getEmailTemplate("31").updateContent("<html>later</html>");
 
-    expect(await clone.getContent()).toBe("<html>later</html>");
+    expect(await clone.getContent()).toBe("<html>before</html>");
     expect(getEmailTemplateContent).toHaveBeenCalledWith(31);
   });
 

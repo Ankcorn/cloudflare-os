@@ -48,11 +48,11 @@ describe("classic Design Studio regressions", () => {
     };
     let { ctx } = context({ getEmails: async () => [], getEmail: async () => source });
     let studio = new MarketoDesignStudioImpl(ctx);
-    await studio.cloneEmail("21", "Clone", { id: "10", type: "folder" });
     await studio.getEmail("21").updateMetadata({
       description: "Pending description",
       subject: "Pending subject",
     });
+    await studio.cloneEmail("21", "Clone", { id: "10", type: "folder" });
 
     expect((await studio.listEmails()).items.find(item => item.id === "~1")).toEqual(
       expect.objectContaining({

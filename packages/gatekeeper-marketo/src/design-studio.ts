@@ -362,6 +362,10 @@ function sameLogicalId(ctx: DesignStudioContext, first: string, second: string):
   return firstReal !== undefined && firstReal === ctx.resolveId(second);
 }
 
+function beforeAction(ctx: DesignStudioContext, actionId: number): DesignStudioContext {
+  return { ...ctx, pending: () => ctx.pending().filter(action => action.id < actionId) };
+}
+
 function overlaySummary(summary: Summary, actions: DesignStudioAction[]): Summary | null {
   let result = { ...summary };
   for (let action of actions) {
@@ -1054,7 +1058,7 @@ async function simulatedSummary(
   let summary: Summary;
   if (creation?.type === "designClone") {
     assertAcyclicCloneSource(ctx, kind, id, pending);
-    let source = await simulatedSummary(ctx, kind, creation.sourceId, undefined, pending);
+    let source = await simulatedSummary(beforeAction(ctx, creation.id), kind, creation.sourceId);
     summary = {
       ...source,
       id: creation.provisionalId,
@@ -1160,7 +1164,7 @@ export class MarketoEmailImpl extends AssetImpl {
     let sourceId = creation?.type === "designClone" ? creation.sourceId : this.id;
     if (creation?.type === "designClone") assertAcyclicCloneSource(this.ctx, this.kind, this.id);
     let sections = creation?.type === "designCreate" ? [] : creation?.type === "designClone"
-      ? await new MarketoEmailImpl(this.ctx, sourceId).getContent()
+      ? await new MarketoEmailImpl(beforeAction(this.ctx, creation.id), sourceId).getContent()
       : emailSections(await (await this.ctx.client()).getEmailContent(physicalId(this.ctx, sourceId)));
     for (let action of actionsFor(this.ctx, this.kind, this.id)) if (action.type === "designContent" && action.sectionId) {
       let section = sections.find(item => item.id === action.sectionId);
@@ -1195,9 +1199,10 @@ abstract class TemplateImpl extends AssetImpl {
       let source = creation?.type === "designClone" ? creation.sourceId : this.id;
       if (creation?.type === "designClone") {
         assertAcyclicCloneSource(this.ctx, this.kind, this.id);
+        let sourceCtx = beforeAction(this.ctx, creation.id);
         content = await (this.kind === "emailTemplate"
-          ? new MarketoEmailTemplateImpl(this.ctx, source)
-          : new MarketoLandingPageTemplateImpl(this.ctx, source)).getContent();
+          ? new MarketoEmailTemplateImpl(sourceCtx, source)
+          : new MarketoLandingPageTemplateImpl(sourceCtx, source)).getContent();
       } else {
         let client = await this.ctx.client(); let id = physicalId(this.ctx, source);
         let response = this.kind === "emailTemplate"
@@ -1233,7 +1238,7 @@ export class MarketoLandingPageImpl extends AssetImpl {
     let creation = findCreation(this.ctx, this.kind, this.id); let source = creation?.type === "designClone" ? creation.sourceId : this.id;
     if (creation?.type === "designClone") assertAcyclicCloneSource(this.ctx, this.kind, this.id);
     let sections = creation?.type === "designCreate" ? [] : creation?.type === "designClone"
-      ? await new MarketoLandingPageImpl(this.ctx, source).getContent()
+      ? await new MarketoLandingPageImpl(beforeAction(this.ctx, creation.id), source).getContent()
       : (await (await this.ctx.client()).getLandingPageContent(physicalId(this.ctx, source)))
         .map(item => ({ id: String(item.id ?? ""), type: textValue(item.type) ?? "", content: textualContent(item.content) })).filter(item => item.id);
     await this.ctx.observe(`Read Marketo landing page content ${this.id}`, `Read ${sections.length} landing-page section(s).`); return sections;
@@ -1257,7 +1262,7 @@ export class MarketoFormImpl extends AssetImpl {
     let creation = findCreation(this.ctx, this.kind, this.id); let source = creation?.type === "designClone" ? creation.sourceId : this.id;
     if (creation?.type === "designClone") assertAcyclicCloneSource(this.ctx, this.kind, this.id);
     let fields = creation?.type === "designCreate" ? [] : creation?.type === "designClone"
-      ? await new MarketoFormImpl(this.ctx, source).getFields()
+      ? await new MarketoFormImpl(beforeAction(this.ctx, creation.id), source).getFields()
       : (await (await this.ctx.client()).getFormFields(physicalId(this.ctx, source)))
         .map(field => ({ id: textValue(field.id) ?? "", label: textValue(field.label), dataType: textValue(field.dataType), required: typeof field.required === "boolean" ? field.required : undefined, hintText: textValue(field.hintText) })).filter(field => field.id);
     await this.ctx.observe(`Read Marketo form fields ${this.id}`, `Read ${fields.length} form field(s).`); return fields;
@@ -1279,7 +1284,7 @@ export class MarketoSnippetImpl extends AssetImpl {
       let source = creation?.type === "designClone" ? creation.sourceId : this.id;
       if (creation?.type === "designClone") {
         assertAcyclicCloneSource(this.ctx, this.kind, this.id);
-        result = await new MarketoSnippetImpl(this.ctx, source).getContent();
+        result = await new MarketoSnippetImpl(beforeAction(this.ctx, creation.id), source).getContent();
       } else {
         for (let item of await (await this.ctx.client()).getSnippetContent(physicalId(this.ctx, source))) {
           if (item.type?.toLowerCase() === "html") result.html = textValue(item.content);
