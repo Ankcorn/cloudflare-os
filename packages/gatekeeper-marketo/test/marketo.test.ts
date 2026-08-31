@@ -3108,26 +3108,16 @@ describe("filter reads", () => {
       .rejects.toThrow("invalid filter paging state");
   });
 
-  it("permits 100 filter pages but refuses to truncate a larger result", async () => {
-    let bounded = clientReturning(...Array.from({ length: 100 }, (_, index) => ({
+  it("continues filter reads beyond 100 pages rather than discarding valid results", async () => {
+    let paged = clientReturning(...Array.from({ length: 101 }, (_, index) => ({
       success: true,
       result: [{ id: index }],
-      moreResult: index < 99,
-      nextPageToken: index < 99 ? `page-${index + 1}` : undefined,
+      moreResult: index < 100,
+      nextPageToken: index < 100 ? `page-${index + 1}` : undefined,
     })));
-    await expect(bounded.client.getLeads("email", ["a@example.com"]))
-      .resolves.toHaveLength(100);
-    expect(bounded.calls).toHaveLength(100);
-
-    let overBound = clientReturning(...Array.from({ length: 100 }, (_, index) => ({
-      success: true,
-      result: [{ id: index }],
-      moreResult: true,
-      nextPageToken: `page-${index + 1}`,
-    })));
-    await expect(overBound.client.getLeads("email", ["a@example.com"]))
-      .rejects.toThrow("exceeded the safe page limit");
-    expect(overBound.calls).toHaveLength(100);
+    await expect(paged.client.getLeads("email", ["a@example.com"]))
+      .resolves.toHaveLength(101);
+    expect(paged.calls).toHaveLength(101);
   });
 
   // Large filters use Marketo's POST-with-method-override read form to avoid oversized URLs.

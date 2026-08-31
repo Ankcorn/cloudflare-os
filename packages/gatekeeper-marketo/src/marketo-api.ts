@@ -257,7 +257,6 @@ function buildQuery(query: Query | undefined): string {
 /** Backoff before retrying Marketo's short-window rate limit (100 calls / 20s). */
 const RATE_LIMIT_BACKOFF_MS = [1_000, 3_000, 8_000];
 const RATE_LIMIT_RETRIES = RATE_LIMIT_BACKOFF_MS.length;
-const FILTER_RESULT_PAGE_LIMIT = 100;
 
 /** Marketo rejects activity queries carrying more than this many activity type ids. */
 export const MAX_ACTIVITY_TYPE_IDS = 10;
@@ -653,7 +652,7 @@ export class MarketoClient {
     let result: T[] = [];
     let nextPageToken: string | undefined;
     let seenTokens = new Set<string>();
-    for (let pageNumber = 0; pageNumber < FILTER_RESULT_PAGE_LIMIT; pageNumber++) {
+    while (true) {
       let page = await this.#page<T>(path, filterRead({
         ...params,
         ...(nextPageToken === undefined ? {} : { nextPageToken }),
@@ -666,7 +665,6 @@ export class MarketoClient {
       seenTokens.add(page.nextPageToken);
       nextPageToken = page.nextPageToken;
     }
-    throw new MarketoError("Marketo filter results exceeded the safe page limit.", { operation: path });
   }
 
   // -------------------------------------------------------------------------
