@@ -202,6 +202,45 @@ function createDescription(action: Extract<EmailDesignerAction, { type: "designe
   ].join("\n");
 }
 
+function cloneDescription(action: Extract<EmailDesignerAction, { type: "designerClone" }>, name: string): string {
+  let inherited = snapshotRecord(action.sourceSnapshot);
+  return [
+    `Clone Marketo Email Designer ${name} \`${escape(action.sourceId)}\` with these exact values:`,
+    "",
+    "Name:",
+    "",
+    codeBlock(action.name),
+    "",
+    "Explicit description:",
+    "",
+    codeBlock(action.description),
+    "",
+    "Inherited destination (workspace and folder or program):",
+    "",
+    codeBlock(inherited.appData),
+    "",
+    "Inherited template ID:",
+    "",
+    codeBlock(inherited.templateId),
+    "",
+    "Inherited application type:",
+    "",
+    codeBlock(inherited.appType),
+    "",
+    "Inherited content:",
+    "",
+    codeBlock(inherited.data),
+    "",
+    "Inherited delivery headers:",
+    "",
+    codeBlock(inherited.headers),
+    "",
+    "Inherited delivery or fragment settings:",
+    "",
+    codeBlock(inherited.settings),
+  ].join("\n");
+}
+
 export function describeEmailDesignerAction(action: EmailDesignerAction): ActionDescription {
   let name = label(action.asset);
   let target = "targetId" in action ? action.targetId : undefined;
@@ -210,7 +249,7 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
     case "designerCreate":
       return { ...base, title: `Create Marketo designer ${name}`, description: createDescription(action, name) };
     case "designerClone":
-      return { ...base, title: `Clone Marketo designer ${name}`, description: `Clone ${name} \`${escape(action.sourceId)}\` as **${escape(action.name)}** in the source asset's snapshotted location and configuration.` };
+      return { ...base, title: `Clone Marketo designer ${name}`, description: cloneDescription(action, name) };
     case "designerUpdate":
       return { ...base, title: `Update Marketo designer ${name}`, description: `Update draft fields on ${name} \`${escape(target ?? "")}\`:\n\n    ${escape(JSON.stringify(action.patch))}` };
     case "designerLifecycle": {

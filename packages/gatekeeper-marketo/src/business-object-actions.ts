@@ -70,10 +70,14 @@ export function describeBusinessObjectAction(action: BusinessObjectAction): Acti
   let count = action.records.length;
   let fields = action.changedFields.length ? action.changedFields.map(field => `\`${escapeMarkdown(field)}\``).join(", ") : "none";
   let operation = action.type === "businessObjectUpsert" ? "Create/update" : "Permanently delete";
+  let executionMode = action.type === "businessObjectUpsert"
+    ? `\n\nExecution mode: **${action.action}**.`
+    : "";
   return {
     title: `${operation} ${count} Marketo ${object} record(s)`,
     description:
-      `${operation} **${count}** Marketo ${object} record(s), matching by **${action.matchBy}**.\n\n` +
+      `${operation} **${count}** Marketo ${object} record(s).${executionMode}\n\n` +
+      `Object type: **${action.kind}**.\n\nMatching mode: **${action.matchBy}**.\n\n` +
       `${action.type === "businessObjectUpsert" ? "Changed fields" : "Key fields"}: ${fields}.` +
       targetDetails(action),
     awaitDecision: true,
