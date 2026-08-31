@@ -3389,6 +3389,84 @@ describe("campaign kind pre-validation", () => {
     await campaign("batch", scheduled).schedule(new Date(Date.now() + 10 * 60 * 1000));
     expect(scheduled.map(a => a.type)).toEqual(["campaignSchedule"]);
   });
+
+  it.each([
+    ["request", "trigger"],
+    ["schedule", "batch"],
+  ] as const)("refuses to %s a campaign with a pending deletion", async (operation, type) => {
+    let reads = 0;
+    let submitted: MarketoActionInput[] = [];
+    let campaign = new MarketoSmartCampaignImpl({
+      client: async () => ({
+        getCampaign: async () => {
+          reads++;
+          return { id: 7800, name: "Deleted", type, isTriggerable: true };
+        },
+      }) as never,
+      observe: async () => {},
+      submit: async (action: MarketoActionInput) => void submitted.push(action),
+      submitCampaign: async (action: MarketoActionInput) => void submitted.push(action),
+      pendingCampaign: () => [{
+        id: 1,
+        type: "campaignLifecycle",
+        targetId: "~1",
+        campaignName: "Deleted",
+        campaignType: type,
+        operation: "delete",
+      }],
+      resolveId: (id: string) => id === "~1" ? 7800 : Number(id),
+      dispose: () => {},
+    } as never, 7800);
+
+    let result = operation === "request"
+      ? campaign.requestCampaign([1])
+      : campaign.schedule(new Date(Date.now() + 10 * 60 * 1000));
+    await expect(result).rejects.toThrow(/pending deletion/);
+    expect(reads).toBe(0);
+    expect(submitted).toEqual([]);
+  });
+
+  it.each([
+    ["request", "trigger"],
+    ["schedule", "batch"],
+  ] as const)("refuses to %s when deletion becomes pending during the read", async (operation, type) => {
+    let release: (() => void) | undefined;
+    let entered = Promise.withResolvers<void>();
+    let pending: CampaignAction[] = [];
+    let submitted: MarketoActionInput[] = [];
+    let campaign = new MarketoSmartCampaignImpl({
+      client: async () => ({
+        getCampaign: async () => {
+          entered.resolve();
+          await new Promise<void>(resolve => void (release = resolve));
+          return { id: 7800, name: "Deleting", type, isTriggerable: true };
+        },
+      }) as never,
+      observe: async () => {},
+      submit: async (action: MarketoActionInput) => void submitted.push(action),
+      submitCampaign: async (action: MarketoActionInput) => void submitted.push(action),
+      pendingCampaign: () => pending,
+      resolveId: (id: string) => Number(id),
+      dispose: () => {},
+    } as never, 7800);
+
+    let result = operation === "request"
+      ? campaign.requestCampaign([1])
+      : campaign.schedule(new Date(Date.now() + 10 * 60 * 1000));
+    await entered.promise;
+    pending.push({
+      id: 1,
+      type: "campaignLifecycle",
+      targetId: "7800",
+      campaignName: "Deleting",
+      campaignType: type,
+      operation: "delete",
+    });
+    release?.();
+
+    await expect(result).rejects.toThrow(/pending deletion/);
+    expect(submitted).toEqual([]);
+  });
 });
 
 // Nothing has happened when an ACTION returns, so there is no outcome to report.

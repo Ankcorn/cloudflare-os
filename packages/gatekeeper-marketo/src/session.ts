@@ -842,6 +842,13 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     );
   }
 
+  #rejectPendingDeletion(): void {
+    if (this.#actions().some(action =>
+      action.type === "campaignLifecycle" && action.operation === "delete")) {
+      throw new Error(`Smart campaign ${this.#campaignId} has a pending deletion.`);
+    }
+  }
+
   async #summary(
     id = this.#campaignId,
     seen = new Set<string>(),
@@ -1039,6 +1046,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     if (personIds.length > MAX_CAMPAIGN_INPUTS) {
       throw new Error(`Marketo campaign requests accept at most ${MAX_CAMPAIGN_INPUTS} people.`);
     }
+    this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
     let summary = normalizeCampaign(campaign, this.#campaignId);
     if (campaign.isTriggerable !== true) {
@@ -1047,6 +1055,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
           `"Campaign is Requested" Web Service API trigger.`,
       );
     }
+    this.#rejectPendingDeletion();
     await this.#ctx.submit({
       type: "campaignTrigger",
       campaignId: requireResolvedCampaignId(this.#ctx, this.#campaignId),
@@ -1065,6 +1074,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     if (delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
       throw new Error("Marketo campaign schedules must be between 5 minutes and 2 years from now.");
     }
+    this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
     let summary = normalizeCampaign(campaign, this.#campaignId);
     if (campaign.type?.toLowerCase() !== "batch") {
@@ -1073,6 +1083,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
           `be scheduled.`,
       );
     }
+    this.#rejectPendingDeletion();
     await this.#ctx.submit({
       type: "campaignSchedule",
       campaignId: requireResolvedCampaignId(this.#ctx, this.#campaignId),
