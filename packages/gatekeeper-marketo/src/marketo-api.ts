@@ -268,6 +268,9 @@ function buildQuery(query: Query | undefined): string {
 const RATE_LIMIT_BACKOFF_MS = [1_000, 3_000, 8_000];
 const RATE_LIMIT_RETRIES = RATE_LIMIT_BACKOFF_MS.length;
 
+/** Marketo's documented timeout for Asset API requests and activity paging-token generation. */
+const LONG_RUNNING_REQUEST_TIMEOUT_MS = 300_000;
+
 /** Marketo rejects activity queries carrying more than this many activity type ids. */
 export const MAX_ACTIVITY_TYPE_IDS = 10;
 
@@ -413,6 +416,8 @@ export class MarketoClient {
   ): Promise<MarketoEnvelope<T>> {
     let attempt = async (token: string): Promise<MarketoEnvelope<T>> => {
       let url = `${this.#endpoint}${options?.withoutRestPrefix ? "" : "/rest"}${path}${buildQuery(options?.query)}`;
+      let longRunning = path.startsWith("/asset/v1/") || path.startsWith("/asset/v2/") ||
+        path === "/v1/activities/pagingtoken.json";
       let contentType = options?.form
         ? "application/x-www-form-urlencoded"
         : options?.body !== undefined
@@ -428,7 +433,9 @@ export class MarketoClient {
           ...(options?.appType ? { "x-app-type": "marketo" } : {}),
           ...(contentType ? { "Content-Type": contentType } : {}),
         },
-        signal: AbortSignal.timeout(options?.timeoutMs ?? 60_000),
+        signal: AbortSignal.timeout(
+          options?.timeoutMs ?? (longRunning ? LONG_RUNNING_REQUEST_TIMEOUT_MS : 60_000),
+        ),
       };
       if (options?.multipart) init.body = options.multipart;
       else if (options?.form) init.body = options.form.toString();
@@ -701,6 +708,13 @@ export class MarketoClient {
       throw new MarketoError("Marketo returned moreResult without a valid nextPageToken.", {
         operation: path,
       });
+    }
+    let queryToken = options?.query?.nextPageToken;
+    let requestToken = queryToken === undefined
+      ? options?.form?.get("nextPageToken") ?? undefined
+      : String(queryToken);
+    if (token && token === requestToken) {
+      throw new MarketoError("Marketo repeated the requested nextPageToken.", { operation: path });
     }
     let moreResult = envelope.moreResult ?? (result.length > 0 && token !== undefined && token.length > 0);
     return {
@@ -2105,9 +2119,14 @@ export class MarketoClient {
   }
 
   async describeCustomObject(apiName: string): Promise<RawCustomObjectSchema | undefined> {
-    let result = await this.#result<RawCustomObjectSchema>(
-      `/v1/customobjects/${encodeURIComponent(apiName)}/describe.json`,
-    );
+    let path = `/v1/customobjects/${encodeURIComponent(apiName)}/describe.json`;
+    let result = await this.#result<RawCustomObjectSchema>(path);
+    if (result.length === 0) return undefined;
+    if (result.length !== 1 || result[0]?.name !== apiName) {
+      throw new MarketoError(`Marketo returned the wrong custom object for exact read ${apiName}.`, {
+        operation: path,
+      });
+    }
     return result[0];
   }
 

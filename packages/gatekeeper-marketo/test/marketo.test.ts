@@ -3403,6 +3403,24 @@ describe("page normalization", () => {
       await expect(client.getLists()).rejects.toThrow(/nextPageToken with an unexpected shape/);
     }
   });
+
+  it("rejects a continuation token equal to the requested query token", async () => {
+    let { client } = clientReturning({
+      success: true, result: [{ id: 1 }], nextPageToken: "same",
+    });
+    await expect(client.getLists({ pageToken: "same" }))
+      .rejects.toThrow(/repeated the requested nextPageToken/);
+  });
+
+  it("rejects a continuation token equal to the requested form token", async () => {
+    let { client } = clientReturning({
+      success: true, result: [{ id: 1 }], moreResult: true, nextPageToken: "same",
+    });
+    await expect(client.queryBusinessObject("company", {
+      filter: { field: "name", values: ["Acme"] },
+      pageToken: "same",
+    })).rejects.toThrow(/repeated the requested nextPageToken/);
+  });
 });
 
 describe("standard response envelopes", () => {
@@ -3457,6 +3475,22 @@ describe("custom object query envelopes", () => {
     });
     let records = await client.queryCustomObject("o", "sourceID", ["5"]);
     expect(records.map(r => r.marketoGUID)).toEqual(["g1", "g2"]);
+  });
+
+  it("correlates an exact custom-object describe response to its API name", async () => {
+    for (let result of [
+      [{ name: "other", fields: [] }],
+      [{ name: "orderStatus", fields: [] }, { name: "orderStatus", fields: [] }],
+    ]) {
+      let { client } = clientReturning({ success: true, result });
+      await expect(client.describeCustomObject("orderStatus"))
+        .rejects.toThrow(/wrong custom object for exact read orderStatus/);
+    }
+  });
+
+  it("preserves an empty custom-object describe response as not found", async () => {
+    let { client } = clientReturning({ success: true, result: [] });
+    await expect(client.describeCustomObject("orderStatus")).resolves.toBeUndefined();
   });
 });
 
@@ -3824,7 +3858,7 @@ describe("filter reads", () => {
       { success: true, result: [{ id: 2 }], moreResult: true, nextPageToken: "same" },
     ).client;
     await expect(repeated.queryCustomObject("orderStatus", "sourceID", ["1"]))
-      .rejects.toThrow("invalid filter paging state");
+      .rejects.toThrow("repeated the requested nextPageToken");
   });
 
   it("bounds complete filter result materialization without authorizing a partial read", async () => {
@@ -4008,19 +4042,26 @@ describe("Marketo request encoding", () => {
     log.mockRestore();
   });
 
-  it("uses longer documented deadlines only for long-running sync endpoints", async () => {
+  it("uses documented deadlines for asset, paging-token, and sync endpoints", async () => {
     let deadlines: number[] = [];
     let timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
       deadlines.push(ms);
       return new AbortController().signal;
     });
-    vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [] }));
+    vi.stubGlobal("fetch", async (url: string) => Response.json(
+      url.includes("/activities/pagingtoken.json")
+        ? { success: true, nextPageToken: "activities" }
+        : { success: true, result: [] },
+    ));
     let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
 
     await client.getLeads("email", ["a@example.com"]);
+    await client.getFolders();
+    await client.createDesignerAsset("email", {});
+    await client.getPagingToken(new Date("2026-01-01T00:00:00Z"));
     await client.syncLeads([{ email: "a@example.com" }], "createOnly", "email");
     await client.syncCustomObject("orders", [{ sourceId: "1" }]);
-    expect(deadlines).toEqual([60_000, 90_000, 120_000]);
+    expect(deadlines).toEqual([60_000, 300_000, 300_000, 300_000, 90_000, 120_000]);
     timeout.mockRestore();
   });
 
