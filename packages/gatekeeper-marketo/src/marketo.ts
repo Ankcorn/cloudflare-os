@@ -729,6 +729,7 @@ type MarketoGatekeeperImplProps = {
 };
 
 type PendingRow = { action: MarketoAction };
+type ApplyingState = "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
 type LogicalKind = DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind;
 type LogicalReference = { id: string; kind: LogicalKind };
@@ -922,9 +923,7 @@ export class MarketoGatekeeperImpl
   async removeObserver(_id: string): Promise<void> {}
 
   async applyAction(actionId: number): Promise<void> {
-    let state = this.ctx.storage.kv.get<
-      "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied"
-    >(`applying:${actionId}`);
+    let state = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
     if (state === "applied") return;
     if (state === "nothing-changed") {
       throw new Error("Marketo's native CRM sync made this action read-only; nothing was changed.");
@@ -1094,7 +1093,8 @@ export class MarketoGatekeeperImpl
   }
 
   async rejectAction(actionId: number): Promise<void | { restart: true }> {
-    if (this.ctx.storage.kv.get(`applying:${actionId}`)) {
+    let applying = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
+    if (applying === "dispatching" || applying === "applied") {
       throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
     }
     let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
@@ -1107,6 +1107,13 @@ export class MarketoGatekeeperImpl
       let identity = this.#actionIdentity(pending);
       let purge = identity ? [identity] : [];
       let crossFamilyPurge = "provisionalId" in pending && identity ? [identity] : [];
+      let provisionalIds: { id: string; designer: boolean }[] = [];
+      let recordProvisional = (action: MarketoAction) => {
+        if ("provisionalId" in action) {
+          provisionalIds.push({ id: action.provisionalId, designer: isEmailDesignerAction(action) });
+        }
+      };
+      recordProvisional(pending);
       let changed = true;
       while (changed) {
         changed = false;
@@ -1127,16 +1134,21 @@ export class MarketoGatekeeperImpl
               crossFamilyPurge.push(created);
               changed = true;
             }
+            recordProvisional(row);
             this.#removePending(id);
           }
         }
       }
       this.#removePending(actionId);
-      this.ctx.storage.kv.delete(`applying:${actionId}`);
+      for (let provisional of provisionalIds) {
+        this.ctx.storage.kv.delete(`${provisional.designer ? "designerProvisional" : "provisional"}:${provisional.id}`);
+        this.ctx.storage.kv.delete(`provisionalKind:${provisional.id}`);
+      }
+      if (applying === undefined) this.ctx.storage.kv.delete(`applying:${actionId}`);
       return { restart: true };
     }
     this.#removePending(actionId);
-    this.ctx.storage.kv.delete(`applying:${actionId}`);
+    if (applying === undefined) this.ctx.storage.kv.delete(`applying:${actionId}`);
   }
 
   async revertAction(_actionId: number): Promise<{ message: string; canRetry: false }> {

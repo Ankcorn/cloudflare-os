@@ -4595,7 +4595,13 @@ describe("Design Studio action lifecycle", () => {
       expect(state.storage.kv.get("applying:2")).toBeUndefined();
       expect(state.storage.kv.get("applying:3")).toBeUndefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
+      for (let id of [1, 2, 3]) expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
+      expect(state.storage.kv.get("provisionalKind:~1")).toBeUndefined();
+      await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
     });
     expect(mutationCalls).toBe(1);
   });
@@ -4670,7 +4676,9 @@ describe("Design Studio action lifecycle", () => {
         expect(state.storage.kv.get("pending:1")).toBeDefined();
         expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1]);
         await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-        await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
+        await expect(instance.rejectAction(1)).resolves.toBeUndefined();
+        expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+        expect(state.storage.kv.get("pending:1")).toBeUndefined();
       });
       vi.unstubAllGlobals();
     }
@@ -4762,6 +4770,7 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
       release?.();
       await first;
+      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
       await instance.applyAction(ACTION.id);
     });
     expect(calls).toBe(1);
@@ -4811,10 +4820,12 @@ describe("action dispatch lifecycle", () => {
   });
 
   it("blocks retry after an ambiguous transport failure", async () => {
+    let calls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
+      calls++;
       throw new Error("connection lost");
     });
     let stub = await actionGatekeeper(ACTION);
@@ -4823,8 +4834,12 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Could not reach the Marketo API.");
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(ACTION.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
     });
+    expect(calls).toBe(1);
   });
 
   it.each([408, 500])("treats HTTP %i responses as ambiguous even with a numeric code", async status => {
@@ -4866,7 +4881,8 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(action.id)).rejects.toThrow(/applied 1 of 2/);
       expect(state.storage.kv.get(`pending:${action.id}`)).toBeUndefined();
       await expect(instance.applyAction(action.id)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(action.id)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(action.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("partial");
     });
   });
 
@@ -4892,6 +4908,8 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
       expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBe(true);
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed/);
+      await expect(instance.rejectAction(action.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
 
       let approvals = 0;
       let queue = new RpcStub(new TestApprovalQueue(async () => void approvals++)) as unknown as RpcStub<ApprovalQueue>;
