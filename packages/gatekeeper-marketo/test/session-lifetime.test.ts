@@ -102,6 +102,10 @@ describe("session child capability lifetime", () => {
     expect(() => session.getStaticList(0)).toThrow(/positive numeric Marketo list id/);
     expect(() => session.getProgram("0")).toThrow(/numeric or provisional.*program id/);
     expect(() => session.getSmartCampaign("invalid")).toThrow(/numeric or provisional.*campaign id/);
+    for (let id of ["00", "01", "+1", "1e2", "0x10", "1.0", "-1"]) {
+      expect(() => session.getProgram(id)).toThrow(/numeric or provisional.*program id/);
+      expect(() => session.getSmartCampaign(id)).toThrow(/numeric or provisional.*campaign id/);
+    }
 
     session[Symbol.dispose]();
     expect(queueDisposals).toBe(1);

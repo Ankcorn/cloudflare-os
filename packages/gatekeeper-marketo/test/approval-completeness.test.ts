@@ -7,7 +7,7 @@ import {
   type MarketoAction,
 } from "../src/actions";
 import { markdownCodeBlock, markdownText } from "../src/approval-markdown";
-import { INSTANCE_RESOURCE, PROGRAM_RESOURCE } from "../src/config";
+import { DESIGN_STUDIO_RESOURCE, INSTANCE_RESOURCE, PROGRAM_RESOURCE } from "../src/config";
 import { designerCloneSnapshot } from "../src/email-designer-actions";
 import { matchesProgramApprovalDates } from "../src/program-actions";
 
@@ -67,6 +67,14 @@ describe("Marketo approval completeness", () => {
   it("advertises the complete instance and program authority", () => {
     expect(INSTANCE_RESOURCE.description).toMatch(/business objects.*Design Studio/i);
     expect(PROGRAM_RESOURCE.description).toMatch(/metadata.*tags.*dates.*approve.*delete/i);
+  });
+
+  it("advertises the complete Design Studio authority", () => {
+    expect(DESIGN_STUDIO_RESOURCE.description).toMatch(/create or clone/i);
+    expect(DESIGN_STUDIO_RESOURCE.description).toMatch(/content and metadata/i);
+    expect(DESIGN_STUDIO_RESOURCE.description).toMatch(/publish.*propagate/i);
+    expect(DESIGN_STUDIO_RESOURCE.description).toMatch(/permanently discard/i);
+    expect(DESIGN_STUDIO_RESOURCE.description).toMatch(/permanently delete/i);
   });
 
   it("lists every recipient in bulk list, campaign, and program-status actions", () => {

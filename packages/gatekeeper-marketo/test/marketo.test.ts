@@ -158,6 +158,20 @@ describe("resource URLs", () => {
     );
   });
 
+  it("requires canonical positive decimal ids in scoped resource URLs", () => {
+    for (let kind of ["program", "list"]) {
+      for (let id of ["0", "00", "01", "+1", "1e2", "0x10", "1.0", "-1", " 1"]) {
+        expect(() => parseResourceUrl(ORIGIN, `${ORIGIN}/_resource/${kind}/${id}`)).toThrow(
+          new RegExp(`Invalid Marketo ${kind} id`),
+        );
+      }
+      expect(() => parseResourceUrl(
+        ORIGIN,
+        `${ORIGIN}/_resource/${kind}/${Number.MAX_SAFE_INTEGER + 1}`,
+      )).toThrow(new RegExp(`Invalid Marketo ${kind} id`));
+    }
+  });
+
   it("exposes exactly the four supported granularities", () => {
     expect(SUPPORTED_RESOURCES.map(r => r.title)).toEqual([
       "Marketo Instance",

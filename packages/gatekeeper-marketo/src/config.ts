@@ -233,7 +233,10 @@ export const DESIGN_STUDIO_RESOURCE: SupportedResource = {
   urlPattern: `${ANY_INSTANCE_ORIGIN}/_resource/design-studio`,
   title: "Marketo Design Studio",
   description:
-    "Access to Design Studio folders, emails, templates, landing pages, forms, snippets, and files.",
+    "Read and create or clone Design Studio folders, emails, templates, landing pages, forms, " +
+    "snippets, and files; mutate their content and metadata; publish drafts, which can propagate " +
+    "changes into dependent assets; permanently discard drafts; and permanently delete assets " +
+    "and empty folders.",
   icon: MARKETO_ICON,
 };
 
@@ -273,17 +276,21 @@ export function parseResourceUrl(
       if (segments.length !== 2) throw new Error(`Invalid Marketo Design Studio URL "${url}".`);
       return { kind: "design-studio" };
     case "program": {
-      let id = Number(segments[2]);
-      if (segments.length !== 3 || !Number.isSafeInteger(id) || id <= 0) {
+      let rawId = segments[2];
+      if (segments.length !== 3 || !rawId || !/^[1-9]\d*$/.test(rawId)) {
         throw new Error(`Invalid Marketo program id in "${url}".`);
       }
+      let id = Number(rawId);
+      if (!Number.isSafeInteger(id)) throw new Error(`Invalid Marketo program id in "${url}".`);
       return { kind: "program", id };
     }
     case "list": {
-      let id = Number(segments[2]);
-      if (segments.length !== 3 || !Number.isSafeInteger(id) || id <= 0) {
+      let rawId = segments[2];
+      if (segments.length !== 3 || !rawId || !/^[1-9]\d*$/.test(rawId)) {
         throw new Error(`Invalid Marketo list id in "${url}".`);
       }
+      let id = Number(rawId);
+      if (!Number.isSafeInteger(id)) throw new Error(`Invalid Marketo list id in "${url}".`);
       return { kind: "list", id };
     }
     default:

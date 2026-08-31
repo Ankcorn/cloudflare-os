@@ -20,8 +20,11 @@ export default {
     return (
       <Section>
         <p>
-          Grants access to Design Studio folders, emails, templates, landing pages, forms, snippets,
-          and files, without granting access to people or campaign data.
+          Grants authority to read and create or clone Design Studio folders, emails, templates,
+          landing pages, forms, snippets, and files; mutate their content and metadata; publish
+          drafts, which can propagate changes into dependent assets; permanently discard drafts;
+          and permanently delete assets and empty folders. This does not grant access to people or
+          campaign data.
         </p>
       </Section>
     );
