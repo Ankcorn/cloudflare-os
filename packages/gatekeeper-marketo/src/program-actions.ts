@@ -74,10 +74,14 @@ function code(value: string): string {
   return `\`${escapeMarkdown(value)}\``;
 }
 
+function descriptionDetail(value: string): string {
+  return value === "" ? "clear the existing description" : escapeMarkdown(value);
+}
+
 function patchDetails(patch: ProgramPatch): string {
   let details: string[] = [];
   if (patch.name !== undefined) details.push(`- Name: ${escapeMarkdown(patch.name)}`);
-  if (patch.description !== undefined) details.push(`- Description: ${escapeMarkdown(patch.description)}`);
+  if (patch.description !== undefined) details.push(`- Description: ${descriptionDetail(patch.description)}`);
   if (patch.tags !== undefined) {
     details.push(`- Tags: ${patch.tags.map(tag => `${escapeMarkdown(tag.tagType)} = ${escapeMarkdown(tag.tagValue)}`).join(", ") || "none"}`);
   }
@@ -101,7 +105,7 @@ export function describeProgramAction(action: ProgramAction): ActionDescription 
         ...base,
         title: `Clone Marketo program ${action.name}`,
         description: `Clone program ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in folder ${code(action.parentId)}, using the source program's current contents when dispatched.` +
-          (action.description === undefined ? "" : `\n\nDescription: ${escapeMarkdown(action.description)}`),
+          (action.description === undefined ? "" : `\n\nDescription: ${descriptionDetail(action.description)}`),
       };
     case "programUpdate":
       return {
@@ -149,10 +153,21 @@ async function verifyCreatedProgram(
   parentId: number,
 ): Promise<void> {
   let created = await client.getProgram(id);
+  let matchesDate = (actual: unknown, expected: string): boolean => {
+    let actualDate = parseMarketoDate(actual);
+    let expectedDate = parseMarketoDate(expected);
+    return actualDate !== undefined && expectedDate !== undefined && actualDate.getTime() === expectedDate.getTime();
+  };
+  let matches =
+    (approved.description === undefined || created?.description === approved.description) &&
+    (approved.type === undefined || created?.type === approved.type) &&
+    (approved.channel === undefined || created?.channel === approved.channel) &&
+    (approved.tags === undefined || JSON.stringify(created?.tags ?? []) === JSON.stringify(approved.tags)) &&
+    (approved.startDate === undefined || matchesDate(created?.startDate, approved.startDate)) &&
+    (approved.endDate === undefined || matchesDate(created?.endDate, approved.endDate));
   if (!created || created.id !== id || created.name !== approved.name ||
       created.folder?.value !== parentId || created.folder.type !== "Folder" ||
-      Object.entries(approved).some(([key, value]) => value !== undefined &&
-        JSON.stringify(created[key as keyof typeof created]) !== JSON.stringify(value))) {
+      !matches) {
     throw new Error(`Marketo could not verify created program ${id} against the approved request.`);
   }
 }

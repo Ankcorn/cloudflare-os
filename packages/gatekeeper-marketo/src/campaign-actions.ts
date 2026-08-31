@@ -56,6 +56,10 @@ function code(value: string): string {
   return `\`${escapeMarkdown(value)}\``;
 }
 
+function descriptionDetail(value: string): string {
+  return value === "" ? "clear the existing description" : escapeMarkdown(value);
+}
+
 /** Render a campaign-management action for human approval. */
 export function describeCampaignAction(action: CampaignAction): ActionDescription {
   let base = { awaitDecision: false, implementsRevert: false } as const;
@@ -77,7 +81,7 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         description:
           `Clone smart campaign ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in ` +
           `${action.parent.type.toLowerCase()} ${code(action.parent.id)}. The clone uses the source campaign's current smart-list rules and flow steps when dispatched.` +
-          (action.description ? `\n\nDescription: ${escapeMarkdown(action.description)}` : ""),
+          (action.description === undefined ? "" : `\n\nDescription: ${descriptionDetail(action.description)}`),
       };
     case "campaignMetadata":
       return {
@@ -87,7 +91,7 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
           `Update smart campaign **${escapeMarkdown(action.campaignName)}** (${code(action.targetId)}) metadata:` +
           (action.patch.name !== undefined ? `\n\n- Name: ${escapeMarkdown(action.patch.name)}` : "") +
           (action.patch.description !== undefined
-            ? `\n- Description: ${escapeMarkdown(action.patch.description)}`
+            ? `\n- Description: ${descriptionDetail(action.patch.description)}`
             : ""),
       };
     case "campaignLifecycle":

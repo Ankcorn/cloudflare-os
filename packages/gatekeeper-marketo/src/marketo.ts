@@ -1244,7 +1244,7 @@ export class MarketoGatekeeperImpl
       this.ctx.storage.kv.delete(`applying:${actionId}`);
       applying = undefined;
     }
-    if (this.#preparingActions.has(actionId) || applying === "dispatching" || applying === "applied") {
+    if (this.#preparingActions.has(actionId) || (applying !== undefined && applying !== "nothing-changed")) {
       throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
     }
     let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;

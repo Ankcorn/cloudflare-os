@@ -1433,6 +1433,28 @@ describe("smart campaign management", () => {
     expect(deletion.description).toMatch(/Permanently delete.*cannot be undone/);
   });
 
+  it("distinguishes inherited descriptions from explicit clears", () => {
+    let clone = (description?: string) => describeAction({
+      id: 1,
+      type: "campaignClone",
+      provisionalId: "~1",
+      sourceId: "7",
+      parent: { id: "10", type: "Folder" },
+      name: "Clone",
+      description,
+    });
+
+    expect(clone().description).not.toContain("Description:");
+    expect(clone("").description).toMatch(/Description: clear the existing description/);
+    expect(describeAction({
+      id: 2,
+      type: "campaignMetadata",
+      targetId: "7",
+      campaignName: "Campaign",
+      patch: { description: "" },
+    }).description).toMatch(/Description: clear the existing description/);
+  });
+
   it("executes creates and dependent metadata updates through resolved logical ids", async () => {
     let calls: unknown[] = [];
     let client = {
@@ -1664,6 +1686,59 @@ describe("program management", () => {
       ["create", { name: "Program", type: "Default", channel: "Web", folder: { id: 10, type: "Folder" } }],
       ["update", 77, { description: "Ready" }],
     ]);
+  });
+
+  it("normalizes equivalent timestamps and empty tags without hiding differences", async () => {
+    let action: ProgramAction = {
+      id: 1, type: "programCreate", provisionalId: "~1", parentId: "10",
+      input: {
+        name: "Program", type: "Email", channel: "Email Send", tags: [],
+        startDate: "2026-09-01T10:00:00.000Z", endDate: "2026-09-01T10:00:00.000Z",
+      },
+    };
+    let verify = (created: Record<string, unknown>) => executeProgramAction(action, {
+      createProgram: async () => [{ id: 77 }],
+      getProgram: async () => created,
+    } as never, Number, () => {});
+    let base = {
+      id: 77, name: "Program", type: "Email", channel: "Email Send",
+      folder: { value: 10, type: "Folder" },
+    };
+    for (let [startDate, tags] of [
+      ["2026-09-01T10:00:00Z", undefined],
+      ["2026-09-01T10:00:00.000Z", null],
+      ["2026-09-01T10:00:00Z+0000", []],
+    ] as const) {
+      await expect(verify({
+        ...base, startDate, endDate: startDate, ...(tags === undefined ? {} : { tags }),
+      })).resolves.toBeUndefined();
+    }
+    await expect(verify({ ...base, startDate: "2026-09-01T10:00:01Z" }))
+      .rejects.toThrow(/could not verify created program/);
+    await expect(verify({ ...base, startDate: action.input.startDate, endDate: action.input.endDate,
+      tags: [{ tagType: "Region", tagValue: "EMEA" }] }))
+      .rejects.toThrow(/could not verify created program/);
+  });
+
+  it("still rejects a meaningful clone verification difference", async () => {
+    let cloneClient = {
+      cloneProgram: async () => [{ id: 77 }],
+      getProgram: async () => ({
+        id: 77,
+        name: "Clone",
+        folder: { value: 10, type: "Folder" },
+        description: "Different",
+      }),
+    } as never;
+    await expect(executeProgramAction({
+      id: 1,
+      type: "programClone",
+      provisionalId: "~1",
+      sourceId: "7",
+      parentId: "10",
+      name: "Clone",
+      description: "Approved",
+    }, cloneClient, Number, () => {})).rejects.toThrow(/could not verify created program/);
   });
 });
 
@@ -6236,11 +6311,11 @@ describe("Design Studio action lifecycle", () => {
       expect(state.storage.kv.get("applying:2")).toBeUndefined();
       expect(state.storage.kv.get("applying:3")).toBeUndefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3]);
-      expect(state.storage.kv.get("pending:1")).toBeUndefined();
-      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1, 2, 3]);
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBeUndefined();
       expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
       expect(state.storage.kv.get("provisionalKind:~1")).toBeUndefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
@@ -6318,9 +6393,9 @@ describe("Design Studio action lifecycle", () => {
         expect(state.storage.kv.get("pending:1")).toBeDefined();
         expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1]);
         await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-        await expect(instance.rejectAction(1)).resolves.toBeUndefined();
+        await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
         expect(state.storage.kv.get("applying:1")).toBe("uncertain");
-        expect(state.storage.kv.get("pending:1")).toBeUndefined();
+        expect(state.storage.kv.get("pending:1")).toBeDefined();
       });
       vi.unstubAllGlobals();
     }
@@ -6746,6 +6821,24 @@ describe("action dispatch lifecycle", () => {
     expect(calls).toBe(1);
   });
 
+  it("allows pre-dispatch rejection but rejects every state that may have applied", async () => {
+    let preparing = await actionGatekeeper(ACTION);
+    await runInDurableObject(preparing, async (instance, state) => {
+      state.storage.kv.put(`applying:${ACTION.id}`, "preparing");
+      await expect(instance.rejectAction(ACTION.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
+    });
+
+    for (let applying of ["dispatching", "uncertain", "partial", "applied"] as const) {
+      let stub = await actionGatekeeper(ACTION);
+      await runInDurableObject(stub, async (instance, state) => {
+        state.storage.kv.put(`applying:${ACTION.id}`, applying);
+        await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+        expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeDefined();
+      });
+    }
+  });
+
   it("recovers legacy persisted preparation state without treating it as dispatched", async () => {
     let calls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
@@ -6829,8 +6922,8 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Could not reach the Marketo API.");
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(ACTION.id)).resolves.toBeUndefined();
-      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
+      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeDefined();
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
     });
@@ -6876,7 +6969,7 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(action.id)).rejects.toThrow(/applied 1 of 2/);
       expect(state.storage.kv.get(`pending:${action.id}`)).toBeUndefined();
       await expect(instance.applyAction(action.id)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(action.id)).resolves.toBeUndefined();
+      await expect(instance.rejectAction(action.id)).rejects.toThrow(/already dispatched/);
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("partial");
     });
   });
