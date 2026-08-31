@@ -630,7 +630,7 @@ describe("optional deployment defaults", () => {
 
 describe("account description", () => {
   it("distinguishes API users on one instance without exposing client credentials", async () => {
-    let describeAccount = async (clientId: string, clientSecret: string) => {
+    let describeAccount = async (clientId: string, clientSecret: string, scope = "api-user@example.com") => {
       let account = { getCredentials: async () => ({ endpoint: ORIGIN, clientId, clientSecret }) };
       let ctx = {
         props: { userObjectId: `account-${clientId}` },
@@ -638,7 +638,7 @@ describe("account description", () => {
           UserAccount: { idFromString: () => "account-id", get: () => account },
           MarketoTokenCache: {
             idFromName: () => "cache-id",
-            get: () => ({ getScope: async () => ({ ok: true, value: "api-user@example.com" }) }),
+            get: () => ({ getScope: async () => ({ ok: true, value: scope }) }),
           },
         },
       } as unknown as ExecutionContext;
@@ -647,11 +647,14 @@ describe("account description", () => {
 
     let first = await describeAccount("client-one", "secret-one");
     let repeated = await describeAccount("client-one", "different-secret");
+    let renamed = await describeAccount("client-one", "secret-one", "renamed@example.com");
     let second = await describeAccount("client-two", "secret-two");
 
     expect(first.uniqueName).toBe(repeated.uniqueName);
+    expect(first.uniqueName).toBe(renamed.uniqueName);
     expect(first.uniqueName).not.toBe(second.uniqueName);
-    expect(first.uniqueName).toContain("api-user@example.com");
+    expect(first.displayName).toContain("api-user@example.com");
+    expect(first.uniqueName).not.toContain("api-user@example.com");
     expect(first.uniqueName).not.toContain("client-one");
     expect(first.uniqueName).not.toContain("secret-one");
   });
@@ -3045,6 +3048,27 @@ describe("person field normalization", () => {
     await expect(list.getMembers(["firstName"]))
       .resolves.toMatchObject({ members: [{ id: 7, firstName: "Person" }] });
   });
+
+  it("correlates projected person searches without exposing an internal filter field", async () => {
+    let requestedFields: string[] | undefined;
+    let notes: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getLeads: async (_field, _values, fields) => {
+        requestedFields = fields;
+        return [{ id: 7, email: "person@example.com", firstName: "Person" }];
+      },
+    }, notes));
+
+    await expect(session.findPeople("email", ["person@example.com"], ["firstName"]))
+      .resolves.toEqual([{ id: 7, firstName: "Person" }]);
+    expect(requestedFields).toEqual(["id", "firstName", "email"]);
+
+    await expect(new MarketoSessionImpl(stubContext({
+      getLeads: async () => [{ id: 8, email: "other@example.com" }],
+    }, notes)).findPeople("email", ["person@example.com"], ["firstName"]))
+      .rejects.toThrow(/outside the requested filter/);
+    expect(notes).toHaveLength(2);
+  });
 });
 
 describe("exact static list reads", () => {
@@ -3333,6 +3357,19 @@ describe("whole-instance listings", () => {
     expect(page.lists.map(l => l.id)).toEqual([1]);
     expect(page.moreResult).toBe(true);
     expect(page.nextPageToken).toBe("tok2");
+  });
+
+  it.each([
+    [{ name: "Wanted" }, "Other"],
+    [{ nameContains: "ant" }, "Other"],
+  ])("rejects static lists outside a requested name filter before observation", async (filter, name) => {
+    let notes: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getLists: async () => ({ result: [{ id: 1, name }], moreResult: false }),
+    }, notes));
+
+    await expect(session.listStaticLists(filter)).rejects.toThrow(/outside the requested name filter/);
+    expect(notes).toEqual([]);
   });
 
   it("reports the end of the list", async () => {

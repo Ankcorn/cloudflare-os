@@ -141,6 +141,15 @@ function normalizeList(list: RawList, fallbackId = -1): MarketoStaticListSummary
   };
 }
 
+function isListNameMatch(list: RawList, filter: MarketoNameFilter): boolean {
+  if (filter.name === undefined && filter.nameContains === undefined) return true;
+  if (typeof list.name !== "string") return false;
+  let name = list.name.toLocaleLowerCase();
+  if (filter.name !== undefined) return name === filter.name.trim().toLocaleLowerCase();
+  return filter.nameContains !== undefined &&
+    name.includes(filter.nameContains.trim().toLocaleLowerCase());
+}
+
 function normalizeCampaign(
   campaign: RawCampaign & RawCampaignAsset,
   fallbackId = "-1",
@@ -1696,7 +1705,12 @@ export class MarketoSessionImpl extends RpcTarget {
     if (!values?.length) throw new Error("At least one search value is required.");
     requireFilterValueCount(values, "search");
     let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
-    let leads = await (await this.#ctx.client()).getLeads(field, values, requested);
+    let wireFields = [...new Set([...requested, field])];
+    let leads = await (await this.#ctx.client()).getLeads(field, values, wireFields);
+    let requestedValues = new Set(values.map(String));
+    if (leads.some(lead => !isRequestedFilterValue(lead[field], requestedValues))) {
+      throw new MarketoError("Marketo returned a person outside the requested filter.");
+    }
     await this.#ctx.observe(
       `Found ${leads.length} Marketo people by ${field}`,
       `Searched people where \`${field}\` matches ${values.length} value(s); ` +
@@ -1724,6 +1738,9 @@ export class MarketoSessionImpl extends RpcTarget {
     nextPageToken?: string;
   }> {
     let page = await (await this.#ctx.client()).getLists(filter);
+    if (page.result.some(list => !isListNameMatch(list, filter))) {
+      throw new MarketoError("Marketo returned a static list outside the requested name filter.");
+    }
     await this.#ctx.observe(
       `Listed ${page.result.length} Marketo static lists${describeNameFilter(filter)}`,
       `Read the names and ids of **${page.result.length}** static list(s)${describeNameFilter(filter)}.`,

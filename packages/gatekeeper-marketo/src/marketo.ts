@@ -616,7 +616,7 @@ export class MarketoUserImpl
     }
     return {
       displayName: scope ? `Marketo (${scope})` : "Marketo",
-      uniqueName: `${scope ? `${scope} @ ` : ""}${host} @ ${identity}`,
+      uniqueName: `${host} @ ${identity}`,
       avatar: MARKETO_ICON,
     };
   }
