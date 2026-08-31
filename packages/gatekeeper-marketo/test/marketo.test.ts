@@ -3633,6 +3633,32 @@ describe("collaborator credentials", () => {
       );
     }
   });
+
+  it("re-verifies a previously admitted observer against live credentials", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await runInDurableObject(gatekeeper, async instance => {
+      let exports = (instance as unknown as { ctx: { exports: Cloudflare.Exports } }).ctx.exports;
+      let verifier = (exports as unknown as {
+        TestMarketoUserVerifier(options: { props: { userObjectId: string } }): Fetcher;
+      }).TestMarketoUserVerifier({ props: { userObjectId: observerId.toString() } });
+      await expect(instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      )).resolves.toBeUndefined();
+
+      let namespace = (env as unknown as { UserAccount: DurableObjectNamespace }).UserAccount;
+      await runInDurableObject(namespace.get(observerId), (_instance, state) => {
+        state.storage.kv.put("credentials", { ...OWNER, clientSecret: "reconnected-secret" });
+      });
+
+      await expect(instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      )).rejects.toThrow(/not connected with the same Marketo LaunchPoint service/);
+    });
+  });
 });
 
 async function actionGatekeeper(action: MarketoAction) {
