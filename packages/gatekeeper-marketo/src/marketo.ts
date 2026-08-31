@@ -528,6 +528,12 @@ async function credentialFingerprint(credentials: MarketoCredentials): Promise<s
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function accountIdentityFingerprint(endpoint: string, clientId: string): Promise<string> {
+  let bytes = new TextEncoder().encode(`${new URL(endpoint).origin}\u0000${clientId}`);
+  let digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 @validateRpc()
 export class MarketoUserVerifier
   extends WorkerEntrypoint<Env, MarketoUserVerifierProps>
@@ -579,9 +585,13 @@ export class MarketoUserImpl
 
   async describe(): Promise<AccountDescription> {
     let creds = await this.#account().getCredentials();
-    if (!creds) return { displayName: "Marketo", uniqueName: "disconnected", avatar: MARKETO_ICON };
+    if (!creds) {
+      let identity = await accountIdentityFingerprint("https://disconnected.invalid", this.ctx.props.userObjectId);
+      return { displayName: "Marketo", uniqueName: `disconnected @ ${identity}`, avatar: MARKETO_ICON };
+    }
 
     let host = new URL(creds.endpoint).host;
+    let identity = await accountIdentityFingerprint(creds.endpoint, creds.clientId);
     // Label the connection with the API-only user owning the custom service, since that is the
     // identity Marketo will attribute every action to.
     let scope: string | undefined;
@@ -605,7 +615,7 @@ export class MarketoUserImpl
     }
     return {
       displayName: scope ? `Marketo (${scope})` : "Marketo",
-      uniqueName: scope ? `${scope} @ ${host}` : host,
+      uniqueName: `${scope ? `${scope} @ ` : ""}${host} @ ${identity}`,
       avatar: MARKETO_ICON,
     };
   }

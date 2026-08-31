@@ -207,6 +207,152 @@ function pageOf<K extends string, T>(
   } as { moreResult: boolean; nextPageToken?: string } & Record<K, T[]>;
 }
 
+function sameManagedId(ctx: CampaignContext, left: string, right: string): boolean {
+  if (left === right) return true;
+  let resolved = ctx.resolveId(left);
+  return resolved !== undefined && resolved === ctx.resolveId(right);
+}
+
+function overlayProgram(
+  ctx: CampaignContext,
+  summary: MarketoProgramSummary,
+  actions: ProgramAction[],
+): MarketoProgramSummary | null {
+  let result = { ...summary };
+  for (let action of actions) {
+    if (!("targetId" in action) || !sameManagedId(ctx, action.targetId, String(summary.id))) continue;
+    if (action.type === "programUpdate") {
+      Object.assign(result,
+        action.patch.name === undefined ? {} : { name: action.patch.name },
+        action.patch.description === undefined ? {} : { description: action.patch.description },
+        action.patch.tags === undefined ? {} : {
+          tags: action.patch.tags.map(tag => ({ type: tag.tagType, value: tag.tagValue })),
+        },
+        action.patch.startDate === undefined ? {} : { startDate: parseMarketoDate(action.patch.startDate) },
+        action.patch.endDate === undefined ? {} : { endDate: parseMarketoDate(action.patch.endDate) },
+      );
+    }
+    if (action.type === "programLifecycle") {
+      if (action.operation === "delete") return null;
+      if (action.operation === "unapprove") result.status = "unlocked";
+    }
+  }
+  return result;
+}
+
+function overlayCampaign(
+  ctx: CampaignContext,
+  summary: MarketoSmartCampaignSummary,
+  actions: CampaignAction[],
+): MarketoSmartCampaignSummary | null {
+  let result = { ...summary };
+  for (let action of actions) {
+    if (!("targetId" in action) || !sameManagedId(ctx, action.targetId, String(summary.id))) continue;
+    if (action.type === "campaignMetadata") Object.assign(result, action.patch);
+    if (action.type === "campaignLifecycle") {
+      if (action.operation === "delete") return null;
+      if (action.operation === "deactivate") Object.assign(result, { active: false, status: "Inactive" });
+    }
+  }
+  return result;
+}
+
+function managedCandidateIds<T extends ProgramAction | CampaignAction>(actions: T[]): string[] {
+  let ids = actions.flatMap(action => {
+    if (action.type === "programCreate" || action.type === "programClone" ||
+        action.type === "campaignCreate" || action.type === "campaignClone") {
+      return [action.provisionalId];
+    }
+    return "targetId" in action ? [action.targetId] : [];
+  });
+  return [...new Set(ids)];
+}
+
+function isProgramName(summary: MarketoProgramSummary, name: string): boolean {
+  return summary.name.localeCompare(name, undefined, { sensitivity: "accent" }) === 0;
+}
+
+function isCampaignMatch(
+  summary: MarketoSmartCampaignSummary,
+  filter: MarketoNameFilter & { requestableOnly?: boolean },
+): boolean {
+  if (filter.requestableOnly && !summary.requestable) return false;
+  let name = summary.name.toLocaleLowerCase();
+  if (filter.name !== undefined && name !== filter.name.trim().toLocaleLowerCase()) return false;
+  if (filter.nameContains !== undefined && !name.includes(filter.nameContains.trim().toLocaleLowerCase())) return false;
+  return true;
+}
+
+const CAMPAIGN_PAGE_SIZE = 300;
+const CAMPAIGN_TOKEN_PREFIX = "gk-campaign:";
+const CAMPAIGN_TOKEN_MAX_LENGTH = 16_384;
+
+type CampaignPageState = {
+  actionIds: number[];
+  candidateIds: string[];
+  maskedIds: string[];
+  upstreamToken?: string;
+  skip: number;
+  scope: string;
+};
+
+function campaignScope(filter: MarketoNameFilter & { requestableOnly?: boolean }): string {
+  return JSON.stringify({
+    name: filter.name,
+    nameContains: filter.nameContains,
+    requestableOnly: filter.requestableOnly === true,
+  });
+}
+
+function campaignPageState(
+  filter: MarketoNameFilter & { requestableOnly?: boolean },
+  actions: CampaignAction[],
+): CampaignPageState {
+  if (filter.pageToken === undefined) {
+    return {
+      actionIds: actions.map(action => action.id),
+      candidateIds: managedCandidateIds(actions),
+      maskedIds: managedCandidateIds(actions),
+      skip: 0,
+      scope: campaignScope(filter),
+    };
+  }
+  try {
+    if (filter.pageToken.length > CAMPAIGN_TOKEN_MAX_LENGTH ||
+        !filter.pageToken.startsWith(CAMPAIGN_TOKEN_PREFIX)) throw new Error();
+    let encoded = filter.pageToken.slice(CAMPAIGN_TOKEN_PREFIX.length)
+      .replace(/-/g, "+").replace(/_/g, "/");
+    let bytes = Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")),
+      character => character.charCodeAt(0));
+    let state = JSON.parse(new TextDecoder().decode(bytes)) as CampaignPageState;
+    if (!Array.isArray(state.actionIds) || state.actionIds.length > 100 ||
+        state.actionIds.some(id => !Number.isSafeInteger(id) || id <= 0) ||
+        new Set(state.actionIds).size !== state.actionIds.length ||
+        !Array.isArray(state.candidateIds) || state.candidateIds.length > 100 ||
+        state.candidateIds.some(id => typeof id !== "string" || !/^(?:[1-9]\d*|~[1-9]\d*)$/.test(id)) ||
+        new Set(state.candidateIds).size !== state.candidateIds.length ||
+        !Array.isArray(state.maskedIds) || state.maskedIds.length > 100 ||
+        state.maskedIds.some(id => typeof id !== "string" || !/^(?:[1-9]\d*|~[1-9]\d*)$/.test(id)) ||
+        new Set(state.maskedIds).size !== state.maskedIds.length ||
+        !Number.isSafeInteger(state.skip) || state.skip < 0 || state.skip > CAMPAIGN_PAGE_SIZE ||
+        state.upstreamToken !== undefined && typeof state.upstreamToken !== "string" ||
+        state.scope !== campaignScope(filter)) throw new Error();
+    return state;
+  } catch {
+    throw new Error("Invalid Marketo smart campaign page token.");
+  }
+}
+
+function campaignPageToken(state: CampaignPageState): string {
+  let bytes = new TextEncoder().encode(JSON.stringify(state));
+  let token = CAMPAIGN_TOKEN_PREFIX + btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (token.length > CAMPAIGN_TOKEN_MAX_LENGTH) {
+    throw new Error("Too many pending Marketo campaign changes to create a page token.");
+  }
+  return token;
+}
+
 /**
  * Normalize a person field. The API name lives under `rest`/`soap`; a field with neither cannot be
  * addressed by any call we expose, so it is dropped by the caller rather than reported nameless.
@@ -1556,7 +1702,9 @@ export class MarketoSessionImpl extends RpcTarget {
 
   async findProgramsByName(name: string): Promise<MarketoProgramSummary[]> {
     if (!name?.trim()) throw new Error("A program name is required.");
-    let programs = await (await this.#ctx.client()).getProgramsByName(name.trim());
+    let searchedName = name.trim();
+    let actions = this.#ctx.pendingProgram();
+    let programs = await (await this.#ctx.client()).getProgramsByName(searchedName);
     if (programs.length >= ASSET_PAGE_MAX) {
       // A full page means Marketo had more to give. Returning it would look like a complete
       // answer to a method whose whole purpose is disambiguating between same-named programs,
@@ -1566,11 +1714,30 @@ export class MarketoSessionImpl extends RpcTarget {
           `listed in one request. Use getProgram(id) if you know the id, or a more specific name.`,
       );
     }
+    let candidateIds = managedCandidateIds(actions);
+    let deleted = (id: string) => actions.some(action =>
+      action.type === "programLifecycle" && action.operation === "delete" &&
+      sameManagedId(this.#ctx, action.targetId, id)
+    );
+    let candidates = (await Promise.all(candidateIds.map(async id => {
+      if (deleted(id)) return null;
+      return await new MarketoProgramImpl(this.#ctx, id).describe();
+    }))).filter((program): program is MarketoProgramSummary =>
+      program !== null && isProgramName(program, searchedName));
+    let identity = (id: string | number) => String(this.#ctx.resolveId(String(id)) ?? id);
+    let seen = new Set(candidates.map(program => identity(program.id)));
+    let merged = [...candidates];
+    for (let raw of programs) {
+      let summary = overlayProgram(this.#ctx, normalizeProgram(raw), actions);
+      if (!summary || !isProgramName(summary, searchedName) || seen.has(identity(summary.id))) continue;
+      seen.add(identity(summary.id));
+      merged.push(summary);
+    }
     await this.#ctx.observe(
       `Looked up Marketo programs named "${name}"`,
-      `Looked up programs named \`${name}\`: **${programs.length}** match(es).`,
+      `Looked up programs named \`${name}\`: **${merged.length}** match(es).`,
     );
-    return programs.map(normalizeProgram);
+    return merged;
   }
 
   getProgram(id: MarketoProgramId): MarketoProgramImpl {
@@ -1667,13 +1834,50 @@ export class MarketoSessionImpl extends RpcTarget {
     moreResult: boolean;
     nextPageToken?: string;
   }> {
-    let page = await (await this.#ctx.client()).getCampaigns(filter);
+    let allActions = this.#ctx.pendingCampaign();
+    let state = campaignPageState(filter, allActions);
+    let actions = allActions.filter(action => state.actionIds.includes(action.id));
+    let listingCtx: CampaignContext = { ...this.#ctx, pendingCampaign: () => actions };
+    let { pageToken: _pageToken, ...requestedFilter } = filter;
+    let page = await (await this.#ctx.client()).getCampaigns({
+      ...requestedFilter,
+      ...(state.upstreamToken === undefined ? {} : { pageToken: state.upstreamToken }),
+    });
+    let deleted = (id: string) => actions.some(action =>
+      action.type === "campaignLifecycle" && action.operation === "delete" &&
+      sameManagedId(listingCtx, action.targetId, id)
+    );
+    let candidates = (await Promise.all(state.candidateIds.map(async id => {
+      if (deleted(id)) return null;
+      return await new MarketoSmartCampaignImpl(listingCtx, id).describe();
+    }))).filter((campaign): campaign is MarketoSmartCampaignSummary =>
+      campaign !== null && isCampaignMatch(campaign, filter));
+    let identity = (id: string | number) => String(listingCtx.resolveId(String(id)) ?? id);
+    let masked = new Set(state.maskedIds.map(identity));
+    let upstream = page.result.flatMap(raw => {
+      let summary = overlayCampaign(listingCtx, normalizeCampaign(raw), actions);
+      return summary && isCampaignMatch(summary, filter) && !masked.has(identity(summary.id)) ? [summary] : [];
+    });
+    let campaigns = [...candidates];
+    let available = upstream.slice(state.skip);
+    let taken = available.slice(0, CAMPAIGN_PAGE_SIZE - campaigns.length);
+    campaigns.push(...taken);
+    let skip = state.skip + taken.length;
+    let upstreamToken = state.upstreamToken;
+    if (skip >= upstream.length && page.moreResult) {
+      upstreamToken = page.nextPageToken;
+      skip = 0;
+    }
+    let hasMore = skip < upstream.length || page.moreResult;
+    let nextPageToken = hasMore
+      ? campaignPageToken({ ...state, candidateIds: [], upstreamToken, skip })
+      : undefined;
     let scope = describeNameFilter(filter) + (filter.requestableOnly ? ", requestable only" : "");
     await this.#ctx.observe(
-      `Listed ${page.result.length} Marketo smart campaigns${scope}`,
-      `Read the names and ids of **${page.result.length}** smart campaign(s)${scope}.`,
+      `Listed ${campaigns.length} Marketo smart campaigns${scope}`,
+      `Read the names and ids of **${campaigns.length}** smart campaign(s)${scope}.`,
     );
-    return pageOf("campaigns", page, page.result.map(campaign => normalizeCampaign(campaign)));
+    return { campaigns, moreResult: hasMore, nextPageToken };
   }
 
   getSmartCampaign(id: string | number): MarketoSmartCampaignImpl {

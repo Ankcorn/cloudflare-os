@@ -627,6 +627,33 @@ describe("optional deployment defaults", () => {
 });
 
 describe("account description", () => {
+  it("distinguishes API users on one instance without exposing client credentials", async () => {
+    let describeAccount = async (clientId: string, clientSecret: string) => {
+      let account = { getCredentials: async () => ({ endpoint: ORIGIN, clientId, clientSecret }) };
+      let ctx = {
+        props: { userObjectId: `account-${clientId}` },
+        exports: {
+          UserAccount: { idFromString: () => "account-id", get: () => account },
+          MarketoTokenCache: {
+            idFromName: () => "cache-id",
+            get: () => ({ getScope: async () => ({ ok: true, value: "api-user@example.com" }) }),
+          },
+        },
+      } as unknown as ExecutionContext;
+      return await new MarketoUserImpl(ctx, {} as Env).describe();
+    };
+
+    let first = await describeAccount("client-one", "secret-one");
+    let repeated = await describeAccount("client-one", "different-secret");
+    let second = await describeAccount("client-two", "secret-two");
+
+    expect(first.uniqueName).toBe(repeated.uniqueName);
+    expect(first.uniqueName).not.toBe(second.uniqueName);
+    expect(first.uniqueName).toContain("api-user@example.com");
+    expect(first.uniqueName).not.toContain("client-one");
+    expect(first.uniqueName).not.toContain("secret-one");
+  });
+
   it("logs a sanitized classification when scope lookup fails", async () => {
     let credentials = { endpoint: ORIGIN, clientId: "client", clientSecret: "secret-marker" };
     let account = {
@@ -3132,6 +3159,68 @@ describe("program tokens", () => {
 });
 
 describe("whole-instance listings", () => {
+  it("merges pending program creates, renames, and deletes into exact-name lookup", async () => {
+    let actions: ProgramAction[] = [
+      {
+        id: 1, type: "programCreate", provisionalId: "~1", parentId: "10",
+        input: { name: "Match", type: "Default", channel: "Default" },
+      },
+      { id: 2, type: "programUpdate", targetId: "1", programName: "Old", patch: { name: "Match" } },
+      { id: 3, type: "programUpdate", targetId: "2", programName: "Match", patch: { name: "Other" } },
+      { id: 4, type: "programLifecycle", targetId: "3", programName: "Match", operation: "delete" },
+    ];
+    let { ctx } = programContext({
+      getProgramsByName: async () => [
+        { id: 1, name: "Old" },
+        { id: 2, name: "Match" },
+        { id: 3, name: "Match" },
+        { id: 4, name: "Match" },
+      ],
+      getProgram: async id => ({ id, name: id === 1 ? "Old" : "Match" }),
+      getChannels: async () => [{ name: "Default", progressionStatuses: [] }],
+    }, actions);
+
+    let programs = await new MarketoSessionImpl(ctx).findProgramsByName("match");
+    expect(programs.map(program => program.id)).toEqual(["~1", 1, 4]);
+    expect(new Set(programs.map(program => String(program.id))).size).toBe(programs.length);
+  });
+
+  it("paginates pending campaign overlays without duplicates", async () => {
+    let actions: CampaignAction[] = [
+      {
+        id: 1, type: "campaignCreate", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" }, name: "Pending",
+      },
+      { id: 2, type: "campaignMetadata", targetId: "1", campaignName: "One", patch: { name: "Updated" } },
+      { id: 3, type: "campaignLifecycle", targetId: "2", campaignName: "Two", operation: "delete" },
+    ];
+    let calls: (string | undefined)[] = [];
+    let firstPage = Array.from({ length: 300 }, (_, index) => ({ id: index + 1, name: `C${index + 1}` }));
+    let { ctx } = campaignContext({
+      getCampaigns: async filter => {
+        calls.push(filter?.pageToken);
+        return filter?.pageToken === "upstream-2"
+          ? { result: [{ id: 301, name: "C301" }], moreResult: false }
+          : { result: firstPage, moreResult: true, nextPageToken: "upstream-2" };
+      },
+      getSmartCampaign: async id => ({ id, name: `C${id}` }),
+    }, actions);
+    let session = new MarketoSessionImpl(ctx);
+
+    let first = await session.listSmartCampaigns();
+    let second = await session.listSmartCampaigns({ pageToken: first.nextPageToken });
+    let ids = [...first.campaigns, ...second.campaigns].map(campaign => String(campaign.id));
+
+    expect(first.campaigns).toHaveLength(300);
+    expect(first.campaigns.slice(0, 2).map(campaign => campaign.id)).toEqual(["~1", 1]);
+    expect(first.campaigns[1]?.name).toBe("Updated");
+    expect(ids).not.toContain("2");
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(second.campaigns.map(campaign => campaign.id)).toEqual([301]);
+    expect(second.moreResult).toBe(false);
+    expect(calls).toEqual([undefined, "upstream-2"]);
+  });
+
   it("returns one page and passes the continuation token through", async () => {
     let seen: (string | undefined)[] = [];
     let session = new MarketoSessionImpl(stubContext({
