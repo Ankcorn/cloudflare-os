@@ -19,6 +19,7 @@ function context(client: Partial<MarketoClient>) {
     observe: async () => {},
     submit: async () => {},
     dispose: () => {},
+    retain: () => {},
     allocateProvisional: () => "~1",
     logicalKind: () => undefined,
     pendingDesigner: () => actions,

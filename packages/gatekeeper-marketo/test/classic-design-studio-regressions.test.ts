@@ -16,6 +16,7 @@ function context(client: Partial<MarketoClient>, initial: DesignStudioAction[] =
     observe: async () => {},
     submit: async () => {},
     dispose: () => {},
+    retain: () => {},
     allocateProvisional: () => `~${++nextProvisional}`,
     logicalKind: id => actions.find((action): action is Extract<DesignStudioAction, { type: "designCreate" | "designClone" }> =>
       (action.type === "designCreate" || action.type === "designClone") && action.provisionalId === id
