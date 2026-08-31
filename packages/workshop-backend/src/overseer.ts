@@ -4306,13 +4306,16 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  getGatekeeperFacet(id: number): Fetcher<Gatekeeper<any>> {
+  // Resolve the facet hosting gatekeeper `id`. Normally the class comes from the persisted
+  // record; addGatekeeper() passes `cls` directly because it needs the facet (for describe())
+  // before the record is published.
+  getGatekeeperFacet(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
     return this.ctx.facets.get(`gatekeeper${id}`, async () => {
-      let cls = this.storage.gatekeepers.get(id)?.class;
-      if (!cls) {
+      let gatekeeperClass = cls ?? this.storage.gatekeepers.get(id)?.class;
+      if (!gatekeeperClass) {
         throw new Error("no such gatekeeper?");
       }
-      return {class: cls};
+      return {class: gatekeeperClass};
     });
   }
 
@@ -4387,19 +4390,37 @@ class OverseerImpl implements AgentHooks {
       class: cls,
       creationSpec,
     };
-    this.storage.gatekeepers.put(gatekeeperRecord);
 
-    let facet = this.getGatekeeperFacet(id);
+    // The record is deliberately not persisted until the very end: an unpublished record is
+    // unreachable (getGatekeeperById and the facet resolver both read storage), so the sever
+    // below runs entirely before the connection exists to anyone. The facet takes the class
+    // directly since the resolver can't read a record that isn't there yet.
+    let facet = this.getGatekeeperFacet(id, cls);
     try {
       let description = await facet.describe();
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
       gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
-      this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
       this.removeGatekeeper(id);
       throw error;
     }
+
+    if (creationSpec && "vendorId" in creationSpec) {
+      // A vendor-backed connection widens the "build" verification scope (see
+      // #inScopeGatekeepers), so a live collaborator session verified before it existed must not
+      // survive into a workspace that has it. Sever those sessions and wait for them to drain
+      // before publishing the record: a stale build session must never see this id, and because
+      // the record is unreachable until the put below, there is nothing else to mark or enforce.
+      // (A vendorless spec -- aiModel/agentSpawner -- is in nobody's observer scope: no sever.)
+      //
+      // Note that ensureAmbientCapsules() calls this from inside open(): the opening session
+      // isn't registered yet, so the sever can't reach it -- that in-flight window is what the
+      // scope epoch covers (see OverseerDurableObject.open()).
+      await this.severCollaboratorSessions("build",
+          "Gadget restarted because a new connection was added.");
+    }
+    this.storage.gatekeepers.put(gatekeeperRecord);
 
     return new GatekeeperClientImpl<any>(this, id, facet);
   }
