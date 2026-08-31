@@ -1703,6 +1703,10 @@ describe("program management", () => {
     let { ctx } = programContext({
       getProgram: async () => ({
         id: 7, name: "Template", description: "Original", type: "Default", channel: "Web",
+        workspace: "Default",
+      }),
+      getFolder: async () => ({
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
       }),
       getChannels: async () => [{ name: "Web", applicableProgramType: "Default" }],
     });
@@ -1713,6 +1717,20 @@ describe("program management", () => {
     expect(await clone.describe()).toMatchObject({ id: "~1", name: "Copy", description: "Later" });
     await expect(session.cloneProgram("7", { id: "20", type: "program" }, { name: "Bad" }))
       .rejects.toThrow(/ordinary folder/);
+  });
+
+  it("rejects a program clone across workspaces before submission", async () => {
+    let { ctx, actions } = programContext({
+      getProgram: async () => ({ id: 7, name: "Source", workspace: "Source" }),
+      getFolder: async () => ({
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Other",
+      }),
+    });
+
+    await expect(new MarketoSessionImpl(ctx).cloneProgram(
+      "7", { id: "10", type: "folder" }, { name: "Clone" },
+    )).rejects.toThrow(/destination folder must be in the source program's workspace/);
+    expect(actions).toEqual([]);
   });
 
   it("validates channel applicability, tags, dates, and immutable fields before submission", async () => {
@@ -5730,7 +5748,7 @@ describe("post-dispatch creation response validation", () => {
         id: 1, type: "programClone", provisionalId: "~1", sourceId: "31",
         parentId: "10", name: "Cloned program",
       },
-      source: { id: 31, name: "Source" },
+      source: { id: 31, name: "Source", workspace: "Default" },
       invalidId: 0,
       gatekeeper: action => campaignActionGatekeeper([action]),
     },
@@ -5769,6 +5787,11 @@ describe("post-dispatch creation response validation", () => {
             return Response.json({ access_token: "token", expires_in: 3600 });
           }
           if ((init?.method ?? "GET") !== "POST") {
+            if (new URL(url).pathname.endsWith("/folder/10.json")) {
+              return Response.json({ success: true, result: [{
+                id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+              }] });
+            }
             return Response.json({ success: true, result: creation.source ? [creation.source] : [] });
           }
           writes++;
@@ -6572,8 +6595,12 @@ describe("program action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
+      if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
       return Response.json({ success: true, result: [{
         id: path.includes("/clone.json") || path.endsWith("/32.json") ? 32 : 31,
+        workspace: "Default",
         ...(path.endsWith("/32.json") ? { name: "Clone", folder: { value: 10, type: "Folder" } } : {}),
       }] });
     });
@@ -6590,6 +6617,7 @@ describe("program action lifecycle", () => {
     expect(paths).toEqual([
       "/rest/asset/v1/program/31.json",
       "/rest/asset/v1/program/31.json",
+      "/rest/asset/v1/folder/10.json",
       "/rest/asset/v1/program/31/clone.json",
       "/rest/asset/v1/program/32.json",
     ]);
@@ -6729,6 +6757,9 @@ describe("Design Studio action lifecycle", () => {
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
+      if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
       if (path.endsWith("/emailTemplates.json")) {
         return Response.json({ success: true, result: [{ id: 201 }] });
       }
@@ -6833,6 +6864,9 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
+      if (new URL(url).pathname.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
       if (init?.body) submitted = init.body as FormData;
       return Response.json({ success: true, result: [{
         id: 88, name: "note.txt", mimeType: "text/plain", folder: { id: 10, type: "Folder" },
@@ -6937,6 +6971,9 @@ describe("Design Studio action lifecycle", () => {
       }
       let path = new URL(url).pathname;
       paths.push(path);
+      if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
       return Response.json({ success: true, result: [{
         id: path.includes("/clone.json") || path.includes("emailTemplate/32.json") ? 32 : 31,
         ...(path.includes("emailTemplate/32.json") ? { name: "Clone", folder: { id: 10, type: "Folder" } } : {}),
@@ -6955,6 +6992,7 @@ describe("Design Studio action lifecycle", () => {
     });
     expect(paths).toEqual([
       "/rest/asset/v1/emailTemplate/31/content.json",
+      "/rest/asset/v1/folder/10.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/clone.json",
       "/rest/asset/v1/emailTemplate/32.json",
@@ -7014,6 +7052,9 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
+      if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
       return Response.json({ success: true, result: [{
         id: path.includes("clone") || path.includes("emailTemplate/32.json") ? 32 : 31,
         ...(path.includes("emailTemplate/32.json") ? { name: "Snapshot", folder: { id: 10, type: "Folder" } } : {}),
@@ -7028,6 +7069,7 @@ describe("Design Studio action lifecycle", () => {
       for (let id of [1, 2, 3]) await instance.applyAction(id);
     });
     expect(paths).toEqual([
+      "/rest/asset/v1/folder/10.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/clone.json",
       "/rest/asset/v1/emailTemplate/32.json",
@@ -7618,6 +7660,58 @@ describe("action dispatch lifecycle", () => {
       expect(writes).toBe(0);
       vi.unstubAllGlobals();
     }
+  });
+
+  it("rejects restricted classic asset destinations that are programs during dispatch preflight", async () => {
+    let actions: DesignStudioAction[] = [
+      { id: 1, type: "designCreate", asset: "emailTemplate", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" }, input: { name: "Template", content: "x" } },
+      { id: 2, type: "designClone", asset: "emailTemplate", provisionalId: "~2", sourceId: "20",
+        parent: { id: "10", type: "Folder" }, name: "Clone" },
+      { id: 3, type: "designCreate", asset: "file", provisionalId: "~3",
+        parent: { id: "10", type: "Folder" }, input: { name: "x", mimeType: "text/plain", data: new Uint8Array([1]) } },
+    ];
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (init?.body) writes++;
+      return Response.json({ success: true, result: [{
+        id: 10, name: "Program", folderId: { id: 10, type: "Program" }, workspace: "Default",
+      }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      for (let id of [1, 2, 3]) {
+        await expect(instance.applyAction(id)).rejects.toThrow(/ordinary folder.*nothing was dispatched/);
+        expect(state.storage.kv.get(`applying:${id}`)).toBeUndefined();
+      }
+    });
+    expect(writes).toBe(0);
+  });
+
+  it("revalidates program clone workspace equality during dispatch preflight", async () => {
+    let action: ProgramAction = {
+      id: 1, type: "programClone", provisionalId: "~1", sourceId: "31",
+      parentId: "10", name: "Clone",
+    };
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (init?.body) writes++;
+      let path = new URL(url).pathname;
+      return Response.json({ success: true, result: [path.includes("/program/")
+        ? { id: 31, name: "Source", workspace: "Source" }
+        : { id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Other" }] });
+    });
+    let stub = await campaignActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/destination workspace does not match.*nothing was dispatched/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+    });
+    expect(writes).toBe(0);
   });
 
   it("uses and revalidates the approved Email Designer content id", async () => {

@@ -37,7 +37,11 @@ import {
 } from "./business-objects";
 import type { CampaignAction, CampaignActionInput } from "./campaign-actions";
 import type { ProgramAction, ProgramActionInput } from "./program-actions";
-import { MarketoDesignStudioImpl, type DesignStudioContext } from "./design-studio";
+import {
+  MarketoDesignStudioImpl,
+  resolveDesignStudioFolderWorkspace,
+  type DesignStudioContext,
+} from "./design-studio";
 import type {
   MarketoActivity,
   MarketoActivityPage,
@@ -1877,7 +1881,16 @@ export class MarketoSessionImpl extends RpcTarget {
     let description = input.description === undefined
       ? undefined
       : requireText(input.description, "Program description", 2_000, true);
-    await new MarketoProgramImpl(this.#ctx, source).describe();
+    let sourceSummary = await new MarketoProgramImpl(this.#ctx, source).describe();
+    let sourceWorkspace = sourceSummary.workspaceName ?? await pendingProgramWorkspace(this.#ctx, source);
+    if (!sourceWorkspace) throw new Error(`Marketo source program ${source} has no workspace.`);
+    let destinationWorkspace = await resolveDesignStudioFolderWorkspace(
+      this.#ctx,
+      { id: parentId, type: "Folder" },
+    );
+    if (destinationWorkspace !== sourceWorkspace) {
+      throw new Error("Program clone destination folder must be in the source program's workspace.");
+    }
     let provisionalId = this.#ctx.allocateProvisional();
     await this.#ctx.submitProgram({
       type: "programClone", provisionalId, sourceId: source, parentId, name, description,
@@ -2051,6 +2064,25 @@ export class MarketoSessionImpl extends RpcTarget {
         .map(u => ({ userId: u.userId, count: u.count ?? 0 })),
     };
   }
+}
+
+async function pendingProgramWorkspace(
+  ctx: CampaignContext,
+  id: string,
+  seen = new Set<string>(),
+): Promise<string | undefined> {
+  if (seen.has(id)) throw new Error(`Program ${id} has a circular clone dependency.`);
+  seen.add(id);
+  let creation = ctx.pendingProgram().find(action =>
+    (action.type === "programCreate" || action.type === "programClone") && action.provisionalId === id
+  );
+  if (creation?.type === "programCreate") {
+    return await resolveDesignStudioFolderWorkspace(ctx, { id: creation.parentId, type: "Folder" });
+  }
+  if (creation?.type === "programClone") {
+    return await pendingProgramWorkspace(ctx, creation.sourceId, seen);
+  }
+  return undefined;
 }
 
 function requireId(id: number, label: string): number {

@@ -225,30 +225,29 @@ describe("classic Design Studio regressions", () => {
     expect(getLandingPageTemplatesByName).not.toHaveBeenCalled();
   });
 
-  it("verifies a created file by parent id without treating its category as the parent type", async () => {
-    let recordCreation = vi.fn();
-    await executeDesignStudioAction({
-      id: 1,
-      type: "designCreate",
-      asset: "file",
-      provisionalId: "~1",
-      parent: { id: "10", type: "Program" },
-      input: {
-        name: "logo.png",
-        mimeType: "image/png",
-        data: new Uint8Array([1]),
-      },
-    }, {
-      createFile: async () => [{ id: 20 }],
-      getFile: async () => ({
-        id: 20,
-        name: "logo.png",
-        mimeType: "image/png",
-        folder: { id: 10, type: "Images" },
-      }),
-    } as unknown as MarketoClient, Number, recordCreation);
+  it("rejects program parents for email-template create/clone and file create before submission", async () => {
+    let { actions, ctx } = context({});
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let destination = { id: "10", type: "program" } as const;
 
-    expect(recordCreation).toHaveBeenCalledWith("~1", 20);
+    await expect(studio.createEmailTemplate(destination, { name: "Template", content: "x" }))
+      .rejects.toThrow(/ordinary folder/);
+    await expect(studio.cloneEmailTemplate("20", "Clone", destination))
+      .rejects.toThrow(/ordinary folder/);
+    await expect(studio.createFile(destination, {
+      name: "logo.png", mimeType: "image/png", data: new Uint8Array([1]),
+    })).rejects.toThrow(/ordinary folder/);
+    expect(actions).toEqual([]);
+  });
+
+  it("revalidates restricted classic asset parents in the executor", async () => {
+    let createFile = vi.fn();
+    await expect(executeDesignStudioAction({
+      id: 1, type: "designCreate", asset: "file", provisionalId: "~1",
+      parent: { id: "10", type: "Program" },
+      input: { name: "logo.png", mimeType: "image/png", data: new Uint8Array([1]) },
+    }, { createFile } as unknown as MarketoClient, Number, () => {})).rejects.toThrow(/ordinary folder/);
+    expect(createFile).not.toHaveBeenCalled();
   });
 
   it("accepts Adobe's uppercase folder discriminator without weakening identity checks", async () => {

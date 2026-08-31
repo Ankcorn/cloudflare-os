@@ -423,6 +423,39 @@ function logicalFolder(
   return { id, type: folder.type === "program" ? "Program" : "Folder" };
 }
 
+/** Resolve a folder's workspace through pending folder creations without trusting its claimed type. */
+export async function resolveDesignStudioFolderWorkspace(
+  ctx: DesignStudioContext,
+  folder: { id: string; type: "Folder" | "Program" },
+  seen = new Set<string>(),
+): Promise<string> {
+  let key = `${folder.type}:${folder.id}`;
+  if (seen.has(key)) throw new Error(`Marketo folder ${folder.id} has a circular pending parent.`);
+  seen.add(key);
+  if (folder.type === "Folder") {
+    let creation = findCreation(ctx, "folder", folder.id);
+    if (creation?.type === "designCreate") {
+      return await resolveDesignStudioFolderWorkspace(ctx, creation.parent, seen);
+    }
+  }
+  let physical = ctx.resolveId(folder.id);
+  if (physical === undefined) {
+    throw new Error(`Marketo ${folder.type.toLowerCase()} ${folder.id} is still pending creation and its workspace cannot be resolved.`);
+  }
+  let raw = await (await ctx.client()).getFolder(physical, folder.type);
+  if (!raw || readId(raw) !== physical) throw new Error(`Marketo ${folder.type.toLowerCase()} ${folder.id} was not found.`);
+  let summary = normalizeFolder(raw);
+  if (summary.type !== folder.type.toLowerCase()) {
+    throw new Error(`Marketo asset ${folder.id} is not a ${folder.type.toLowerCase()}.`);
+  }
+  if (!summary.workspaceName) throw new Error(`Marketo ${folder.type.toLowerCase()} ${folder.id} has no workspace.`);
+  await ctx.observe(
+    "Validate Marketo destination workspace",
+    `Read the workspace of Marketo ${folder.type.toLowerCase()} \`${folder.id}\`.`,
+  );
+  return summary.workspaceName;
+}
+
 const MAX_PAGE_TOKEN_IDS = 1_000;
 const MAX_PAGE_TOKEN_LENGTH = 32_768;
 
@@ -665,6 +698,9 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   }
   async #create(kind: DesignStudioAssetKind, destination: MarketoDesignStudioFolderRef, input: DesignStudioCreateInput) {
     let parent = logicalFolder(this.#ctx, destination);
+    if ((kind === "emailTemplate" || kind === "file") && parent.type !== "Folder") {
+      throw new Error(`Marketo ${kind === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
+    }
     assertDurablePayload({ parent, input });
     let provisionalId = this.#ctx.allocateProvisional();
     await submitDesign(this.#ctx, { type: "designCreate", asset: kind, provisionalId, parent, input });
@@ -742,6 +778,9 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let source = logicalId(sourceId);
     assertNotDeleted(this.#ctx, kind, source);
     let parent = logicalFolder(this.#ctx, destination);
+    if (kind === "emailTemplate" && parent.type !== "Folder") {
+      throw new Error("Marketo email-template destination must be an ordinary folder.");
+    }
     let cloneName = requiredText(name, "Clone name");
     assertDurablePayload({ source, parent, name: cloneName });
     let provisionalId = this.#ctx.allocateProvisional();

@@ -279,6 +279,9 @@ export async function executeDesignStudioAction(
   landingPageTemplateId?: number,
 ): Promise<void> {
   if (action.type === "designCreate") {
+    if ((action.asset === "emailTemplate" || action.asset === "file") && action.parent.type !== "Folder") {
+      throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
+    }
     let folder = folderRef(action.parent, resolve);
     let input = action.input;
     let templateId: number | undefined;
@@ -363,6 +366,9 @@ export async function executeDesignStudioAction(
   }
 
   if (action.type === "designClone") {
+    if (action.asset === "emailTemplate" && action.parent.type !== "Folder") {
+      throw new Error("Marketo email-template destination must be an ordinary folder.");
+    }
     let id = resolve(action.sourceId);
     let clone = { name: action.name, folder: folderRef(action.parent, resolve) };
     let created;

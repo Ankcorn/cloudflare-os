@@ -118,6 +118,7 @@ import {
   type MarketoCredentials,
   type DesignerAssetKind,
   type RawDesignerAsset,
+  type RawFolder,
   type RawList,
 } from "./marketo-api";
 import type { MarketoConfiguratorOption } from "./configurator/configurator-types";
@@ -1538,6 +1539,10 @@ export class MarketoGatekeeperImpl
   }
 
   #validateDesignReferences(action: DesignStudioAction, ready: boolean): void {
+    if ((action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
+        action.type === "designClone" && action.asset === "emailTemplate") && action.parent.type !== "Folder") {
+      throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
+    }
     if ("targetId" in action) {
       this.#validateLogicalReference(action.targetId, action.type === "designDeleteFolder" ? "folder" : action.asset, ready);
     }
@@ -1667,6 +1672,11 @@ export class MarketoGatekeeperImpl
   }
 
   async #preflightClassicAsset(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
+    if (isDesignStudioAction(action) &&
+        (action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
+          action.type === "designClone" && action.asset === "emailTemplate")) {
+      await this.#preflightOrdinaryFolder(action.parent.id, client);
+    }
     if (isCampaignAction(action) && action.type === "campaignClone") {
       let id = this.#requireLogicalId(action.sourceId);
       let source = await client.getSmartCampaign(id);
@@ -1691,6 +1701,12 @@ export class MarketoGatekeeperImpl
       if (!source || source.id !== id) {
         throw new DesignerPreDispatchError(`Marketo program ${action.sourceId} was not found; nothing was dispatched.`);
       }
+      let destination = await this.#preflightOrdinaryFolder(action.parentId, client);
+      if (!source.workspace || !destination.workspace || source.workspace !== destination.workspace) {
+        throw new DesignerPreDispatchError(
+          "The Marketo program clone destination workspace does not match the source program workspace; nothing was dispatched.",
+        );
+      }
       return;
     }
     if (!isDesignStudioAction(action) || action.type !== "designClone") return;
@@ -1711,6 +1727,16 @@ export class MarketoGatekeeperImpl
       throw new DesignerPreDispatchError(`Marketo landing page ${action.sourceId} has no valid source template; nothing was dispatched.`);
     }
     return Number(template);
+  }
+
+  async #preflightOrdinaryFolder(id: string, client: MarketoClient): Promise<RawFolder> {
+    let physical = this.#requireLogicalId(id);
+    let folder = await client.getFolder(physical, "Folder");
+    let type = folder?.folderId?.type ?? folder?.folderType;
+    if (!folder || folder.id !== physical || type?.toLowerCase() !== "folder") {
+      throw new DesignerPreDispatchError(`Marketo ordinary folder ${id} was not found; nothing was dispatched.`);
+    }
+    return folder;
   }
 
   #validDesignerCloneSnapshot(value: unknown): boolean {

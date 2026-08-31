@@ -103,6 +103,10 @@ describe("classic clone simulation action boundaries", () => {
         description: "Original",
         type: "Default",
         channel: "Web",
+        workspace: "Default",
+      }),
+      getFolder: async () => ({
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
       }),
       getChannels: async () => [{ name: "Web", applicableProgramType: "Default" }],
     });
@@ -115,5 +119,25 @@ describe("classic clone simulation action boundaries", () => {
 
     expect(await clone.describe()).toMatchObject({ name: "Clone", description: "Before clone" });
     expect(await source.describe()).toMatchObject({ description: "After clone" });
+  });
+
+  it("resolves nested pending destination folders before simulating a program clone", async () => {
+    let ctx = context({
+      getProgram: async () => ({ id: 7, name: "Source", workspace: "Default" }),
+      getFolder: async () => ({
+        id: 10, name: "Root", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }),
+    });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let child = await studio.createFolder({ id: "10", type: "folder" }, "Child");
+    let childId = (await child.describe()).id;
+    let grandchild = await studio.createFolder({ id: childId, type: "folder" }, "Grandchild");
+    let grandchildId = (await grandchild.describe()).id;
+
+    let clone = await new MarketoSessionImpl(ctx).cloneProgram(
+      "7", { id: grandchildId, type: "folder" }, { name: "Clone" },
+    );
+
+    expect(await clone.describe()).toMatchObject({ name: "Clone" });
   });
 });
