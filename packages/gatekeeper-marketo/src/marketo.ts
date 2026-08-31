@@ -108,6 +108,7 @@ import {
 import {
   fetchAccessToken,
   MarketoError,
+  MarketoResponseValidationError,
   type MarketoClient,
   type MarketoCredentials,
   type DesignerAssetKind,
@@ -1192,6 +1193,9 @@ export class MarketoGatekeeperImpl
           (e.status === undefined || e.status < 400) &&
             (e.isProviderRejection || e.code !== undefined) ||
           (e.status !== undefined && e.status >= 400 && e.status < 500 && e.status !== 408));
+      if (e instanceof MarketoResponseValidationError && e.disposition === "uncertain") {
+        definitive = false;
+      }
       if (isDesignStudioAction(pending.action) && (
         pending.action.type === "designCreate" && this.#resolveLogicalId(pending.action.provisionalId) !== undefined ||
         pending.action.type === "designMetadata" && pending.action.asset === "email" ||

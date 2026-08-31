@@ -1,12 +1,13 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { markdownCodeBlock, markdownJsonCodeBlock, markdownText } from "./approval-markdown";
-import type {
-  MarketoClient,
-  MarketoFolderRef,
-  RawAssetId,
-  RawDesignStudioAsset,
-  RawFile,
-  RawFolder,
+import {
+  MarketoResponseValidationError,
+  type MarketoClient,
+  type MarketoFolderRef,
+  type RawAssetId,
+  type RawDesignStudioAsset,
+  type RawFile,
+  type RawFolder,
 } from "./marketo-api";
 
 export type DesignStudioAssetKind =
@@ -200,7 +201,9 @@ type RecordCreation = (provisionalId: string, realId: number) => void;
 function resultId(result: (RawDesignStudioAsset | RawFolder | RawFile | RawAssetId)[]): number {
   let id = result[0]?.id;
   if (result.length !== 1 || !Number.isSafeInteger(id) || Number(id) <= 0) {
-    throw new Error("Marketo created the asset but did not return exactly one positive numeric id.");
+    throw new MarketoResponseValidationError(
+      "Marketo created the asset but did not return exactly one positive numeric id.",
+    );
   }
   return Number(id);
 }

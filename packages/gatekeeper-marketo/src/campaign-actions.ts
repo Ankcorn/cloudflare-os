@@ -1,6 +1,12 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { markdownCode, markdownText } from "./approval-markdown";
-import type { MarketoClient, MarketoFolderRef, RawAssetId, RawCampaignAsset } from "./marketo-api";
+import {
+  MarketoResponseValidationError,
+  type MarketoClient,
+  type MarketoFolderRef,
+  type RawAssetId,
+  type RawCampaignAsset,
+} from "./marketo-api";
 
 /** Approval-queued smart-campaign management operations. */
 export type CampaignAction =
@@ -107,7 +113,7 @@ type RecordCreation = (provisionalId: string, realId: number) => void;
 function resultId(result: (RawCampaignAsset | RawAssetId)[], operation: string): number {
   let id = result[0]?.id;
   if (result.length !== 1 || !Number.isSafeInteger(id) || Number(id) <= 0) {
-    throw new Error(`Marketo returned an invalid result for ${operation}.`);
+    throw new MarketoResponseValidationError(`Marketo returned an invalid result for ${operation}.`);
   }
   return Number(id);
 }

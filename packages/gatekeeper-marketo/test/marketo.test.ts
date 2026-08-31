@@ -65,6 +65,7 @@ import {
   fetchAccessToken,
   MarketoClient,
   MarketoError,
+  MarketoResponseValidationError,
   MAX_FILTER_VALUES,
   parseMarketoDate,
   qualifyTokenName,
@@ -5300,6 +5301,131 @@ async function emailDesignerActionGatekeeper(
   });
   return stub;
 }
+
+describe("post-dispatch creation response validation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  let designerSource = { id: "designer-source", name: "Source" };
+  let cases: {
+    label: string;
+    action: MarketoAction;
+    source?: Record<string, unknown>;
+    invalidId: unknown;
+    gatekeeper: (action: MarketoAction) => ReturnType<typeof actionGatekeeper>;
+  }[] = [
+    {
+      label: "classic Design Studio create",
+      action: {
+        id: 1, type: "designCreate", asset: "folder", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" }, input: { name: "Created folder" },
+      },
+      invalidId: 0,
+      gatekeeper: action => designActionGatekeeper([action as DesignStudioAction]),
+    },
+    {
+      label: "classic Design Studio clone",
+      action: {
+        id: 1, type: "designClone", asset: "email", provisionalId: "~1", sourceId: "31",
+        parent: { id: "10", type: "Folder" }, name: "Cloned email",
+      },
+      source: { id: 31, name: "Source" },
+      invalidId: 0,
+      gatekeeper: action => designActionGatekeeper([action as DesignStudioAction]),
+    },
+    {
+      label: "campaign create",
+      action: {
+        id: 1, type: "campaignCreate", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" }, name: "Created campaign",
+      },
+      invalidId: 0,
+      gatekeeper: action => campaignActionGatekeeper([action]),
+    },
+    {
+      label: "campaign clone",
+      action: {
+        id: 1, type: "campaignClone", provisionalId: "~1", sourceId: "31",
+        parent: { id: "10", type: "Folder" }, name: "Cloned campaign",
+      },
+      source: { id: 31, name: "Source" },
+      invalidId: 0,
+      gatekeeper: action => campaignActionGatekeeper([action]),
+    },
+    {
+      label: "program create",
+      action: {
+        id: 1, type: "programCreate", provisionalId: "~1", parentId: "10",
+        input: { name: "Created program", type: "Default", channel: "Email" },
+      },
+      invalidId: 0,
+      gatekeeper: action => campaignActionGatekeeper([action]),
+    },
+    {
+      label: "program clone",
+      action: {
+        id: 1, type: "programClone", provisionalId: "~1", sourceId: "31",
+        parentId: "10", name: "Cloned program",
+      },
+      source: { id: 31, name: "Source" },
+      invalidId: 0,
+      gatekeeper: action => campaignActionGatekeeper([action]),
+    },
+    {
+      label: "Email Designer create",
+      action: {
+        id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
+        body: { name: "Created email" },
+      },
+      invalidId: "",
+      gatekeeper: action => emailDesignerActionGatekeeper([action]),
+    },
+    {
+      label: "Email Designer clone",
+      action: {
+        id: 1, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
+        sourceId: "designer-source", name: "Cloned email",
+        sourceSnapshot: designerCloneSnapshot(designerSource),
+      },
+      source: designerSource,
+      invalidId: "",
+      gatekeeper: action => emailDesignerActionGatekeeper([action]),
+    },
+  ];
+
+  for (let creation of cases) {
+    for (let response of [
+      { label: "empty", body: { success: true, result: [] } },
+      { label: "malformed", body: { success: true, result: {} } },
+      { label: "invalid ID", body: { success: true, result: [{ id: creation.invalidId }] } },
+    ]) {
+      it(`keeps a ${creation.label} with a ${response.label} successful result uncertain`, async () => {
+        let writes = 0;
+        vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+          if (url.includes("/identity/")) {
+            return Response.json({ access_token: "token", expires_in: 3600 });
+          }
+          if ((init?.method ?? "GET") !== "POST") {
+            return Response.json({ success: true, result: creation.source ? [creation.source] : [] });
+          }
+          writes++;
+          return Response.json(response.body);
+        });
+        let stub = await creation.gatekeeper(creation.action);
+
+        await runInDurableObject(stub, async (instance, state) => {
+          let error = await instance.applyAction(creation.action.id).catch(value => value);
+          expect(error).toBeInstanceOf(MarketoResponseValidationError);
+          expect(error.disposition).toBe("uncertain");
+          expect(state.storage.kv.get(`applying:${creation.action.id}`)).toBe("uncertain");
+          expect(state.storage.kv.get(`pending:${creation.action.id}`)).toBeDefined();
+          await expect(instance.applyAction(creation.action.id)).rejects.toThrow(/already dispatched/);
+          await expect(instance.rejectAction(creation.action.id)).rejects.toThrow(/already dispatched/);
+        });
+        expect(writes).toBe(1);
+      });
+    }
+  }
+});
 
 describe("Email Designer action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());

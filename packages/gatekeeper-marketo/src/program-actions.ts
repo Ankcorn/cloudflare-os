@@ -1,6 +1,13 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { markdownCode, markdownText } from "./approval-markdown";
-import { parseMarketoDate, type MarketoClient, type MarketoProgramTag, type RawAssetId, type RawProgram } from "./marketo-api";
+import {
+  MarketoResponseValidationError,
+  parseMarketoDate,
+  type MarketoClient,
+  type MarketoProgramTag,
+  type RawAssetId,
+  type RawProgram,
+} from "./marketo-api";
 
 type ProgramPatch = {
   name?: string;
@@ -134,7 +141,7 @@ export function matchesProgramApprovalDates(
 function resultId(result: (RawProgram | RawAssetId)[], operation: string): number {
   let id = result[0]?.id;
   if (result.length !== 1 || !Number.isSafeInteger(id) || Number(id) <= 0) {
-    throw new Error(`Marketo returned an invalid result for ${operation}.`);
+    throw new MarketoResponseValidationError(`Marketo returned an invalid result for ${operation}.`);
   }
   return Number(id);
 }

@@ -72,6 +72,17 @@ export class MarketoError extends Error {
   }
 }
 
+/** A successful provider response that cannot prove what a dispatched mutation created or changed. */
+export class MarketoResponseValidationError extends MarketoError {
+  /** Retrying the mutation is unsafe because the provider may already have applied it. */
+  readonly disposition = "uncertain" as const;
+
+  constructor(message: string, options?: { status?: number; operation?: string; cause?: unknown }) {
+    super(message, options);
+    this.name = "MarketoResponseValidationError";
+  }
+}
+
 /** Marketo's standard response envelope. */
 type MarketoEnvelope<T> = {
   requestId?: string;
@@ -456,7 +467,8 @@ export class MarketoClient {
       }
       let envelope = parseEnvelope<T>(raw);
       if (!envelope) {
-        throw new MarketoError(`Marketo returned an unreadable response (HTTP ${response.status})`, {
+        let ErrorType = response.ok ? MarketoResponseValidationError : MarketoError;
+        throw new ErrorType(`Marketo returned an unreadable response (HTTP ${response.status})`, {
           status: response.status,
           operation: path,
         });
@@ -542,7 +554,7 @@ export class MarketoClient {
     let envelope = await this.#request<unknown>(path, options);
     if (envelope.result === undefined) return [];
     if (!Array.isArray(envelope.result)) {
-      throw new MarketoError("Marketo returned a result with an unexpected shape.", {
+      throw new MarketoResponseValidationError("Marketo returned a result with an unexpected shape.", {
         operation: path,
       });
     }
@@ -557,20 +569,20 @@ export class MarketoClient {
   ): Promise<T[]> {
     let envelope = await this.#request<unknown>(path, { ...options, appType: true });
     if (requireExplicitSuccess && envelope.success !== true) {
-      throw new MarketoError("Marketo returned a designer result without confirming success.", {
+      throw new MarketoResponseValidationError("Marketo returned a designer result without confirming success.", {
         operation: path,
       });
     }
     if (envelope.result === undefined) return [];
     if (!Array.isArray(envelope.result)) {
-      throw new MarketoError("Marketo returned a designer result with an unexpected shape.", { operation: path });
+      throw new MarketoResponseValidationError("Marketo returned a designer result with an unexpected shape.", { operation: path });
     }
     return envelope.result.map((item, index) => {
       try {
         return parse(item, `designer result ${index + 1}`);
       } catch (error) {
         if (error instanceof MarketoError && error.operation === undefined) {
-          throw new MarketoError(error.message, { operation: path, cause: error });
+          throw new MarketoResponseValidationError(error.message, { operation: path, cause: error });
         }
         throw error;
       }

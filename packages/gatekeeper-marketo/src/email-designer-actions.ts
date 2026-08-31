@@ -1,6 +1,11 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { markdownCode, markdownJsonCodeBlock } from "./approval-markdown";
-import type { DesignerAssetKind, MarketoClient, RawDesignerAsset } from "./marketo-api";
+import {
+  MarketoResponseValidationError,
+  type DesignerAssetKind,
+  type MarketoClient,
+  type RawDesignerAsset,
+} from "./marketo-api";
 
 export type EmailDesignerKind = "designerEmail" | "designerTemplate" | "designerFragment";
 
@@ -271,7 +276,9 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
 function createdId(result: RawDesignerAsset[]): string {
   let id = result[0]?.id;
   if (result.length !== 1 || (typeof id !== "string" && typeof id !== "number") || !String(id)) {
-    throw new Error("Marketo created the designer asset but did not return exactly one id.");
+    throw new MarketoResponseValidationError(
+      "Marketo created the designer asset but did not return exactly one id.",
+    );
   }
   return String(id);
 }
