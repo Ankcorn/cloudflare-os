@@ -447,7 +447,9 @@ function paging(options: { pageToken?: string; maxResults?: number }, scope: str
     try {
       if (options.pageToken.length > MAX_PAGE_TOKEN_LENGTH) throw new Error();
       let encoded = options.pageToken.replace(/-/g, "+").replace(/_/g, "/");
-      let value = JSON.parse(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="))) as Partial<PageState>;
+      let binary = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="));
+      let bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+      let value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)) as Partial<PageState>;
       if (typeof value.offset !== "number" || !Number.isSafeInteger(value.offset) || value.offset < 0 ||
           typeof value.skip !== "number" || !Number.isSafeInteger(value.skip) || value.skip < 0 ||
           typeof value.batchSize !== "number" || !Number.isSafeInteger(value.batchSize) ||
@@ -481,7 +483,12 @@ function pageToken(state: PageState): string {
       state.masked !== undefined && !validTokenIds(state.masked)) {
     throw new Error("Too many pending Design Studio changes to create a page token.");
   }
-  let token = btoa(JSON.stringify(state)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  let bytes = new TextEncoder().encode(JSON.stringify(state));
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  }
+  let token = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   if (token.length > MAX_PAGE_TOKEN_LENGTH) {
     throw new Error("Too many pending Design Studio changes to create a page token.");
   }
@@ -770,7 +777,8 @@ export class MarketoDesignStudioImpl extends RpcTarget {
   getFile(id: string) { let value = logicalId(id); return new MarketoFileImpl(retainSessionContext(this.#ctx), value, undefined, true); }
 
   async #list(kind: Exclude<DesignStudioAssetKind, "folder">, options: MarketoDesignStudioListOptions = {}) {
-    let upstreamPaged = options.name === undefined || kind === "landingPage" || kind === "snippet";
+    let upstreamPaged = options.name === undefined || kind === "landingPage" || kind === "snippet" ||
+      kind === "landingPageTemplate" && options.status !== undefined;
     let logicalParent = options.folder ? logicalFolder(this.#ctx, options.folder) : undefined;
     let name = options.name === undefined ? undefined : requiredText(options.name, "name");
     let status = statusValue(options.status);
@@ -870,7 +878,9 @@ async function listByName(client: MarketoClient, kind: Exclude<DesignStudioAsset
     case "email": return await client.getEmailsByName(name, { status, folder });
     case "emailTemplate": return await client.getEmailTemplatesByName(name, status);
     case "landingPage": return await client.getLandingPagesByName(name, { status, offset, maxReturn });
-    case "landingPageTemplate": return await client.getLandingPageTemplatesByName(name);
+    case "landingPageTemplate": return status === undefined
+      ? await client.getLandingPageTemplatesByName(name)
+      : await client.getLandingPageTemplates({ status, folder, offset, maxReturn });
     case "form": return await client.getFormsByName(name, status);
     case "snippet": return (await client.getSnippets({ status, folder, offset, maxReturn })).filter(item => item.name?.toLocaleLowerCase() === name.toLocaleLowerCase());
     case "file": return await client.getFilesByName(name);

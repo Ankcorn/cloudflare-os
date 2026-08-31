@@ -251,6 +251,31 @@ describe("Email Designer pending-state simulation", () => {
     expect(requestedPages).toEqual([0, 1, 0, 1]);
   });
 
+  it("rejects a wrong page while collecting pages for a pending overlay", async () => {
+    let { ctx } = context({
+      filterDesignerAssets: async (_kind, options) => {
+        let requested = options.pageIndex ?? 0;
+        return {
+          items: [{
+            id: `email-${requested}`,
+            name: `Email ${requested}`,
+            status: "draft",
+            appData: { workspaceId: "1" },
+          }],
+          totalItems: 2,
+          currentPage: 0,
+          pageSize: 1,
+        };
+      },
+      getDesignerAsset: async () => ({
+        id: "pending", name: "Pending", status: "draft", appData: { workspaceId: "1" },
+      }),
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+
+    await expect(new MarketoEmailDesignerImpl(ctx).listEmails("1", { pageIndex: 1, pageSize: 1 }))
+      .rejects.toThrow(/page 0 when page 1 was requested/);
+  });
+
   it("deduplicates overlapping upstream pages before local pagination", async () => {
     let requestedPages: number[] = [];
     let pages = [

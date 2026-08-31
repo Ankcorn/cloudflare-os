@@ -446,9 +446,13 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     while (!exhausted && (options.sortKey === undefined
       ? merged.length < end
       : merged.length < end + candidates.size)) {
+      let requestedPage = upstreamPage++;
       let raw = await client.filterDesignerAssets(path(kind), {
-        ...query, pageIndex: upstreamPage++, pageSize: DESIGNER_PAGE_SIZE,
+        ...query, pageIndex: requestedPage, pageSize: DESIGNER_PAGE_SIZE,
       });
+      if (raw.currentPage !== requestedPage) {
+        throw new Error(`Marketo returned designer page ${String(raw.currentPage)} when page ${requestedPage} was requested.`);
+      }
       upstreamTotal ??= raw.totalItems;
       let page = raw.items ?? [];
       let seenBefore = seen.size;

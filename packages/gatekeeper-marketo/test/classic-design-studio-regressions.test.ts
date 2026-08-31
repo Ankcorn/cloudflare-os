@@ -145,6 +145,50 @@ describe("classic Design Studio regressions", () => {
       .toEqual([[0, 1, 21], [1, 1, 21], [2, 1, 21]]);
   });
 
+  it("round-trips Unicode list scopes through page tokens", async () => {
+    let getEmailsByName = vi.fn(async () => [
+      { id: 1, name: "Mañana 東京" },
+      { id: 2, name: "Mañana 東京" },
+    ]);
+    let { ctx } = context({ getEmailsByName });
+    let studio = new MarketoDesignStudioImpl(ctx);
+
+    let first = await studio.listEmails({ name: "Mañana 東京", maxResults: 1 });
+    let second = await studio.listEmails({
+      name: "Mañana 東京",
+      maxResults: 1,
+      pageToken: first.nextPageToken,
+    });
+
+    expect(first.items.map(item => item.id)).toEqual(["1"]);
+    expect(second.items.map(item => item.id)).toEqual(["2"]);
+  });
+
+  it("browses status-specific landing-page-template versions and filters names locally", async () => {
+    let records = [
+      { id: 1, name: "Other", status: "approved" },
+      { id: 2, name: "Target", status: "approved" },
+    ];
+    let getLandingPageTemplates = vi.fn(async ({ offset = 0, maxReturn = 200 }: {
+      offset?: number; maxReturn?: number;
+    }) => records.slice(offset, offset + maxReturn));
+    let getLandingPageTemplatesByName = vi.fn();
+    let { ctx } = context({ getLandingPageTemplates, getLandingPageTemplatesByName });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let options = { name: "Target", status: "approved" as const, maxResults: 1 };
+
+    let first = await studio.listLandingPageTemplates(options);
+    let second = await studio.listLandingPageTemplates({ ...options, pageToken: first.nextPageToken });
+
+    expect(first.items).toEqual([]);
+    expect(second.items.map(item => item.id)).toEqual(["2"]);
+    expect(getLandingPageTemplates.mock.calls.map(([request]) => request)).toEqual([
+      { status: "approved", folder: undefined, offset: 0, maxReturn: 1 },
+      { status: "approved", folder: undefined, offset: 1, maxReturn: 1 },
+    ]);
+    expect(getLandingPageTemplatesByName).not.toHaveBeenCalled();
+  });
+
   it("verifies a created file by parent id without treating its category as the parent type", async () => {
     let recordCreation = vi.fn();
     await executeDesignStudioAction({
