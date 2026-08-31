@@ -2645,11 +2645,12 @@ describe("custom object normalization", () => {
   const SCHEMA = {
     name: "orderStatus",
     displayName: "Order Status",
-    dedupeFields: ["marketoGUID"],
-    searchableFields: [["sourceID"], ["marketoGUID"], ["leadID"]],
+    dedupeFields: ["sourceID", "leadID"],
+    searchableFields: [["sourceID"], ["sourceID", "leadID"], ["marketoGUID"]],
     fields: [
       { name: "createdAt", displayName: "Created At", dataType: "datetime", updateable: false },
       { name: "sourceID", displayName: "Source ID", dataType: "string", updateable: true },
+      { name: "leadID", displayName: "Lead ID", dataType: "integer", updateable: true },
     ],
   };
 
@@ -2657,7 +2658,7 @@ describe("custom object normalization", () => {
     let object = new MarketoCustomObjectImpl(
       stubContext({ describeCustomObject: async () => SCHEMA }), "orderStatus");
     let schema = await object.describe();
-    expect(schema.fields.map(f => f.name)).toEqual(["createdAt", "sourceID"]);
+    expect(schema.fields.map(f => f.name)).toEqual(["createdAt", "sourceID", "leadID"]);
     expect(schema.fields.every(f => f.name !== "")).toBe(true);
   });
 
@@ -2669,8 +2670,34 @@ describe("custom object normalization", () => {
     expect(byName.get("createdAt")?.readOnly).toBe(true);
     expect(byName.get("sourceID")?.readOnly).toBe(false);
     expect(byName.get("sourceID")?.searchable).toBe(true);
+    expect(byName.get("leadID")?.searchable).toBe(false);
     expect(byName.get("createdAt")?.searchable).toBe(false);
-    expect(schema.searchableFields).toEqual(["sourceID", "marketoGUID", "leadID"]);
+    expect(schema.searchableFields).toEqual(["sourceID", "marketoGUID"]);
+    expect(schema.searchableFieldGroups).toEqual([
+      ["sourceID"], ["sourceID", "leadID"], ["marketoGUID"],
+    ]);
+  });
+
+  it("queries custom objects by complete compound dedupe keys", async () => {
+    let requests: { apiName: string; input: Record<string, unknown>[]; fields?: string[] }[] = [];
+    let object = new MarketoCustomObjectImpl(stubContext({
+      describeCustomObject: async () => SCHEMA,
+      queryCustomObjectByDedupeKeys: async (apiName, input, fields) => {
+        requests.push({ apiName, input, fields });
+        return [{ marketoGUID: "g1" }];
+      },
+    }), "orderStatus");
+
+    await expect(object.queryByDedupeKeys([
+      { sourceID: "source-1", leadID: 7, ignored: "not sent" },
+    ], ["status"])).resolves.toEqual([{ marketoGUID: "g1" }]);
+    expect(requests).toEqual([{
+      apiName: "orderStatus",
+      input: [{ sourceID: "source-1", leadID: 7 }],
+      fields: ["status"],
+    }]);
+    await expect(object.queryByDedupeKeys([{ sourceID: "source-1" }]))
+      .rejects.toThrow(/leadID/);
   });
 
   it("deletes GUID-only records explicitly by marketoGUID", async () => {
@@ -3594,6 +3621,22 @@ describe("standard CRM business objects", () => {
     expect(request.init?.method).toBe("POST");
     expect(JSON.parse(String(request.init?.body))).toEqual({
       filterType: "dedupeFields", fields: ["role"], input: [key],
+    });
+  });
+
+  it("sends compound custom-object keys as JSON", async () => {
+    let request: { url?: string; init?: RequestInit } = {};
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      request = { url, init };
+      return Response.json({ success: true, result: [] });
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+    let key = { sourceID: "source-1", leadID: 7 };
+    await client.queryCustomObjectByDedupeKeys("orderStatus", [key], ["status"]);
+    expect(request.url).toContain("/rest/v1/customobjects/orderStatus.json?_method=GET");
+    expect(request.init?.method).toBe("POST");
+    expect(JSON.parse(String(request.init?.body))).toEqual({
+      filterType: "dedupeFields", fields: ["status"], input: [key],
     });
   });
 

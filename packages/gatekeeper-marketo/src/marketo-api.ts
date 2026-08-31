@@ -724,15 +724,15 @@ export class MarketoClient {
     };
   }
 
-  async #filterResults<T>(path: string, params: Record<string, string | number>): Promise<T[]> {
+  async #allFilterResults<T>(
+    path: string,
+    request: (nextPageToken?: string) => { method?: string; query?: Query; body?: unknown; form?: URLSearchParams },
+  ): Promise<T[]> {
     let result: T[] = [];
     let nextPageToken: string | undefined;
     let seenTokens = new Set<string>();
     while (true) {
-      let page = await this.#page<T>(path, filterRead({
-        ...params,
-        ...(nextPageToken === undefined ? {} : { nextPageToken }),
-      }));
+      let page = await this.#page<T>(path, request(nextPageToken));
       if (result.length + page.result.length > MAX_FILTER_RESULTS) {
         throw new MarketoError(
           `Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`,
@@ -747,6 +747,13 @@ export class MarketoClient {
       seenTokens.add(page.nextPageToken);
       nextPageToken = page.nextPageToken;
     }
+  }
+
+  async #filterResults<T>(path: string, params: Record<string, string | number>): Promise<T[]> {
+    return await this.#allFilterResults(path, nextPageToken => filterRead({
+      ...params,
+      ...(nextPageToken === undefined ? {} : { nextPageToken }),
+    }));
   }
 
   async #assetMetadata<T>(path: string, query: Query = {}): Promise<T[]> {
@@ -2143,6 +2150,28 @@ export class MarketoClient {
       filterValues: commaSeparatedFilterValues(filterValues),
       ...(fields?.length ? { fields: fields.join(",") } : {}),
     });
+    return this.#validatedCustomObjectResults(path, records);
+  }
+
+  /** Query custom object records by complete compound dedupe keys. */
+  async queryCustomObjectByDedupeKeys(
+    apiName: string,
+    input: Record<string, unknown>[],
+    fields?: string[],
+  ): Promise<Record<string, unknown>[]> {
+    let path = `/v1/customobjects/${encodeURIComponent(apiName)}.json`;
+    let records = await this.#allFilterResults<Record<string, unknown>>(path, nextPageToken => ({
+      method: "POST",
+      query: { _method: "GET", nextPageToken },
+      body: { filterType: "dedupeFields", ...(fields?.length ? { fields } : {}), input },
+    }));
+    return this.#validatedCustomObjectResults(path, records);
+  }
+
+  #validatedCustomObjectResults(
+    path: string,
+    records: Record<string, unknown>[],
+  ): Record<string, unknown>[] {
     return records.filter(record => {
       // A rejected filter value is not reported as an error: Marketo answers 200 with
       // `success: true` and smuggles `{reasons: [{code, message}]}` into the result array

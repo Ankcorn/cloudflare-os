@@ -1283,8 +1283,9 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       `Read schema of Marketo custom object \`${this.#apiName}\``,
       `Read the field schema of custom object \`${this.#apiName}\`.`,
     );
-    // Marketo reports searchable fields as groups of field names.
-    let searchableFields = [...new Set((schema.searchableFields ?? []).flat())];
+    let searchableFieldGroups = schema.searchableFields ?? [];
+    let searchableFields = [...new Set(searchableFieldGroups.flatMap(group =>
+      group.length === 1 ? group : []))];
     let searchable = new Set(searchableFields);
     return {
       apiName: schema.name ?? this.#apiName,
@@ -1295,6 +1296,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
         .map(field => normalizeCustomObjectField(field, searchable))
         .filter((field): field is MarketoFieldMetadata => field !== undefined),
       searchableFields,
+      searchableFieldGroups,
     };
   }
 
@@ -1316,6 +1318,47 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       `Read ${records.length} \`${this.#apiName}\` record(s)`,
       `Queried custom object \`${this.#apiName}\` where \`${field}\` matches ` +
         `${values.length} value(s); **${records.length}** record(s) returned.`,
+    );
+    return records;
+  }
+
+  async queryByDedupeKeys(
+    keys: Record<string, unknown>[],
+    fields?: string[],
+  ): Promise<Record<string, unknown>[]> {
+    requireRecords(keys);
+    let client = await this.#ctx.client();
+    let schema = await client.describeCustomObject(this.#apiName);
+    if (!schema) throw notFound("custom object", `"${this.#apiName}"`);
+    let dedupeFields = schema.dedupeFields ?? [];
+    let isSearchable = dedupeFields.length > 1 && (schema.searchableFields ?? []).some(group =>
+      group.length === dedupeFields.length && group.every((field, index) => field === dedupeFields[index]));
+    if (!isSearchable) {
+      throw new Error("This custom object does not expose a searchable compound dedupe key.");
+    }
+    let seen = new Set<string>();
+    let input = keys.map((key, index) => {
+      let values = dedupeFields.map(field => {
+        let value = key[field];
+        if (value === undefined || value === null || value === "") {
+          throw new Error(`Dedupe key ${index + 1} requires non-null field \`${field}\`.`);
+        }
+        return value;
+      });
+      let signature = JSON.stringify(values);
+      if (seen.has(signature)) throw new Error(`Duplicate dedupe key at entry ${index + 1}.`);
+      seen.add(signature);
+      return Object.fromEntries(dedupeFields.map((field, fieldIndex) => [field, values[fieldIndex]]));
+    });
+    let records = await client.queryCustomObjectByDedupeKeys(
+      this.#apiName,
+      input,
+      fields,
+    );
+    await this.#ctx.observe(
+      `Read ${records.length} \`${this.#apiName}\` record(s)`,
+      `Queried custom object \`${this.#apiName}\` by ${keys.length} compound dedupe key(s); ` +
+        `**${records.length}** record(s) returned.`,
     );
     return records;
   }

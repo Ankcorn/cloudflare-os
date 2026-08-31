@@ -442,8 +442,10 @@ export type MarketoCustomObjectSummary = {
 export type MarketoCustomObjectSchema = MarketoCustomObjectSummary & {
   /** All fields on the object. */
   fields: MarketoFieldMetadata[];
-  /** Fields usable as filters in `query()`. */
+  /** Single-field groups usable as scalar filters in `query()`. */
   searchableFields: string[];
+  /** Searchable fields, preserving compound groups exactly as Marketo reports them. */
+  searchableFieldGroups: string[][];
 };
 
 // -----------------------------------------------------------------------------
@@ -1664,6 +1666,17 @@ export interface MarketoCustomObject {
   query(
     field: string,
     values: string[],
+    fields?: string[],
+  ): Promise<Record<string, unknown>[]>;
+
+  /**
+   * Query records by complete compound dedupe keys. This is available when `dedupeFields` has
+   * multiple entries and that exact group appears in `describe().searchableFieldGroups`.
+   * Each key must provide every dedupe field; other properties are ignored. Only requested
+   * `fields` are returned. The complete result is limited to 1,000 records.
+   */
+  queryByDedupeKeys(
+    keys: Record<string, unknown>[],
     fields?: string[],
   ): Promise<Record<string, unknown>[]>;
 
