@@ -273,8 +273,11 @@ function normalizeActivity(raw: RawActivity): MarketoActivity {
       if (attr.name) attributes[attr.name] = attr.value;
     }
   }
+  let guid = typeof raw.marketoGUID === "string" && raw.marketoGUID.trim()
+    ? raw.marketoGUID
+    : undefined;
   return {
-    id: raw.id ?? -1,
+    id: guid ?? (typeof raw.id === "number" && Number.isSafeInteger(raw.id) && raw.id > 0 ? raw.id : -1),
     activityTypeId: raw.activityTypeId ?? -1,
     personId: raw.leadId ?? -1,
     date: parseMarketoDate(raw.activityDate) ?? new Date(0),

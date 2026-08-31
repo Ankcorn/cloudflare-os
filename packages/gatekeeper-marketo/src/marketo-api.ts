@@ -2862,6 +2862,7 @@ export type RawActivityType = {
 
 export type RawActivity = {
   id?: number;
+  marketoGUID?: string;
   leadId?: number;
   activityDate?: string;
   activityTypeId?: number;

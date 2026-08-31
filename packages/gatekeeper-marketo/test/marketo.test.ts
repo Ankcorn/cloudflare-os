@@ -2439,6 +2439,34 @@ describe("custom object normalization", () => {
   });
 });
 
+describe("activity normalization", () => {
+  it("uses valid Marketo GUID identity and falls back safely", async () => {
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => "page",
+      getActivities: async () => ({
+        result: [
+          { id: 1, marketoGUID: "activity-guid" },
+          { id: 2 },
+          { id: 3, marketoGUID: "" },
+          { marketoGUID: "   " },
+          { id: 4, marketoGUID: 4 } as never,
+          { id: "malformed", marketoGUID: 4 } as never,
+          { id: -5 },
+          { id: 1.5 },
+          {},
+        ],
+        moreResult: false,
+      }),
+    }));
+
+    let page = await session.getActivities({ sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [1] });
+
+    expect(page.activities.map(activity => activity.id)).toEqual([
+      "activity-guid", 2, 3, -1, 4, -1, -1, -1, -1,
+    ]);
+  });
+});
+
 describe("person field normalization", () => {
   it("marks searchable from describe2, since describe.json never reports it", async () => {
     let session = new MarketoSessionImpl(stubContext({

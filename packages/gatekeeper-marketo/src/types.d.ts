@@ -323,7 +323,8 @@ export type MarketoActivityType = {
 
 /** A single recorded activity for a person. */
 export type MarketoActivity = {
-  id: number;
+  /** Valid non-empty Marketo GUID when provided, otherwise the positive numeric activity id. */
+  id: number | string;
   /** Activity type id — resolve via `getActivityTypes()`. */
   activityTypeId: number;
   /** Person the activity belongs to. */
