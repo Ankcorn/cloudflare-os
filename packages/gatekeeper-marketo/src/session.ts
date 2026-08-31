@@ -305,29 +305,18 @@ function normalizeActivity(raw: RawActivity): MarketoActivity {
       if (attr.name) attributes[attr.name] = attr.value;
     }
   }
-  let guid = typeof raw.marketoGUID === "string" && raw.marketoGUID.trim()
-    ? raw.marketoGUID
-    : undefined;
+  let guid = typeof raw.marketoGUID === "string" && raw.marketoGUID.trim() ? raw.marketoGUID : undefined;
   return {
-    id: guid ?? (typeof raw.id === "number" && Number.isSafeInteger(raw.id) && raw.id > 0 ? raw.id : -1),
-    activityTypeId: raw.activityTypeId ?? -1,
-    personId: raw.leadId ?? -1,
-    date: parseMarketoDate(raw.activityDate) ?? new Date(0),
+    id: guid ?? raw.id!,
+    activityTypeId: raw.activityTypeId!,
+    personId: raw.leadId!,
+    date: parseMarketoDate(raw.activityDate)!,
     primaryAttributeValue: raw.primaryAttributeValue,
     attributes,
   };
 }
 
-/** Resolve a page of activities, optionally scoped to specific people. */
-async function readActivities(
-  ctx: SessionContext,
-  query: MarketoActivityQuery,
-  pageToken: string | undefined,
-  leadIds: number[] | undefined,
-  scopeLabel: string,
-): Promise<MarketoActivityPage> {
-  // Marketo has no "all activity types" query and rejects more than ten, so fail early with a
-  // message that tells the caller how to fix it rather than surfacing a raw API error.
+function validateActivityQuery(query: MarketoActivityQuery): void {
   if (!(query?.sinceDate instanceof Date) || Number.isNaN(query.sinceDate.getTime())) {
     throw new Error("query.sinceDate is required and must be a valid Date.");
   }
@@ -343,6 +332,39 @@ async function readActivities(
         `${query.activityTypeIds.length} were given.`,
     );
   }
+  if (query.activityTypeIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new Error("query.activityTypeIds must contain only positive numeric Marketo activity type ids.");
+  }
+}
+
+function validateActivity(raw: RawActivity, requestedTypeIds: Set<number>): void {
+  let hasGuid = typeof raw.marketoGUID === "string" && Boolean(raw.marketoGUID.trim());
+  if (!hasGuid && (!Number.isSafeInteger(raw.id) || raw.id! <= 0)) {
+    throw new MarketoError("Marketo returned an activity without a valid positive numeric id or GUID.");
+  }
+  if (!Number.isSafeInteger(raw.activityTypeId) || raw.activityTypeId! <= 0) {
+    throw new MarketoError("Marketo returned an activity with an invalid activity type id.");
+  }
+  if (!requestedTypeIds.has(raw.activityTypeId!)) {
+    throw new MarketoError("Marketo returned an activity type outside the requested query set.");
+  }
+  if (!Number.isSafeInteger(raw.leadId) || raw.leadId! <= 0) {
+    throw new MarketoError("Marketo returned an activity with an invalid lead id.");
+  }
+  if (!parseMarketoDate(raw.activityDate)) {
+    throw new MarketoError("Marketo returned an activity with an invalid activity date.");
+  }
+}
+
+/** Resolve a page of activities, optionally scoped to specific people. */
+async function readActivities(
+  ctx: SessionContext,
+  query: MarketoActivityQuery,
+  pageToken: string | undefined,
+  leadIds: number[] | undefined,
+  scopeLabel: string,
+): Promise<MarketoActivityPage> {
+  validateActivityQuery(query);
 
   let client = await ctx.client();
   let token = pageToken ?? (await client.getPagingToken(query.sinceDate));
@@ -352,6 +374,8 @@ async function readActivities(
     leadIds,
     batchSize: query.maxResults,
   });
+  let requestedTypeIds = new Set(query.activityTypeIds);
+  for (let activity of page.result) validateActivity(activity, requestedTypeIds);
   if (leadIds && page.result.some(activity => !leadIds.includes(activity.leadId ?? -1))) {
     throw new MarketoError("Marketo returned an activity outside the requested person scope.", {
       operation: "/v1/activities.json",
@@ -454,6 +478,7 @@ export class MarketoPersonImpl extends RpcTarget {
     query: MarketoActivityQuery,
     pageToken?: string,
   ): Promise<MarketoActivityPage> {
+    validateActivityQuery(query);
     let personId = await this.#resolveId();
     if (personId === undefined) {
       throw new Error(

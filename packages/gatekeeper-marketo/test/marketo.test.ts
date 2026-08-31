@@ -68,6 +68,7 @@ import {
   parseMarketoDate,
   qualifyTokenName,
   type MarketoCredentials,
+  type RawActivity,
 } from "../src/marketo-api";
 import { resolveProgramOptions } from "../src/program-options";
 import {
@@ -2678,20 +2679,14 @@ describe("custom object normalization", () => {
 });
 
 describe("activity normalization", () => {
-  it("uses valid Marketo GUID identity and falls back safely", async () => {
+  it("uses valid Marketo GUID identity or a positive numeric id", async () => {
     let session = new MarketoSessionImpl(stubContext({
       getPagingToken: async () => "page",
       getActivities: async () => ({
         result: [
-          { id: 1, marketoGUID: "activity-guid" },
-          { id: 2 },
-          { id: 3, marketoGUID: "" },
-          { marketoGUID: "   " },
-          { id: 4, marketoGUID: 4 } as never,
-          { id: "malformed", marketoGUID: 4 } as never,
-          { id: -5 },
-          { id: 1.5 },
-          {},
+          { id: 1, marketoGUID: "activity-guid", activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+          { id: 2, activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T02:00:00Z" },
+          { id: 3, marketoGUID: "", activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T03:00:00Z" },
         ],
         moreResult: false,
       }),
@@ -2699,9 +2694,48 @@ describe("activity normalization", () => {
 
     let page = await session.getActivities({ sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [1] });
 
-    expect(page.activities.map(activity => activity.id)).toEqual([
-      "activity-guid", 2, 3, -1, 4, -1, -1, -1, -1,
-    ]);
+    expect(page.activities.map(activity => activity.id)).toEqual(["activity-guid", 2, 3]);
+  });
+
+  it("rejects malformed activity fields before observing them", async () => {
+    let malformed: RawActivity[] = [
+      { id: 0, activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+      { id: "bad" as never, activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 0, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 1.5, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 2, leadId: 7, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 1, leadId: 0, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 1, activityDate: "2026-08-31T01:00:00Z" },
+      { marketoGUID: "activity-guid", activityTypeId: 1, leadId: 7, activityDate: "not-a-date" },
+    ];
+    for (let activity of malformed) {
+      let notes: string[] = [];
+      let session = new MarketoSessionImpl(stubContext({
+        getPagingToken: async () => "page",
+        getActivities: async () => ({ result: [activity], moreResult: false }),
+      }, notes));
+      await expect(session.getActivities({
+        sinceDate: new Date("2026-08-31T00:00:00Z"),
+        activityTypeIds: [1],
+      })).rejects.toThrow();
+      expect(notes).toEqual([]);
+    }
+  });
+
+  it("rejects invalid activity queries before reading or observing", async () => {
+    let calls = 0;
+    let notes: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => { calls++; return "page"; },
+    }, notes));
+    for (let query of [
+      { sinceDate: new Date("invalid"), activityTypeIds: [1] },
+      { sinceDate: new Date(), activityTypeIds: [0] },
+      { sinceDate: new Date(), activityTypeIds: [1.5] },
+      { sinceDate: new Date(), activityTypeIds: ["1" as never] },
+    ]) await expect(Promise.resolve().then(() => session.getActivities(query))).rejects.toThrow();
+    expect(calls).toBe(0);
+    expect(notes).toEqual([]);
   });
 
   it("rejects activities outside an explicitly requested person scope before observing", async () => {
@@ -2709,7 +2743,12 @@ describe("activity normalization", () => {
     let person = new MarketoPersonImpl(stubContext({
       getPagingToken: async () => "page",
       getActivities: async () => ({
-        result: [{ id: 1, leadId: 8 }],
+        result: [{
+          id: 1,
+          activityTypeId: 1,
+          leadId: 8,
+          activityDate: "2026-08-31T01:00:00Z",
+        }],
         moreResult: false,
       }),
     }, notes), { field: "id", value: "7" });
@@ -6367,6 +6406,14 @@ describe("action dispatch lifecycle", () => {
       [
         { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign", runAt: "2027-01-01T00:00:00.000Z" },
         { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "First", personIds: [7] },
+        { id: 2, type: "campaignTrigger", campaignId: 32, campaignName: "Second", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "First", runAt: "2027-01-01T00:00:00.000Z" },
+        { id: 2, type: "campaignSchedule", campaignId: 32, campaignName: "Second", runAt: "2027-01-02T00:00:00.000Z" },
       ],
       [
         { id: 1, type: "businessObjectDelete", kind: "company", records: [{ externalCompanyId: "acme" }], matchBy: "dedupeFields", changedFields: ["externalCompanyId"] },

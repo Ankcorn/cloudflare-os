@@ -1651,8 +1651,9 @@ export class MarketoGatekeeperImpl
     }
     if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
       add(`campaign:${action.campaignId}`, true);
+      add("campaignRecipientEffects", true);
       if (action.type === "campaignTrigger") {
-        for (let personId of action.personIds) add(`person:${personId}`, false);
+        for (let personId of action.personIds) add(`person:${personId}`, true);
       }
     } else if (action.type === "programStatus") {
       add(`program:${action.programId}`, false);
