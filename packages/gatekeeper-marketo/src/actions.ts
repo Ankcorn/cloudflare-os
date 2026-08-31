@@ -353,9 +353,9 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
     case "deletePerson": expected = [action.personId]; statuses = ["deleted", "skipped"]; break;
     case "listAdd": expected = action.personIds; statuses = ["added", "skipped"]; break;
     case "listRemove": expected = action.personIds; statuses = ["removed", "skipped"]; break;
-    case "programStatus": expected = action.personIds; statuses = ["updated", "skipped"]; break;
-    case "campaignTrigger": statuses = ["triggered", "queued", "skipped"]; break;
-    case "campaignSchedule": statuses = ["scheduled", "queued", "skipped"]; break;
+    case "programStatus": expected = action.personIds; statuses = [action.status.toLowerCase(), "skipped"]; break;
+    case "campaignTrigger": expected = [action.campaignId]; statuses = ["triggered", "queued", "skipped"]; break;
+    case "campaignSchedule": expected = [action.campaignId]; statuses = ["scheduled", "queued", "skipped"]; break;
     case "upsertPeople":
       statuses = ["created", "updated", "skipped"];
       if (action.lookupField === "id") expected = action.records.map(record => record.id as number | undefined);
@@ -385,12 +385,67 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
     }
   }
   for (let [index, result] of results.entries()) {
-    let status = resultStatus(result);
-    if (statuses && !statuses.includes(status)) identityError(action);
+    let status = (action.type === "campaignTrigger" || action.type === "campaignSchedule") &&
+        result.status === undefined
+      ? undefined
+      : resultStatus(result);
+    if (statuses && status !== undefined && !statuses.includes(status)) identityError(action);
     // Marketo commonly omits identity fields for skipped rows. Exact result count and ordering
     // still correlate them with the input, and no target mutation was reported for that row.
     if (expected && status !== "skipped" && result[identity] !== expected[index]) identityError(action);
   }
+}
+
+function assertResultShapes(
+  results: unknown[],
+  expected: number,
+  requireStatus: boolean,
+): asserts results is RawSyncResult[] {
+  if (
+    results.length === 0 ||
+    results.length !== expected ||
+    results.some(result => {
+      if (!result || typeof result !== "object" || Array.isArray(result)) return true;
+      let value = result as Record<string, unknown>;
+      if (value.id !== undefined && (!Number.isSafeInteger(value.id) || Number(value.id) <= 0)) return true;
+      if (value.marketoGUID !== undefined &&
+          (typeof value.marketoGUID !== "string" || value.marketoGUID.length === 0)) return true;
+      if (value.status !== undefined && (typeof value.status !== "string" || value.status.length === 0)) return true;
+      if (value.status === undefined && (requireStatus || value.reasons !== undefined)) {
+        return true;
+      }
+      if (value.reasons !== undefined && (
+        !Array.isArray(value.reasons) ||
+        value.reasons.some(reason => {
+          if (!reason || typeof reason !== "object" || Array.isArray(reason)) return true;
+          let detail = reason as Record<string, unknown>;
+          return detail.code !== undefined && typeof detail.code !== "string" ||
+            detail.message !== undefined && typeof detail.message !== "string";
+        })
+      )) return true;
+      return !(
+        (Number.isSafeInteger(value.id) && Number(value.id) > 0) ||
+        (typeof value.marketoGUID === "string" && value.marketoGUID.length > 0) ||
+        (typeof value.status === "string" && value.status.length > 0)
+      );
+    })
+  ) {
+    throw new MarketoActionResultError(
+      `Marketo accepted the request but returned ${results.length} of ${expected} expected result(s), ` +
+        "so its outcome is uncertain.",
+      "uncertain",
+    );
+  }
+}
+
+/** Validate the single campaign request/schedule result, including its campaign identity. */
+export function assertCampaignRequestResults(
+  action: Extract<MarketoAction, { type: "campaignTrigger" | "campaignSchedule" }>,
+  results: unknown[],
+): void {
+  assertResultShapes(results, 1, false);
+  assertActionResultIdentity(action, results);
+  if (results[0].status !== undefined) assertApplied(results, 1);
 }
 
 /** Number of per-record outcomes expected from an action. */
@@ -422,38 +477,7 @@ export function assertActionResults(
   results: unknown[],
   expected = results.length,
 ): asserts results is RawSyncResult[] {
-  if (
-    results.length === 0 ||
-    results.length !== expected ||
-    results.some(result => {
-      if (!result || typeof result !== "object" || Array.isArray(result)) return true;
-      let value = result as Record<string, unknown>;
-      if (value.id !== undefined && (!Number.isSafeInteger(value.id) || Number(value.id) <= 0)) return true;
-      if (value.marketoGUID !== undefined &&
-          (typeof value.marketoGUID !== "string" || value.marketoGUID.length === 0)) return true;
-      if (typeof value.status !== "string" || value.status.length === 0) return true;
-      if (value.reasons !== undefined && (
-        !Array.isArray(value.reasons) ||
-        value.reasons.some(reason => {
-          if (!reason || typeof reason !== "object" || Array.isArray(reason)) return true;
-          let detail = reason as Record<string, unknown>;
-          return detail.code !== undefined && typeof detail.code !== "string" ||
-            detail.message !== undefined && typeof detail.message !== "string";
-        })
-      )) return true;
-      return !(
-        (Number.isSafeInteger(value.id) && Number(value.id) > 0) ||
-        (typeof value.marketoGUID === "string" && value.marketoGUID.length > 0) ||
-        (typeof value.status === "string" && value.status.length > 0)
-      );
-    })
-  ) {
-    throw new MarketoActionResultError(
-      `Marketo accepted the request but returned ${results.length} of ${expected} expected result(s), ` +
-        "so its outcome is uncertain.",
-      "uncertain",
-    );
-  }
+  assertResultShapes(results, expected, true);
 }
 
 /** Fail unless Marketo reports a complete, non-skipped result. */

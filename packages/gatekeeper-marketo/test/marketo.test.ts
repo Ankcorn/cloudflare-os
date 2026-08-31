@@ -23,6 +23,7 @@ import { connectPageHtml } from "../src/connect-ui";
 import {
   assertApplied,
   assertActionResultIdentity,
+  assertCampaignRequestResults,
   describeAction,
   executeAction,
   validateActionForDispatch,
@@ -6884,7 +6885,7 @@ describe("action dispatch lifecycle", () => {
   it("validates endpoint-specific target identities and statuses", () => {
     let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
       [{ id: 1, type: "deletePerson", personId: 7 }, [{ id: 8, status: "deleted" }]],
-      [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 8, status: "updated" }]],
+      [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 7, status: "updated" }]],
       [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7] }, [{ status: "scheduled" }]],
@@ -6892,6 +6893,72 @@ describe("action dispatch lifecycle", () => {
     for (let [action, results] of cases) {
       expect(() => assertActionResultIdentity(action, results)).toThrow(/does not identify the approved target/);
     }
+  });
+
+  it("accepts exact statusless campaign results without weakening other result families", () => {
+    let trigger: Extract<MarketoAction, { type: "campaignTrigger" }> = {
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+    };
+    let schedule: Extract<MarketoAction, { type: "campaignSchedule" }> = {
+      id: 2, type: "campaignSchedule", campaignId: 4, campaignName: "D", runAt: "2027-01-01T00:00:00.000Z",
+    };
+
+    expect(() => assertCampaignRequestResults(trigger, [{ id: 3 }])).not.toThrow();
+    expect(() => assertCampaignRequestResults(schedule, [{ id: 4 }])).not.toThrow();
+    expect(() => assertApplied([{ id: 3 }])).toThrow(/without a status|expected result/);
+  });
+
+  it("applies a statusless campaign response through the dispatch lifecycle", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+    };
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [{ id: 3 }] }));
+    let stub = await actionGatekeeper(action);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(action.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("applied");
+    });
+  });
+
+  it("fails closed on malformed, mismatched, and declined campaign results", () => {
+    let action: Extract<MarketoAction, { type: "campaignTrigger" }> = {
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+    };
+
+    expect(() => assertCampaignRequestResults(action, [{ id: 4 }])).toThrow(/approved target/);
+    expect(() => assertCampaignRequestResults(action, [{ id: 3, reasons: [{ code: "1004" }] }]))
+      .toThrow(/outcome is uncertain/);
+    expect(() => assertCampaignRequestResults(action, [{ status: "skipped", reasons: [{ code: "1004" }] }]))
+      .toThrow(/declined all 1 record/);
+  });
+
+  it("correlates program membership results with the approved progression status", () => {
+    let action: MarketoAction = {
+      id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member",
+    };
+
+    expect(() => assertActionResultIdentity(action, [{ id: 7, status: "Member" }])).not.toThrow();
+    expect(() => assertActionResultIdentity(action, [{ status: "skipped" }])).not.toThrow();
+    expect(() => assertActionResultIdentity(action, [{ id: 7, status: "updated" }]))
+      .toThrow(/approved target/);
+  });
+
+  it("applies the approved program progression status through the dispatch lifecycle", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member",
+    };
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [{ id: 7, status: "Member" }] }));
+    let stub = await actionGatekeeper(action);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(action.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("applied");
+    });
   });
 
   it("requires statuses and normalizes their case for identity and skipped-result handling", () => {

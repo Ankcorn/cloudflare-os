@@ -53,6 +53,7 @@ import {
   assertActionResults,
   assertActionResultIdentity,
   assertApplied,
+  assertCampaignRequestResults,
   describeActionForSubmission,
   expectedActionResults,
   executeAction,
@@ -1206,8 +1207,12 @@ export class MarketoGatekeeperImpl
     }
     try {
       if (results) {
-        assertActionResults(results, expectedActionResults(pending.action));
-        assertActionResultIdentity(pending.action, results);
+        if (pending.action.type === "campaignTrigger" || pending.action.type === "campaignSchedule") {
+          assertCampaignRequestResults(pending.action, results);
+        } else {
+          assertActionResults(results, expectedActionResults(pending.action));
+          assertActionResultIdentity(pending.action, results);
+        }
       }
       if (results && isBusinessObjectAction(pending.action) && pending.action.kind !== "namedAccount" &&
           results.some(result => result.status?.toLowerCase() === "skipped" && result.reasons?.some(reason => reason.code === "1018"))) {
@@ -1219,7 +1224,9 @@ export class MarketoGatekeeperImpl
           throw new Error("Marketo's native CRM sync rejected this write; nothing was changed and it cannot be retried.");
         }
       }
-      if (results) assertApplied(results, expectedActionResults(pending.action));
+      if (results && pending.action.type !== "campaignTrigger" && pending.action.type !== "campaignSchedule") {
+        assertApplied(results, expectedActionResults(pending.action));
+      }
     } catch (e) {
       if (e instanceof MarketoActionResultError) {
         if (e.disposition === "uncertain") {
