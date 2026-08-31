@@ -2545,6 +2545,52 @@ describe("person field normalization", () => {
   });
 });
 
+describe("exact program reads", () => {
+  it("accepts only the requested program record", async () => {
+    let matching = clientReturning({ success: true, result: [{ id: 9900, name: "Program" }] }).client;
+    await expect(matching.getProgram(9900)).resolves.toMatchObject({ id: 9900, name: "Program" });
+
+    let missing = clientReturning({ success: true, result: [] }).client;
+    await expect(missing.getProgram(9900)).resolves.toBeUndefined();
+
+    for (let result of [
+      [null],
+      ["program"],
+      [{ id: "9900" }],
+      [{ name: "Missing id" }],
+      [{ id: 9901, name: "Foreign" }],
+      [{ id: 9900 }, { id: 9900 }],
+    ]) {
+      let notes: string[] = [];
+      let program = new MarketoProgramImpl(
+        stubContext(clientReturning({ success: true, result }).client, notes),
+        9900,
+      );
+      let error = await program.describe().catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.message).toMatch(/wrong program for exact read 9900/);
+      expect(error.operation).toBe("/asset/v1/program/9900.json");
+      expect(notes).toEqual([]);
+    }
+  });
+
+  it("rejects malformed exact program metadata", async () => {
+    for (let program of [
+      { id: 9900, name: { text: "Program" } },
+      { id: 9900, headStart: "yes" },
+      { id: 9900, folder: { value: "10" } },
+      { id: 9900, tags: {} },
+      { id: 9900, tags: [{ tagType: { text: "Region" } }] },
+    ]) {
+      let error = await clientReturning({ success: true, result: [program] }).client
+        .getProgram(9900).catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.message).toMatch(/program with an unexpected shape/);
+      expect(error.operation).toBe("/asset/v1/program/9900.json");
+    }
+  });
+});
+
 describe("program tokens", () => {
   it("accepts tokens only from the requested program envelope", async () => {
     let matching = clientReturning({

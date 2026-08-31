@@ -1603,8 +1603,36 @@ export class MarketoClient {
   }
 
   async getProgram(programId: number): Promise<RawProgram | undefined> {
-    let result = await this.#result<RawProgram>(`/asset/v1/program/${programId}.json`);
-    return result[0];
+    let path = `/asset/v1/program/${programId}.json`;
+    let result = await this.#result<unknown>(path);
+    if (result.length > 1 || result[0] !== undefined &&
+        (!isRecord(result[0]) || result[0].id !== programId)) {
+      throw new MarketoError(`Marketo returned the wrong program for exact read ${programId}.`, {
+        operation: path,
+      });
+    }
+    let program = result[0];
+    if (program === undefined) return undefined;
+    let stringFields = [program.name, program.description, program.type, program.channel,
+      program.status, program.workspace, program.startDate, program.endDate, program.url,
+      program.createdAt, program.updatedAt];
+    let folder = program.folder;
+    let tags = program.tags;
+    if (stringFields.some(value => value !== undefined && typeof value !== "string") ||
+        program.headStart !== undefined && typeof program.headStart !== "boolean" ||
+        folder !== undefined && (!isRecord(folder) ||
+          [folder.type, folder.folderName]
+            .some(value => value !== undefined && typeof value !== "string") ||
+          folder.value !== undefined && !Number.isSafeInteger(folder.value)) ||
+        tags !== undefined && tags !== null && (!Array.isArray(tags) || tags.some(tag =>
+          !isRecord(tag) || [tag.tagType, tag.tagValue]
+            .some(value => value !== undefined && typeof value !== "string")
+        ))) {
+      throw new MarketoError("Marketo returned a program with an unexpected shape.", {
+        operation: path,
+      });
+    }
+    return program as RawProgram;
   }
 
   /** Tag definitions and allowed values configured for programs in this instance. */
