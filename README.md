@@ -216,6 +216,7 @@ Each gatekeeper package contains instructions for how to set it up:
 * [Slack API](packages/gatekeeper-slack/README.md)
 * [Spotify](packages/gatekeeper-spotify/README.md)
 * [ZoomInfo API](packages/gatekeeper-zoominfo/README.md)
+* [Adobe Marketo Engage](packages/gatekeeper-marketo/README.md)
 
 ## Developing
 
