@@ -7621,6 +7621,64 @@ describe("action dispatch lifecycle", () => {
     }
   });
 
+  it("accepts only the Marketo result statuses permitted by each approved upsert action", () => {
+    let cases: { action: MarketoAction; allowed: string[] }[] = [
+      ...(["createOnly", "updateOnly", "createOrUpdate"] as const).flatMap(upsertAction => [
+        {
+          action: {
+            id: 1, type: "upsertPeople" as const, records: [{ email: "person@example.com" }],
+            upsertAction, lookupField: "email",
+          },
+          allowed: upsertAction === "createOnly" ? ["created", "skipped"]
+            : upsertAction === "updateOnly" ? ["updated", "skipped"]
+              : ["created", "updated", "skipped"],
+        },
+        {
+          action: {
+            id: 1, type: "businessObjectUpsert" as const, kind: "company" as const,
+            records: [{ externalCompanyId: "acme" }], matchBy: "dedupeFields" as const,
+            action: upsertAction, changedFields: [],
+          },
+          allowed: upsertAction === "createOnly" ? ["created", "skipped"]
+            : upsertAction === "updateOnly" ? ["updated", "skipped"]
+              : ["created", "updated", "skipped"],
+        },
+      ]),
+      {
+        action: { id: 1, type: "customObjectUpsert", apiName: "order", records: [{ orderId: "one" }] },
+        allowed: ["created", "updated", "skipped"],
+      },
+    ];
+
+    for (let { action, allowed } of cases) {
+      for (let status of ["created", "updated", "skipped"]) {
+        let assertion = () => assertActionResultIdentity(action, [{ status }]);
+        if (allowed.includes(status)) expect(assertion).not.toThrow();
+        else expect(assertion).toThrow(/does not identify the approved target/);
+      }
+    }
+  });
+
+  it("keeps upsert identity checks when the result status is permitted", () => {
+    let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
+      [{
+        id: 1, type: "upsertPeople", records: [{ id: 7 }], upsertAction: "updateOnly", lookupField: "id",
+      }, [{ id: 8, status: "updated" }]],
+      [{
+        id: 1, type: "businessObjectUpsert", kind: "opportunity", records: [{ marketoGUID: "g-1" }],
+        matchBy: "idField", action: "updateOnly", changedFields: [],
+      }, [{ marketoGUID: "g-2", status: "updated" }]],
+      [{
+        id: 1, type: "customObjectUpsert", apiName: "order", records: [{ marketoGUID: "g-1" }],
+      }, [{ marketoGUID: "g-2", status: "updated" }]],
+    ];
+
+    for (let [action, results] of cases) {
+      expect(() => assertActionResultIdentity(action, results))
+        .toThrow(/does not identify the approved target/);
+    }
+  });
+
   it("accepts exact statusless campaign results without weakening other result families", () => {
     let trigger: Extract<MarketoAction, { type: "campaignTrigger" }> = {
       id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],

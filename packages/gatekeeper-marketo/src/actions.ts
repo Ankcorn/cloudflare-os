@@ -31,6 +31,7 @@ import {
   isBusinessObjectAction,
   type BusinessObjectAction,
 } from "./business-object-actions";
+import type { MarketoUpsertAction } from "./types";
 
 /** A queued Marketo action. `id` is the gatekeeper-assigned approval id. */
 type ExistingMarketoAction =
@@ -38,7 +39,7 @@ type ExistingMarketoAction =
       id: number;
       type: "upsertPeople";
       records: Record<string, unknown>[];
-      upsertAction: string;
+      upsertAction: MarketoUpsertAction;
       lookupField: string;
     }
   | { id: number; type: "updatePerson"; personId: number; fields: Record<string, unknown> }
@@ -343,6 +344,12 @@ function resultStatus(result: RawSyncResult): string {
   return result.status.toLowerCase();
 }
 
+const UPSERT_RESULT_STATUSES: Record<MarketoUpsertAction, string[]> = {
+  createOnly: ["created", "skipped"],
+  updateOnly: ["updated", "skipped"],
+  createOrUpdate: ["created", "updated", "skipped"],
+};
+
 /** Correlate result identities and endpoint statuses with the approved request where Marketo supplies them. */
 export function assertActionResultIdentity(action: MarketoAction, results: RawSyncResult[]): void {
   let expected: (number | string | undefined)[] | undefined;
@@ -361,11 +368,11 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
     case "campaignTrigger": expected = [action.campaignId]; statuses = ["triggered", "queued", "skipped"]; break;
     case "campaignSchedule": expected = [action.campaignId]; statuses = ["scheduled", "queued", "skipped"]; break;
     case "upsertPeople":
-      statuses = ["created", "updated", "skipped"];
+      statuses = UPSERT_RESULT_STATUSES[action.upsertAction];
       if (action.lookupField === "id") expected = action.records.map(record => record.id as number | undefined);
       break;
     case "customObjectUpsert":
-      statuses = ["created", "updated", "skipped"];
+      statuses = UPSERT_RESULT_STATUSES.createOrUpdate;
       if (action.records.every(record => typeof record.marketoGUID === "string")) {
         identity = "marketoGUID";
         expected = action.records.map(record => record.marketoGUID as string);
@@ -378,9 +385,17 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
         expected = action.records.map(record => record.marketoGUID as string | undefined);
       }
       break;
-    case "businessObjectUpsert":
+    case "businessObjectUpsert": {
+      if (!action.action) identityError(action);
+      statuses = UPSERT_RESULT_STATUSES[action.action];
+      if (action.matchBy === "idField") {
+        identity = action.kind === "company" || action.kind === "salesPerson" ? "id" : "marketoGUID";
+        expected = action.records.map(record => record[identity] as number | string | undefined);
+      }
+      break;
+    }
     case "businessObjectDelete": {
-      statuses = action.type === "businessObjectDelete" ? ["deleted", "skipped"] : ["created", "updated", "skipped"];
+      statuses = ["deleted", "skipped"];
       if (action.matchBy === "idField") {
         identity = action.kind === "company" || action.kind === "salesPerson" ? "id" : "marketoGUID";
         expected = action.records.map(record => record[identity] as number | string | undefined);
