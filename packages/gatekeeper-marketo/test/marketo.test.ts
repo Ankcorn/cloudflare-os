@@ -1182,7 +1182,7 @@ describe("new Email Designer", () => {
     expect(notes.join(" ")).toMatch(/dependency/);
   });
 
-  it("preserves server pagination and forwards filters while pending changes stay handle-scoped", async () => {
+  it("preserves server pagination and forwards filters without pending actions", async () => {
     let requests: { kind: string; options: Record<string, unknown> }[] = [];
     let { ctx } = emailDesignerContext({
       filterDesignerAssets: async (kind, options) => {
@@ -1196,15 +1196,7 @@ describe("new Email Designer", () => {
         };
       },
       getDesignerAsset: async (_path, assetId) => ({ id: assetId, name: "Server name" }),
-    }, [
-      {
-        id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
-        body: { name: "Local create", appData: { workspaceId: "1", folderId: "10" } },
-      },
-      { id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-0-1", name: "Clone", sourceSnapshot: designerCloneSnapshot({}) },
-      { id: 3, type: "designerUpdate", asset: "designerEmail", targetId: "email-0-1", patch: { name: "Updated" } },
-      { id: 4, type: "designerDelete", asset: "designerEmail", targetId: "email-0-2" },
-    ]);
+    });
     let designer = new MarketoEmailDesignerImpl(ctx);
 
     let first = await designer.listEmails("1", {
@@ -1229,7 +1221,6 @@ describe("new Email Designer", () => {
       },
     });
     expect(requests[2]?.options.fragmentType).toBe("email");
-    expect(await designer.getEmail("~1").describe()).toMatchObject({ id: "~1", name: "Local create" });
   });
 
   it("exposes the designer from a Design Studio-scoped handle", () => {

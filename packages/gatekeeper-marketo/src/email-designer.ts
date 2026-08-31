@@ -38,6 +38,8 @@ export type EmailDesignerContext = SessionContext & {
 const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_ARRAY_ITEMS = 100;
 const MAX_DURABLE_PAYLOAD_BYTES = 1280 * 1024;
+const MAX_FILTER_RESULTS = 1_000;
+const DESIGNER_PAGE_SIZE = 50;
 
 function path(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
@@ -257,6 +259,40 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
   return result;
 }
 
+function matchesList(
+  item: Record<string, unknown>,
+  workspaceId: string,
+  options: MarketoDesignerListOptions & { templateId?: string; fragmentType?: string },
+): boolean {
+  if (item.workspaceId !== workspaceId) return false;
+  if (options.folderId !== undefined) {
+    let location = options.folderType === "Program" ? item.programId : item.folderId;
+    if (location !== options.folderId) return false;
+  }
+  if (options.name !== undefined && item.name !== options.name) return false;
+  if (options.status !== undefined && !options.status.includes(String(item.status))) return false;
+  if (!options.includeArchived && String(item.status).toLowerCase() === "archived") return false;
+  if (options.templateId !== undefined && item.templateId !== options.templateId) return false;
+  if (options.fragmentType !== undefined && item.fragmentType !== options.fragmentType) return false;
+  return true;
+}
+
+function sortDesignerItems(items: Record<string, unknown>[], sortKey: string | undefined, sortOrder: "ASC" | "DESC" | undefined): void {
+  if (sortKey === undefined) return;
+  let direction = sortOrder === "DESC" ? -1 : 1;
+  items.sort((left, right) => {
+    let a = left[sortKey];
+    let b = right[sortKey];
+    if (a === b) return String(left.id).localeCompare(String(right.id)) * direction;
+    if (a === undefined) return direction;
+    if (b === undefined) return -direction;
+    let first = a instanceof Date ? a.getTime() : a;
+    let second = b instanceof Date ? b.getTime() : b;
+    if (typeof first === "number" && typeof second === "number") return (first - second) * direction;
+    return String(first).localeCompare(String(second)) * direction;
+  });
+}
+
 async function summary(ctx: EmailDesignerContext, kind: EmailDesignerKind, assetId: string, before = Infinity, seen = new Set<string>()): Promise<Record<string, unknown>> {
   if (seen.has(assetId)) throw new Error(`Designer ${kind} ${assetId} has a circular clone dependency.`);
   seen.add(assetId);
@@ -319,16 +355,96 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("pageSize must be between 1 and 50.");
     let status = stringArray(options.status, "status");
     let client = await this.#ctx.client();
-    let raw = await client.filterDesignerAssets(path(kind), {
+    let query = {
       workspaceId: workspace, folderId: options.folderId, folderType: options.folderType, name: options.name,
-      status, pageIndex, pageSize, sortKey: options.sortKey, sortOrder: options.sortOrder,
+      status, sortKey: options.sortKey, sortOrder: options.sortOrder,
       includeArchived: options.includeArchived, isCreatedByMe: options.isCreatedByMe,
       isModifiedByMe: options.isModifiedByMe, templateId: options.templateId, fragmentType: options.fragmentType,
-    });
-    let items = (raw.items ?? []).map(item => normalize(item));
+    };
+    let pending = this.#ctx.pendingDesigner().filter(action => action.asset === kind);
+    if (pending.length === 0) {
+      let raw = await client.filterDesignerAssets(path(kind), { ...query, pageIndex, pageSize });
+      let items = (raw.items ?? []).map(item => normalize(item));
+      await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
+      return { items, totalItems: raw.totalItems,
+        pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
+    }
+
+    let upstream = new Map<string, RawDesignerAsset>();
+    let fetchedResults = 0;
+    for (let upstreamPage = 0; ; upstreamPage++) {
+      let raw = await client.filterDesignerAssets(path(kind), {
+        ...query, pageIndex: upstreamPage, pageSize: DESIGNER_PAGE_SIZE,
+      });
+      if (raw.totalItems !== undefined && raw.totalItems > MAX_FILTER_RESULTS ||
+          fetchedResults + (raw.items?.length ?? 0) > MAX_FILTER_RESULTS) {
+        throw new Error(`Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
+      }
+      let page = raw.items ?? [];
+      fetchedResults += page.length;
+      for (let item of page) {
+        let assetId = item.id === undefined ? undefined : String(item.id);
+        if (!assetId) throw new Error("Marketo returned a designer asset without an id.");
+        if (!upstream.has(assetId)) upstream.set(assetId, item);
+      }
+      if (raw.totalItems !== undefined && upstream.size >= raw.totalItems) break;
+      if (page.length === 0 && raw.totalItems !== undefined) {
+        throw new Error("Marketo returned invalid designer paging state.");
+      }
+      let effectivePageSize = raw.pageSize && raw.pageSize > 0 ? raw.pageSize : DESIGNER_PAGE_SIZE;
+      if (page.length < effectivePageSize) break;
+      if (fetchedResults === MAX_FILTER_RESULTS) {
+        throw new Error(`Marketo returned at least ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
+      }
+    }
+
+    let candidateIds: string[] = [];
+    for (let action of pending) {
+      let candidate = action.type === "designerCreate" || action.type === "designerClone"
+        ? action.provisionalId
+        : action.targetId;
+      if (!candidateIds.some(existing => same(this.#ctx, existing, candidate))) candidateIds.push(candidate);
+    }
+    let candidates = new Map<string, { item: Record<string, unknown> | null; isCreation: boolean }>();
+    for (let candidateId of candidateIds) {
+      let key = this.#ctx.resolveDesignerId(candidateId) ?? candidateId;
+      let isCreation = pending.some(action =>
+        (action.type === "designerCreate" || action.type === "designerClone") && same(this.#ctx, action.provisionalId, candidateId));
+      if (actions(this.#ctx, kind, candidateId).some(action => action.type === "designerDelete")) {
+        candidates.set(key, { item: null, isCreation });
+      } else {
+        candidates.set(key, { item: await summary(this.#ctx, kind, candidateId), isCreation });
+      }
+    }
+
+    let includedCandidates = new Set<string>();
+    let merged: Record<string, unknown>[] = [];
+    for (let item of upstream.values()) {
+      let normalized = normalize(item);
+      let key = this.#ctx.resolveDesignerId(String(normalized.id)) ?? String(normalized.id);
+      if (!candidates.has(key)) {
+        merged.push(normalized);
+        continue;
+      }
+      let candidate = candidates.get(key)?.item;
+      includedCandidates.add(key);
+      if (candidate) merged.push(candidate);
+    }
+    for (let [key, candidate] of candidates) {
+      // Exact reads cannot determine whether an existing asset was created by the API user.
+      if (candidate.item && !includedCandidates.has(key) && (candidate.isCreation || !options.isCreatedByMe)) {
+        merged.push(candidate.item);
+      }
+    }
+    let items = merged.filter(item => matchesList(item, workspace, { ...options, status }));
+    sortDesignerItems(items, options.sortKey, options.sortOrder);
+    if (items.length > MAX_FILTER_RESULTS) {
+      throw new Error(`Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`);
+    }
+    let totalItems = items.length;
+    items = items.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
     await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
-    return { items, totalItems: raw.totalItems,
-      pageIndex: raw.currentPage ?? pageIndex, pageSize: raw.pageSize ?? pageSize };
+    return { items, totalItems, pageIndex, pageSize };
   }
 
   getEmail(assetId: string) { let value = id(assetId, "designer email id", this.#ctx, "designerEmail"); return new MarketoDesignerEmailImpl(retainSessionContext(this.#ctx), value, true); }
