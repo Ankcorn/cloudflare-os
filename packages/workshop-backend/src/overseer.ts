@@ -1394,6 +1394,28 @@ export function sanitizeMessageFormatRefs(
   return accepted.toSorted((a, b) => a.position - b.position);
 }
 
+// What kind of access a live session holds, for the session registry (see joinSession). The
+// owner's sessions are tracked but never severed: widening a scope can only invalidate a
+// *collaborator's* prior verification.
+type SessionKind = CollaboratorRole | "owner";
+
+// One live client session in OverseerImpl.#liveSessions.
+type SessionRegistration = {
+  kind: SessionKind;
+  // Revoke the session now, without calling the client: dispose its `notifyClosed` stub uncalled,
+  // which AuthenticatedApiImpl reads as a lost DO connection and answers by aborting the client's
+  // whole capnweb session -- dropping its export table, and with it every capability the session
+  // ever obtained.
+  sever: () => void;
+  // Resolved by the leave function once the session's disposer has run in this DO.
+  left: PromiseWithResolvers<void>;
+};
+
+// How long severCollaboratorSessions waits for severed sessions to drain before falling back to
+// restarting the whole DO. One sever round trip is worker<->DO, so ~milliseconds; 2s only trips
+// on a wedged intermediary.
+const SEVER_DRAIN_TIMEOUT_MS = 2000;
+
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
@@ -1540,6 +1562,32 @@ class OverseerImpl implements AgentHooks {
     if (!sub) return;
     this.#presenceSubscribers.delete(token);
     sub[Symbol.dispose]();
+  }
+
+  // Every live client session, registered by the session interface's constructor and removed by
+  // its disposer. Distinct from #presence, which cannot back an access decision: presence joins
+  // only after fetchProfile() resolves (and never at all if it fails), so a session can be live --
+  // holding capabilities -- while invisible to presence. This registry is populated synchronously
+  // in the interface constructor, before the session object is ever returned to the client.
+  //
+  // A Set of registrations rather than a count: severing must reach *every* matching session (one
+  // user with three tabs is three sessions), and a drain must observe each individual departure.
+  #liveSessions = new Set<SessionRegistration>();
+
+  // Register a live session. `sever` must revoke the session immediately without waiting for the
+  // client (see severCollaboratorSessions). Returns the leave function, which the session's
+  // disposer must call; leaving resolves the registration's `left` promise, which is what a
+  // sever's drain waits on.
+  joinSession(kind: SessionKind, sever: () => void): () => void {
+    let registration: SessionRegistration = { kind, sever, left: Promise.withResolvers<void>() };
+    this.#liveSessions.add(registration);
+    let leftAlready = false;
+    return () => {
+      if (leftAlready) return;
+      leftAlready = true;
+      this.#liveSessions.delete(registration);
+      registration.left.resolve();
+    };
   }
 
   #getLiveChat(chatId: number): LiveChatContext {
@@ -4978,7 +5026,9 @@ class OverseerImpl implements AgentHooks {
   // Force every client to disconnect and re-authenticate after a collaborator has been removed or
   // downgraded, so that someone who just lost access can't keep using a session that's already
   // open. Authorization is only checked at open() (see the sharing docs), so without this a stale
-  // session would survive until something else happened to disconnect it.
+  // session would survive until something else happened to disconnect it. (Scope *widenings* use
+  // the per-session severCollaboratorSessions() below instead; this whole-DO abort remains the
+  // revocation path and the sever's drain-timeout fallback.)
   //
   // We restart by aborting the whole DO. Aborting propagates to clients: the `notifyClosed` stub
   // handed to each session is disposed without being called, which AuthenticatedApiImpl detects
@@ -4995,10 +5045,47 @@ class OverseerImpl implements AgentHooks {
   //   the owner, who is also connected and will be disconnected) before their connection drops.
   //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
   //   connection error even though it succeeded.
-  async scheduleRevocationRestart(): Promise<void> {
+  async scheduleRevocationRestart(reason: string): Promise<void> {
     await this.ctx.storage.sync();
     await scheduler.wait(100);
-    this.ctx.abort("Gadget restarted to revoke access for a removed collaborator.");
+    this.ctx.abort(reason);
+  }
+
+  // Sever every live collaborator session of the given role (all non-owner sessions if `role` is
+  // undefined) and wait for them to drain. This is the surgical alternative to
+  // scheduleRevocationRestart() for *scope widenings*: when a role's verification scope grows, the
+  // sessions verified against the old scope must die before the widened capability becomes
+  // reachable, but the owner -- whose own action widened the scope -- stays connected.
+  //
+  // The drain works because severing propagates back to us: disposing our dup of the session's
+  // `notifyClosed` stub (uncalled) makes AuthenticatedApiImpl abort the client's capnweb session,
+  // which tears down the native worker<->DO session carrying the Overseer interface, which runs
+  // the interface's [Symbol.dispose] here in the DO, whose leave() resolves the registration's
+  // `left` promise. So awaiting `left` is awaiting the session's actual disappearance from this
+  // DO, not merely having asked for it.
+  //
+  // If the drain times out (a wedged intermediary that never tears down), fall back to
+  // scheduleRevocationRestart(): the whole-DO abort is disruptive but always effective, and this
+  // is the degraded path, never the happy one.
+  async severCollaboratorSessions(
+      role: CollaboratorRole | undefined, reason: string): Promise<void> {
+    let severed = [...this.#liveSessions].filter(
+        session => session.kind !== "owner" && (role === undefined || session.kind === role));
+    if (severed.length === 0) return;
+
+    for (let session of severed) {
+      session.sever();
+    }
+
+    let drained = Promise.all(severed.map(session => session.left.promise))
+        .then(() => true as const);
+    let timeout = scheduler.wait(SEVER_DRAIN_TIMEOUT_MS).then(() => false as const);
+    if (!await Promise.race([drained, timeout])) {
+      this.logger.warn("severed sessions did not drain in time; restarting the workspace", {
+        event: "session.sever.drain.timeout", sessionCount: severed.length,
+      });
+      await this.scheduleRevocationRestart(reason);
+    }
   }
 
   // Last timestamp generated by getChatTimestamp(), if it has been called during this session.
@@ -9062,6 +9149,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               // this so ambient providers are attached when possible.
                private slashCommandsReady: Promise<void>) {
     super();
+    this.#leaveSession = this.impl.joinSession(
+        this.isOwner ? "owner" : "build", () => this.#sever());
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
     this.#leaveOutputsFanout = this.impl.joinOutputsFanout(this.clientUserId);
@@ -9082,14 +9171,29 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.logger);
   }
 
+  #leaveSession: () => void;
   #leavePresence: () => void;
   #leaveOutputsFanout: () => void;
 
+  // Revoke this session without waiting for the client: dispose `notifyClosed` *uncalled*, which
+  // AuthenticatedApiImpl reads as a lost DO connection and answers by killing the client's
+  // WebSocket -- dropping the capnweb session's export table and every capability this session
+  // ever obtained. The forced reconnect re-runs open(), re-verifying against the current scope.
+  #severed = false;
+  #sever() {
+    if (this.#severed) return;
+    this.#severed = true;
+    this.notifyClosed[Symbol.dispose]();
+  }
+
   [Symbol.dispose]() {
+    this.#leaveSession();
     this.#leavePresence();
     this.#leaveOutputsFanout();
-    this.notifyClosed();
-    this.notifyClosed[Symbol.dispose]();
+    if (!this.#severed) {  // severed already disposed the stub, deliberately uncalled
+      this.notifyClosed();
+      this.notifyClosed[Symbol.dispose]();
+    }
   }
 
   // Per-session caller identity for the SharingManager.
@@ -9307,7 +9411,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.#owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
-      this.impl.scheduleRevocationRestart();
+      this.impl.scheduleRevocationRestart("Gadget restarted because the workspace was deleted.");
       this.impl.ownerId = undefined;
     });
 
@@ -10436,7 +10540,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
     // disconnect everyone.
     if (affected.length > 0) {
-      this.impl.scheduleRevocationRestart();
+      this.impl.scheduleRevocationRestart(
+          "Gadget restarted to revoke access for a removed collaborator.");
     }
     return affected;
   }
@@ -10455,7 +10560,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.refreshAffectedCollaboratorListings(affected);
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     if (affected.length > 0) {
-      this.impl.scheduleRevocationRestart();
+      this.impl.scheduleRevocationRestart(
+          "Gadget restarted to revoke access for a removed collaborator.");
     }
     return affected;
   }
@@ -10555,6 +10661,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
               private clientUserId: string,
               private notifyClosed: NativeRpcStub<() => void>) {
     super();
+    this.#leaveSession = this.impl.joinSession("use", () => this.#sever());
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "use",
         () => retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger));
@@ -10575,14 +10682,26 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
         this.impl.logger);
   }
 
+  #leaveSession: () => void;
   #leavePresence: () => void;
   #leaveOutputsFanout: () => void;
 
+  // See OverseerClientInterface.#sever.
+  #severed = false;
+  #sever() {
+    if (this.#severed) return;
+    this.#severed = true;
+    this.notifyClosed[Symbol.dispose]();
+  }
+
   [Symbol.dispose]() {
+    this.#leaveSession();
     this.#leavePresence();
     this.#leaveOutputsFanout();
-    this.notifyClosed();
-    this.notifyClosed[Symbol.dispose]();
+    if (!this.#severed) {  // severed already disposed the stub, deliberately uncalled
+      this.notifyClosed();
+      this.notifyClosed[Symbol.dispose]();
+    }
   }
 
   // Throws "Unauthorized" for any method not available to "use" collaborators.

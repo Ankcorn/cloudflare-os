@@ -25,6 +25,7 @@ export type WorkshopObservabilityFields = {
   path: string;
   resourceTitle: string;
   sequence: number;
+  sessionCount: number;
   size: number;
   status: number;
   statusCode: number;
