@@ -2497,6 +2497,51 @@ describe("person field normalization", () => {
 });
 
 describe("program tokens", () => {
+  it("accepts tokens only from the requested program envelope", async () => {
+    let matching = clientReturning({
+      success: true,
+      result: [{
+        folder: { type: "Program", value: 9900 },
+        tokens: [{ name: "discount", value: "x" }],
+      }],
+    });
+    await expect(matching.client.getProgramTokens(9900)).resolves.toEqual([
+      { name: "discount", value: "x" },
+    ]);
+    expect(new URL(matching.calls[0]!).searchParams.get("folderType")).toBe("Program");
+
+    for (let result of [
+      [{ folder: { type: "Program", value: 9901 }, tokens: [{ name: "secret" }] }],
+      [{ folder: { type: "Folder", value: 9900 }, tokens: [{ name: "secret" }] }],
+      [
+        { folder: { type: "Program", value: 9900 }, tokens: [] },
+        { folder: { type: "Program", value: 9900 }, tokens: [] },
+      ],
+    ]) {
+      let client = clientReturning({ success: true, result }).client;
+      let error = await client.getProgramTokens(9900).catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.message).toMatch(/wrong program 9900/);
+      expect(error.operation).toBe("/asset/v1/folder/9900/tokens.json");
+    }
+  });
+
+  it("rejects malformed program token envelopes and values", async () => {
+    for (let result of [
+      [null],
+      [{ folder: null, tokens: [] }],
+      [{ folder: { type: "Program", value: 9900 } }],
+      [{ folder: { type: "Program", value: 9900 }, tokens: {} }],
+      [{ folder: { type: "Program", value: 9900 }, tokens: [null] }],
+      [{ folder: { type: "Program", value: 9900 }, tokens: [{ value: { secret: true } }] }],
+    ]) {
+      let client = clientReturning({ success: true, result }).client;
+      let error = await client.getProgramTokens(9900).catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.operation).toBe("/asset/v1/folder/9900/tokens.json");
+    }
+  });
+
   it("unwraps the folder envelope instead of reporting a blank token", async () => {
     // The endpoint answers [{ folder, tokens: [...] }]; treating that entry as a token itself
     // produces one phantom { name: "", type: "", value: "" }.

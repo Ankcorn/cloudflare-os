@@ -1687,11 +1687,37 @@ export class MarketoClient {
    * leaking the folder envelope to callers.
    */
   async getProgramTokens(programId: number): Promise<RawToken[]> {
-    let folders = await this.#result<RawTokenFolder>(
-      `/asset/v1/folder/${programId}/tokens.json`,
+    let path = `/asset/v1/folder/${programId}/tokens.json`;
+    let folders = await this.#result<unknown>(
+      path,
       { query: { folderType: "Program" } },
     );
-    return folders.flatMap(folder => folder.tokens ?? []);
+    if (folders.length === 0) return [];
+    let envelope = folders[0];
+    if (folders.length > 1 || !isRecord(envelope) || !isRecord(envelope.folder) ||
+        envelope.folder.type !== "Program" || envelope.folder.value !== programId) {
+      throw new MarketoError(`Marketo returned tokens for the wrong program ${programId}.`, {
+        operation: path,
+      });
+    }
+    if (!Array.isArray(envelope.tokens)) {
+      throw new MarketoError("Marketo returned program tokens with an unexpected shape.", {
+        operation: path,
+      });
+    }
+    return envelope.tokens.map((token, index) => {
+      if (!isRecord(token) || [token.name, token.type, token.value]
+        .some(value => value !== undefined && typeof value !== "string")) {
+        throw new MarketoError(`Marketo returned program token ${index + 1} with an unexpected shape.`, {
+          operation: path,
+        });
+      }
+      return {
+        name: optionalString(token.name),
+        type: optionalString(token.type),
+        value: optionalString(token.value),
+      };
+    });
   }
 
   async getProgramMembers(
@@ -2807,12 +2833,6 @@ export type RawTagType = {
 };
 
 export type RawToken = { name?: string; type?: string; value?: string };
-
-/** The folder envelope the tokens endpoint wraps each program's tokens in. */
-export type RawTokenFolder = {
-  folder?: { type?: string; value?: number };
-  tokens?: RawToken[];
-};
 
 export type RawCampaign = {
   id?: number;
