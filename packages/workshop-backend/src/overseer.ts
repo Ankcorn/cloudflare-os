@@ -3692,6 +3692,12 @@ class OverseerImpl implements AgentHooks {
       throw new Error("The chat's code is being actively edited; please retry.");
     }
 
+    // The promotions below (gadgets and binding edges) are the moment provisional bindings become
+    // visible to "use" collaborators, i.e. can widen the "use" verification scope. Snapshot the
+    // scope here to diff after them (see severUseScopeWidening; a promotion covering only
+    // already-in-scope connections widens nothing and severs nobody).
+    let useScopeBefore = this.useScopeGatekeeperIds();
+
     // Promote provisional gadgets whose creation is covered by this merge: accepting the chat's
     // changes through `mergeThrough` makes them permanent workspace members. Each covered
     // creation sits on an unmerged, unreverted "changes" message at `pending.sequence` (a
@@ -3723,6 +3729,13 @@ class OverseerImpl implements AgentHooks {
         this.storage.gadgets.put(gadget);
       }
     }
+
+    // Enforce any "use" scope widening the promotions caused. Started here -- still inside the
+    // synchronous mutation tail, so the draining marks land before anything can interleave with
+    // the promoted edges -- but awaited only at the end, keeping the writes below atomic.
+    let severDrain = this.severUseScopeWidening(
+        [...this.useScopeGatekeeperIds()].filter(id => !useScopeBefore.has(id)),
+        "Gadget restarted because accepted changes bound new connections.");
 
     // Fast-forward each committed gadget's head.
     for (let {gadgetId, commitId} of commits) {
@@ -3812,6 +3825,7 @@ class OverseerImpl implements AgentHooks {
       interaction_type: "code_merged",
     });
 
+    await severDrain;
     return {outcome: "merged"};
   }
 
@@ -4458,9 +4472,16 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "gatekeeper": {
-        let client = new GatekeeperClientImpl<any>(
-            this, target.id, this.getGatekeeperFacet(target.id), caller);
-        return client.openSession();
+        let open = () => {
+          let client = new GatekeeperClientImpl<any>(
+              this, target.id, this.getGatekeeperFacet(target.id), caller);
+          return client.openSession();
+        };
+        // If this gatekeeper just entered "use" scope, hold the open until the stale sessions'
+        // drain settles (see severUseScopeWidening). Await rather than throw: the gadget facet is
+        // shared with the owner, and the drain is about one worker<->DO round trip.
+        let draining = this.#drainingGatekeepers.get(target.id);
+        return draining ? draining.then(open) : open();
       }
 
       default:
@@ -5107,6 +5128,81 @@ class OverseerImpl implements AgentHooks {
       });
       await this.scheduleRevocationRestart(reason);
     }
+  }
+
+  // Gatekeepers that just entered "use" scope and whose stale sessions are still draining, each
+  // mapped to the promise that resolves when its drain settles. startGatekeeperSession() awaits
+  // the entry before opening a gatekeeper session -- the only route a "use" session reaches a
+  // gatekeeper -- which closes the hop window between the widening write landing and the severed
+  // sessions actually dying.
+  #drainingGatekeepers = new Map<number, Promise<void>>();
+
+  // The gatekeeper ids currently in "use" observer scope: vendor-backed connections bound by some
+  // non-provisional gadget. Mirrors #inScopeGatekeepers("use"), except that a legacy record with
+  // no creationSpec is skipped rather than thrown on: this feeds the widening diff around the
+  // owner's own bind/merge writes, which must not start failing on a legacy workspace (where
+  // verification -- and thus any collaborator open -- already fails on its own).
+  useScopeGatekeeperIds(): Set<number> {
+    let boundIds = new Set<WorkpieceId>();
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.pending) continue;
+      for (let [, edge] of this.visibleBindings(gadget)) {
+        boundIds.add(edge.target);
+      }
+    }
+    let result = new Set<number>();
+    for (let gk of this.storage.gatekeepers.list()) {
+      if (!gk.creationSpec || !("vendorId" in gk.creationSpec)) continue;
+      if (boundIds.has(gk.id)) result.add(gk.id);
+    }
+    return result;
+  }
+
+  // After writes that brought gatekeepers into "use" scope (a permanent bind, a merge promoting
+  // pending edges or gadgets), sever the stale "use" collaborator sessions and hold the newly
+  // in-scope gatekeepers unreachable until those sessions have drained.
+  //
+  // Unlike addGatekeeper() -- which simply publishes its record after the drain -- the widening
+  // writes here can't be held back (a merge's promotions land in one atomic batch with its
+  // commits), so the hop window is closed with the #drainingGatekeepers mark instead. The marks
+  // are set synchronously, so a caller invoking this in the same synchronous block as its
+  // widening writes gets them marked before anything can interleave.
+  //
+  // `widenedIds` must be the diff of useScopeGatekeeperIds() across the writes: a rebind of an
+  // already-in-scope connection widens nothing and must sever nobody. Build sessions are never
+  // severed here -- a bound connection has been in "build" scope since its creation, so a bind
+  // widens nothing for them.
+  severUseScopeWidening(widenedIds: number[], reason: string): Promise<void> {
+    if (widenedIds.length === 0) return Promise.resolve();
+    let drain = Promise.withResolvers<void>();
+    for (let id of widenedIds) {
+      this.#drainingGatekeepers.set(id, drain.promise);
+    }
+    return (async () => {
+      try {
+        await this.severCollaboratorSessions("use", reason);
+      } finally {
+        drain.resolve();
+        for (let id of widenedIds) {
+          if (this.#drainingGatekeepers.get(id) === drain.promise) {
+            this.#drainingGatekeepers.delete(id);
+          }
+        }
+      }
+    })();
+  }
+
+  // bindWorkpiece() plus the use-scope widening enforcement, for the async callers that create
+  // permanent binding edges. bindWorkpiece() itself stays synchronous (chat-provisional binds
+  // must land atomically with their chat-log message and are invisible to "use" until promotion,
+  // where mergeChanges() runs this same diff).
+  async bindWorkpieceAndSeverWidened(
+      gadgetId: WorkpieceId, name: string, target: WorkpieceId): Promise<void> {
+    let before = this.useScopeGatekeeperIds();
+    this.bindWorkpiece(gadgetId, name, target);
+    let widened = [...this.useScopeGatekeeperIds()].filter(id => !before.has(id));
+    await this.severUseScopeWidening(widened,
+        "Gadget restarted because a connection was newly bound to a gadget.");
   }
 
   // Last timestamp generated by getChatTimestamp(), if it has been called during this session.
@@ -11023,7 +11119,9 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
 
   async bind(name: string, target: WorkpieceId, chatId?: number): Promise<void> {
     if (chatId === undefined) {
-      this.impl.bindWorkpiece(this.id, name, target);
+      // A permanent bind can bring the target into "use" observer scope, so it goes through the
+      // widening-enforcing wrapper.
+      await this.impl.bindWorkpieceAndSeverWidened(this.id, name, target);
       return;
     }
 
