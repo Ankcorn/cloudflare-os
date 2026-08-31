@@ -2931,6 +2931,10 @@ describe("activity normalization", () => {
       { sinceDate: new Date(), activityTypeIds: [0] },
       { sinceDate: new Date(), activityTypeIds: [1.5] },
       { sinceDate: new Date(), activityTypeIds: ["1" as never] },
+      { sinceDate: new Date(), activityTypeIds: [1], maxResults: 0 },
+      { sinceDate: new Date(), activityTypeIds: [1], maxResults: -1 },
+      { sinceDate: new Date(), activityTypeIds: [1], maxResults: 1.5 },
+      { sinceDate: new Date(), activityTypeIds: [1], maxResults: 301 },
     ]) await expect(Promise.resolve().then(() => session.getActivities(query))).rejects.toThrow();
     expect(calls).toBe(0);
     expect(notes).toEqual([]);
@@ -3522,6 +3526,45 @@ function clientReturning(...envelopes: unknown[]) {
   });
   return { client: new MarketoClient(ORIGIN, { getToken: async () => "t" }), calls };
 }
+
+describe("provider result identities", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  let listingReads: [string, (client: MarketoClient) => Promise<unknown>][] = [
+    ["static lists", client => client.getLists()],
+    ["program browse", client => client.getProgramPage(200)],
+    ["program name lookup", client => client.getProgramsByName("Program")],
+    ["smart campaigns", client => client.getCampaigns()],
+    ["activity types", client => client.getActivityTypes()],
+  ];
+
+  it.each(listingReads)("rejects malformed and duplicate ids from %s", async (_label, read) => {
+    for (let result of [
+      [{ name: "Missing" }],
+      [{ id: 0, name: "Zero" }],
+      [{ id: -1, name: "Negative" }],
+      [{ id: 1.5, name: "Fractional" }],
+      [{ id: Number.MAX_SAFE_INTEGER + 1, name: "Unsafe" }],
+      [{ id: 7, name: "First" }, { id: 7, name: "Duplicate" }],
+    ]) {
+      let error = await read(clientReturning({ success: true, result }).client).catch(value => value);
+      expect(error).toBeInstanceOf(MarketoError);
+    }
+  });
+
+  it.each([
+    ["static list", (client: MarketoClient) => client.getList(7)],
+    ["program", (client: MarketoClient) => client.getProgram(7)],
+    ["campaign", (client: MarketoClient) => client.getCampaign(7)],
+    ["smart campaign", (client: MarketoClient) => client.getSmartCampaign(7)],
+  ])("rejects malformed ids from exact %s reads", async (_label, read) => {
+    for (let id of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      let error = await read(clientReturning({ success: true, result: [{ id }] }).client)
+        .catch(value => value);
+      expect(error).toBeInstanceOf(MarketoError);
+    }
+  });
+});
 
 function businessContext(client: Partial<MarketoClient>, submitted: MarketoActionInput[] = [], notes: string[] = []) {
   let access = new Map<string, "read-write" | "read-only" | "unavailable">();

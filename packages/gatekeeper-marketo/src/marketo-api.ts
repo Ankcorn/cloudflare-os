@@ -106,6 +106,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function validateProviderIds<T>(items: T[], label: string, operation: string): asserts items is (T & { id: number })[] {
+  let ids = new Set<number>();
+  for (let item of items) {
+    if (!isRecord(item) || !Number.isSafeInteger(item.id) || (item.id as number) <= 0) {
+      throw new MarketoError(`Marketo returned a ${label} with an unexpected shape.`, { operation });
+    }
+    let id = item.id as number;
+    if (ids.has(id)) {
+      throw new MarketoError(`Marketo returned duplicate ${label} id ${id}.`, { operation });
+    }
+    ids.add(id);
+  }
+}
+
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -1628,13 +1642,16 @@ export class MarketoClient {
   /** One page of static lists (Marketo caps a page at 300). */
   async getLists(filter: NameFilter = {}): Promise<MarketoPage<RawList>> {
     let { pageToken, ...name } = filter;
-    return await this.#page<RawList>("/v1/lists.json", {
+    let path = "/v1/lists.json";
+    let page = await this.#page<RawList>(path, {
       query: {
         batchSize: 300,
         ...nameQuery(name),
         ...(pageToken ? { nextPageToken: pageToken } : {}),
       },
     });
+    validateProviderIds(page.result, "static list", path);
+    return page;
   }
 
   async getList(listId: number): Promise<RawList | undefined> {
@@ -1646,7 +1663,7 @@ export class MarketoClient {
         operation: path,
       });
     }
-    let list = result[0];
+    let list = result[0] as RawList & { id: number };
     if ([list.name, list.programName, list.workspaceName, list.createdAt, list.updatedAt]
       .some(value => value !== undefined && typeof value !== "string")) {
       throw new MarketoError("Marketo returned a static list with an unexpected shape.", {
@@ -1689,9 +1706,12 @@ export class MarketoClient {
    * {@link getProgramsByName} or {@link getProgram} for direct lookup.
    */
   async getProgramPage(limit: number): Promise<RawProgram[]> {
-    return await this.#result<RawProgram>("/asset/v1/programs.json", {
+    let path = "/asset/v1/programs.json";
+    let result = await this.#result<RawProgram>(path, {
       query: { maxReturn: Math.min(limit, ASSET_PAGE_MAX), offset: 0 },
     });
+    validateProviderIds(result, "program", path);
+    return result;
   }
 
   /**
@@ -1702,9 +1722,12 @@ export class MarketoClient {
    * unique, so use the API maximum to avoid hiding valid matches.
    */
   async getProgramsByName(name: string): Promise<RawProgram[]> {
-    return await this.#result<RawProgram>("/asset/v1/program/byName.json", {
+    let path = "/asset/v1/program/byName.json";
+    let result = await this.#result<RawProgram>(path, {
       query: { name, maxReturn: ASSET_PAGE_MAX },
     });
+    validateProviderIds(result, "program", path);
+    return result;
   }
 
   async getProgram(programId: number): Promise<RawProgram | undefined> {
@@ -1716,8 +1739,8 @@ export class MarketoClient {
         operation: path,
       });
     }
-    let program = result[0];
-    if (program === undefined) return undefined;
+    if (result.length === 0) return undefined;
+    let program = result[0] as RawProgram & { id: number };
     let stringFields = [program.name, program.description, program.type, program.channel,
       program.status, program.workspace, program.startDate, program.endDate, program.url,
       program.createdAt, program.updatedAt];
@@ -1932,7 +1955,8 @@ export class MarketoClient {
   async getCampaigns(filter: NameFilter & { requestableOnly?: boolean } = {})
       : Promise<MarketoPage<RawCampaign>> {
     let { pageToken, requestableOnly, ...name } = filter;
-    return await this.#page<RawCampaign>("/v1/campaigns.json", {
+    let path = "/v1/campaigns.json";
+    let page = await this.#page<RawCampaign>(path, {
       query: {
         batchSize: 300,
         ...nameQuery(name),
@@ -1941,13 +1965,15 @@ export class MarketoClient {
         ...(pageToken ? { nextPageToken: pageToken } : {}),
       },
     });
+    validateProviderIds(page.result, "smart campaign", path);
+    return page;
   }
 
   async getCampaign(campaignId: number): Promise<RawCampaign | undefined> {
     let path = `/v1/campaigns/${campaignId}.json`;
     let result = await this.#result<RawCampaign>(path);
     if (result.length === 0) return undefined;
-    if (result.length !== 1 || result[0]?.id !== campaignId) {
+    if (result.length !== 1 || !isRecord(result[0]) || result[0].id !== campaignId) {
       throw new MarketoError(`Marketo returned the wrong campaign for exact read ${campaignId}.`, {
         operation: path,
       });
@@ -1960,7 +1986,7 @@ export class MarketoClient {
     let path = `/asset/v1/smartCampaign/${campaignId}.json`;
     let result = await this.#result<RawCampaignAsset>(path);
     if (result.length === 0) return undefined;
-    if (result.length !== 1 || result[0]?.id !== campaignId) {
+    if (result.length !== 1 || !isRecord(result[0]) || result[0].id !== campaignId) {
       throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${campaignId}.`, {
         operation: path,
       });
@@ -2098,7 +2124,10 @@ export class MarketoClient {
   // Activities
 
   async getActivityTypes(): Promise<RawActivityType[]> {
-    return await this.#result<RawActivityType>("/v1/activities/types.json");
+    let path = "/v1/activities/types.json";
+    let result = await this.#result<RawActivityType>(path);
+    validateProviderIds(result, "activity type", path);
+    return result;
   }
 
   /** Marketo requires a paging token anchored at a start time before reading activities. */

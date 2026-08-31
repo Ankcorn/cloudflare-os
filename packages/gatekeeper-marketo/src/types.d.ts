@@ -349,7 +349,7 @@ export type MarketoActivityQuery = {
    * **10** per query — pick the types you actually need rather than querying broadly.
    */
   activityTypeIds: number[];
-  /** Max activities to return in this page (Marketo caps page size). */
+  /** Max activities to return in this page, from 1 through Marketo's maximum of 300. */
   maxResults?: number;
 };
 

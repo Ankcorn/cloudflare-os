@@ -106,9 +106,9 @@ export function retainSessionContext<T extends SessionContext>(ctx: T): T {
 // Normalization
 
 /** Map a raw program to the summary shape handed to callers. */
-function normalizeProgram(program: RawProgram, fallbackId = -1): MarketoProgramSummary {
+function normalizeProgram(program: RawProgram): MarketoProgramSummary {
   return {
-    id: program.id ?? fallbackId,
+    id: program.id!,
     name: program.name ?? "",
     description: program.description,
     type: program.type,
@@ -130,9 +130,9 @@ function normalizeProgramTag(tag: RawProgramTag): MarketoProgramTag[] {
     : [];
 }
 
-function normalizeList(list: RawList, fallbackId = -1): MarketoStaticListSummary {
+function normalizeList(list: RawList): MarketoStaticListSummary {
   return {
-    id: list.id ?? fallbackId,
+    id: list.id!,
     name: list.name ?? "",
     programName: list.programName,
     workspaceName: list.workspaceName,
@@ -150,14 +150,11 @@ function isListNameMatch(list: RawList, filter: MarketoNameFilter): boolean {
     name.includes(filter.nameContains.trim().toLocaleLowerCase());
 }
 
-function normalizeCampaign(
-  campaign: RawCampaign & RawCampaignAsset,
-  fallbackId = "-1",
-): MarketoSmartCampaignSummary {
+function normalizeCampaign(campaign: RawCampaign & RawCampaignAsset): MarketoSmartCampaignSummary {
   let folderId = campaign.folder?.id ?? campaign.folder?.value;
   let folderType = campaign.folder?.type?.toLowerCase();
   return {
-    id: campaign.id ?? fallbackId,
+    id: campaign.id!,
     name: campaign.name ?? "",
     description: campaign.description,
     type: campaign.type,
@@ -512,6 +509,10 @@ function validateActivityQuery(query: MarketoActivityQuery): void {
   if (query.activityTypeIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
     throw new Error("query.activityTypeIds must contain only positive numeric Marketo activity type ids.");
   }
+  if (query.maxResults !== undefined &&
+      (!Number.isSafeInteger(query.maxResults) || query.maxResults < 1 || query.maxResults > MAX_FILTER_VALUES)) {
+    throw new Error(`query.maxResults must be an integer between 1 and ${MAX_FILTER_VALUES}.`);
+  }
 }
 
 function validateActivity(raw: RawActivity, requestedTypeIds: Set<number>): void {
@@ -716,7 +717,7 @@ export class MarketoStaticListImpl extends RpcTarget {
       `Read Marketo list "${list.name ?? this.#listId}"`,
       `Read metadata for static list **${list.name ?? this.#listId}** (\`${this.#listId}\`).`,
     );
-    return normalizeList(list, this.#listId);
+    return normalizeList(list);
   }
 
   async getMembers(
@@ -899,7 +900,7 @@ export class MarketoProgramImpl extends RpcTarget {
       if (physicalId === undefined) throw notFound("program", id);
       let program = await (await this.#ctx.client()).getProgram(physicalId);
       if (!program) throw notFound("program", id);
-      summary = normalizeProgram(program, physicalId);
+      summary = normalizeProgram(program);
     }
 
     for (let action of this.#actions(id, beforeId)) {
@@ -1212,7 +1213,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       if (campaign.id !== physicalId) {
         throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${physicalId}.`);
       }
-      summary = normalizeCampaign(campaign, id);
+      summary = normalizeCampaign(campaign);
     }
 
     for (let action of this.#actions(id, beforeId)) {
@@ -1382,7 +1383,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     }
     this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
-    let summary = normalizeCampaign(campaign, this.#campaignId);
+    let summary = normalizeCampaign(campaign);
     if (campaign.isTriggerable !== true) {
       throw new Error(
         `Smart campaign "${summary.name}" (${summary.id}) is not configured with a ` +
@@ -1410,7 +1411,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     }
     this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
-    let summary = normalizeCampaign(campaign, this.#campaignId);
+    let summary = normalizeCampaign(campaign);
     if (campaign.type?.toLowerCase() !== "batch") {
       throw new Error(
         `Smart campaign "${summary.name}" (${summary.id}) is not a batch campaign, so it cannot ` +
@@ -1995,7 +1996,7 @@ export class MarketoSessionImpl extends RpcTarget {
       `Read metadata for **${types.length}** activity type(s).`,
     );
     return types.map(type => ({
-      id: type.id ?? -1,
+      id: type.id!,
       name: type.name ?? "",
       description: type.description,
       attributes: type.attributes?.map(attr => ({
