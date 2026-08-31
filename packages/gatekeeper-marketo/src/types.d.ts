@@ -1036,7 +1036,8 @@ export interface MarketoSession {
    * returned; if omitted, a small default set is used.
    *
    * `values` must be non-empty and individual values cannot contain commas; an empty list throws
-   * rather than returning `[]`.
+   * rather than returning `[]`. The complete result is limited to 1,000 records; narrow the
+   * filter when more records match.
    */
   findPeople(
     field: string,
@@ -1652,7 +1653,8 @@ export interface MarketoCustomObject {
    * `integer` field for `"abc"`, or for a number above 2147483647, is an error, not an empty
    * result. Check the field's `dataType` in `describe()` and format accordingly. A well-typed
    * value that matches nothing returns `[]`. Individual values cannot contain commas because
-   * Marketo reserves commas as its filter-value delimiter.
+   * Marketo reserves commas as its filter-value delimiter. The complete result is limited to
+   * 1,000 records; narrow the filter when more records match.
    */
   query(
     field: string,

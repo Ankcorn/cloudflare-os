@@ -3248,6 +3248,49 @@ describe("filter reads", () => {
       .rejects.toThrow("invalid filter paging state");
   });
 
+  it("bounds complete filter result materialization without authorizing a partial read", async () => {
+    let page = (start: number, length: number, moreResult: boolean) => ({
+      success: true,
+      result: Array.from({ length }, (_, offset) => ({ id: start + offset })),
+      moreResult,
+      ...(moreResult ? { nextPageToken: `after-${start + length}` } : {}),
+    });
+    let complete = clientReturning(
+      page(0, 300, true),
+      page(300, 300, true),
+      page(600, 300, true),
+      page(900, 100, false),
+    ).client;
+    await expect(complete.getLeads("email", ["a@example.com"]))
+      .resolves.toHaveLength(1_000);
+
+    let overflow = clientReturning(
+      page(0, 300, true),
+      page(300, 300, true),
+      page(600, 300, true),
+      page(900, 101, false),
+    ).client;
+    let notes: string[] = [];
+    let error = await new MarketoCustomObjectImpl(stubContext(overflow, notes), "orderStatus")
+      .query("sourceID", ["1"])
+      .catch(error => error);
+    expect(error).toBeInstanceOf(MarketoError);
+    expect(error.message).toMatch(/more than 1000 filtered records; narrow the filter/);
+    expect(error.operation).toBe("/v1/customobjects/orderStatus.json");
+    expect(notes).toEqual([]);
+  });
+
+  it("rejects empty filter continuation pages", async () => {
+    let empty = clientReturning({
+      success: true,
+      result: [],
+      moreResult: true,
+      nextPageToken: "next",
+    }).client;
+    await expect(empty.getLeads("email", ["a@example.com"]))
+      .rejects.toThrow(/invalid filter paging state/);
+  });
+
   it("continues filter reads beyond 100 pages rather than discarding valid results", async () => {
     let paged = clientReturning(...Array.from({ length: 101 }, (_, index) => ({
       success: true,

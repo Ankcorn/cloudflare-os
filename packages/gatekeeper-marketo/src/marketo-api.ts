@@ -275,6 +275,9 @@ export const ASSET_PAGE_MAX = 200;
 /** Marketo's documented ceiling on `filterValues` for the person and custom-object reads. */
 export const MAX_FILTER_VALUES = 300;
 
+/** Bound aggregate filter reads that cannot expose pagination without breaking their public API. */
+const MAX_FILTER_RESULTS = 1_000;
+
 /**
  * Request options for a filter-style read, sent as a form body rather than a query string.
  *
@@ -681,9 +684,15 @@ export class MarketoClient {
         ...params,
         ...(nextPageToken === undefined ? {} : { nextPageToken }),
       }));
+      if (result.length + page.result.length > MAX_FILTER_RESULTS) {
+        throw new MarketoError(
+          `Marketo returned more than ${MAX_FILTER_RESULTS} filtered records; narrow the filter.`,
+          { operation: path },
+        );
+      }
       result.push(...page.result);
       if (!page.moreResult) return result;
-      if (!page.nextPageToken || seenTokens.has(page.nextPageToken)) {
+      if (page.result.length === 0 || !page.nextPageToken || seenTokens.has(page.nextPageToken)) {
         throw new MarketoError("Marketo returned invalid filter paging state.", { operation: path });
       }
       seenTokens.add(page.nextPageToken);
