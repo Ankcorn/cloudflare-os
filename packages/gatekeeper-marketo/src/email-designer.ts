@@ -663,13 +663,16 @@ abstract class DesignerAssetImpl extends RpcTarget {
     let physical = this.ctx.resolveDesignerId(this.assetId);
     if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
     let raw = await (await this.ctx.client()).getDesignerAssetUsedBy(path(this.kind), { assetId: physical, pageIndex, pageSize, type: "all" });
+    if (raw.pageDetails?.currentPage !== pageIndex + 1 || raw.pageDetails.pageSize !== pageSize) {
+      throw new Error(`Marketo returned used-by page ${String(raw.pageDetails?.currentPage)} with page size ${String(raw.pageDetails?.pageSize)} when page ${pageIndex} with page size ${pageSize} was requested.`);
+    }
     let items: MarketoDesignerUsedBy[] = raw.result.flatMap(item => item.id === undefined ? [] : [{
       id: String(item.id), name: item.name ?? "", channel: item.channel, contentType: item.contentType,
       workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
       folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
     }]);
     await this.ctx.observe(`Read dependencies for Marketo designer ${this.kind}`, `Read ${items.length} direct dependency record(s) for ${this.assetId}.`);
-    return { items, totalItems: raw.pageDetails?.totalItems, pageIndex: raw.pageDetails?.currentPage ?? pageIndex, pageSize: raw.pageDetails?.pageSize ?? pageSize };
+    return { items, totalItems: raw.pageDetails.totalItems, pageIndex, pageSize };
   }
 }
 

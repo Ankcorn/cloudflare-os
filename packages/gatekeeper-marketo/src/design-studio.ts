@@ -1301,10 +1301,14 @@ abstract class TemplateImpl extends AssetImpl {
         let response = this.kind === "emailTemplate"
           ? await client.getEmailTemplateContent(id)
           : await client.getLandingPageTemplateContent(id);
-        if (response && readId(response) !== id) {
+        if (!response) throw new Error(`Marketo did not return template content for ${id}.`);
+        if (readId(response) !== id) {
           throw new Error(`Marketo returned template content ${readId(response)} when ${id} was requested.`);
         }
-        content = response?.content;
+        if (typeof response.content !== "string") {
+          throw new Error(`Marketo returned template content ${id} without a valid content field.`);
+        }
+        content = response.content;
       }
     }
     for (let action of actionsFor(this.ctx, this.kind, this.id)) if (action.type === "designContent") content = action.content;

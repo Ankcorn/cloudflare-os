@@ -1214,7 +1214,7 @@ describe("new Email Designer", () => {
     let base = emailDesignerContext({
       getDesignerAssetUsedBy: async () => ({
         result: [{ id: 9, name: "Newsletter", contentType: "email", appData: { workspaceId: 1001 } }],
-        pageDetails: { totalItems: 1, currentPage: 0, pageSize: 20 },
+        pageDetails: { totalItems: 1, currentPage: 1, pageSize: 20 },
       }),
     });
     base.ctx.observe = async (title, description) => { notes.push(title, description); };
@@ -1225,6 +1225,31 @@ describe("new Email Designer", () => {
       pageSize: 20,
     });
     expect(notes.join(" ")).toMatch(/dependency/);
+  });
+
+  it("correlates one-based used-by provider pages before observing", async () => {
+    for (let pageDetails of [
+      { totalItems: 1, currentPage: 2, pageSize: 10 },
+      { totalItems: 1, currentPage: 3, pageSize: 20 },
+      undefined,
+    ]) {
+      let notes: string[] = [];
+      let base = emailDesignerContext({
+        getDesignerAssetUsedBy: async () => ({ result: [], pageDetails }),
+      });
+      base.ctx.observe = async (title, description) => { notes.push(title, description); };
+      await expect(new MarketoDesignerFragmentImpl(base.ctx, "fragment-x").getUsedBy(2, 10))
+        .rejects.toThrow(/when page 2 with page size 10 was requested/);
+      expect(notes).toEqual([]);
+    }
+
+    let { ctx } = emailDesignerContext({
+      getDesignerAssetUsedBy: async () => ({
+        result: [], pageDetails: { totalItems: 0, currentPage: 3, pageSize: 10 },
+      }),
+    });
+    await expect(new MarketoDesignerFragmentImpl(ctx, "fragment-x").getUsedBy(2, 10))
+      .resolves.toMatchObject({ pageIndex: 2, pageSize: 10 });
   });
 
   it("preserves server pagination and forwards filters without pending actions", async () => {
@@ -2483,6 +2508,23 @@ describe("Design Studio simulation", () => {
 
     await expect(studio.getEmailTemplate("31").getContent()).rejects.toThrow(/32 when 31 was requested/);
     await expect(studio.getLandingPageTemplate("41").getContent()).rejects.toThrow(/42 when 41 was requested/);
+  });
+
+  it("requires exact template reads to contain string content before observing", async () => {
+    for (let response of [undefined, { id: 31 }, { id: 31, content: null }]) {
+      let notes: string[] = [];
+      let { ctx } = designContext({ getEmailTemplateContent: async () => response as never });
+      ctx.observe = async (title, description) => { notes.push(title, description); };
+      await expect(new MarketoDesignStudioImpl(ctx).getEmailTemplate("31").getContent())
+        .rejects.toThrow(/template content|content field/);
+      expect(notes).toEqual([]);
+    }
+
+    let notes: string[] = [];
+    let { ctx } = designContext({ getLandingPageTemplateContent: async () => ({ id: 41, content: "" }) });
+    ctx.observe = async (title, description) => { notes.push(title, description); };
+    await expect(new MarketoDesignStudioImpl(ctx).getLandingPageTemplate("41").getContent()).resolves.toBe("");
+    expect(notes.join(" ")).toMatch(/template content/);
   });
 
   it("blocks deleted content reads without fetching the source", async () => {
