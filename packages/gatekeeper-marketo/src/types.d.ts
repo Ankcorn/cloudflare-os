@@ -1553,7 +1553,7 @@ export interface MarketoProgram {
     fields?: string[],
     pageToken?: string,
   ): Promise<{
-    members: (MarketoPersonRecord & { membership?: MarketoProgramMembership })[];
+    members: (MarketoPersonRecord & { membership: MarketoProgramMembership })[];
     moreResult: boolean;
     nextPageToken?: string;
   }>;

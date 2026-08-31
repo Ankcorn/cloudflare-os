@@ -5620,6 +5620,47 @@ describe("program membership normalization", () => {
     return (await program.getMembers()).members;
   }
 
+  it("accepts Adobe's documented membership shape at the client boundary", async () => {
+    let response = clientReturning({
+      success: true,
+      result: [RAW],
+      moreResult: true,
+      nextPageToken: "next-members",
+    });
+
+    await expect(response.client.getProgramMembers(9900, ["id", "email"])).resolves.toMatchObject({
+      result: [RAW],
+      moreResult: true,
+      nextPageToken: "next-members",
+    });
+    let url = new URL(response.calls[0]!);
+    expect(url.pathname).toBe("/rest/v1/leads/programs/9900.json");
+    expect(url.searchParams.get("fields")).toBe("id,email");
+  });
+
+  it("rejects membership rows not owned by the requested program before observation", async () => {
+    for (let membership of [
+      undefined,
+      { id: 9901 },
+      { id: 9900, progressionStatus: { malformed: true } },
+      { id: 9900, reachedSuccess: "yes" },
+    ]) {
+      let client = clientReturning({
+        success: true,
+        result: [{ id: 4242, membership }],
+        moreResult: false,
+      }).client;
+      let notes: string[] = [];
+      let program = new MarketoProgramImpl(stubContext(client, notes), 9900);
+
+      let error = await program.getMembers().catch(error => error);
+      expect(error).toBeInstanceOf(MarketoError);
+      expect(error.message).toMatch(/membership for the wrong program 9900/);
+      expect(error.operation).toBe("/v1/leads/programs/9900.json");
+      expect(notes).toEqual([]);
+    }
+  });
+
   it("exposes one documented membership object, not Marketo's raw one", async () => {
     let [member] = await members();
     expect(member.membership).toEqual({

@@ -239,6 +239,7 @@ function normalizeCustomObjectField(
 
 /** Marketo's raw membership block, as returned nested in a program member record. */
 type RawProgramMembership = {
+  id: number;
   progressionStatus?: string;
   progressionStatusType?: string;
   reachedSuccess?: boolean;
@@ -707,7 +708,7 @@ export class MarketoProgramImpl extends RpcTarget {
     fields?: string[],
     pageToken?: string,
   ): Promise<{
-    members: (MarketoPersonRecord & { membership?: MarketoProgramMembership })[];
+    members: (MarketoPersonRecord & { membership: MarketoProgramMembership })[];
     moreResult: boolean;
     nextPageToken?: string;
   }> {
@@ -727,11 +728,8 @@ export class MarketoProgramImpl extends RpcTarget {
       members: page.result.map(lead => {
         // Marketo nests membership inside the person record; replace it with the normalized shape
         // rather than passing the raw one through alongside.
-        let { membership, ...person } = lead as RawLead & { membership?: RawProgramMembership };
-        return {
-          ...normalizeLead(person),
-          ...(membership ? { membership: normalizeMembership(membership) } : {}),
-        };
+        let { membership, ...person } = lead as RawLead & { membership: RawProgramMembership };
+        return { ...normalizeLead(person), membership: normalizeMembership(membership) };
       }),
       moreResult: page.moreResult,
       nextPageToken: page.nextPageToken,

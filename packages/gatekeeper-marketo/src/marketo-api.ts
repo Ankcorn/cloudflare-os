@@ -1725,12 +1725,29 @@ export class MarketoClient {
     fields?: string[],
     nextPageToken?: string,
   ): Promise<MarketoPage<RawLead>> {
-    return await this.#page<RawLead>(`/v1/leads/programs/${programId}.json`, {
+    let path = `/v1/leads/programs/${programId}.json`;
+    let page = await this.#page<RawLead>(path, {
       query: {
         ...(fields?.length ? { fields: fields.join(",") } : {}),
         ...(nextPageToken ? { nextPageToken } : {}),
       },
     });
+    if (page.result.some(lead => {
+      if (!isRecord(lead) || !isRecord(lead.membership) || lead.membership.id !== programId) {
+        return true;
+      }
+      let membership = lead.membership;
+      return [membership.progressionStatus, membership.progressionStatusType,
+        membership.membershipDate, membership.updatedAt]
+        .some(value => value !== undefined && typeof value !== "string") ||
+        [membership.reachedSuccess, membership.acquiredBy, membership.isExhausted]
+          .some(value => value !== undefined && typeof value !== "boolean");
+    })) {
+      throw new MarketoError(`Marketo returned membership for the wrong program ${programId}.`, {
+        operation: path,
+      });
+    }
+    return page;
   }
 
   /**
