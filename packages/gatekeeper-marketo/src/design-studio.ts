@@ -1126,13 +1126,16 @@ async function simulatedSummary(
   if (creation?.type === "designClone") {
     assertAcyclicCloneSource(ctx, kind, id, pending);
     let source = await simulatedSummary(beforeAction(ctx, creation.id), kind, creation.sourceId);
+    for (let field of ["id", "name", "status", "workspaceName", "createdAt", "updatedAt", "url"]) {
+      delete source[field];
+    }
+    let workspaceName = await destinationWorkspace(ctx, creation.parent, pending);
     summary = {
       ...source,
       id: creation.provisionalId,
       name: creation.name,
       status: "draft",
-      createdAt: undefined,
-      updatedAt: undefined,
+      ...(workspaceName === undefined ? {} : { workspaceName }),
     };
   } else if (creation) summary = creationSummary(creation);
   else {
@@ -1151,6 +1154,27 @@ async function simulatedSummary(
   let overlaid = overlaySummary(summary, actionsFor(ctx, kind, id, pending));
   if (!overlaid) throw new Error(`Marketo ${kind} ${id} was deleted.`);
   return overlaid;
+}
+
+async function destinationWorkspace(
+  ctx: DesignStudioContext,
+  parent: { id: string; type: "Folder" | "Program" },
+  pending: DesignStudioAction[],
+): Promise<string | undefined> {
+  if (parent.type === "Folder") {
+    let creation = findCreation(ctx, "folder", parent.id, pending);
+    if (creation) return await destinationWorkspace(ctx, creation.parent, pending);
+  }
+  let physical = ctx.resolveId(parent.id);
+  if (physical === undefined) return undefined;
+  let client = await ctx.client();
+  if (typeof client.getFolder !== "function") return undefined;
+  let raw = await client.getFolder(physical, parent.type);
+  if (!raw) return undefined;
+  if (readId(raw) !== physical) {
+    throw new Error(`Marketo returned asset ${readId(raw)} when ${physical} was requested.`);
+  }
+  return normalizeFolder(raw).workspaceName;
 }
 
 async function readAsset(client: MarketoClient, kind: DesignStudioAssetKind, id: number, folderType?: "folder" | "program") {

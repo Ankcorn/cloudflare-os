@@ -251,6 +251,50 @@ describe("Email Designer pending-state simulation", () => {
     expect(requestedPages).toEqual([0, 1, 0, 1]);
   });
 
+  it("materializes the same bounded collection before paginating equal sort keys", async () => {
+    let requestedPages: number[] = [];
+    let listCall = -1;
+    let orders = [["d", "b", "a", "c"], ["c", "a", "b", "d"]];
+    let { ctx } = context({
+      filterDesignerAssets: async (_kind, options) => {
+        let page = options.pageIndex ?? 0;
+        if (page === 0) listCall++;
+        requestedPages.push(page);
+        let ids = orders[listCall]!.slice(page * 2, page * 2 + 2);
+        return {
+          items: ids.map(id => ({ id, name: "Same", status: "draft", appData: { workspaceId: "1" } })),
+          totalItems: 4, currentPage: page, pageSize: 2,
+        };
+      },
+      getDesignerAsset: async () => ({
+        id: "pending", name: "Same", status: "draft", appData: { workspaceId: "1" },
+      }),
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+    let designer = new MarketoEmailDesignerImpl(ctx);
+
+    let first = await designer.listEmails("1", { pageSize: 2, sortKey: "name" });
+    let second = await designer.listEmails("1", { pageIndex: 1, pageSize: 2, sortKey: "name" });
+
+    expect(first.items.map(item => item.id)).toEqual(["a", "b"]);
+    expect(second.items.map(item => item.id)).toEqual(["c", "d"]);
+    expect(requestedPages).toEqual([0, 1, 0, 1]);
+  });
+
+  it("rejects oversized sorted pending collections without aggregating them", async () => {
+    let requestedPages: number[] = [];
+    let { ctx } = context({
+      filterDesignerAssets: async (_kind, options) => {
+        requestedPages.push(options.pageIndex ?? 0);
+        return { items: [], totalItems: 1_001, currentPage: 0, pageSize: 50 };
+      },
+      getDesignerAsset: async () => ({ id: "pending", name: "Pending", appData: { workspaceId: "1" } }),
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+
+    await expect(new MarketoEmailDesignerImpl(ctx).listEmails("1", { sortKey: "name" }))
+      .rejects.toThrow(/cannot exceed 1000 assets/);
+    expect(requestedPages).toEqual([0]);
+  });
+
   it("rejects a wrong page while collecting pages for a pending overlay", async () => {
     let { ctx } = context({
       filterDesignerAssets: async (_kind, options) => {

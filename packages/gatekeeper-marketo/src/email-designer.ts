@@ -42,6 +42,7 @@ const MAX_TEXT_BYTES = 512 * 1024;
 const MAX_ARRAY_ITEMS = 100;
 const MAX_DURABLE_PAYLOAD_BYTES = 1280 * 1024;
 const DESIGNER_PAGE_SIZE = 50;
+const MAX_SORTED_DESIGNER_ITEMS = 1_000;
 
 function path(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
@@ -409,6 +410,9 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         : action.targetId;
       if (!candidateIds.some(existing => same(this.#ctx, existing, candidate))) candidateIds.push(candidate);
     }
+    if (options.sortKey !== undefined && candidateIds.length > MAX_SORTED_DESIGNER_ITEMS) {
+      throw new Error(`Sorted pending Designer lists cannot exceed ${MAX_SORTED_DESIGNER_ITEMS} assets.`);
+    }
     let candidates = new Map<string, {
       logicalId: string;
       item: Record<string, unknown> | null;
@@ -443,9 +447,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     let exhausted = false;
     let upstreamPage = 0;
     let end = (pageIndex + 1) * pageSize;
-    while (!exhausted && (options.sortKey === undefined
-      ? merged.length < end
-      : merged.length < end + candidates.size)) {
+    while (!exhausted && (options.sortKey !== undefined || merged.length < end)) {
       let requestedPage = upstreamPage++;
       let raw = await client.filterDesignerAssets(path(kind), {
         ...query, pageIndex: requestedPage, pageSize: DESIGNER_PAGE_SIZE,
@@ -454,6 +456,10 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         throw new Error(`Marketo returned designer page ${String(raw.currentPage)} when page ${requestedPage} was requested.`);
       }
       upstreamTotal ??= raw.totalItems;
+      if (options.sortKey !== undefined && raw.totalItems !== undefined &&
+          raw.totalItems > MAX_SORTED_DESIGNER_ITEMS) {
+        throw new Error(`Sorted pending Designer lists cannot exceed ${MAX_SORTED_DESIGNER_ITEMS} assets.`);
+      }
       let page = raw.items ?? [];
       let seenBefore = seen.size;
       for (let item of page) {
@@ -475,6 +481,9 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
           merged.push(normalized);
         }
       }
+      if (options.sortKey !== undefined && seen.size > MAX_SORTED_DESIGNER_ITEMS) {
+        throw new Error(`Sorted pending Designer lists cannot exceed ${MAX_SORTED_DESIGNER_ITEMS} assets.`);
+      }
       let effectivePageSize = raw.pageSize && raw.pageSize > 0 ? raw.pageSize : DESIGNER_PAGE_SIZE;
       if (page.length >= effectivePageSize && seen.size === seenBefore) {
         throw new Error("Marketo returned invalid designer paging state.");
@@ -485,6 +494,9 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     if (options.sortKey !== undefined) {
       merged.push(...matchingCandidates.flatMap(([key, candidate]) =>
         candidate.isCreation || !options.isCreatedByMe || encounteredCandidates.has(key) ? [candidate.item!] : []));
+      if (merged.length > MAX_SORTED_DESIGNER_ITEMS) {
+        throw new Error(`Sorted pending Designer lists cannot exceed ${MAX_SORTED_DESIGNER_ITEMS} assets.`);
+      }
       merged.sort((left, right) => compareDesignerItems(left, right, options.sortKey!, options.sortOrder));
     } else if (exhausted) {
       for (let [key, candidate] of matchingCandidates) {

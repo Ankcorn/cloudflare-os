@@ -50,7 +50,13 @@ describe("classic Design Studio regressions", () => {
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-02T00:00:00Z",
     };
-    let { ctx } = context({ getEmails: async () => [], getEmail: async () => source });
+    let { ctx } = context({
+      getEmails: async () => [],
+      getEmail: async () => source,
+      getFolder: async () => ({
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Destination workspace",
+      }),
+    });
     let studio = new MarketoDesignStudioImpl(ctx);
     await studio.getEmail("21").updateMetadata({
       description: "Pending description",
@@ -68,12 +74,42 @@ describe("classic Design Studio regressions", () => {
         fromEmail: "marketing@example.com",
         replyEmail: "reply@example.com",
         preHeader: "Preview",
-        workspaceName: "Default",
+        workspaceName: "Destination workspace",
         status: "draft",
-        createdAt: undefined,
-        updatedAt: undefined,
       }),
     );
+    let clone = (await studio.listEmails()).items.find(item => item.id === "~1")!;
+    expect(clone).not.toHaveProperty("createdAt");
+    expect(clone).not.toHaveProperty("updatedAt");
+  });
+
+  it("does not copy generated source identity into pending clone summaries", async () => {
+    let { ctx } = context({
+      getLandingPages: async () => [],
+      getLandingPage: async () => ({
+        id: 21,
+        name: "Source",
+        description: "Inherited",
+        status: "approved",
+        workspace: "Source workspace",
+        computedUrl: "https://example.com/source",
+      }),
+      getFolder: async () => ({
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Destination workspace",
+      }),
+    });
+    let studio = new MarketoDesignStudioImpl(ctx);
+
+    let clone = await studio.cloneLandingPage("21", "Clone", { id: "10", type: "folder" });
+    let detail = await clone.describe();
+    let listed = (await studio.listLandingPages()).items[0]!;
+
+    expect(detail).toMatchObject({
+      id: "~1", name: "Clone", description: "Inherited", status: "draft",
+      workspaceName: "Destination workspace",
+    });
+    expect(detail).not.toHaveProperty("url");
+    expect(listed).not.toHaveProperty("url");
   });
 
   it("uses depth-aware folder browsing for exact-name queries", async () => {
