@@ -2514,6 +2514,23 @@ describe("activity normalization", () => {
       "activity-guid", 2, 3, -1, 4, -1, -1, -1, -1,
     ]);
   });
+
+  it("rejects activities outside an explicitly requested person scope before observing", async () => {
+    let notes: string[] = [];
+    let person = new MarketoPersonImpl(stubContext({
+      getPagingToken: async () => "page",
+      getActivities: async () => ({
+        result: [{ id: 1, leadId: 8 }],
+        moreResult: false,
+      }),
+    }, notes), { field: "id", value: "7" });
+
+    await expect(person.getActivities({
+      sinceDate: new Date("2026-08-31T00:00:00Z"),
+      activityTypeIds: [1],
+    })).rejects.toThrow(/outside the requested person scope/);
+    expect(notes).toEqual([]);
+  });
 });
 
 describe("person field normalization", () => {
@@ -2542,6 +2559,66 @@ describe("person field normalization", () => {
       getSearchablePersonFields: async () => new Set(["email"]),
     }));
     expect((await session.describePersonFields()).map(f => f.name)).toEqual(["email"]);
+  });
+
+  it("requires canonical positive decimal id lookups", async () => {
+    for (let value of ["0", "-1", "01", "+1", " 1", "1 ", "0x10", "1e2", "9007199254740992"]) {
+      let person = new MarketoPersonImpl(stubContext({}), { field: "id", value });
+      await expect(person.read()).rejects.toThrow(/canonical positive base-10 safe integer/);
+    }
+  });
+
+  it("correlates exact lookup rows and returns only requested fields plus id", async () => {
+    let requested: string[] | undefined;
+    let person = new MarketoPersonImpl(stubContext({
+      getLeads: async (_field, _values, fields) => {
+        requested = fields;
+        return [
+          { id: 1, email: "other@example.com", firstName: "Wrong" },
+          { id: 2, email: "right@example.com", firstName: "Right", secret: "hidden" },
+        ];
+      },
+    }), { field: "email", value: "right@example.com" });
+
+    await expect(person.read(["firstName"])).resolves.toEqual({ id: 2, firstName: "Right" });
+    expect(requested).toEqual(["id", "firstName", "email"]);
+  });
+
+  it("rejects invalid provider person ids", async () => {
+    for (let id of [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      let person = new MarketoPersonImpl(stubContext({
+        getLeads: async () => [{ id, email: "right@example.com" }],
+      }), { field: "email", value: "right@example.com" });
+      await expect(person.read()).rejects.toThrow(/person with an invalid id/);
+    }
+  });
+
+  it("resolves writes from an exact lookup row rather than row zero", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({
+      getLeads: async () => [
+        { id: 1, email: "other@example.com" },
+        { id: 2, email: "right@example.com" },
+      ],
+    });
+    ctx.submit = async action => void submitted.push(action);
+    let person = new MarketoPersonImpl(ctx, { field: "email", value: "right@example.com" });
+
+    await person.update({ firstName: "Updated" });
+    expect(submitted).toEqual([{ type: "updatePerson", personId: 2, fields: { firstName: "Updated" } }]);
+  });
+
+  it("projects person search and list members to requested fields", async () => {
+    let raw = { id: 7, email: "person@example.com", firstName: "Person", secret: "hidden" };
+    let session = new MarketoSessionImpl(stubContext({ getLeads: async () => [raw] }));
+    let list = new MarketoStaticListImpl(stubContext({
+      getListMembers: async () => ({ result: [raw], moreResult: false }),
+    }), 55);
+
+    await expect(session.findPeople("email", [raw.email], ["email"]))
+      .resolves.toEqual([{ id: 7, email: raw.email }]);
+    await expect(list.getMembers(["firstName"]))
+      .resolves.toMatchObject({ members: [{ id: 7, firstName: "Person" }] });
   });
 });
 
@@ -3014,6 +3091,42 @@ describe("page normalization", () => {
     expect(page.moreResult).toBe(false);
     expect(page.nextPageToken).toBeUndefined();
   });
+
+  it("rejects moreResult true without a non-empty nextPageToken", async () => {
+    for (let nextPageToken of [undefined, ""]) {
+      let { client } = clientReturning({ success: true, result: [], moreResult: true, nextPageToken });
+      await expect(client.getActivities({ nextPageToken: "t", activityTypeIds: [1] }))
+        .rejects.toThrow(/moreResult without a valid nextPageToken/);
+    }
+  });
+
+  it("rejects malformed nextPageToken types", async () => {
+    for (let nextPageToken of [7, null, {}, []]) {
+      let { client } = clientReturning({ success: true, result: [{ id: 1 }], nextPageToken });
+      await expect(client.getLists()).rejects.toThrow(/nextPageToken with an unexpected shape/);
+    }
+  });
+});
+
+describe("standard response envelopes", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("requires an explicit boolean success field", async () => {
+    for (let success of [undefined, "true", 1, null]) {
+      let { client } = clientReturning({ success, result: [] });
+      await expect(client.getCampaigns()).rejects.toThrow(/unreadable response/);
+    }
+  });
+
+  it("preserves provider errors from success false envelopes", async () => {
+    let { client } = clientReturning({
+      success: false,
+      errors: [{ code: "1003", message: "Invalid value" }],
+    });
+    let error = await client.getCampaigns().catch(value => value);
+    expect(error).toBeInstanceOf(MarketoError);
+    expect(error).toMatchObject({ code: "1003", isProviderRejection: true });
+  });
 });
 
 describe("custom object query envelopes", () => {
@@ -3408,7 +3521,7 @@ describe("filter reads", () => {
       success: true, result: [{ id: 1 }], moreResult: true,
     }).client;
     await expect(missing.getLeads("email", ["a@example.com"]))
-      .rejects.toThrow("invalid filter paging state");
+      .rejects.toThrow("moreResult without a valid nextPageToken");
 
     let repeated = clientReturning(
       { success: true, result: [{ id: 1 }], moreResult: true, nextPageToken: "same" },
@@ -3912,6 +4025,13 @@ describe("fully declined actions do not count as applied", () => {
     expect(() => assertApplied([{}], 1)).toThrow(/outcome is uncertain/);
     expect(() => assertApplied([{ id: "garbage" } as never], 1)).toThrow(/outcome is uncertain/);
     expect(() => assertApplied([null as never], 1)).toThrow(/outcome is uncertain/);
+    expect(() => assertApplied([1 as never], 1)).toThrow(/outcome is uncertain/);
+    expect(() => assertApplied([{ status: "skipped", reasons: [null] } as never], 1))
+      .toThrow(/outcome is uncertain/);
+    expect(() => assertApplied([{ status: "skipped", reasons: [{ code: 1018 }] } as never], 1))
+      .toThrow(/outcome is uncertain/);
+    expect(() => assertApplied([{ id: 7, status: 42 } as never], 1)).toThrow(/outcome is uncertain/);
+    expect(() => assertApplied([{ id: 7, marketoGUID: "" } as never], 1)).toThrow(/outcome is uncertain/);
   });
 });
 
@@ -4465,7 +4585,7 @@ describe("Email Designer action lifecycle", () => {
       let stub = await emailDesignerActionGatekeeper([action]);
 
       await runInDurableObject(stub, async (instance, state) => {
-        await expect(instance.applyAction(1)).rejects.toThrow(/without confirming success/);
+        await expect(instance.applyAction(1)).rejects.toThrow(/unreadable response/);
         expect(state.storage.kv.get("applying:1")).toBe("uncertain");
         expect(state.storage.kv.get("pending:1")).toBeDefined();
       });
@@ -5642,6 +5762,30 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get(`applying:${action.id}`)).toBe("nothing-changed");
       expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBe(true);
       await expect(instance.applyAction(action.id)).rejects.toThrow(/nothing was changed/);
+    });
+  });
+
+  it.each([
+    [[null]],
+    [[7]],
+    [[{ status: "skipped", reasons: [null] }]],
+    [[{ status: "skipped", reasons: [{ code: 1018 }] }]],
+  ])("keeps malformed business-object results uncertain", async result => {
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result }));
+    let action: BusinessObjectAction = {
+      id: 21, type: "businessObjectDelete", kind: "company",
+      records: [{ id: 7 }], matchBy: "idField", changedFields: ["id"],
+    };
+    let stub = await actionGatekeeper(action);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      let error = await instance.applyAction(action.id).catch(value => value);
+      expect(error.name).toBe("MarketoActionResultError");
+      expect(error.disposition).toBe("uncertain");
+      expect(state.storage.kv.get(`applying:${action.id}`)).toBe("uncertain");
+      expect(state.storage.kv.get("businessObjects:nativeCrmReadOnly")).toBeUndefined();
     });
   });
 

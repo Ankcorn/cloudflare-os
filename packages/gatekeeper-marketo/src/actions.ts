@@ -334,17 +334,34 @@ export function expectedActionResults(action: MarketoAction): number {
   }
 }
 
-/** Fail unless Marketo reports a complete, non-skipped result. */
-export function assertApplied(results: RawSyncResult[], expected = results.length): void {
+/** Validate the per-record outcomes returned for an action. */
+export function assertActionResults(
+  results: unknown[],
+  expected = results.length,
+): asserts results is RawSyncResult[] {
   if (
     results.length === 0 ||
     results.length !== expected ||
     results.some(result => {
-      if (!result || typeof result !== "object") return true;
+      if (!result || typeof result !== "object" || Array.isArray(result)) return true;
+      let value = result as Record<string, unknown>;
+      if (value.id !== undefined && (!Number.isSafeInteger(value.id) || Number(value.id) <= 0)) return true;
+      if (value.marketoGUID !== undefined &&
+          (typeof value.marketoGUID !== "string" || value.marketoGUID.length === 0)) return true;
+      if (value.status !== undefined && (typeof value.status !== "string" || value.status.length === 0)) return true;
+      if (value.reasons !== undefined && (
+        !Array.isArray(value.reasons) ||
+        value.reasons.some(reason => {
+          if (!reason || typeof reason !== "object" || Array.isArray(reason)) return true;
+          let detail = reason as Record<string, unknown>;
+          return detail.code !== undefined && typeof detail.code !== "string" ||
+            detail.message !== undefined && typeof detail.message !== "string";
+        })
+      )) return true;
       return !(
-        (Number.isSafeInteger(result.id) && Number(result.id) > 0) ||
-        (typeof result.marketoGUID === "string" && result.marketoGUID.length > 0) ||
-        (typeof result.status === "string" && result.status.length > 0)
+        (Number.isSafeInteger(value.id) && Number(value.id) > 0) ||
+        (typeof value.marketoGUID === "string" && value.marketoGUID.length > 0) ||
+        (typeof value.status === "string" && value.status.length > 0)
       );
     })
   ) {
@@ -354,6 +371,11 @@ export function assertApplied(results: RawSyncResult[], expected = results.lengt
       "uncertain",
     );
   }
+}
+
+/** Fail unless Marketo reports a complete, non-skipped result. */
+export function assertApplied(results: unknown[], expected = results.length): void {
+  assertActionResults(results, expected);
   let skipped = results.filter(r => r.status === "skipped");
   if (skipped.length === 0) return;
   let codes = [

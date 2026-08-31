@@ -45,6 +45,7 @@ import {
 import { makeClient, tokenCacheStub } from "./token-cache";
 import { logger } from "./logger";
 import {
+  assertActionResults,
   assertApplied,
   describeAction,
   expectedActionResults,
@@ -1066,6 +1067,7 @@ export class MarketoGatekeeperImpl
       throw e;
     }
     try {
+      if (results) assertActionResults(results, expectedActionResults(pending.action));
       if (results && isBusinessObjectAction(pending.action) && pending.action.kind !== "namedAccount" &&
           results.some(result => result.status === "skipped" && result.reasons?.some(reason => reason.code === "1018"))) {
         this.#setBusinessObjectAccess(pending.action.kind, "read-only");

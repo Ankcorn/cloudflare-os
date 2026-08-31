@@ -73,11 +73,11 @@ export class MarketoError extends Error {
 /** Marketo's standard response envelope. */
 type MarketoEnvelope<T> = {
   requestId?: string;
-  success?: boolean;
+  success: boolean;
   result?: T;
   errors?: { code?: string; message?: string }[];
   moreResult?: boolean;
-  nextPageToken?: string;
+  nextPageToken?: unknown;
   pageDetails?: unknown;
 };
 
@@ -117,7 +117,7 @@ function providerFailure(message: string, status: number | undefined, code?: str
 
 function parseEnvelope<T>(value: unknown): MarketoEnvelope<T> | undefined {
   if (!isRecord(value)) return undefined;
-  if (value.success !== undefined && typeof value.success !== "boolean") return undefined;
+  if (typeof value.success !== "boolean") return undefined;
   if (value.moreResult !== undefined && typeof value.moreResult !== "boolean") return undefined;
   if (value.errors !== undefined && !Array.isArray(value.errors)) return undefined;
 
@@ -133,7 +133,7 @@ function parseEnvelope<T>(value: unknown): MarketoEnvelope<T> | undefined {
     result: value.result as T | undefined,
     errors,
     moreResult: value.moreResult,
-    nextPageToken: optionalString(value.nextPageToken),
+    nextPageToken: value.nextPageToken,
     pageDetails: value.pageDetails,
   };
 }
@@ -431,7 +431,7 @@ export class MarketoClient {
 
       let raw = await response.json().catch(() => undefined);
       if (options?.withoutRestPrefix && response.ok && Array.isArray(raw)) {
-        return { result: raw as T };
+        return { success: true, result: raw as T };
       }
       let envelope = parseEnvelope<T>(raw);
       if (!envelope) {
@@ -667,11 +667,22 @@ export class MarketoClient {
         operation: path,
       });
     }
-    let moreResult = envelope.moreResult ?? (result.length > 0 && Boolean(envelope.nextPageToken));
+    if (envelope.nextPageToken !== undefined && typeof envelope.nextPageToken !== "string") {
+      throw new MarketoError("Marketo returned a nextPageToken with an unexpected shape.", {
+        operation: path,
+      });
+    }
+    let token = envelope.nextPageToken;
+    if (envelope.moreResult === true && !token) {
+      throw new MarketoError("Marketo returned moreResult without a valid nextPageToken.", {
+        operation: path,
+      });
+    }
+    let moreResult = envelope.moreResult ?? (result.length > 0 && token !== undefined && token.length > 0);
     return {
       result: result as T[],
       moreResult,
-      nextPageToken: moreResult ? envelope.nextPageToken : undefined,
+      nextPageToken: moreResult ? token : undefined,
     };
   }
 
@@ -1961,7 +1972,7 @@ export class MarketoClient {
     let envelope = await this.#request<never>("/v1/activities/pagingtoken.json", {
       query: { sinceDatetime: toMarketoDate(sinceDate) },
     });
-    if (!envelope.nextPageToken) {
+    if (typeof envelope.nextPageToken !== "string" || !envelope.nextPageToken) {
       throw new MarketoError("Marketo did not return an activities paging token.");
     }
     return envelope.nextPageToken;

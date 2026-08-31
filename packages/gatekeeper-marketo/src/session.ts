@@ -262,8 +262,30 @@ function normalizeMembership(raw: RawProgramMembership): MarketoProgramMembershi
   };
 }
 
-function normalizeLead(raw: RawLead): MarketoPersonRecord {
-  return { ...raw, id: typeof raw.id === "number" ? raw.id : -1 };
+function personId(raw: RawLead): number {
+  if (!Number.isSafeInteger(raw.id) || Number(raw.id) <= 0) {
+    throw new MarketoError("Marketo returned a person with an invalid id.");
+  }
+  return Number(raw.id);
+}
+
+function normalizeLead(raw: RawLead, fields: readonly string[]): MarketoPersonRecord {
+  let result: MarketoPersonRecord = { id: personId(raw) };
+  for (let field of fields) {
+    if (field !== "id" && Object.hasOwn(raw, field)) result[field] = raw[field];
+  }
+  return result;
+}
+
+function parsePersonId(value: string): number | undefined {
+  if (!/^[1-9]\d*$/.test(value)) return undefined;
+  let parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function matchesPersonLookup(lead: RawLead, lookup: MarketoPersonLookup): boolean {
+  if (lookup.field === "id") return personId(lead) === parsePersonId(lookup.value);
+  return Object.hasOwn(lead, lookup.field) && String(lead[lookup.field]) === lookup.value;
 }
 
 function normalizeActivity(raw: RawActivity): MarketoActivity {
@@ -321,6 +343,11 @@ async function readActivities(
     leadIds,
     batchSize: query.maxResults,
   });
+  if (leadIds && page.result.some(activity => !leadIds.includes(activity.leadId ?? -1))) {
+    throw new MarketoError("Marketo returned an activity outside the requested person scope.", {
+      operation: "/v1/activities.json",
+    });
+  }
   await ctx.observe(
     `Read ${page.result.length} Marketo activities`,
     `Read **${page.result.length}** activity record(s) ${scopeLabel} since ` +
@@ -349,8 +376,9 @@ export class MarketoPersonImpl extends RpcTarget {
 
   async #resolveId(): Promise<number | undefined> {
     if (this.#lookup.field === "id") {
-      let parsed = Number(this.#lookup.value);
-      if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+      let parsed = parsePersonId(this.#lookup.value);
+      if (parsed !== undefined) return parsed;
+      throw new Error("A person id lookup must be a canonical positive base-10 safe integer.");
     }
     await this.#ctx.observe(
       "Resolve a Marketo person",
@@ -359,20 +387,26 @@ export class MarketoPersonImpl extends RpcTarget {
     let leads = await (await this.#ctx.client()).getLeads(
       this.#lookup.field,
       [this.#lookup.value],
-      ["id"],
+      ["id", this.#lookup.field],
     );
-    let id = leads[0]?.id;
-    return typeof id === "number" ? id : undefined;
+    for (let lead of leads) personId(lead);
+    let id = leads.find(lead => matchesPersonLookup(lead, this.#lookup))?.id;
+    return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : undefined;
   }
 
   async read(fields?: string[]): Promise<MarketoPersonRecord | null> {
     let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    if (this.#lookup.field === "id" && parsePersonId(this.#lookup.value) === undefined) {
+      throw new Error("A person id lookup must be a canonical positive base-10 safe integer.");
+    }
+    let wireFields = [...new Set([...requested, this.#lookup.field])];
     let leads = await (await this.#ctx.client()).getLeads(
       this.#lookup.field,
       [this.#lookup.value],
-      requested,
+      wireFields,
     );
-    let lead = leads[0];
+    for (let candidate of leads) personId(candidate);
+    let lead = leads.find(candidate => matchesPersonLookup(candidate, this.#lookup));
     await this.#ctx.observe(
       lead ? `Read Marketo person ${lead.id}` : "Read Marketo person (no match)",
       lead
@@ -380,7 +414,7 @@ export class MarketoPersonImpl extends RpcTarget {
             `(matched \`${this.#lookup.field}\` = \`${this.#lookup.value}\`).`
         : `No Marketo person matched \`${this.#lookup.field}\` = \`${this.#lookup.value}\`.`,
     );
-    return lead ? normalizeLead(lead) : null;
+    return lead ? normalizeLead(lead, requested) : null;
   }
 
   async update(fields: MarketoPersonInput): Promise<void> {
@@ -474,7 +508,7 @@ export class MarketoStaticListImpl extends RpcTarget {
         `fields \`${requested.join("`, `")}\`.`,
     );
     return {
-      members: page.result.map(normalizeLead),
+      members: page.result.map(lead => normalizeLead(lead, requested)),
       moreResult: page.moreResult,
       nextPageToken: page.nextPageToken,
     };
@@ -729,7 +763,7 @@ export class MarketoProgramImpl extends RpcTarget {
         // Marketo nests membership inside the person record; replace it with the normalized shape
         // rather than passing the raw one through alongside.
         let { membership, ...person } = lead as RawLead & { membership: RawProgramMembership };
-        return { ...normalizeLead(person), membership: normalizeMembership(membership) };
+        return { ...normalizeLead(person, requested), membership: normalizeMembership(membership) };
       }),
       moreResult: page.moreResult,
       nextPageToken: page.nextPageToken,
@@ -1272,7 +1306,7 @@ export class MarketoSessionImpl extends RpcTarget {
       `Searched people where \`${field}\` matches ${values.length} value(s); ` +
         `**${leads.length}** record(s) returned with fields \`${requested.join("`, `")}\`.`,
     );
-    return leads.map(normalizeLead);
+    return leads.map(lead => normalizeLead(lead, requested));
   }
 
   async createOrUpdatePeople(
