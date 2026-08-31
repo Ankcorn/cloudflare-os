@@ -1,4 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownCodeBlock, markdownJsonCodeBlock, markdownText } from "./approval-markdown";
 import type {
   MarketoClient,
   MarketoFolderRef,
@@ -104,18 +105,13 @@ function label(kind: DesignStudioAssetKind): string {
   return kind.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`);
 }
 
-function escapeMarkdown(value: string): string {
-  return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
-}
-
 function codeBlock(value: unknown): string {
-  let text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return (text ?? "undefined").split("\n").map(line => `    ${line}`).join("\n");
+  return typeof value === "string" ? markdownCodeBlock(value) : markdownJsonCodeBlock(value);
 }
 
 function details(values: Record<string, unknown>): string {
   return Object.entries(values).filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${escapeMarkdown(key)}:\n\n${codeBlock(value)}`).join("\n\n");
+    .map(([key, value]) => `${markdownText(key)}:\n\n${codeBlock(value)}`).join("\n\n");
 }
 
 function createDetails(input: DesignStudioCreateInput): string {
@@ -158,7 +154,7 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
       return {
         ...base,
         awaitDecision: false,
-        title: `Update Marketo ${label(action.asset)} ${escapeMarkdown(target ?? "")}`,
+        title: `Update Marketo ${label(action.asset)} ${target ?? ""}`,
         description: `Update Design Studio metadata on:\n\n${codeBlock(target)}\n\n${details(action.patch)}`,
       };
     case "designContent":
@@ -183,16 +179,16 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         ...base,
         // Discarding a draft exposes approved content that cannot be reconstructed locally.
         awaitDecision: action.operation === "discardDraft",
-        title: `${escapeMarkdown(action.operation)} Marketo ${label(action.asset)} ${escapeMarkdown(target ?? "")}`,
+        title: `${action.operation} Marketo ${label(action.asset)} ${target ?? ""}`,
         description: action.operation === "delete"
           ? `Permanently delete Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}`
-          : `${escapeMarkdown(action.operation)} Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}`,
+          : `${action.operation} Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}`,
       };
     case "designDeleteFolder":
       return {
         ...base,
         awaitDecision: false,
-        title: `Delete Marketo folder ${escapeMarkdown(target ?? "")}`,
+        title: `Delete Marketo folder ${target ?? ""}`,
         description: `Permanently delete empty Design Studio folder:\n\n${codeBlock(target)}`,
       };
   }

@@ -6,11 +6,64 @@ import {
   MAX_APPROVAL_DESCRIPTION_BYTES,
   type MarketoAction,
 } from "../src/actions";
+import { markdownCodeBlock, markdownText } from "../src/approval-markdown";
 import { INSTANCE_RESOURCE, PROGRAM_RESOURCE } from "../src/config";
 import { designerCloneSnapshot } from "../src/email-designer-actions";
 import { matchesProgramApprovalDates } from "../src/program-actions";
 
 describe("Marketo approval completeness", () => {
+  it("preserves HTML-looking, entity, multiline, and backtick values in safe Markdown", () => {
+    let value = "<target> &nbsp; *literal*\n# second `line`\n```";
+    expect(markdownText(value)).toBe(
+      "&lt;target&gt; &amp;nbsp; \\*literal\\*\n\\# second \\`line\\`\n\\`\\`\\`",
+    );
+    expect(markdownCodeBlock(value)).toBe(
+      "    <target> &nbsp; *literal*\n    # second `line`\n    ```",
+    );
+
+    let textDescriptions = [
+      describeAction({
+        id: 1, type: "listAdd", listId: 7, listName: value, personIds: [1],
+      }).description,
+      describeAction({
+        id: 2, type: "campaignMetadata", targetId: "8", campaignName: value,
+        patch: { name: value, description: value },
+      }).description,
+      describeAction({
+        id: 3, type: "programUpdate", targetId: "9", programName: value,
+        patch: { name: value, description: value, tags: [{ tagType: value, tagValue: value }] },
+      }).description,
+    ];
+    for (let description of textDescriptions) {
+      expect(description).toContain("&lt;target&gt;");
+      expect(description).toContain("&amp;nbsp;");
+      expect(description).toContain("\\# second \\`line\\`");
+      expect(description).not.toContain("<target>");
+    }
+
+    let codeDescriptions = [
+      describeAction({
+        id: 4, type: "businessObjectUpsert", kind: "company",
+        records: [{ externalCompanyId: value, company: value }], matchBy: "dedupeFields",
+        action: "createOrUpdate", changedFields: [value],
+      }).description,
+      describeAction({
+        id: 5, type: "designContent", asset: "emailTemplate", targetId: "10", content: value,
+      }).description,
+      describeAction({
+        id: 6, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
+        body: { name: value, description: value, data: { html: value } },
+      }).description,
+    ];
+    for (let description of codeDescriptions) {
+      expect(description).toContain("<target>");
+      expect(description).toContain("&nbsp;");
+      expect(description).toContain("`");
+      expect(description).not.toMatch(/more|\.\.\.|…/);
+    }
+    expect(codeDescriptions[1]).toContain(markdownCodeBlock(value));
+  });
+
   it("advertises the complete instance and program authority", () => {
     expect(INSTANCE_RESOURCE.description).toMatch(/business objects.*Design Studio/i);
     expect(PROGRAM_RESOURCE.description).toMatch(/metadata.*tags.*dates.*approve.*delete/i);

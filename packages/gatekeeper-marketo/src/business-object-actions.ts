@@ -1,4 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownCode, markdownJsonCodeBlock, markdownText } from "./approval-markdown";
 import type { MarketoClient, RawSyncResult } from "./marketo-api";
 import type { MarketoBusinessObjectKind, MarketoBusinessObjectMatchBy, MarketoUpsertAction } from "./types";
 
@@ -31,17 +32,6 @@ function label(kind: MarketoBusinessObjectKind): string {
   })[kind];
 }
 
-function escapeMarkdown(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    .replace(/[\\`*_{}[\]()#+.!|~-]/g, "\\$&");
-}
-
-function codeBlock(value: unknown): string {
-  let serialized = JSON.stringify(value, null, 2);
-  if (serialized === undefined) serialized = String(value);
-  return serialized.split("\n").map(line => `    ${line}`).join("\n");
-}
-
 function matchFields(action: BusinessObjectAction): string[] {
   if (action.matchBy === "idField") {
     return [action.kind === "opportunity" || action.kind === "opportunityRole" || action.kind === "namedAccount"
@@ -60,7 +50,7 @@ function matchFields(action: BusinessObjectAction): string[] {
 function targetDetails(action: BusinessObjectAction): string {
   let keys = matchFields(action);
   return `\n\nTargets and submitted values:\n\n${action.records.map((record, index) =>
-    `Record ${index + 1} (${keys.map(key => escapeMarkdown(key)).join(" + ")}):\n\n${codeBlock(record)}`
+    `Record ${index + 1} (${keys.map(key => markdownText(key)).join(" + ")}):\n\n${markdownJsonCodeBlock(record)}`
   ).join("\n\n")}`;
 }
 
@@ -68,7 +58,7 @@ function targetDetails(action: BusinessObjectAction): string {
 export function describeBusinessObjectAction(action: BusinessObjectAction): ActionDescription {
   let object = label(action.kind);
   let count = action.records.length;
-  let fields = action.changedFields.length ? action.changedFields.map(field => `\`${escapeMarkdown(field)}\``).join(", ") : "none";
+  let fields = action.changedFields.length ? action.changedFields.map(markdownCode).join(", ") : "none";
   let operation = action.type === "businessObjectUpsert" ? "Create/update" : "Permanently delete";
   let executionMode = action.type === "businessObjectUpsert"
     ? `\n\nExecution mode: **${action.action}**.`

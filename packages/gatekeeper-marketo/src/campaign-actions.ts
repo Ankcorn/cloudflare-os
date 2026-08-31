@@ -1,4 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownCode, markdownText } from "./approval-markdown";
 import type { MarketoClient, MarketoFolderRef, RawAssetId, RawCampaignAsset } from "./marketo-api";
 
 /** Approval-queued smart-campaign management operations. */
@@ -48,16 +49,8 @@ export function isCampaignAction(action: { type: string }): action is CampaignAc
   return action.type.startsWith("campaign") && action.type !== "campaignTrigger" && action.type !== "campaignSchedule";
 }
 
-function escapeMarkdown(value: string): string {
-  return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
-}
-
-function code(value: string): string {
-  return `\`${escapeMarkdown(value)}\``;
-}
-
 function descriptionDetail(value: string): string {
-  return value === "" ? "clear the existing description" : escapeMarkdown(value);
+  return value === "" ? "clear the existing description" : markdownText(value);
 }
 
 /** Render a campaign-management action for human approval. */
@@ -69,9 +62,9 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         ...base,
         title: `Create Marketo smart campaign ${action.name}`,
         description:
-          `Create empty smart campaign **${escapeMarkdown(action.name)}** in ` +
-          `${action.parent.type.toLowerCase()} ${code(action.parent.id)}.` +
-          (action.description ? `\n\nDescription: ${escapeMarkdown(action.description)}` : "") +
+          `Create empty smart campaign **${markdownText(action.name)}** in ` +
+          `${action.parent.type.toLowerCase()} ${markdownCode(action.parent.id)}.` +
+          (action.description ? `\n\nDescription: ${markdownText(action.description)}` : "") +
           "\n\nMarketo creates an empty batch campaign; its smart list and flow must be configured in Marketo before it can run.",
       };
     case "campaignClone":
@@ -79,8 +72,8 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         ...base,
         title: `Clone Marketo smart campaign ${action.name}`,
         description:
-          `Clone smart campaign ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in ` +
-          `${action.parent.type.toLowerCase()} ${code(action.parent.id)}. The clone uses the source campaign's current smart-list rules and flow steps when dispatched.` +
+          `Clone smart campaign ${markdownCode(action.sourceId)} as **${markdownText(action.name)}** in ` +
+          `${action.parent.type.toLowerCase()} ${markdownCode(action.parent.id)}. The clone uses the source campaign's current smart-list rules and flow steps when dispatched.` +
           (action.description === undefined ? "" : `\n\nDescription: ${descriptionDetail(action.description)}`),
       };
     case "campaignMetadata":
@@ -88,8 +81,8 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         ...base,
         title: `Update Marketo smart campaign ${action.campaignName}`,
         description:
-          `Update smart campaign **${escapeMarkdown(action.campaignName)}** (${code(action.targetId)}) metadata:` +
-          (action.patch.name !== undefined ? `\n\n- Name: ${escapeMarkdown(action.patch.name)}` : "") +
+          `Update smart campaign **${markdownText(action.campaignName)}** (${markdownCode(action.targetId)}) metadata:` +
+          (action.patch.name !== undefined ? `\n\n- Name: ${markdownText(action.patch.name)}` : "") +
           (action.patch.description !== undefined
             ? `\n- Description: ${descriptionDetail(action.patch.description)}`
             : ""),
@@ -100,10 +93,10 @@ export function describeCampaignAction(action: CampaignAction): ActionDescriptio
         awaitDecision: action.operation === "activate",
         title: `${action.operation} Marketo smart campaign ${action.campaignName}`,
         description: action.operation === "activate"
-          ? `**Activate smart campaign ${escapeMarkdown(action.campaignName)} (${code(action.targetId)}).** Future people matching its triggers may immediately enter its flow, which can send messages or change data.`
+          ? `**Activate smart campaign ${markdownText(action.campaignName)} (${markdownCode(action.targetId)}).** Future people matching its triggers may immediately enter its flow, which can send messages or change data.`
           : action.operation === "delete"
-            ? `**Permanently delete smart campaign ${escapeMarkdown(action.campaignName)} (${code(action.targetId)}).** This cannot be undone.`
-            : `Deactivate smart campaign **${escapeMarkdown(action.campaignName)}** (${code(action.targetId)}) so future trigger matches no longer enter its flow.`,
+            ? `**Permanently delete smart campaign ${markdownText(action.campaignName)} (${markdownCode(action.targetId)}).** This cannot be undone.`
+            : `Deactivate smart campaign **${markdownText(action.campaignName)}** (${markdownCode(action.targetId)}) so future trigger matches no longer enter its flow.`,
       };
   }
 }

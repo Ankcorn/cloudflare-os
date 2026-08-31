@@ -4,6 +4,7 @@
 // Existing lead-database actions are not simulated. Design Studio actions are overlaid separately.
 
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownText } from "./approval-markdown";
 import type { MarketoClient, RawSyncResult } from "./marketo-api";
 import {
   describeDesignStudioAction,
@@ -92,16 +93,11 @@ export type MarketoActionInput = MarketoAction extends infer T
 /** Maximum UTF-8 size of the complete approval description submitted to the Workshop. */
 export const MAX_APPROVAL_DESCRIPTION_BYTES = 128 * 1024;
 
-function escapeMarkdown(value: string): string {
-  let controls = new Set("\\`*_{}[]()#+.!|>~-");
-  return [...value].map(character => controls.has(character) ? `\\${character}` : character).join("");
-}
-
 function fieldTable(fields: Record<string, unknown>): string {
   let entries = Object.entries(fields);
   if (entries.length === 0) return "_(no fields)_";
   return entries
-    .map(([key, value]) => `- ${escapeMarkdown(key)}: ${escapeMarkdown(JSON.stringify(value) ?? String(value))}`)
+    .map(([key, value]) => `- ${markdownText(key)}: ${markdownText(JSON.stringify(value) ?? String(value))}`)
     .join("\n");
 }
 
@@ -113,7 +109,7 @@ function recordDetails(records: Record<string, unknown>[]): string {
 
 function tokenDetails(tokens: { name: string; value: string }[]): string {
   return tokens
-    .map(token => `- ${escapeMarkdown(token.name)}: ${escapeMarkdown(JSON.stringify(token.value))}`)
+    .map(token => `- ${markdownText(token.name)}: ${markdownText(JSON.stringify(token.value))}`)
     .join("\n");
 }
 
@@ -134,7 +130,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Create/update ${action.records.length} ${action.records.length === 1 ? "person" : "people"} in Marketo`,
         description:
           `Write **${action.records.length}** person record(s) to Marketo using ` +
-          `${escapeMarkdown(action.upsertAction)}, matching on ${escapeMarkdown(action.lookupField)}.\n\n` +
+          `${markdownText(action.upsertAction)}, matching on ${markdownText(action.lookupField)}.\n\n` +
           recordDetails(action.records),
         implementsRevert: false,
       };
@@ -164,7 +160,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Add ${action.personIds.length} to list "${action.listName}"`,
         description:
           `Add **${action.personIds.length}** person(s) to static list ` +
-          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}`,
+          `**${markdownText(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}`,
         implementsRevert: false,
       };
 
@@ -174,7 +170,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Remove ${action.personIds.length} from list "${action.listName}"`,
         description:
           `Remove **${action.personIds.length}** person(s) from static list ` +
-          `**${escapeMarkdown(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}\n\n` +
+          `**${markdownText(action.listName)}** (${action.listId}).\n\nPerson ids: ${action.personIds.join(", ")}\n\n` +
           `Removing someone from a list can stop campaigns that depend on that membership.`,
         implementsRevert: false,
       };
@@ -184,8 +180,8 @@ export function describeAction(action: MarketoAction): ActionDescription {
         ...base,
         title: `Set ${action.personIds.length} to "${action.status}" in "${action.programName}"`,
         description:
-          `Set program membership status to **${escapeMarkdown(action.status)}** for **${action.personIds.length}** ` +
-          `person(s) in program **${escapeMarkdown(action.programName)}** (${action.programId}).\n\n` +
+          `Set program membership status to **${markdownText(action.status)}** for **${action.personIds.length}** ` +
+          `person(s) in program **${markdownText(action.programName)}** (${action.programId}).\n\n` +
           `Person ids: ${action.personIds.join(", ")}\n\n` +
           `Progression changes can trigger campaigns listening for that status.`,
         implementsRevert: false,
@@ -196,7 +192,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         ...base,
         title: `Run campaign ${action.campaignId} for ${action.personIds.length} people`,
         description:
-          `**Run the smart campaign "${escapeMarkdown(action.campaignName)}" (${action.campaignId}) immediately** ` +
+          `**Run the smart campaign "${markdownText(action.campaignName)}" (${action.campaignId}) immediately** ` +
           `against **${action.personIds.length}** person(s).\n\n` +
           `This executes the campaign's real flow steps, which may **send email or SMS to real ` +
           `people**, change field values, and trigger downstream campaigns. It cannot be undone.\n\n` +
@@ -212,7 +208,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         ...base,
         title: `Schedule campaign ${action.campaignId}`,
         description:
-          `**Schedule the smart campaign "${escapeMarkdown(action.campaignName)}" (${action.campaignId})** to run at ` +
+          `**Schedule the smart campaign "${markdownText(action.campaignName)}" (${action.campaignId})** to run at ` +
           `**${action.runAt}**.\n\n` +
           `When it runs it executes the campaign's real flow steps against its smart list, which may ` +
           `**send email or SMS to real people**. It cannot be undone from here once scheduled.` +
@@ -228,7 +224,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Write ${action.records.length} ${action.apiName} record(s)`,
         description:
           `Create or update **${action.records.length}** record(s) of custom object ` +
-          `${escapeMarkdown(action.apiName)}.\n\n${recordDetails(action.records)}`,
+          `${markdownText(action.apiName)}.\n\n${recordDetails(action.records)}`,
         implementsRevert: false,
       };
 
@@ -238,7 +234,7 @@ export function describeAction(action: MarketoAction): ActionDescription {
         title: `Delete ${action.records.length} ${action.apiName} record(s)`,
         description:
           `**Permanently delete ${action.records.length}** record(s) of custom object ` +
-          `${escapeMarkdown(action.apiName)} by ${action.deleteBy ?? "dedupeFields"}. This cannot be undone.\n\n` +
+          `${markdownText(action.apiName)} by ${action.deleteBy ?? "dedupeFields"}. This cannot be undone.\n\n` +
           recordDetails(action.records),
         implementsRevert: false,
       };

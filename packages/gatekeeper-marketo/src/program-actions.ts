@@ -1,4 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownCode, markdownText } from "./approval-markdown";
 import { parseMarketoDate, type MarketoClient, type MarketoProgramTag, type RawAssetId, type RawProgram } from "./marketo-api";
 
 type ProgramPatch = {
@@ -66,24 +67,16 @@ export function isProgramAction(action: { type: string }): action is ProgramActi
     action.type === "programUpdate" || action.type === "programLifecycle";
 }
 
-function escapeMarkdown(value: string): string {
-  return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
-}
-
-function code(value: string): string {
-  return `\`${escapeMarkdown(value)}\``;
-}
-
 function descriptionDetail(value: string): string {
-  return value === "" ? "clear the existing description" : escapeMarkdown(value);
+  return value === "" ? "clear the existing description" : markdownText(value);
 }
 
 function patchDetails(patch: ProgramPatch): string {
   let details: string[] = [];
-  if (patch.name !== undefined) details.push(`- Name: ${escapeMarkdown(patch.name)}`);
+  if (patch.name !== undefined) details.push(`- Name: ${markdownText(patch.name)}`);
   if (patch.description !== undefined) details.push(`- Description: ${descriptionDetail(patch.description)}`);
   if (patch.tags !== undefined) {
-    details.push(`- Tags: ${patch.tags.map(tag => `${escapeMarkdown(tag.tagType)} = ${escapeMarkdown(tag.tagValue)}`).join(", ") || "none"}`);
+    details.push(`- Tags: ${patch.tags.map(tag => `${markdownText(tag.tagType)} = ${markdownText(tag.tagValue)}`).join(", ") || "none"}`);
   }
   if (patch.startDate !== undefined) details.push(`- Start: ${patch.startDate}`);
   if (patch.endDate !== undefined) details.push(`- End: ${patch.endDate}`);
@@ -98,20 +91,20 @@ export function describeProgramAction(action: ProgramAction): ActionDescription 
       return {
         ...base,
         title: `Create Marketo program ${action.input.name}`,
-        description: `Create **${escapeMarkdown(action.input.name)}**, a ${escapeMarkdown(action.input.type)} program using channel ${escapeMarkdown(action.input.channel)}, in folder ${code(action.parentId)}.\n\n${patchDetails(action.input)}`,
+        description: `Create **${markdownText(action.input.name)}**, a ${markdownText(action.input.type)} program using channel ${markdownText(action.input.channel)}, in folder ${markdownCode(action.parentId)}.\n\n${patchDetails(action.input)}`,
       };
     case "programClone":
       return {
         ...base,
         title: `Clone Marketo program ${action.name}`,
-        description: `Clone program ${code(action.sourceId)} as **${escapeMarkdown(action.name)}** in folder ${code(action.parentId)}, using the source program's current contents when dispatched.` +
+        description: `Clone program ${markdownCode(action.sourceId)} as **${markdownText(action.name)}** in folder ${markdownCode(action.parentId)}, using the source program's current contents when dispatched.` +
           (action.description === undefined ? "" : `\n\nDescription: ${descriptionDetail(action.description)}`),
       };
     case "programUpdate":
       return {
         ...base,
         title: `Update Marketo program ${action.programName}`,
-        description: `Update program **${escapeMarkdown(action.programName)}** (${code(action.targetId)}):\n\n${patchDetails(action.patch)}`,
+        description: `Update program **${markdownText(action.programName)}** (${markdownCode(action.targetId)}):\n\n${patchDetails(action.patch)}`,
       };
     case "programLifecycle":
       return {
@@ -119,10 +112,10 @@ export function describeProgramAction(action: ProgramAction): ActionDescription 
         awaitDecision: action.operation === "approve",
         title: `${action.operation} Marketo program ${action.programName}`,
         description: action.operation === "approve"
-          ? `**Approve Email Program ${escapeMarkdown(action.programName)} (${code(action.targetId)}).** It may send its configured email to real people.\n\nExact approved schedule:\n- Start: ${action.startDate}\n- End: ${action.endDate}`
+          ? `**Approve Email Program ${markdownText(action.programName)} (${markdownCode(action.targetId)}).** It may send its configured email to real people.\n\nExact approved schedule:\n- Start: ${action.startDate}\n- End: ${action.endDate}`
           : action.operation === "delete"
-            ? `**Permanently delete program ${escapeMarkdown(action.programName)} (${code(action.targetId)}).** This cannot be undone.`
-            : `Unapprove Email Program **${escapeMarkdown(action.programName)}** (${code(action.targetId)}) so it will not run as scheduled.`,
+            ? `**Permanently delete program ${markdownText(action.programName)} (${markdownCode(action.targetId)}).** This cannot be undone.`
+            : `Unapprove Email Program **${markdownText(action.programName)}** (${markdownCode(action.targetId)}) so it will not run as scheduled.`,
       };
   }
 }

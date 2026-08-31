@@ -1,4 +1,5 @@
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { markdownCode, markdownJsonCodeBlock } from "./approval-markdown";
 import type { DesignerAssetKind, MarketoClient, RawDesignerAsset } from "./marketo-api";
 
 export type EmailDesignerKind = "designerEmail" | "designerTemplate" | "designerFragment";
@@ -157,16 +158,6 @@ export function matchesDesignerCloneConfiguration(
     JSON.stringify(createdSnapshot[field]) === JSON.stringify(sourceSnapshot[field]));
 }
 
-function escape(value: string): string {
-  return value.replace(/[\\`*_{}[\]()#+.!|>~-]/g, "\\$&");
-}
-
-function codeBlock(value: unknown): string {
-  let serialized = value === undefined ? "(none)" : JSON.stringify(value, null, 2);
-  if (serialized === undefined) serialized = String(value);
-  return serialized.split("\n").map(line => `    ${line}`).join("\n");
-}
-
 function createDescription(action: Extract<EmailDesignerAction, { type: "designerCreate" }>, name: string): string {
   let body = action.body;
   return [
@@ -174,70 +165,70 @@ function createDescription(action: Extract<EmailDesignerAction, { type: "designe
     "",
     "Name:",
     "",
-    codeBlock(body.name),
+    markdownJsonCodeBlock(body.name),
     "",
     "Description:",
     "",
-    codeBlock(body.description),
+    markdownJsonCodeBlock(body.description),
     "",
     "Destination (workspace and folder or program):",
     "",
-    codeBlock(body.appData),
+    markdownJsonCodeBlock(body.appData),
     "",
     "Template ID:",
     "",
-    codeBlock(body.templateId),
+    markdownJsonCodeBlock(body.templateId),
     "",
     "Content:",
     "",
-    codeBlock(body.data),
+    markdownJsonCodeBlock(body.data),
     "",
     "Delivery headers:",
     "",
-    codeBlock(body.headers),
+    markdownJsonCodeBlock(body.headers),
     "",
     "Delivery or fragment settings:",
     "",
-    codeBlock(body.settings),
+    markdownJsonCodeBlock(body.settings),
   ].join("\n");
 }
 
 function cloneDescription(action: Extract<EmailDesignerAction, { type: "designerClone" }>, name: string): string {
   let inherited = snapshotRecord(action.sourceSnapshot);
   return [
-    `Clone Marketo Email Designer ${name} \`${escape(action.sourceId)}\` with these exact values:`,
+    `Clone Marketo Email Designer ${name} ${markdownCode(action.sourceId)} with these exact values:`,
     "",
     "Name:",
     "",
-    codeBlock(action.name),
+    markdownJsonCodeBlock(action.name),
     "",
     "Explicit description:",
     "",
-    codeBlock(action.description),
+    markdownJsonCodeBlock(action.description),
     "",
     "Inherited destination (workspace and folder or program):",
     "",
-    codeBlock(inherited.appData),
+    markdownJsonCodeBlock(inherited.appData),
     "",
     "Inherited template ID:",
     "",
-    codeBlock(inherited.templateId),
+    markdownJsonCodeBlock(inherited.templateId),
     "",
     "Inherited application type:",
     "",
-    codeBlock(inherited.appType),
+    markdownJsonCodeBlock(inherited.appType),
     "",
     "Inherited content:",
     "",
-    codeBlock(inherited.data),
+    markdownJsonCodeBlock(inherited.data),
     "",
     "Inherited delivery headers:",
     "",
-    codeBlock(inherited.headers),
+    markdownJsonCodeBlock(inherited.headers),
     "",
     "Inherited delivery or fragment settings:",
     "",
-    codeBlock(inherited.settings),
+    markdownJsonCodeBlock(inherited.settings),
   ].join("\n");
 }
 
@@ -251,7 +242,7 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
     case "designerClone":
       return { ...base, title: `Clone Marketo designer ${name}`, description: cloneDescription(action, name) };
     case "designerUpdate":
-      return { ...base, title: `Update Marketo designer ${name}`, description: `Update draft fields on ${name} \`${escape(target ?? "")}\`:\n\n    ${escape(JSON.stringify(action.patch))}` };
+      return { ...base, title: `Update Marketo designer ${name}`, description: `Update draft fields on ${name} ${markdownCode(target ?? "")}:\n\n${markdownJsonCodeBlock(action.patch)}` };
     case "designerLifecycle": {
       let risk = action.operation === "approve"
         ? action.asset === "designerFragment"
@@ -264,14 +255,14 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
         ...base,
         awaitDecision: action.operation === "discard",
         title: `${action.operation} Marketo designer ${name}`,
-        description: `${action.operation} ${name} \`${escape(target ?? "")}\` using its snapshotted ${action.sourceState} content \`${escape(action.contentId)}\`.${risk}`,
+        description: `${action.operation} ${name} ${markdownCode(target ?? "")} using its snapshotted ${action.sourceState} content ${markdownCode(action.contentId)}.${risk}`,
       };
     }
     case "designerDelete":
       return {
         ...base,
         title: `Delete Marketo designer ${name}`,
-        description: `Permanently delete ${name} \`${escape(target ?? "")}\`. This is irreversible and can break assets that depend on it.`,
+        description: `Permanently delete ${name} ${markdownCode(target ?? "")}. This is irreversible and can break assets that depend on it.`,
       };
   }
 }
