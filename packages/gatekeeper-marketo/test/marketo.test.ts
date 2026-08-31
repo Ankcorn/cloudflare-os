@@ -3226,6 +3226,39 @@ describe("whole-instance listings", () => {
     expect(calls).toEqual([undefined, "upstream-2"]);
   });
 
+  it("accepts its continuation token with more than 100 pending campaign changes", async () => {
+    let actions: CampaignAction[] = Array.from({ length: 150 }, (_, index) => ({
+      id: index + 1,
+      type: "campaignCreate",
+      provisionalId: `~${index + 1}`,
+      parent: { id: "10", type: "Folder" },
+      name: `Pending ${index + 1}`,
+    }));
+    let upstream = Array.from({ length: 300 }, (_, index) => ({
+      id: index + 1,
+      name: `Existing ${index + 1}`,
+    }));
+    let { ctx } = campaignContext({
+      getCampaigns: async () => ({ result: upstream, moreResult: false }),
+    }, actions);
+    let session = new MarketoSessionImpl(ctx);
+
+    let first = await session.listSmartCampaigns();
+    expect(first.nextPageToken?.length).toBeLessThanOrEqual(16_384);
+    let second = await session.listSmartCampaigns({ pageToken: first.nextPageToken });
+    let ids = [...first.campaigns, ...second.campaigns].map(campaign => String(campaign.id));
+
+    expect(first.campaigns).toHaveLength(300);
+    expect(second.campaigns).toHaveLength(150);
+    expect(second.moreResult).toBe(false);
+    expect(ids).toHaveLength(450);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual([
+      ...Array.from({ length: 150 }, (_, index) => `~${index + 1}`),
+      ...upstream.map(campaign => String(campaign.id)),
+    ]);
+  });
+
   it("preserves program-name substring matches through campaign overlays", async () => {
     let actions: CampaignAction[] = [
       { id: 1, type: "campaignMetadata", targetId: "1", campaignName: "Old", patch: { name: "Renamed" } },

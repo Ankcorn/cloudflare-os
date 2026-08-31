@@ -291,6 +291,7 @@ function isCampaignMatch(
 const CAMPAIGN_PAGE_SIZE = 300;
 const CAMPAIGN_TOKEN_PREFIX = "gk-campaign:";
 const CAMPAIGN_TOKEN_MAX_LENGTH = 16_384;
+const CAMPAIGN_TOKEN_MAX_IDS = 200;
 
 type CampaignPageState = {
   actionIds: number[];
@@ -300,6 +301,30 @@ type CampaignPageState = {
   skip: number;
   scope: string;
 };
+
+function validCampaignActionIds(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length <= CAMPAIGN_TOKEN_MAX_IDS &&
+    value.every(id => Number.isSafeInteger(id) && id > 0) &&
+    new Set(value).size === value.length;
+}
+
+function validCampaignIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= CAMPAIGN_TOKEN_MAX_IDS &&
+    value.every(id => typeof id === "string" && /^(?:[1-9]\d*|~[1-9]\d*)$/.test(id)) &&
+    new Set(value).size === value.length;
+}
+
+function validCampaignPageState(value: unknown, scope: string): value is CampaignPageState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  let state = value as Partial<CampaignPageState>;
+  return validCampaignActionIds(state.actionIds) &&
+    validCampaignIds(state.candidateIds) &&
+    validCampaignIds(state.maskedIds) &&
+    Number.isSafeInteger(state.skip) && state.skip !== undefined &&
+    state.skip >= 0 && state.skip <= CAMPAIGN_PAGE_SIZE &&
+    (state.upstreamToken === undefined || typeof state.upstreamToken === "string") &&
+    state.scope === scope;
+}
 
 function campaignScope(filter: MarketoNameFilter & { requestableOnly?: boolean }): string {
   return JSON.stringify({
@@ -329,19 +354,8 @@ function campaignPageState(
       .replace(/-/g, "+").replace(/_/g, "/");
     let bytes = Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")),
       character => character.charCodeAt(0));
-    let state = JSON.parse(new TextDecoder().decode(bytes)) as CampaignPageState;
-    if (!Array.isArray(state.actionIds) || state.actionIds.length > 100 ||
-        state.actionIds.some(id => !Number.isSafeInteger(id) || id <= 0) ||
-        new Set(state.actionIds).size !== state.actionIds.length ||
-        !Array.isArray(state.candidateIds) || state.candidateIds.length > 100 ||
-        state.candidateIds.some(id => typeof id !== "string" || !/^(?:[1-9]\d*|~[1-9]\d*)$/.test(id)) ||
-        new Set(state.candidateIds).size !== state.candidateIds.length ||
-        !Array.isArray(state.maskedIds) || state.maskedIds.length > 100 ||
-        state.maskedIds.some(id => typeof id !== "string" || !/^(?:[1-9]\d*|~[1-9]\d*)$/.test(id)) ||
-        new Set(state.maskedIds).size !== state.maskedIds.length ||
-        !Number.isSafeInteger(state.skip) || state.skip < 0 || state.skip > CAMPAIGN_PAGE_SIZE ||
-        state.upstreamToken !== undefined && typeof state.upstreamToken !== "string" ||
-        state.scope !== campaignScope(filter)) throw new Error();
+    let state: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (!validCampaignPageState(state, campaignScope(filter))) throw new Error();
     return state;
   } catch {
     throw new Error("Invalid Marketo smart campaign page token.");
@@ -349,6 +363,9 @@ function campaignPageState(
 }
 
 function campaignPageToken(state: CampaignPageState): string {
+  if (!validCampaignPageState(state, state.scope)) {
+    throw new Error("Too many pending Marketo campaign changes to create a page token.");
+  }
   let bytes = new TextEncoder().encode(JSON.stringify(state));
   let token = CAMPAIGN_TOKEN_PREFIX + btoa(String.fromCharCode(...bytes))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
