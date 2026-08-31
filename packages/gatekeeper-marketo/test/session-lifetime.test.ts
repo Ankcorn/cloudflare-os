@@ -88,6 +88,50 @@ describe("program pending overlays", () => {
 });
 
 describe("session child capability lifetime", () => {
+  it("does not retain the session context when a child id is invalid", () => {
+    let queueDisposals = 0;
+    let queue = {
+      [Symbol.dispose]() { queueDisposals++; },
+    } as unknown as RpcStub<ApprovalQueue>;
+    let session = new MarketoSessionImpl(makeSessionContext({
+      approvalQueue: queue,
+      submit: async () => {},
+      client: async () => ({}) as MarketoClient,
+    }));
+
+    expect(() => session.getStaticList(0)).toThrow(/positive numeric Marketo list id/);
+    expect(() => session.getProgram("0")).toThrow(/numeric or provisional.*program id/);
+    expect(() => session.getSmartCampaign("invalid")).toThrow(/numeric or provisional.*campaign id/);
+
+    session[Symbol.dispose]();
+    expect(queueDisposals).toBe(1);
+  });
+
+  it("retains the session context for valid id handles until each is disposed", () => {
+    let queueDisposals = 0;
+    let queue = {
+      [Symbol.dispose]() { queueDisposals++; },
+    } as unknown as RpcStub<ApprovalQueue>;
+    let session = new MarketoSessionImpl(makeSessionContext({
+      approvalQueue: queue,
+      submit: async () => {},
+      client: async () => ({}) as MarketoClient,
+    }));
+    let handles = [
+      session.getStaticList(1),
+      session.getProgram(2),
+      session.getSmartCampaign(3),
+    ];
+
+    session[Symbol.dispose]();
+    expect(queueDisposals).toBe(0);
+    handles[0][Symbol.dispose]();
+    handles[1][Symbol.dispose]();
+    expect(queueDisposals).toBe(0);
+    handles[2][Symbol.dispose]();
+    expect(queueDisposals).toBe(1);
+  });
+
   it("keeps every child family usable after disposing its parents and releases the queue once", async () => {
     let queueDisposals = 0;
     let queue = {

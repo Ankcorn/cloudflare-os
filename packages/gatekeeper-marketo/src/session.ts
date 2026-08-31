@@ -1477,9 +1477,10 @@ export class MarketoSessionImpl extends RpcTarget {
     if (!lookup?.field || lookup.value === undefined || lookup.value === null) {
       throw new Error("A lookup { field, value } is required.");
     }
+    let validatedLookup = { field: lookup.field, value: String(lookup.value) };
     return new MarketoPersonImpl(
       retainSessionContext(this.#ctx),
-      { field: lookup.field, value: String(lookup.value) },
+      validatedLookup,
       true,
     );
   }
@@ -1529,7 +1530,8 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getStaticList(id: number): MarketoStaticListImpl {
-    return new MarketoStaticListImpl(retainSessionContext(this.#ctx), requireId(id, "list"), true);
+    let validatedId = requireId(id, "list");
+    return new MarketoStaticListImpl(retainSessionContext(this.#ctx), validatedId, true);
   }
 
   async findProgramsByName(name: string): Promise<MarketoProgramSummary[]> {
@@ -1552,9 +1554,10 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getProgram(id: MarketoProgramId): MarketoProgramImpl {
+    let validatedId = requireLogicalId(String(id), "program");
     return new MarketoProgramImpl(
       retainSessionContext(this.#ctx),
-      requireLogicalId(String(id), "program"),
+      validatedId,
       true,
     );
   }
@@ -1654,9 +1657,10 @@ export class MarketoSessionImpl extends RpcTarget {
   }
 
   getSmartCampaign(id: string | number): MarketoSmartCampaignImpl {
+    let validatedId = requireLogicalId(String(id), "campaign");
     return new MarketoSmartCampaignImpl(
       retainSessionContext(this.#ctx),
-      requireLogicalId(String(id), "campaign"),
+      validatedId,
       true,
     );
   }
