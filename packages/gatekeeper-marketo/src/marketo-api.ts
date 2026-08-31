@@ -2214,9 +2214,15 @@ export class MarketoClient {
   // Standard CRM business objects
 
   /** Read schema and access metadata for a standard Marketo business object. */
-  async describeBusinessObject(kind: MarketoBusinessObjectKind): Promise<RawBusinessObjectSchema | undefined> {
-    let result = await this.#result<RawBusinessObjectSchema>(`/v1/${businessObjectPath(kind)}/describe.json`);
-    return result[0];
+  async describeBusinessObject(kind: MarketoBusinessObjectKind): Promise<RawBusinessObjectSchema> {
+    let path = `/v1/${businessObjectPath(kind)}/describe.json`;
+    let result = await this.#result<RawBusinessObjectSchema>(path);
+    if (result.length !== 1 || normalizeBusinessObjectName(result[0]?.name) !== normalizeBusinessObjectName(kind)) {
+      throw new MarketoError(`Marketo returned the wrong schema for exact ${kind} describe.`, {
+        operation: path,
+      });
+    }
+    return result[0]!;
   }
 
   /** Query one page by simple field values or a compound dedupe key. */
@@ -3186,6 +3192,10 @@ function businessObjectPath(kind: MarketoBusinessObjectKind): string {
     salesPerson: "salespersons",
     namedAccount: "namedaccounts",
   })[kind];
+}
+
+function normalizeBusinessObjectName(value: unknown): string | undefined {
+  return typeof value === "string" ? value.replaceAll(/[^a-z0-9]/gi, "").toLowerCase() : undefined;
 }
 
 /**

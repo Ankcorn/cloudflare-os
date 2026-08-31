@@ -1669,8 +1669,11 @@ export class MarketoGatekeeperImpl
     } else if (isBusinessObjectAction(action)) {
       for (let key of this.#businessObjectKeys(action)) add(key, true);
     } else if (action.type === "updatePerson" || action.type === "deletePerson") {
+      add("person:unresolved lookup alias", false);
       add(`person:${action.personId}`, true);
     } else if (action.type === "upsertPeople") {
+      // An alias may resolve to any numeric id, so it conflicts with every person write.
+      add("person:unresolved lookup alias", action.lookupField !== "id");
       for (let record of action.records) {
         if (Number.isSafeInteger(record.id) && Number(record.id) > 0) add(`person:${record.id}`, true);
         let lookup = record[action.lookupField];

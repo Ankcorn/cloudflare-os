@@ -3525,9 +3525,10 @@ describe("standard CRM business objects", () => {
 
   it("uses each object-specific endpoint path", async () => {
     let paths: string[] = [];
+    let names = ["Company", "Opportunity", "Opportunity Role", "SalesPerson", "Named Account"];
     vi.stubGlobal("fetch", async (url: string) => {
       paths.push(new URL(url).pathname);
-      return Response.json({ success: true, result: [{ idField: "id", fields: [] }] });
+      return Response.json({ success: true, result: [{ name: names.shift(), idField: "id", fields: [] }] });
     });
     let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
     for (let kind of ["company", "opportunity", "opportunityRole", "salesPerson", "namedAccount"] as const) {
@@ -3540,6 +3541,26 @@ describe("standard CRM business objects", () => {
       "/rest/v1/salespersons/describe.json",
       "/rest/v1/namedaccounts/describe.json",
     ]);
+  });
+
+  it("requires exactly one schema matching the requested normalized object name", async () => {
+    for (let result of [
+      [],
+      [{ name: "Opportunity", fields: [] }],
+      [{ name: "Company", fields: [] }, { name: "Company", fields: [] }],
+      [{ fields: [{ name: "secret" }], crmManaged: true }],
+    ]) {
+      let { client } = clientReturning({ success: true, result });
+      await expect(client.describeBusinessObject("company"))
+        .rejects.toThrow(/wrong schema for exact company describe/);
+    }
+
+    let { client } = clientReturning({
+      success: true,
+      result: [{ name: "  COMPANY  ", fields: [] }],
+    });
+    await expect(client.describeBusinessObject("company"))
+      .resolves.toMatchObject({ name: "  COMPANY  " });
   });
 
   it("uses each object-specific sync and delete path", async () => {
@@ -6585,6 +6606,14 @@ describe("action dispatch lifecycle", () => {
         { id: 1, type: "upsertPeople", records: [{ id: 7, email: "person@example.com" }], upsertAction: "updateOnly", lookupField: "email" },
         { id: 2, type: "deletePerson", personId: 7 },
       ],
+      [
+        { id: 1, type: "upsertPeople", records: [{ email: "person@example.com" }], upsertAction: "createOrUpdate", lookupField: "email" },
+        { id: 2, type: "deletePerson", personId: 7 },
+      ],
+      [
+        { id: 1, type: "updatePerson", personId: 7, fields: { email: "person@example.com" } },
+        { id: 2, type: "upsertPeople", records: [{ email: "person@example.com" }], upsertAction: "updateOnly", lookupField: "email" },
+      ],
     ];
     for (let actions of cases) {
       let calls = 0;
@@ -6596,6 +6625,20 @@ describe("action dispatch lifecycle", () => {
       expect(calls).toBe(0);
       vi.unstubAllGlobals();
     }
+  });
+
+  it("does not serialize distinct id-based person mutations", async () => {
+    let actions: MarketoAction[] = [
+      { id: 1, type: "deletePerson", personId: 7 },
+      { id: 2, type: "deletePerson", personId: 8 },
+    ];
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [{ id: 8, status: "deleted" }] }));
+    let stub = await campaignActionGatekeeper(actions);
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+    });
   });
 
   it("orders business-object records across id and dedupe strategies without aliasing incomplete identities", async () => {
