@@ -926,6 +926,9 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       if (physicalId === undefined) throw notFound("smart campaign", id);
       let campaign = await (await this.#ctx.client()).getSmartCampaign(physicalId);
       if (!campaign) throw notFound("smart campaign", id);
+      if (campaign.id !== physicalId) {
+        throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${physicalId}.`);
+      }
       summary = normalizeCampaign(campaign, id);
     }
 
@@ -955,12 +958,15 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     if (physicalId === undefined) {
       throw new Error(`Smart campaign ${this.#campaignId} is still pending creation.`);
     }
+    let campaign = await (await this.#ctx.client()).getCampaign(physicalId);
+    if (!campaign) throw notFound("smart campaign", this.#campaignId);
+    if (campaign.id !== physicalId) {
+      throw new MarketoError(`Marketo returned the wrong campaign for exact read ${physicalId}.`);
+    }
     await this.#ctx.observe(
       "Read a Marketo smart campaign",
       `Read metadata for smart campaign \`${this.#campaignId}\`.`,
     );
-    let campaign = await (await this.#ctx.client()).getCampaign(physicalId);
-    if (!campaign) throw notFound("smart campaign", this.#campaignId);
     return campaign;
   }
 
@@ -1003,8 +1009,19 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     }
     let physicalId = this.#ctx.resolveId(id);
     if (physicalId === undefined) throw new Error(`Smart campaign ${id} is still pending creation.`);
-    let smartList = await (await this.#ctx.client()).getCampaignSmartList(physicalId);
+    let campaign = await (await this.#ctx.client()).getSmartCampaign(physicalId);
+    if (!campaign) throw notFound("smart campaign", id);
+    if (campaign.id !== physicalId || !Number.isSafeInteger(campaign.smartListId) || campaign.smartListId! <= 0) {
+      throw new MarketoError(`Marketo returned invalid smart-list identity for campaign ${physicalId}.`);
+    }
+    let smartList = await (await this.#ctx.client()).getCampaignSmartList(
+      physicalId,
+      campaign.smartListId,
+    );
     if (!smartList) throw notFound("smart list for campaign", id);
+    if (!Number.isSafeInteger(smartList.id) || smartList.id! <= 0 || smartList.id !== campaign.smartListId) {
+      throw new MarketoError(`Marketo returned the wrong smart list for campaign ${physicalId}.`);
+    }
     return {
       filterMatchType: smartList.rules?.filterMatchType,
       triggers: smartList.rules?.triggers?.map(normalizeSmartListRule) ?? [],
@@ -1235,8 +1252,17 @@ function requireTokens(tokens: { name: string; value: string }[] | undefined): v
     throw new Error(`Marketo campaigns accept at most ${MAX_CAMPAIGN_INPUTS} token overrides.`);
   }
   for (let token of tokens) {
-    if (!token || typeof token.name !== "string" || !token.name.trim()) {
-      throw new Error("Each campaign token requires a name.");
+    if (!token || typeof token.name !== "string" || token.name !== token.name.trim() ||
+        !token.name.startsWith("{{my.") || !token.name.endsWith("}}")) {
+      throw new Error("Each campaign token name must use the {{my.*}} form.");
+    }
+    let name = token.name.slice(5, -2);
+    if (!name || name !== name.trim() || [...name].some(character => {
+      let code = character.codePointAt(0)!;
+      return character === "{" || character === "}" || code <= 0x1f ||
+        code >= 0x7f && code <= 0x9f || code === 0x2028 || code === 0x2029;
+    })) {
+      throw new Error("Each campaign token name must contain a non-whitespace single-line name.");
     }
     if (typeof token.value !== "string") {
       throw new Error(`Campaign token "${token.name}" requires a string value.`);
@@ -1375,10 +1401,11 @@ export class MarketoSessionImpl extends RpcTarget {
 
   async getTagTypes(): Promise<MarketoProgramTagType[]> {
     let definitions: RawTagType[] = await (await this.#ctx.client()).getTagTypes();
-    let result = definitions.flatMap(tag => tag.name ? [{
-      name: tag.name,
-      requiredFor: tag.requiredFor ?? [],
-      values: tag.allowableValues ?? [],
+    let result = definitions.flatMap(tag => tag.tagType ? [{
+      name: tag.tagType,
+      applicableProgramTypes: parseTagList(tag.applicableProgramTypes).map(programTypeName),
+      required: tag.required === true,
+      values: parseTagList(tag.allowableValues),
     }] : []);
     await this.#ctx.observe("List Marketo program tag types", `Read ${result.length} program tag type(s).`);
     return result;
@@ -1656,17 +1683,41 @@ async function validateProgramTags(
   let definitions = await (await ctx.client()).getTagTypes();
   await ctx.observe("Read Marketo program tag definitions", `Read ${definitions.length} program tag definition(s) for validation.`);
   for (let tag of tags) {
-    let definition = definitions.find(candidate => candidate.name === tag.tagType);
+    let definition = definitions.find(candidate => candidate.tagType === tag.tagType);
     if (!definition) throw new Error(`Unknown Marketo program tag type: ${tag.tagType}.`);
-    if (definition.allowableValues?.length && !definition.allowableValues.includes(tag.tagValue)) {
+    let applicable = parseTagList(definition.applicableProgramTypes).map(programTypeName);
+    if (programType && !applicable.includes(programType)) {
+      throw new Error(`Program tag "${tag.tagType}" does not apply to ${programType} programs.`);
+    }
+    let allowable = parseTagList(definition.allowableValues);
+    if (allowable.length && !allowable.includes(tag.tagValue)) {
       throw new Error(`"${tag.tagValue}" is not allowed for program tag "${tag.tagType}".`);
     }
   }
   let present = new Set(tags.map(tag => tag.tagType));
-  let missing = definitions.find(definition => definition.name &&
-    definition.requiredFor?.includes(programType ?? "") && !present.has(definition.name));
-  if (missing) throw new Error(`Required program tag is missing: ${missing.name}.`);
+  let missing = definitions.find(definition => definition.tagType && definition.required &&
+    parseTagList(definition.applicableProgramTypes).map(programTypeName).includes(programType ?? "") &&
+    !present.has(definition.tagType));
+  if (missing) throw new Error(`Required program tag is missing: ${missing.tagType}.`);
   return tags;
+}
+
+function parseTagList(value: string | undefined): string[] {
+  if (value === undefined || value === "[]") return [];
+  if (!value.startsWith("[") || !value.endsWith("]")) {
+    throw new MarketoError("Marketo returned malformed program tag metadata.");
+  }
+  return value.slice(1, -1).split(",").map(item => item.trim()).filter(Boolean);
+}
+
+function programTypeName(value: string): string {
+  return ({
+    program: "Default",
+    email_batch: "Email",
+    nurture: "Engagement",
+    event: "Event",
+    webinar: "EventWithWebinar",
+  } as Record<string, string>)[value] ?? value;
 }
 
 function requireLogicalId(id: unknown, label: string): string {

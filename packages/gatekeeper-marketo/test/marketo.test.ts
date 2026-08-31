@@ -81,7 +81,13 @@ import {
   type CampaignContext,
   type SessionContext,
 } from "../src/session";
-import { MarketoGatekeeperImpl, MarketoUserImpl, UserAccount } from "../src/marketo";
+import {
+  MarketoGatekeeperImpl,
+  MarketoUserImpl,
+  readConnectBody,
+  UserAccount,
+} from "../src/marketo";
+import { MarketoTokenCache, unwrapTokenCacheResult } from "../src/token-cache";
 import { MarketoBusinessObjectImpl, type BusinessObjectContext } from "../src/business-objects";
 import type { BusinessObjectAction } from "../src/business-object-actions";
 
@@ -205,6 +211,57 @@ describe("connect endpoint", () => {
     expect(html).toContain("Connect Marketo");
     // The deployment default is offered, but the field stays editable.
     expect(html).toContain(TEST_ENV.MARKETO_ENDPOINT!);
+    expect(res.headers.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
+    expect(res.headers.get("X-Frame-Options")).toBe("DENY");
+  });
+
+  it("rejects oversized declared and streamed bodies", async () => {
+    for (let request of [
+      new Request(`${BASE}/${await mintConnectUrl()}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://example.com",
+          "Content-Length": String(16 * 1024 + 1),
+        },
+        body: "{}",
+      }),
+      new Request(`${BASE}/${await mintConnectUrl()}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "https://example.com" },
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(9_000));
+            controller.enqueue(new Uint8Array(9_000));
+            controller.close();
+          },
+        }),
+      }),
+    ]) {
+      let res = await SELF.fetch(request);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "Invalid connection details." });
+    }
+  });
+
+  it("cancels a stalled connect body at its read deadline", async () => {
+    let deadline = new AbortController();
+    let canceled = false;
+    let timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    let request = new Request(BASE, {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        pull() {},
+        cancel() { canceled = true; },
+      }),
+    });
+
+    let read = readConnectBody(request);
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    deadline.abort();
+    await expect(read).rejects.toThrow(/timed out/);
+    expect(canceled).toBe(true);
+    timeout.mockRestore();
   });
 
   it("404s anything that is not a connect URL", async () => {
@@ -488,6 +545,67 @@ describe("optional deployment defaults", () => {
     expect(await account.getCredentials()).toEqual(initial);
     await runInDurableObject(account, (_instance, state) => {
       expect(state.storage.kv.get<{ value: string }>("nonce")?.value).toBe(nonce);
+    });
+  });
+
+  it("does not restore credentials when revoke races a failed reconnect callback", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+    let initial = { endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret" };
+    let nonce = crypto.randomUUID();
+    let rejectCallback!: (error: Error) => void;
+    let callback = {
+      credentialsRestored: () => new Promise<void>((_resolve, reject) => { rejectCallback = reject; }),
+    };
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", initial);
+      state.storage.kv.put("reconnecting", true);
+      state.storage.kv.put("nonce", { value: nonce, expiresAt: Date.now() + 60_000 });
+      let get = state.storage.kv.get.bind(state.storage.kv);
+      vi.spyOn(state.storage.kv, "get").mockImplementation((key: string) =>
+        key === "callback" ? callback : get(key));
+      let completion = instance.completeConnection(nonce, { ...initial, clientSecret: "new" });
+      await vi.waitFor(() => expect(rejectCallback).toBeTypeOf("function"));
+      await instance.revoke();
+      rejectCallback(new Error("Workshop unavailable"));
+      await expect(completion).resolves.toMatchObject({ kind: "error" });
+      expect(instance.getCredentials()).toBeUndefined();
+    });
+  });
+
+  it("does not clean up a newer reconnect after an older callback succeeds", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+    let initial = { endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret" };
+    let oldNonce = crypto.randomUUID();
+    let newNonce = crypto.randomUUID();
+    let releaseCallback!: () => void;
+    let callbackStarted!: () => void;
+    let started = new Promise<void>(resolve => { callbackStarted = resolve; });
+    let callback = {
+      credentialsRestored: () => {
+        callbackStarted();
+        return new Promise<void>(resolve => { releaseCallback = resolve; });
+      },
+    };
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", initial);
+      state.storage.kv.put("reconnecting", true);
+      state.storage.kv.put("nonce", { value: oldNonce, expiresAt: Date.now() + 60_000 });
+      let get = state.storage.kv.get.bind(state.storage.kv);
+      vi.spyOn(state.storage.kv, "get").mockImplementation((key: string) =>
+        key === "callback" ? callback : get(key));
+
+      let older = instance.completeConnection(oldNonce, { ...initial, clientSecret: "replacement" });
+      await started;
+      await instance.prepareReconnect(newNonce);
+      releaseCallback();
+
+      await expect(older).resolves.toMatchObject({ kind: "error" });
+      expect(state.storage.kv.get<boolean>("reconnecting")).toBe(true);
+      expect(state.storage.kv.get<{ value: string }>("nonce")?.value).toBe(newNonce);
     });
   });
 });
@@ -1168,6 +1286,7 @@ describe("smart campaign management", () => {
         status: "Active",
         isActive: true,
         folder: { id: 20, type: "Program" },
+        smartListId: 8,
       }),
       getCampaignSmartList: async () => ({
         id: 8,
@@ -1235,7 +1354,7 @@ describe("smart campaign management", () => {
 
   it("follows nested provisional clones to read source rules", async () => {
     let { ctx } = campaignContext({
-      getSmartCampaign: async () => ({ id: 7, name: "Source", type: "trigger" }),
+      getSmartCampaign: async () => ({ id: 7, name: "Source", type: "trigger", smartListId: 8 }),
       getCampaignSmartList: async () => ({
         id: 8,
         rules: { triggers: [{ id: 1, name: "Data Value Changes" }], filters: [] },
@@ -1261,7 +1380,9 @@ describe("smart campaign management", () => {
 
   it("rejects lifecycle operations Marketo cannot apply", async () => {
     let { ctx } = campaignContext({
-      getSmartCampaign: async () => ({ id: 7, name: "Inactive trigger", type: "trigger", isActive: false }),
+      getSmartCampaign: async () => ({
+        id: 7, name: "Inactive trigger", type: "trigger", isActive: false, smartListId: 8,
+      }),
       getCampaignSmartList: async () => ({ id: 8, rules: { triggers: [], filters: [] } }),
     });
     let campaign = new MarketoSessionImpl(ctx).getSmartCampaign("7");
@@ -1362,10 +1483,10 @@ describe("program management", () => {
     progressionStatuses: [{ name: "Member" }, { name: "Success" }],
   }];
   const tagTypes = [{
-    id: 2,
-    name: "Region",
-    requiredFor: ["Email"],
-    allowableValues: ["EMEA", "AMER"],
+    tagType: "Region",
+    applicableProgramTypes: "[email_batch]",
+    required: true,
+    allowableValues: "[EMEA, AMER]",
   }];
 
   it("discovers channels and tag definitions through observations", async () => {
@@ -1378,7 +1499,7 @@ describe("program management", () => {
       name: "Email Send", programType: "Email", statuses: ["Member", "Success"],
     }]);
     expect(await session.getTagTypes()).toEqual([{
-      name: "Region", requiredFor: ["Email"], values: ["EMEA", "AMER"],
+      name: "Region", applicableProgramTypes: ["Email"], required: true, values: ["EMEA", "AMER"],
     }]);
     expect(notes.join(" ")).toMatch(/program channels.*program tag types/i);
   });
@@ -3753,6 +3874,45 @@ describe("Marketo request encoding", () => {
     expect(notifications).toBe(1);
   });
 
+  it("preserves the provider auth rejection when expiry notification fails", async () => {
+    vi.stubGlobal("fetch", async () => Response.json(
+      { success: false, errors: [{ code: "601", message: "invalid" }] },
+      { status: 401 },
+    ));
+    let log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let client = new MarketoClient(ORIGIN, {
+      getToken: async force => force ? "refreshed" : "stale",
+      credentialsExpired: async () => { throw new Error("callback marker"); },
+    });
+
+    let error = await client.getLeads("email", ["a@example.com"]).catch(value => value);
+    expect(error).toBeInstanceOf(MarketoError);
+    expect(error.code).toBe("601");
+    expect(error.isAuthError).toBe(true);
+    expect(error.message).not.toContain("callback marker");
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      event: "marketo_credentials_expired_callback_failed",
+      error: "Error",
+    }));
+    log.mockRestore();
+  });
+
+  it("uses longer documented deadlines only for long-running sync endpoints", async () => {
+    let deadlines: number[] = [];
+    let timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+      deadlines.push(ms);
+      return new AbortController().signal;
+    });
+    vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [] }));
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    await client.getLeads("email", ["a@example.com"]);
+    await client.syncLeads([{ email: "a@example.com" }], "createOnly", "email");
+    await client.syncCustomObject("orders", [{ sourceId: "1" }]);
+    expect(deadlines).toEqual([60_000, 90_000, 120_000]);
+    timeout.mockRestore();
+  });
+
   it("reserves a prepared token for exactly the next request", async () => {
     let now = Date.now();
     let lookups = 0;
@@ -3911,6 +4071,99 @@ describe("Marketo request encoding", () => {
   });
 });
 
+describe("token cache RPC protocol", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function cache() {
+    let namespace = (env as unknown as {
+      MarketoTokenCache: DurableObjectNamespace<MarketoTokenCache>;
+    }).MarketoTokenCache;
+    return namespace.get(namespace.newUniqueId());
+  }
+
+  it("serializes auth and network failures as sanitized tagged results", async () => {
+    let marker = "provider-secret-marker";
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: marker };
+    vi.stubGlobal("fetch", async () => Response.json(
+      { error: "invalid_client", error_description: marker },
+      { status: 401 },
+    ));
+    let auth = await cache().getToken(creds);
+    expect(auth).toEqual({
+      ok: false,
+      error: { kind: "auth", code: "invalid_client", status: 401 },
+    });
+    expect(JSON.stringify(auth)).not.toContain(marker);
+    expect(() => unwrapTokenCacheResult(auth)).toThrow(/authentication failed/);
+
+    vi.stubGlobal("fetch", async () => { throw new Error(marker); });
+    let network = await cache().getToken({ ...creds, clientId: crypto.randomUUID() });
+    expect(network).toEqual({ ok: false, error: { kind: "network" } });
+    expect(JSON.stringify(network)).not.toContain(marker);
+  });
+
+  it("backs off when Identity repeats the same nearly-expired token and never serves it expired", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls++;
+      return Response.json({
+        access_token: calls < 3 ? "same-token" : "replacement-token",
+        expires_in: 60,
+      });
+    });
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("same-token");
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("same-token");
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("same-token");
+    expect(calls).toBe(2);
+
+    now += 61_000;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("replacement-token");
+    expect(calls).toBe(3);
+  });
+
+  it.each([0, -1, 0.5])("rejects an access token with an unusable %s-second lifetime", async expiresIn => {
+    vi.stubGlobal("fetch", async () => Response.json({
+      access_token: "already-expired-token",
+      expires_in: expiresIn,
+    }));
+    await expect(fetchAccessToken({
+      endpoint: ORIGIN,
+      clientId: crypto.randomUUID(),
+      clientSecret: "secret",
+    })).rejects.toThrow(/unusable lifetime/);
+  });
+
+  it("does not return or repeatedly refresh the same expired token", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => {
+      calls++;
+      return Response.json({ access_token: "expired-token", expires_in: 0 });
+    });
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.kv.put("token", { accessToken: "expired-token", expiresAt: now - 1 });
+    });
+
+    let first = await stub.getToken(creds);
+    let second = await stub.getToken(creds);
+    expect(first).toMatchObject({ ok: false, error: { kind: "provider" } });
+    expect(second).toEqual(first);
+    expect(JSON.stringify(first)).not.toContain("expired-token");
+    expect(calls).toBe(1);
+  });
+});
+
 // The lead-database status endpoint requires `status`; Marketo's other status endpoint uses
 // `statusName`.
 describe("program member status payload", () => {
@@ -3999,6 +4252,30 @@ describe("campaign kind pre-validation", () => {
       campaign("batch", submitted).schedule(new Date(Date.now() + 60_000)),
     ).rejects.toThrow(/between 5 minutes and 2 years/);
     expect(submitted).toEqual([]);
+  });
+
+  it("accepts only fully-qualified My Token override names", async () => {
+    let submitted: MarketoActionInput[] = [];
+    for (let name of ["Year", "{{lead.Email}}", "{{anything}}", "{{my.bad}}suffix"]) {
+      await expect(campaign("trigger", submitted).requestCampaign([1], [{ name, value: "x" }]))
+        .rejects.toThrow(/\{\{my\.\*\}\}/);
+    }
+    for (let name of [
+      "{{my.   }}",
+      "{{my.Bad\nName}}",
+      "{{my.Bad\rName}}",
+      "{{my.Bad\u0000Name}}",
+      "{{my.Bad\u0085Name}}",
+      "{{my.Bad\u2028Name}}",
+      "{{my. Leading}}",
+      "{{my.Trailing }}",
+    ]) {
+      await expect(campaign("trigger", submitted).requestCampaign([1], [{ name, value: "x" }]))
+        .rejects.toThrow(/non-whitespace single-line/);
+    }
+    await campaign("trigger", submitted).requestCampaign([1], [{ name: "{{my.Year}}", value: "x" }]);
+    await campaign("trigger", submitted).requestCampaign([1], [{ name: "{{my.Event Date}}", value: "x" }]);
+    expect(submitted).toHaveLength(2);
   });
 
   it("still submits each operation for the kind that supports it", async () => {
@@ -6750,7 +7027,7 @@ describe("smart campaign Asset API encoding", () => {
     await client.activateSmartCampaign(77);
     await client.deactivateSmartCampaign(77);
     await client.deleteSmartCampaign(77);
-    await client.getCampaignSmartList(77);
+    await client.getCampaignSmartList(77, 77);
 
     expect(new URL(calls[0]!.url).pathname).toBe("/rest/asset/v1/smartCampaigns.json");
     expect(Object.fromEntries(new URLSearchParams(String(calls[0]!.init.body)))).toEqual({
@@ -6773,15 +7050,129 @@ describe("smart campaign Asset API encoding", () => {
     expect(rules.pathname).toBe("/rest/asset/v1/smartCampaign/77/smartList.json");
     expect(rules.searchParams.get("includeRules")).toBe("true");
   });
+
+  it("rejects wrong identities from both exact campaign APIs", async () => {
+    vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [{ id: 78 }] }));
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+    await expect(client.getCampaign(77)).rejects.toThrow(/wrong campaign.*77/i);
+    await expect(client.getSmartCampaign(77)).rejects.toThrow(/wrong smart campaign.*77/i);
+    await expect(client.getCampaignSmartList(77, 77)).rejects.toThrow(/wrong smart list.*77/i);
+  });
+
+  it("rejects non-positive expected and returned smart-list ids", async () => {
+    let fetches = 0;
+    let returnedId = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetches++;
+      return Response.json({ success: true, result: [{ id: returnedId }] });
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+    await expect(client.getCampaignSmartList(77, 0)).rejects.toThrow(/invalid smart-list identity/);
+    await expect(client.getCampaignSmartList(77, -1)).rejects.toThrow(/invalid smart-list identity/);
+    expect(fetches).toBe(0);
+    await expect(client.getCampaignSmartList(77, 8)).rejects.toThrow(/wrong smart list/);
+    returnedId = -1;
+    await expect(client.getCampaignSmartList(77, 8)).rejects.toThrow(/wrong smart list/);
+  });
+
+  it("fails closed on session campaign and smart-list identity mismatches", async () => {
+    let notes: string[] = [];
+    let wrongCampaign = campaignContext({
+      getSmartCampaign: async () => ({ id: 78, name: "Wrong" }),
+    });
+    wrongCampaign.ctx.observe = async title => { notes.push(title); };
+    await expect(new MarketoSessionImpl(wrongCampaign.ctx).getSmartCampaign(77).describe())
+      .rejects.toThrow(/wrong smart campaign/i);
+
+    let wrongList = campaignContext({
+      getSmartCampaign: async () => ({ id: 77, name: "Campaign", smartListId: 8 }),
+      getCampaignSmartList: async () => ({ id: 9, rules: { triggers: [], filters: [] } }),
+    });
+    wrongList.ctx.observe = async title => { notes.push(title); };
+    await expect(new MarketoSessionImpl(wrongList.ctx).getSmartCampaign(77).readSmartListRules())
+      .rejects.toThrow(/wrong smart list/i);
+
+    let requestCampaign = campaignContext({
+      getCampaign: async () => ({ id: 78, name: "Wrong", type: "trigger", isTriggerable: true }),
+    });
+    requestCampaign.ctx.observe = async title => { notes.push(title); };
+    await expect(new MarketoSessionImpl(requestCampaign.ctx).getSmartCampaign(77).requestCampaign([1]))
+      .rejects.toThrow(/wrong campaign/i);
+
+    for (let smartListId of [0, -1]) {
+      let nonPositive = campaignContext({
+        getSmartCampaign: async () => ({ id: 77, name: "Campaign", smartListId }),
+      });
+      nonPositive.ctx.observe = async title => { notes.push(title); };
+      await expect(new MarketoSessionImpl(nonPositive.ctx).getSmartCampaign(77).readSmartListRules())
+        .rejects.toThrow(/invalid smart-list identity/);
+    }
+    expect(notes).toEqual([]);
+  });
 });
 
 describe("program Asset API encoding", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("fully pages channels and tag types and retrieves every tag's allowed values", async () => {
+    let tagTypes = Array.from({ length: ASSET_PAGE_MAX + 1 }, (_, index) => ({
+      tagType: `Tag ${index}`,
+      applicableProgramTypes: "[program]",
+      required: false,
+    }));
+    let calls: URL[] = [];
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      calls.push(url);
+      let offset = Number(url.searchParams.get("offset") ?? 0);
+      if (url.pathname.endsWith("/tagTypes.json")) {
+        return Response.json({ success: true, result: tagTypes.slice(offset, offset + ASSET_PAGE_MAX) });
+      }
+      if (url.pathname.endsWith("/tagType/byName.json")) {
+        let tagType = url.searchParams.get("name")!;
+        return Response.json({ success: true, result: [{
+          tagType, applicableProgramTypes: "[program]", required: false,
+          allowableValues: `[Value for ${tagType}]`,
+        }] });
+      }
+      if (url.pathname.endsWith("/channels.json")) {
+        let channels = Array.from({ length: ASSET_PAGE_MAX + 1 }, (_, index) => ({ name: `Channel ${index}` }));
+        return Response.json({ success: true, result: channels.slice(offset, offset + ASSET_PAGE_MAX) });
+      }
+      throw new Error(`Unexpected path ${url.pathname}`);
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    let tags = await client.getTagTypes();
+    expect(tags).toHaveLength(ASSET_PAGE_MAX + 1);
+    expect(tags.at(-1)?.allowableValues).toBe(`[Value for Tag ${ASSET_PAGE_MAX}]`);
+    expect(await client.getChannels()).toHaveLength(ASSET_PAGE_MAX + 1);
+    expect(calls.filter(url => url.pathname.endsWith("/tagTypes.json"))
+      .map(url => url.searchParams.get("offset"))).toEqual(["0", String(ASSET_PAGE_MAX)]);
+    expect(calls.filter(url => url.pathname.endsWith("/tagType/byName.json"))).toHaveLength(tagTypes.length);
+    expect(calls.filter(url => url.pathname.endsWith("/channels.json"))
+      .map(url => url.searchParams.get("offset"))).toEqual(["0", String(ASSET_PAGE_MAX)]);
+  });
+
+  it("rejects a repeated full metadata page", async () => {
+    let page = Array.from({ length: ASSET_PAGE_MAX }, (_, index) => ({ name: `Channel ${index}` }));
+    vi.stubGlobal("fetch", async () => Response.json({ success: true, result: page }));
+    await expect(new MarketoClient(ORIGIN, { getToken: async () => "t" }).getChannels())
+      .rejects.toThrow(/repeated an asset metadata page/);
+  });
+
   it("uses official form fields, JSON tag encoding, and lifecycle paths", async () => {
     let calls: { url: string; init: RequestInit }[] = [];
     vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
       calls.push({ url: String(url), init });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/tagTypes.json")) return Response.json({ success: true, result: [{
+        tagType: "Region", applicableProgramTypes: "[email_batch]", required: true,
+      }] });
+      if (path.endsWith("/tagType/byName.json")) return Response.json({ success: true, result: [{
+        tagType: "Region", applicableProgramTypes: "[email_batch]", required: true,
+        allowableValues: "[EMEA]",
+      }] });
       return Response.json({ success: true, result: [{ id: 77 }] });
     });
     let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
@@ -6801,7 +7192,8 @@ describe("program Asset API encoding", () => {
 
     expect(new URL(calls[0]!.url).pathname).toBe("/rest/asset/v1/tagTypes.json");
     expect(new URL(calls[0]!.url).searchParams.get("maxReturn")).toBe(String(ASSET_PAGE_MAX));
-    let create = Object.fromEntries(new URLSearchParams(String(calls[1]!.init.body)));
+    expect(new URL(calls[1]!.url).pathname).toBe("/rest/asset/v1/tagType/byName.json");
+    let create = Object.fromEntries(new URLSearchParams(String(calls[2]!.init.body)));
     expect(create).toMatchObject({
       name: "Program",
       folder: JSON.stringify({ id: 10, type: "Folder" }),
@@ -6811,9 +7203,9 @@ describe("program Asset API encoding", () => {
       startDate: "2026-09-01T10:00:00.000Z",
       endDate: "2026-09-01T11:00:00.000Z",
     });
-    expect(new URL(calls[2]!.url).pathname).toBe("/rest/asset/v1/program/7/clone.json");
-    expect(new URL(calls[3]!.url).pathname).toBe("/rest/asset/v1/program/77.json");
-    expect(calls.slice(4).map(call => new URL(call.url).pathname)).toEqual([
+    expect(new URL(calls[3]!.url).pathname).toBe("/rest/asset/v1/program/7/clone.json");
+    expect(new URL(calls[4]!.url).pathname).toBe("/rest/asset/v1/program/77.json");
+    expect(calls.slice(5).map(call => new URL(call.url).pathname)).toEqual([
       "/rest/asset/v1/program/77/approve.json",
       "/rest/asset/v1/program/77/unapprove.json",
       "/rest/asset/v1/program/77/delete.json",

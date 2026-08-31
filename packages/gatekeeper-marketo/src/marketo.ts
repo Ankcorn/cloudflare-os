@@ -42,7 +42,12 @@ import {
   type Env,
   type MarketoResourceKind,
 } from "./config";
-import { makeClient, tokenCacheStub } from "./token-cache";
+import {
+  makeClient,
+  tokenCacheStub,
+  unwrapTokenCacheResult,
+  type TokenCacheError,
+} from "./token-cache";
 import { logger } from "./logger";
 import {
   assertActionResults,
@@ -148,6 +153,50 @@ const DO_ID_LENGTH = 64;
 const EXPIRED_LINK_MESSAGE =
   "This connection link is invalid or has expired. Return to the Workshop and try again.";
 const MAX_CONNECT_BODY_BYTES = 16 * 1024;
+const CONNECT_BODY_TIMEOUT_MS = 10_000;
+
+/** Read a small connect payload without allowing a stalled client to hold the Worker open. */
+export async function readConnectBody(req: Request): Promise<string> {
+  let declared = req.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > MAX_CONNECT_BODY_BYTES) {
+    throw new Error("Connection details are too large.");
+  }
+  if (!req.body) return "";
+  let reader = req.body.getReader();
+  let decoder = new TextDecoder();
+  let text = "";
+  let size = 0;
+  let deadline = AbortSignal.timeout(CONNECT_BODY_TIMEOUT_MS);
+  try {
+    while (true) {
+      let chunk = await readUntilAbort(reader, deadline);
+      if (chunk.done) return text + decoder.decode();
+      size += chunk.value.byteLength;
+      if (size > MAX_CONNECT_BODY_BYTES) {
+        throw new Error("Connection details are too large.");
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function readUntilAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) return Promise.reject(new Error("Connection body read timed out."));
+  return new Promise((resolve, reject) => {
+    let abort = () => reject(new Error("Connection body read timed out."));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    reader.read().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 
 /**
  * The one answer given to any request that does not present a live nonce.
@@ -221,10 +270,7 @@ export default {
 
     let creds: MarketoCredentials;
     try {
-      let text = await req.text();
-      if (new TextEncoder().encode(text).byteLength > MAX_CONNECT_BODY_BYTES) {
-        throw new Error("Connection details are too large.");
-      }
+      let text = await readConnectBody(req);
       let body: unknown = JSON.parse(text);
       creds = parseCredentials(body, env, existingCredentials);
     } catch {
@@ -314,6 +360,8 @@ type CompleteConnectionResult =
   | { kind: "error"; message: string };
 
 export class UserAccount extends DurableObject<Env> {
+  #credentialGeneration = 0;
+
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string): Promise<void> {
     if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials")) {
       await this.ctx.storage.setAlarm(Date.now() + ABANDONED_CONNECT_MS);
@@ -347,36 +395,55 @@ export class UserAccount extends DurableObject<Env> {
     // Re-checked here rather than trusted from the fetch handler: this is the call that stores the
     // credentials, so it is the one that must be safe on its own.
     if (!this.#nonceIsValid(nonce)) return { kind: "invalid_nonce" };
+    let generation = this.#credentialGeneration;
     let storedNonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (generation !== this.#credentialGeneration) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
     this.ctx.storage.kv.delete("nonce");
 
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
-      if (storedNonce && storedNonce.expiresAt > Date.now()) this.ctx.storage.kv.put("nonce", storedNonce);
+      if (generation === this.#credentialGeneration && storedNonce && storedNonce.expiresAt > Date.now()) {
+        this.ctx.storage.kv.put("nonce", storedNonce);
+      }
       return { kind: "error", message: "Connection callback expired. Please retry." };
     }
 
+    if (generation !== this.#credentialGeneration) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
     let reconnecting = Boolean(this.ctx.storage.kv.get<boolean>("reconnecting"));
     let previousCredentials = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+    if (generation !== this.#credentialGeneration) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
     this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
 
     try {
       if (reconnecting) {
-        await callback.credentialsRestored().catch(error => { throw error; });
+        await callback.credentialsRestored();
+        if (generation !== this.#credentialGeneration) {
+          return { kind: "error", message: "Connection state changed. Please retry." };
+        }
         this.ctx.storage.kv.delete("reconnecting");
       } else {
         let props: MarketoUserImplProps = { userObjectId: this.ctx.id.toString() };
         await callback.complete(this.ctx.exports.MarketoUserImpl({ props }));
       }
     } catch {
-      if (previousCredentials) {
-        this.ctx.storage.kv.put("credentials", previousCredentials);
-      } else {
-        // Initial connection failed before the Workshop received the account capability.
-        this.ctx.storage.kv.delete("credentials");
-      }
-      if (storedNonce && storedNonce.expiresAt > Date.now()) {
-        this.ctx.storage.kv.put("nonce", storedNonce);
+      // A revoke or newer reconnect owns the credential state now. Never roll an older failed
+      // callback over that lifecycle change.
+      if (generation === this.#credentialGeneration) {
+        if (previousCredentials) {
+          this.ctx.storage.kv.put("credentials", previousCredentials);
+        } else {
+          // Initial connection failed before the Workshop received the account capability.
+          this.ctx.storage.kv.delete("credentials");
+        }
+        if (storedNonce && storedNonce.expiresAt > Date.now()) {
+          this.ctx.storage.kv.put("nonce", storedNonce);
+        }
       }
       return {
         kind: "error",
@@ -384,11 +451,15 @@ export class UserAccount extends DurableObject<Env> {
       };
     }
 
+    if (generation !== this.#credentialGeneration) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
     await this.ctx.storage.deleteAlarm();
     return { kind: "ok" };
   }
 
   async prepareReconnect(nonce: string): Promise<void> {
+    this.#credentialGeneration++;
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: nonce,
@@ -408,6 +479,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
+    this.#credentialGeneration++;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
@@ -441,7 +513,9 @@ async function requireAccountCredentials(
 type MarketoUserVerifierProps = { userObjectId: string };
 
 interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
-  hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean>;
+  hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<
+    { valid: boolean } | { error: TokenCacheError }
+  >;
 }
 
 async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
@@ -457,18 +531,24 @@ export class MarketoUserVerifier
   extends WorkerEntrypoint<Env, MarketoUserVerifierProps>
   implements MarketoUserVerifierApi
 {
-  async hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<boolean> {
+  async hasLiveCredential(
+    endpoint: string,
+    clientId: string,
+    fingerprint: string,
+  ): Promise<{ valid: boolean } | { error: TokenCacheError }> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
     let credentials = await account.getCredentials();
     if (
       !credentials || credentials.endpoint !== endpoint || credentials.clientId !== clientId ||
       await credentialFingerprint(credentials) !== fingerprint
-    ) return false;
+    ) return { valid: false };
 
-    let valid = await (await tokenCacheStub(this.ctx.exports, credentials))
+    let result = await (await tokenCacheStub(this.ctx.exports, credentials))
       .verifyCredentials(credentials);
+    if (!result.ok) return { error: result.error };
+    let valid = result.value;
     if (!valid) await account.credentialsExpired();
-    return valid;
+    return { valid };
   }
 }
 
@@ -504,7 +584,9 @@ export class MarketoUserImpl
     // identity Marketo will attribute every action to.
     let scope: string | undefined;
     try {
-      scope = await (await tokenCacheStub(this.ctx.exports, creds)).getScope(creds);
+      scope = unwrapTokenCacheResult(
+        await (await tokenCacheStub(this.ctx.exports, creds)).getScope(creds),
+      );
     } catch (error) {
       // Credentials may have been revoked in Marketo; fall back to a generic label.
       if (error instanceof MarketoError && error.isAuthError) {
@@ -927,13 +1009,15 @@ export class MarketoGatekeeperImpl
   async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     let credentials = await this.#credentials();
     let verifier = user as unknown as Fetcher<MarketoUserVerifierApi>;
-    if (!(
-      await verifier.hasLiveCredential(
-        credentials.endpoint,
-        credentials.clientId,
-        await credentialFingerprint(credentials),
-      )
-    )) {
+    let verification = await verifier.hasLiveCredential(
+      credentials.endpoint,
+      credentials.clientId,
+      await credentialFingerprint(credentials),
+    );
+    if ("error" in verification) {
+      throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
+    }
+    if (!verification.valid) {
       throw new Error(
         "This collaborator is not connected with the same Marketo LaunchPoint service.",
       );

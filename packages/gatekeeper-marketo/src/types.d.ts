@@ -201,8 +201,10 @@ export type MarketoProgramChannel = {
 export type MarketoProgramTagType = {
   /** Tag type name. */
   name: string;
-  /** Program types for which the tag is required. */
-  requiredFor: string[];
+  /** Program types to which this tag applies. */
+  applicableProgramTypes: string[];
+  /** Whether Marketo requires the tag on applicable programs. */
+  required: boolean;
   /** Values the instance permits for this tag. */
   values: string[];
 };

@@ -36,6 +36,8 @@ export function htmlResponse(body: string, status = 200): Response {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": "frame-ancestors 'none'",
+      "X-Frame-Options": "DENY",
     },
   });
 }

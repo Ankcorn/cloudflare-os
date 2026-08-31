@@ -4,6 +4,8 @@
 // unwraps it and raises MarketoError so callers never see the envelope. Identity responses use
 // their OAuth token shape and are parsed separately.
 
+import { logger } from "./logger";
+
 /** One account's LaunchPoint custom service credentials. */
 export type MarketoCredentials = {
   /** Instance base URL, e.g. `https://123-ABC-456.mktorest.com` (no trailing slash). */
@@ -278,6 +280,9 @@ export const MAX_FILTER_VALUES = 300;
 /** Bound aggregate filter reads that cannot expose pagination without breaking their public API. */
 const MAX_FILTER_RESULTS = 1_000;
 
+/** Bound metadata aggregation even if Marketo ignores offsets or keeps returning full pages. */
+const MAX_ASSET_METADATA_RESULTS = 10_000;
+
 /**
  * Request options for a filter-style read, sent as a form body rather than a query string.
  *
@@ -352,12 +357,18 @@ export async function fetchAccessToken(
     });
   }
 
+  let expiresInSeconds = body?.expires_in === undefined ? 3600 : body.expires_in;
+  if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) ||
+      expiresInSeconds < 5) {
+    throw new MarketoError("Marketo returned an access token with an unusable lifetime.", {
+      status: response.status,
+      providerRejection: true,
+    });
+  }
+
   return {
     accessToken,
-    expiresInSeconds:
-      typeof body?.expires_in === "number" && Number.isFinite(body.expires_in)
-        ? body.expires_in
-        : 3600,
+    expiresInSeconds,
     scope: optionalString(body?.scope),
   };
 }
@@ -397,6 +408,7 @@ export class MarketoClient {
       multipart?: FormData;
       appType?: boolean;
       withoutRestPrefix?: boolean;
+      timeoutMs?: number;
     },
   ): Promise<MarketoEnvelope<T>> {
     let attempt = async (token: string): Promise<MarketoEnvelope<T>> => {
@@ -416,7 +428,7 @@ export class MarketoClient {
           ...(options?.appType ? { "x-app-type": "marketo" } : {}),
           ...(contentType ? { "Content-Type": contentType } : {}),
         },
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(options?.timeoutMs ?? 60_000),
       };
       if (options?.multipart) init.body = options.multipart;
       else if (options?.form) init.body = options.form.toString();
@@ -472,7 +484,14 @@ export class MarketoClient {
             return await attempt(await this.#tokens.getToken(true));
           } catch (retryError) {
             if (retryError instanceof MarketoError && retryError.isAuthError) {
-              await this.#tokens.credentialsExpired?.();
+              try {
+                await this.#tokens.credentialsExpired?.();
+              } catch (callbackError) {
+                logger.warn("credential expiry callback failed", {
+                  event: "marketo_credentials_expired_callback_failed",
+                  error: callbackError instanceof Error ? callbackError.name : typeof callbackError,
+                });
+              }
             }
             throw retryError;
           }
@@ -510,6 +529,7 @@ export class MarketoClient {
       body?: unknown;
       form?: URLSearchParams;
       multipart?: FormData;
+      timeoutMs?: number;
     },
   ): Promise<T[]> {
     let envelope = await this.#request<unknown>(path, options);
@@ -713,6 +733,28 @@ export class MarketoClient {
       seenTokens.add(page.nextPageToken);
       nextPageToken = page.nextPageToken;
     }
+  }
+
+  async #assetMetadata<T>(path: string, query: Query = {}): Promise<T[]> {
+    let result: T[] = [];
+    let seenPages = new Set<string>();
+    for (let offset = 0; offset < MAX_ASSET_METADATA_RESULTS; offset += ASSET_PAGE_MAX) {
+      let page = await this.#result<T>(path, {
+        query: { ...query, maxReturn: ASSET_PAGE_MAX, offset },
+      });
+      if (result.length + page.length > MAX_ASSET_METADATA_RESULTS) {
+        throw new MarketoError("Marketo returned too much asset metadata.", { operation: path });
+      }
+      if (page.length === 0) return result;
+      let signature = JSON.stringify(page);
+      if (seenPages.has(signature)) {
+        throw new MarketoError("Marketo repeated an asset metadata page.", { operation: path });
+      }
+      seenPages.add(signature);
+      result.push(...page);
+      if (page.length < ASSET_PAGE_MAX) return result;
+    }
+    throw new MarketoError("Marketo returned too much asset metadata.", { operation: path });
   }
 
   // -------------------------------------------------------------------------
@@ -1535,6 +1577,7 @@ export class MarketoClient {
     return await this.#result<RawSyncResult>("/v1/leads.json", {
       method: "POST",
       body: { action, lookupField, input },
+      timeoutMs: 90_000,
     });
   }
 
@@ -1666,9 +1709,30 @@ export class MarketoClient {
 
   /** Tag definitions and allowed values configured for programs in this instance. */
   async getTagTypes(): Promise<RawTagType[]> {
-    return await this.#result<RawTagType>("/asset/v1/tagTypes.json", {
-      query: { maxReturn: ASSET_PAGE_MAX },
-    });
+    let definitions = await this.#assetMetadata<RawTagType>("/asset/v1/tagTypes.json");
+    let result: RawTagType[] = [];
+    for (let definition of definitions) {
+      if (typeof definition.tagType !== "string" ||
+          typeof definition.applicableProgramTypes !== "string" ||
+          typeof definition.required !== "boolean") {
+        throw new MarketoError("Marketo returned a tag type with an unexpected shape.", {
+          operation: "/asset/v1/tagTypes.json",
+        });
+      }
+      let details = await this.#result<RawTagType>("/asset/v1/tagType/byName.json", {
+        query: { name: definition.tagType },
+      });
+      if (details.length !== 1 || details[0]?.tagType !== definition.tagType ||
+          typeof details[0].applicableProgramTypes !== "string" ||
+          typeof details[0].required !== "boolean" ||
+          details[0].allowableValues !== undefined && typeof details[0].allowableValues !== "string") {
+        throw new MarketoError("Marketo returned a tag value with an unexpected shape.", {
+          operation: "/asset/v1/tagType/byName.json",
+        });
+      }
+      result.push(details[0]);
+    }
+    return result;
   }
 
   /** Create a program in an ordinary Marketing Activities folder. */
@@ -1825,7 +1889,7 @@ export class MarketoClient {
 
   /** Channel metadata carries the ordered progression statuses available to a program. */
   async getChannels(): Promise<RawChannel[]> {
-    return await this.#result<RawChannel>("/asset/v1/channels.json", { query: { maxReturn: 200 } });
+    return await this.#assetMetadata<RawChannel>("/asset/v1/channels.json");
   }
 
   // -------------------------------------------------------------------------
@@ -1847,22 +1911,55 @@ export class MarketoClient {
   }
 
   async getCampaign(campaignId: number): Promise<RawCampaign | undefined> {
-    let result = await this.#result<RawCampaign>(`/v1/campaigns/${campaignId}.json`);
+    let path = `/v1/campaigns/${campaignId}.json`;
+    let result = await this.#result<RawCampaign>(path);
+    if (result.length === 0) return undefined;
+    if (result.length !== 1 || result[0]?.id !== campaignId) {
+      throw new MarketoError(`Marketo returned the wrong campaign for exact read ${campaignId}.`, {
+        operation: path,
+      });
+    }
     return result[0];
   }
 
   /** Read a smart campaign through the Asset API, including lifecycle and folder metadata. */
   async getSmartCampaign(campaignId: number): Promise<RawCampaignAsset | undefined> {
-    let result = await this.#result<RawCampaignAsset>(`/asset/v1/smartCampaign/${campaignId}.json`);
+    let path = `/asset/v1/smartCampaign/${campaignId}.json`;
+    let result = await this.#result<RawCampaignAsset>(path);
+    if (result.length === 0) return undefined;
+    if (result.length !== 1 || result[0]?.id !== campaignId) {
+      throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${campaignId}.`, {
+        operation: path,
+      });
+    }
     return result[0];
   }
 
   /** Read the smart-list definition attached to a smart campaign. */
-  async getCampaignSmartList(campaignId: number): Promise<RawSmartList | undefined> {
+  async getCampaignSmartList(
+    campaignId: number,
+    expectedSmartListId?: number,
+  ): Promise<RawSmartList | undefined> {
+    if (expectedSmartListId === undefined) {
+      let campaign = await this.getSmartCampaign(campaignId);
+      if (!campaign) return undefined;
+      expectedSmartListId = campaign.smartListId;
+    }
+    if (!Number.isSafeInteger(expectedSmartListId) || expectedSmartListId! <= 0) {
+      throw new MarketoError(`Marketo returned invalid smart-list identity for campaign ${campaignId}.`);
+    }
+    let path = `/asset/v1/smartCampaign/${campaignId}/smartList.json`;
     let result = await this.#result<RawSmartList>(
-      `/asset/v1/smartCampaign/${campaignId}/smartList.json`,
+      path,
       { query: { includeRules: true } },
     );
+    if (result.length === 0) return undefined;
+    if (result.length !== 1 || !Number.isSafeInteger(result[0]?.id) || result[0]!.id! <= 0 ||
+        result[0]?.id !== expectedSmartListId) {
+      throw new MarketoError(`Marketo returned the wrong smart list for campaign ${campaignId}.`, {
+        operation: path,
+      });
+    }
     return result[0];
   }
 
@@ -2050,6 +2147,7 @@ export class MarketoClient {
     return await this.#result<RawSyncResult>(`/v1/customobjects/${encodeURIComponent(apiName)}.json`, {
       method: "POST",
       body: { action, input },
+      timeoutMs: 120_000,
     });
   }
 
@@ -2912,10 +3010,10 @@ export type RawProgramTag = { tagType?: string; tagValue?: string };
 
 /** Program tag definition returned by Get Tag Types. */
 export type RawTagType = {
-  id?: number;
-  name?: string;
-  requiredFor?: string[];
-  allowableValues?: string[];
+  tagType?: string;
+  applicableProgramTypes?: string;
+  required?: boolean;
+  allowableValues?: string;
 };
 
 export type RawToken = { name?: string; type?: string; value?: string };
