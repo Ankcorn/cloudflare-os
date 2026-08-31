@@ -736,8 +736,9 @@ export class MarketoClient {
       });
     }
     let queryToken = options?.query?.nextPageToken;
+    let bodyToken = isRecord(options?.body) ? options.body.nextPageToken : undefined;
     let requestToken = queryToken === undefined
-      ? options?.form?.get("nextPageToken") ?? undefined
+      ? options?.form?.get("nextPageToken") ?? (bodyToken === undefined ? undefined : String(bodyToken))
       : String(queryToken);
     if (token && token === requestToken) {
       throw new MarketoError("Marketo repeated the requested nextPageToken.", { operation: path });
@@ -2203,8 +2204,14 @@ export class MarketoClient {
     let path = `/v1/customobjects/${encodeURIComponent(apiName)}.json`;
     let records = await this.#allFilterResults<Record<string, unknown>>(path, nextPageToken => ({
       method: "POST",
-      query: { _method: "GET", nextPageToken },
-      body: { filterType: "dedupeFields", ...(fields?.length ? { fields } : {}), input },
+      query: { _method: "GET" },
+      body: {
+        filterType: "dedupeFields",
+        ...(fields?.length ? { fields } : {}),
+        input,
+        batchSize: MAX_FILTER_VALUES,
+        ...(nextPageToken ? { nextPageToken } : {}),
+      },
     }));
     return this.#validatedCustomObjectResults(path, records);
   }
@@ -2280,12 +2287,14 @@ export class MarketoClient {
     if ("dedupeKeys" in request.filter) {
       return await this.#page(path, {
         method: "POST",
-        query: {
-          _method: "GET",
+        query: { _method: "GET" },
+        body: {
+          filterType: "dedupeFields",
+          fields: request.fields,
+          input: request.filter.dedupeKeys,
           batchSize: request.maxResults ?? MAX_FILTER_VALUES,
-          nextPageToken: request.pageToken,
+          ...(request.pageToken ? { nextPageToken: request.pageToken } : {}),
         },
-        body: { filterType: "dedupeFields", fields: request.fields, input: request.filter.dedupeKeys },
       });
     }
     return await this.#page(path, filterRead({

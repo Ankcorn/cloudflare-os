@@ -3978,10 +3978,11 @@ describe("standard CRM business objects", () => {
     await client.queryBusinessObject("opportunityRole", {
       filter: { dedupeKeys: [key] }, fields: ["role"], pageToken: "p", maxResults: 10,
     });
-    expect(request.url).toContain("/rest/v1/opportunities/roles.json?_method=GET&batchSize=10&nextPageToken=p");
+    let url = new URL(request.url!);
+    expect(`${url.pathname}?${url.searchParams}`).toBe("/rest/v1/opportunities/roles.json?_method=GET");
     expect(request.init?.method).toBe("POST");
     expect(JSON.parse(String(request.init?.body))).toEqual({
-      filterType: "dedupeFields", fields: ["role"], input: [key],
+      filterType: "dedupeFields", fields: ["role"], input: [key], batchSize: 10, nextPageToken: "p",
     });
   });
 
@@ -3997,7 +3998,7 @@ describe("standard CRM business objects", () => {
     expect(request.url).toContain("/rest/v1/customobjects/orderStatus.json?_method=GET");
     expect(request.init?.method).toBe("POST");
     expect(JSON.parse(String(request.init?.body))).toEqual({
-      filterType: "dedupeFields", fields: ["status"], input: [key],
+      filterType: "dedupeFields", fields: ["status"], input: [key], batchSize: MAX_FILTER_VALUES,
     });
   });
 
@@ -4300,6 +4301,37 @@ describe("filter reads", () => {
 
     expect(records.map(record => record.marketoGUID)).toEqual(["g1", "g2"]);
     expect(new URLSearchParams(bodies[1]).get("nextPageToken")).toBe("objects-2");
+  });
+
+  it("returns every compound custom-object page with paging in the JSON body", async () => {
+    let requests: { url: string; body: Record<string, unknown> }[] = [];
+    let envelopes = [
+      { success: true, result: [{ marketoGUID: "g1" }], moreResult: true, nextPageToken: "compound-2" },
+      { success: true, result: [{ marketoGUID: "g2" }], moreResult: false },
+    ];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      requests.push({ url, body: JSON.parse(String(init.body)) });
+      return Response.json(envelopes.shift());
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+    let key = { sourceID: "source-1", leadID: 7 };
+
+    let records = await client.queryCustomObjectByDedupeKeys("orderStatus", [key], ["status"]);
+
+    expect(records.map(record => record.marketoGUID)).toEqual(["g1", "g2"]);
+    expect(requests.map(request => [...new URL(request.url).searchParams])).toEqual([
+      [["_method", "GET"]], [["_method", "GET"]],
+    ]);
+    expect(requests.map(request => request.body)).toEqual([
+      { filterType: "dedupeFields", fields: ["status"], input: [key], batchSize: MAX_FILTER_VALUES },
+      {
+        filterType: "dedupeFields",
+        fields: ["status"],
+        input: [key],
+        batchSize: MAX_FILTER_VALUES,
+        nextPageToken: "compound-2",
+      },
+    ]);
   });
 
   it("rejects missing and repeated filter continuation tokens", async () => {
