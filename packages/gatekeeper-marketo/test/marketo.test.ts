@@ -7478,7 +7478,7 @@ describe("action dispatch lifecycle", () => {
   it("validates endpoint-specific target identities and statuses", () => {
     let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
       [{ id: 1, type: "deletePerson", personId: 7 }, [{ id: 8, status: "deleted" }]],
-      [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 7, status: "updated" }]],
+      [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 7, status: "added" }]],
       [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7] }, [{ status: "scheduled" }]],
@@ -7534,8 +7534,9 @@ describe("action dispatch lifecycle", () => {
     };
 
     expect(() => assertActionResultIdentity(action, [{ id: 7, status: "Member" }])).not.toThrow();
+    expect(() => assertActionResultIdentity(action, [{ id: 7, status: "updated" }])).not.toThrow();
     expect(() => assertActionResultIdentity(action, [{ status: "skipped" }])).not.toThrow();
-    expect(() => assertActionResultIdentity(action, [{ id: 7, status: "updated" }]))
+    expect(() => assertActionResultIdentity(action, [{ id: 7, status: "added" }]))
       .toThrow(/approved target/);
   });
 
@@ -7545,7 +7546,7 @@ describe("action dispatch lifecycle", () => {
     };
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({ success: true, result: [{ id: 7, status: "Member" }] }));
+      : Response.json({ success: true, result: [{ id: 7, status: "updated" }] }));
     let stub = await actionGatekeeper(action);
 
     await runInDurableObject(stub, async (instance, state) => {

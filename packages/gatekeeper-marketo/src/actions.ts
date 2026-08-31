@@ -353,7 +353,11 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
     case "deletePerson": expected = [action.personId]; statuses = ["deleted", "skipped"]; break;
     case "listAdd": expected = action.personIds; statuses = ["added", "skipped"]; break;
     case "listRemove": expected = action.personIds; statuses = ["removed", "skipped"]; break;
-    case "programStatus": expected = action.personIds; statuses = [action.status.toLowerCase(), "skipped"]; break;
+    case "programStatus":
+      expected = action.personIds;
+      // The legacy endpoint can return the progression label or the newer generic outcome.
+      statuses = [action.status.toLowerCase(), "updated", "skipped"];
+      break;
     case "campaignTrigger": expected = [action.campaignId]; statuses = ["triggered", "queued", "skipped"]; break;
     case "campaignSchedule": expected = [action.campaignId]; statuses = ["scheduled", "queued", "skipped"]; break;
     case "upsertPeople":
