@@ -3054,6 +3054,82 @@ describe("program name lookup", () => {
 describe("filter reads", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("returns every person page through findPeople", async () => {
+    let requests: { url: string; init: RequestInit }[] = [];
+    let envelopes = [
+      { success: true, result: [{ id: 1, email: "a@example.com" }], moreResult: true, nextPageToken: "people-2" },
+      { success: true, result: [{ id: 2, email: "a@example.com" }], moreResult: false },
+    ];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      requests.push({ url, init });
+      return Response.json(envelopes.shift());
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    let people = await new MarketoSessionImpl(stubContext(client)).findPeople("email", ["a@example.com"]);
+
+    expect(people.map(person => person.id)).toEqual([1, 2]);
+    expect(requests[1]?.init.method).toBe("POST");
+    expect(new URL(requests[1]!.url).searchParams.get("_method")).toBe("GET");
+    expect(new URLSearchParams(String(requests[1]?.init.body)).get("nextPageToken")).toBe("people-2");
+  });
+
+  it("returns every custom-object page through query", async () => {
+    let bodies: string[] = [];
+    let envelopes = [
+      { success: true, result: [{ marketoGUID: "g1" }], moreResult: true, nextPageToken: "objects-2" },
+      { success: true, result: [{ marketoGUID: "g2" }], moreResult: false },
+    ];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Response.json(envelopes.shift());
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    let records = await new MarketoCustomObjectImpl(stubContext(client), "orderStatus")
+      .query("sourceID", ["1"]);
+
+    expect(records.map(record => record.marketoGUID)).toEqual(["g1", "g2"]);
+    expect(new URLSearchParams(bodies[1]).get("nextPageToken")).toBe("objects-2");
+  });
+
+  it("rejects missing and repeated filter continuation tokens", async () => {
+    let missing = clientReturning({
+      success: true, result: [{ id: 1 }], moreResult: true,
+    }).client;
+    await expect(missing.getLeads("email", ["a@example.com"]))
+      .rejects.toThrow("invalid filter paging state");
+
+    let repeated = clientReturning(
+      { success: true, result: [{ id: 1 }], moreResult: true, nextPageToken: "same" },
+      { success: true, result: [{ id: 2 }], moreResult: true, nextPageToken: "same" },
+    ).client;
+    await expect(repeated.queryCustomObject("orderStatus", "sourceID", ["1"]))
+      .rejects.toThrow("invalid filter paging state");
+  });
+
+  it("permits 100 filter pages but refuses to truncate a larger result", async () => {
+    let bounded = clientReturning(...Array.from({ length: 100 }, (_, index) => ({
+      success: true,
+      result: [{ id: index }],
+      moreResult: index < 99,
+      nextPageToken: index < 99 ? `page-${index + 1}` : undefined,
+    })));
+    await expect(bounded.client.getLeads("email", ["a@example.com"]))
+      .resolves.toHaveLength(100);
+    expect(bounded.calls).toHaveLength(100);
+
+    let overBound = clientReturning(...Array.from({ length: 100 }, (_, index) => ({
+      success: true,
+      result: [{ id: index }],
+      moreResult: true,
+      nextPageToken: `page-${index + 1}`,
+    })));
+    await expect(overBound.client.getLeads("email", ["a@example.com"]))
+      .rejects.toThrow("exceeded the safe page limit");
+    expect(overBound.calls).toHaveLength(100);
+  });
+
   // Large filters use Marketo's POST-with-method-override read form to avoid oversized URLs.
   it("sends person filters as a form body Marketo routes as a read", async () => {
     let seen: RequestInit | undefined;

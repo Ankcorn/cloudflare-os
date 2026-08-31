@@ -257,6 +257,7 @@ function buildQuery(query: Query | undefined): string {
 /** Backoff before retrying Marketo's short-window rate limit (100 calls / 20s). */
 const RATE_LIMIT_BACKOFF_MS = [1_000, 3_000, 8_000];
 const RATE_LIMIT_RETRIES = RATE_LIMIT_BACKOFF_MS.length;
+const FILTER_RESULT_PAGE_LIMIT = 100;
 
 /** Marketo rejects activity queries carrying more than this many activity type ids. */
 export const MAX_ACTIVITY_TYPE_IDS = 10;
@@ -646,6 +647,26 @@ export class MarketoClient {
       moreResult,
       nextPageToken: moreResult ? envelope.nextPageToken : undefined,
     };
+  }
+
+  async #filterResults<T>(path: string, params: Record<string, string | number>): Promise<T[]> {
+    let result: T[] = [];
+    let nextPageToken: string | undefined;
+    let seenTokens = new Set<string>();
+    for (let pageNumber = 0; pageNumber < FILTER_RESULT_PAGE_LIMIT; pageNumber++) {
+      let page = await this.#page<T>(path, filterRead({
+        ...params,
+        ...(nextPageToken === undefined ? {} : { nextPageToken }),
+      }));
+      result.push(...page.result);
+      if (!page.moreResult) return result;
+      if (!page.nextPageToken || seenTokens.has(page.nextPageToken)) {
+        throw new MarketoError("Marketo returned invalid filter paging state.", { operation: path });
+      }
+      seenTokens.add(page.nextPageToken);
+      nextPageToken = page.nextPageToken;
+    }
+    throw new MarketoError("Marketo filter results exceeded the safe page limit.", { operation: path });
   }
 
   // -------------------------------------------------------------------------
@@ -1452,11 +1473,11 @@ export class MarketoClient {
 
   /** Fetch people whose `filterType` field matches any of `filterValues`. */
   async getLeads(filterType: string, filterValues: string[], fields?: string[]): Promise<RawLead[]> {
-    return await this.#result<RawLead>("/v1/leads.json", filterRead({
+    return await this.#filterResults<RawLead>("/v1/leads.json", {
       filterType,
       filterValues: filterValues.join(","),
       ...(fields?.length ? { fields: fields.join(",") } : {}),
-    }));
+    });
   }
 
   /** Create and/or update people. */
@@ -1870,11 +1891,11 @@ export class MarketoClient {
     fields?: string[],
   ): Promise<Record<string, unknown>[]> {
     let path = `/v1/customobjects/${encodeURIComponent(apiName)}.json`;
-    let records = await this.#result<Record<string, unknown>>(path, filterRead({
+    let records = await this.#filterResults<Record<string, unknown>>(path, {
       filterType,
       filterValues: filterValues.join(","),
       ...(fields?.length ? { fields: fields.join(",") } : {}),
-    }));
+    });
     return records.filter(record => {
       // A rejected filter value is not reported as an error: Marketo answers 200 with
       // `success: true` and smuggles `{reasons: [{code, message}]}` into the result array
