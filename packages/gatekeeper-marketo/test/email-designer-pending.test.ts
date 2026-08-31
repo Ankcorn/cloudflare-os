@@ -422,6 +422,17 @@ describe("Email Designer pending-state simulation", () => {
     });
   });
 
+  it("rejects a template and content in the same email update without submitting an action", async () => {
+    let { actions, ctx } = context({});
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+
+    await expect(email.update({
+      templateId: "template-1",
+      content: { html: "<p>Overwritten</p>" },
+    })).rejects.toThrow(/templateId and content cannot be updated together.*overwrites email content/);
+    expect(actions).toEqual([]);
+  });
+
   it("projects pending fragment settings onto the public fragment detail shape", async () => {
     let { actions, ctx } = context({
       getDesignerAsset: async () => ({

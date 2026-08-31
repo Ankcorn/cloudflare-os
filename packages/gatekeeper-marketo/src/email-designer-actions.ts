@@ -244,9 +244,9 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
   let base = { awaitDecision: false, implementsRevert: false } as const;
   switch (action.type) {
     case "designerCreate":
-      return { ...base, title: `Create Marketo designer ${name}`, description: createDescription(action, name) };
+      return { ...base, awaitDecision: true, title: `Create Marketo designer ${name}`, description: createDescription(action, name) };
     case "designerClone":
-      return { ...base, title: `Clone Marketo designer ${name}`, description: cloneDescription(action, name) };
+      return { ...base, awaitDecision: true, title: `Clone Marketo designer ${name}`, description: cloneDescription(action, name) };
     case "designerUpdate":
       return { ...base, title: `Update Marketo designer ${name}`, description: `Update draft fields on ${name} ${markdownCode(target ?? "")}:\n\n${markdownJsonCodeBlock(action.patch)}` };
     case "designerLifecycle": {
@@ -259,7 +259,7 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
           : "";
       return {
         ...base,
-        awaitDecision: action.operation === "discard",
+        awaitDecision: action.operation === "createDraft" || action.operation === "discard",
         title: `${action.operation} Marketo designer ${name}`,
         description: `${action.operation} ${name} ${markdownCode(target ?? "")} using its snapshotted ${action.sourceState} content ${markdownCode(action.contentId)}.${risk}`,
       };

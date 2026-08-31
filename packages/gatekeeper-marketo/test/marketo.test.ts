@@ -1031,27 +1031,24 @@ function emailDesignerContext(client: Partial<MarketoClient>, initial: EmailDesi
 
 describe("new Email Designer", () => {
   it("snapshots the operation-specific associated content id for lifecycle approvals", async () => {
-    let { ctx, actions } = emailDesignerContext({
-      getDesignerAsset: async () => ({
-        id: "email-1",
-        associatedStates: [
-          { contentId: "draft-1", state: "draft" },
-          { contentId: "approved-1", state: "approved" },
-        ],
-      }),
-    });
-    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
-    await email.approve();
-    await email.discardDraft();
-    await email.unapprove();
-    await email.createDraft();
-
-    expect(actions).toMatchObject([
-      { operation: "approve", contentId: "draft-1", sourceState: "draft" },
-      { operation: "discard", contentId: "draft-1", sourceState: "draft" },
-      { operation: "unapprove", contentId: "approved-1", sourceState: "approved" },
-      { operation: "createDraft", contentId: "approved-1", sourceState: "approved" },
-    ]);
+    for (let [operation, contentId, sourceState] of [
+      ["approve", "draft-1", "draft"],
+      ["discardDraft", "draft-1", "draft"],
+      ["unapprove", "approved-1", "approved"],
+      ["createDraft", "approved-1", "approved"],
+    ] as const) {
+      let { ctx, actions } = emailDesignerContext({
+        getDesignerAsset: async () => ({
+          id: "email-1",
+          associatedStates: [
+            { contentId: "draft-1", state: "draft" },
+            { contentId: "approved-1", state: "approved" },
+          ],
+        }),
+      });
+      await new MarketoDesignerEmailImpl(ctx, "email-1")[operation]();
+      expect(actions).toMatchObject([{ contentId, sourceState }]);
+    }
   });
 
   it("creates a fully-specified email provisionally and simulates follow-up updates", async () => {
@@ -5180,6 +5177,71 @@ describe("Design Studio scoped binding", () => {
       await expect(studio.getEmail("~1").approve()).rejects.toThrow(/~1 is not a email/);
       expect(approvals).toBe(0);
       expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1]);
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("handles pending Email Designer lifecycle dependencies through the session and action queue", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    let descriptions: ActionDescription[] = [];
+    let assetRequests: { path: string; body?: unknown }[] = [];
+    let state = "draft";
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      let body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      assetRequests.push({ path, ...(body === undefined ? {} : { body }) });
+      if (body) {
+        state = body.action === "approve" ? "approved" : "draft";
+        return Response.json({ success: true, result: [{
+          id: "email-1", contentId: "content-1", status: state,
+        }] });
+      }
+      return Response.json({ success: true, result: [{
+        id: "email-1", associatedStates: [{ contentId: "content-1", state }],
+      }] });
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, storage) => {
+      let queue = new RpcStub(new TestApprovalQueue(async (_id, description) => {
+        descriptions.push(description);
+      })) as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let designer = studio.getEmailDesigner();
+      let created = await designer.createEmail({
+        location: { workspaceId: "1", folderId: "10" },
+        name: "Pending", headers: { subject: "Pending" },
+      });
+      expect(descriptions[0]?.awaitDecision).toBe(true);
+      await expect(created.approve()).rejects.toThrow(/still pending creation/);
+
+      let email = designer.getEmail("email-1");
+      await email.approve();
+      await email.unapprove();
+      expect(storage.storage.kv.get<{ action: EmailDesignerAction }>("pending:2")?.action).toMatchObject({
+        operation: "approve", contentId: "content-1", sourceState: "draft",
+      });
+      expect(storage.storage.kv.get<{ action: EmailDesignerAction }>("pending:3")?.action).toMatchObject({
+        operation: "unapprove", contentId: "content-1", sourceState: "approved",
+      });
+      await expect(instance.applyAction(3)).rejects.toThrow(/earlier pending mutation/);
+      await instance.applyAction(2);
+      await instance.applyAction(3);
+
+      expect(assetRequests).toEqual([
+        { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/state/transition", body: { contentId: "content-1", action: "approve" } },
+        { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/state/transition", body: { contentId: "content-1", action: "unapprove" } },
+      ]);
+      created[Symbol.dispose]();
+      email[Symbol.dispose]();
+      designer[Symbol.dispose]();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });

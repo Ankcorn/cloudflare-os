@@ -593,11 +593,28 @@ abstract class DesignerAssetImpl extends RpcTarget {
 
   protected async lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
     this.assertNotDeleted();
+    let sourceState: "draft" | "approved" = operation === "approve" || operation === "discard" ? "draft" : "approved";
+    let prior = actions(this.ctx, this.kind, this.assetId)
+      .filter((action): action is Extract<EmailDesignerAction, { type: "designerLifecycle" }> =>
+        action.type === "designerLifecycle")
+      .at(-1);
+    if (prior) {
+      let pendingState = prior.operation === "approve" || prior.operation === "discard" ? "approved" : "draft";
+      if (pendingState !== sourceState) {
+        throw new Error(`Designer asset ${this.assetId} has a pending ${pendingState} state, not ${sourceState} content.`);
+      }
+      if (prior.operation === "approve" || prior.operation === "unapprove") {
+        return await submitDesigner(this.ctx, {
+          type: "designerLifecycle", asset: this.kind, targetId: this.assetId, operation,
+          contentId: prior.contentId, sourceState,
+        });
+      }
+      throw new Error(`Designer asset ${this.assetId} has a pending lifecycle change that must be decided first.`);
+    }
     let physical = this.ctx.resolveDesignerId(this.assetId);
     if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
     let raw = await (await this.ctx.client()).getDesignerAsset(path(this.kind), physical);
     if (!raw || String(raw.id) !== physical) throw new Error(`Marketo designer asset ${this.assetId} was not found.`);
-    let sourceState: "draft" | "approved" = operation === "approve" || operation === "discard" ? "draft" : "approved";
     let state = raw.associatedStates?.find(item => item.state?.toLowerCase() === sourceState);
     if (!state?.contentId) throw new Error(`Marketo designer asset ${this.assetId} has no ${sourceState} content.`);
     await this.ctx.observe(`Read Marketo designer ${sourceState} state`, `Resolved the content version for designer asset ${this.assetId}.`);
@@ -639,6 +656,9 @@ export class MarketoDesignerEmailImpl extends DesignerAssetImpl {
   async describe(): Promise<MarketoDesignerEmailDetail> { return await this.detail() as MarketoDesignerEmailDetail; }
   async update(value: MarketoDesignerEmailPatch) {
     let input = only(value, "Designer email patch", ["name", "description", "headers", "content", "settings", "templateId"]);
+    if (input.templateId !== undefined && input.content !== undefined) {
+      throw new Error("templateId and content cannot be updated together because applying a template overwrites email content.");
+    }
     await this.submitUpdate({ name: input.name === undefined ? undefined : text(input.name, "Email name"),
       description: optionalText(input.description, "description"), headers: input.headers === undefined ? undefined : headers(input.headers, true),
       data: content(input.content), settings: settings(input.settings),
