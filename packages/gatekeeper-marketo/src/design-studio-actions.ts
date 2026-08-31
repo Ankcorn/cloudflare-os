@@ -225,6 +225,7 @@ async function verifyCreatedAsset(
   id: number,
   input: DesignStudioCreateInput,
   parent: MarketoFolderRef,
+  templateId?: number,
 ): Promise<void> {
   let created = asset === "folder" ? await client.getFolder(id)
     : asset === "email" ? await client.getEmail(id)
@@ -240,8 +241,8 @@ async function verifyCreatedAsset(
   let folderId = folder?.id ?? folder?.value;
   let actual = created as Record<string, unknown> | undefined;
   let expected: Record<string, unknown> = { description: input.description };
-  if ((asset === "email" || asset === "landingPage") && input.templateId !== undefined) {
-    expected.template = Number(input.templateId);
+  if (asset === "email" || asset === "landingPage") {
+    expected.template = templateId;
   }
   if (asset === "email") {
     for (let field of ["subject", "fromName", "fromEmail", "replyEmail"] as const) {
@@ -280,16 +281,18 @@ export async function executeDesignStudioAction(
   if (action.type === "designCreate") {
     let folder = folderRef(action.parent, resolve);
     let input = action.input;
+    let templateId: number | undefined;
     let created: (RawDesignStudioAsset | RawFolder | RawFile)[];
     switch (action.asset) {
       case "folder":
         created = await client.createFolder({ name: input.name, parent: folder, description: input.description });
         break;
       case "email":
+        templateId = resolve(required(input.templateId, "email template"));
         created = await client.createEmail({
           name: input.name,
           folder,
-          template: resolve(required(input.templateId, "email template")),
+          template: templateId,
           description: input.description,
           subject: input.subject,
           fromName: input.fromName,
@@ -306,10 +309,11 @@ export async function executeDesignStudioAction(
         });
         break;
       case "landingPage":
+        templateId = resolve(required(input.templateId, "landing-page template"));
         created = await client.createLandingPage({
           name: input.name,
           folder,
-          template: resolve(required(input.templateId, "landing-page template")),
+          template: templateId,
           description: input.description,
         });
         break;
@@ -349,7 +353,7 @@ export async function executeDesignStudioAction(
     }
     let id = resultId(created);
     recordCandidate(id);
-    await verifyCreatedAsset(client, action.asset, id, input, folder);
+    await verifyCreatedAsset(client, action.asset, id, input, folder, templateId);
     recordCreation(action.provisionalId, id);
     if (action.asset === "snippet") {
       if (input.html !== undefined) assertTargetResult(await client.updateSnippetContent(id, "HTML", input.html), id, "snippet HTML update");
@@ -377,8 +381,7 @@ export async function executeDesignStudioAction(
     recordCandidate(createdId);
     await verifyCreatedAsset(client, action.asset, createdId, {
       name: action.name,
-      ...(action.asset === "landingPage" ? { templateId: String(landingPageTemplateId) } : {}),
-    }, clone.folder);
+    }, clone.folder, landingPageTemplateId);
     recordCreation(action.provisionalId, createdId);
     return;
   }

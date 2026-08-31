@@ -6367,6 +6367,59 @@ describe("provisional id kind safety", () => {
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("maps a created classic template and applies it to a dependent email", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1,
+        type: "designCreate",
+        asset: "emailTemplate",
+        provisionalId: "~1",
+        parent: { id: "10", type: "Folder" },
+        input: { name: "Template", content: "<html>Template</html>" },
+      },
+      {
+        id: 2,
+        type: "designCreate",
+        asset: "email",
+        provisionalId: "~2",
+        parent: { id: "10", type: "Folder" },
+        input: { name: "Email", templateId: "~1" },
+      },
+    ];
+    let emailRequest: URLSearchParams | undefined;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/emailTemplates.json")) {
+        return Response.json({ success: true, result: [{ id: 201 }] });
+      }
+      if (path.endsWith("/emailTemplate/201.json")) {
+        return Response.json({ success: true, result: [{
+          id: 201, name: "Template", folder: { id: 10, type: "Folder" },
+        }] });
+      }
+      if (path.endsWith("/emails.json")) {
+        emailRequest = new URLSearchParams(String(init?.body));
+        return Response.json({ success: true, result: [{ id: 202 }] });
+      }
+      if (path.endsWith("/email/202.json")) {
+        return Response.json({ success: true, result: [{
+          id: 202, name: "Email", template: 201, folder: { id: 10, type: "Folder" },
+        }] });
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await instance.applyAction(1);
+      expect(state.storage.kv.get("provisional:~1")).toBe(201);
+      await instance.applyAction(2);
+      expect(state.storage.kv.get("provisional:~2")).toBe(202);
+    });
+    expect(emailRequest?.get("template")).toBe("201");
+  });
+
   it("reads and sends the landing page's current source template when cloning", async () => {
     let action: DesignStudioAction = {
       id: 1,
