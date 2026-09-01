@@ -1,6 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type {
-  ActionDescription, ApprovalQueue, HookController, HookDescription, ObservationDescription,
+  ActionDescription, ApprovalQueue, GitCache, GitObjectType, GitOid, HookController,
+  HookDescription, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { GoogleAccessToken } from "../src/google-api";
 import type { GoogleDocSession } from "../src/docs-types";
@@ -21,6 +22,10 @@ class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
 
   async authorizeObservation(_description: ObservationDescription): Promise<void> {}
 
+  async getGitCache(): Promise<GitCache> {
+    throw new Error("Unexpected git cache access");
+  }
+
   async submitAction(actionId: number, _description: ActionDescription): Promise<void> {
     this.actionId = actionId;
   }
@@ -31,6 +36,31 @@ class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
     _description: HookDescription,
   ): Promise<void> {
     throw new Error("Unexpected hook binding");
+  }
+}
+
+/**
+ * Stands in for the git cache the overseer passes to `applyAction()`. This gatekeeper never
+ * touches it, so every method just throws.
+ */
+class TestGitCache extends RpcTarget implements GitCache {
+  async get(_id: GitOid): Promise<{type: GitObjectType, content: Uint8Array} | null> {
+    throw new Error("not implemented");
+  }
+  async has(_id: GitOid): Promise<boolean> { throw new Error("not implemented"); }
+  async stat(_id: GitOid): Promise<{type: GitObjectType, size: number} | null> {
+    throw new Error("not implemented");
+  }
+  async put(_type: GitObjectType, _content: Uint8Array): Promise<GitOid> {
+    throw new Error("not implemented");
+  }
+  async advertiseCommit(_commitId: GitOid): Promise<void> { throw new Error("not implemented"); }
+  async buildPack(): Promise<ReadableStream<Uint8Array>> { throw new Error("not implemented"); }
+  async consumePack(_pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
+    throw new Error("not implemented");
+  }
+  async isAncestor(_ancestor: GitOid, _descendant: GitOid): Promise<boolean> {
+    throw new Error("not implemented");
   }
 }
 
@@ -79,7 +109,10 @@ export class TestHooks extends DurableObject<Env> {
 
   async applyAction(facetName: string, actionId: number): Promise<string | null> {
     try {
-      await this.#gatekeeper(facetName).applyAction(actionId);
+      // The overseer always passes an action-scoped git cache with the apply call, and the
+      // validator (sharpened by the `Gatekeeper` interface) requires it, so the test passes a
+      // stand-in the same way.
+      await this.#gatekeeper(facetName).applyAction(actionId, new RpcStub(new TestGitCache()));
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
