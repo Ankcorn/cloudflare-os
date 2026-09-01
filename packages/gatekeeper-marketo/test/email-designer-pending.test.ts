@@ -126,6 +126,7 @@ describe("Email Designer pending-state simulation", () => {
     }) as unknown as MarketoClient;
     ctx.pendingDesigner = () => [{
       id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending",
+      ...EMPTY_DELETE_REVIEW,
     }];
     await expect(designer.listEmails("1", { pageIndex: 2, pageSize: 20 }))
       .rejects.toThrow(/inconsistent designer paging totals/);
