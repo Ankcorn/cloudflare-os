@@ -78,11 +78,12 @@ function hexOid(bytes: Uint8Array): string {
 
 /**
  * Parse a git tree object's payload (as returned by `GitCache.get()` -- no `<type> <size>\0`
- * header): repeated `<mode> <name>\0<20-byte oid>`. Entry names are decoded as strict UTF-8; a
- * name that is not valid UTF-8 fails the parse (a lossy decode could alias two distinct entries).
+ * header): repeated `<mode> <name>\0<20-byte oid>`. Entry names are decoded as strict,
+ * byte-exact UTF-8: a name that is not valid UTF-8 fails the parse, and a leading BOM is kept
+ * (`ignoreBOM: true`) -- either a lossy decode or BOM stripping could alias two distinct entries.
  */
 export function parseGitTreePayload(payload: Uint8Array, oid: GitOid): GitTreeEntry[] {
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const entries: GitTreeEntry[] = [];
   let offset = 0;
   while (offset < payload.length) {
@@ -237,7 +238,8 @@ export async function diffGitTrees(
     }
     budget -= oldContent.byteLength + newContent.byteLength;
 
-    const decoder = new TextDecoder();
+    // Keep a leading BOM (`ignoreBOM: true`) so a BOM-only change still produces a visible diff.
+    const decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
     const { hunks, additions, deletions } =
       diffTextLines(decoder.decode(oldContent), decoder.decode(newContent));
     files.push({

@@ -82,6 +82,14 @@ describe("parseGitTreePayload", () => {
     const badName = new Uint8Array([...text("100644 "), 0xff, 0, ...new Uint8Array(20)]);
     expect(() => parseGitTreePayload(badName, oid(9))).toThrow(/non-UTF-8 entry name/);
   });
+
+  it("keeps a leading BOM in an entry name, so it cannot alias the BOM-less name", () => {
+    const entries = [
+      { mode: "100644", name: "a.txt", oid: oid(1) },
+      { mode: "100644", name: "\uFEFFa.txt", oid: oid(2) },
+    ];
+    expect(parseGitTreePayload(treePayload(entries), oid(9))).toEqual(entries);
+  });
 });
 
 describe("diffTextLines", () => {
@@ -276,6 +284,23 @@ describe("diffGitTrees", () => {
     expect(files.map(file => [file.path, file.status])).toEqual([
       ["thing/x.txt", "removed"],
       ["thing", "added"],
+    ]);
+  });
+
+  it("shows a BOM-only content change instead of stripping it into an empty diff", async () => {
+    const { source } = fakeSource(
+      {
+        [oid(30)]: [{ mode: "100644", name: "a.txt", oid: oid(1) }],
+        [oid(31)]: [{ mode: "100644", name: "a.txt", oid: oid(2) }],
+      },
+      { [oid(1)]: text("hello\n"), [oid(2)]: text("\uFEFFhello\n") },
+    );
+    const files = await diffGitTrees(source, oid(30), oid(31));
+    expect(files).toHaveLength(1);
+    expect(files[0].diffOmitted).toBe(false);
+    expect(files[0].hunks[0].lines).toEqual([
+      { kind: "removed", text: "hello", oldLineNumber: 1 },
+      { kind: "added", text: "\uFEFFhello", newLineNumber: 1 },
     ]);
   });
 
