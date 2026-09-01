@@ -83,9 +83,24 @@ describe("Design Studio configurator", () => {
     let rendered = JSON.stringify(designStudioConfigurator.render());
 
     expect(rendered).toMatch(/create or clone/i);
+    expect(rendered).toMatch(/classic snippets/i);
     expect(rendered).toMatch(/content and metadata/i);
     expect(rendered).toMatch(/publish.*propagate/i);
     expect(rendered).toMatch(/permanently discard/i);
     expect(rendered).toMatch(/permanently delete/i);
+    expect(rendered).toMatch(/separately.*create Email Designer fragments/i);
+    expect(rendered).toMatch(/fragments.*metadata and content.*publish.*propagate.*delete/i);
+  });
+});
+
+describe("Program configurator", () => {
+  it("warns that approving an Email Program can send real email", () => {
+    let rendered = JSON.stringify(programConfigurator.render({
+      values: { programId: "42" },
+      setValues: vi.fn(),
+      ui: {},
+    } as never));
+
+    expect(rendered).toMatch(/approving an Email Program.*configured email.*real recipients.*start date/i);
   });
 });

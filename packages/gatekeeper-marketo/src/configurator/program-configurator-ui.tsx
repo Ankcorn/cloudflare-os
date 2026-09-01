@@ -31,7 +31,7 @@ export default {
     return <Section>
       <Field
         label="Program"
-        description="Scopes this connection to one Marketo program: read members and tokens; change membership statuses, metadata, tags, and Email Program dates; approve or unapprove Email Programs; and permanently delete the program."
+        description="Scopes this connection to one Marketo program: read members and tokens; change membership statuses, metadata, tags, and Email Program dates; approve or unapprove Email Programs; and permanently delete the program. Approving an Email Program may send its configured email to real recipients at its start date."
       >
         <Autocomplete
           name="programId"

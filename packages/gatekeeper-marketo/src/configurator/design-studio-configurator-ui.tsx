@@ -32,10 +32,12 @@ export default {
       <Section>
         <p>
           Grants authority to read and create or clone Design Studio folders, emails, templates,
-          landing pages, forms, snippets, and files; mutate their content and metadata; publish
-          drafts, which can propagate changes into dependent assets; permanently discard drafts;
-          and permanently delete assets and empty folders. This does not grant access to people or
-          campaign data.
+          landing pages, forms, classic snippets, and files; mutate their content and metadata;
+          publish drafts, which can propagate changes into dependent assets; permanently discard
+          drafts; and permanently delete assets and empty folders. Separately, this can create Email
+          Designer fragments, update their metadata and content, publish changes that can propagate
+          to dependent emails or templates, and permanently delete them. This does not grant access
+          to people or campaign data.
         </p>
       </Section>
     );
