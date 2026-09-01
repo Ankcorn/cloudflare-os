@@ -4106,6 +4106,30 @@ describe("standard CRM business objects", () => {
     expect(calls[1]?.body).toEqual({ deleteBy: "idField", input: [{ key: "company" }] });
   });
 
+  it("uses Marketo's 120-second timeout only for named-account sync", async () => {
+    let genericDeadline = new AbortController();
+    let namedAccountDeadline = new AbortController();
+    let timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds =>
+      milliseconds === 120_000 ? namedAccountDeadline.signal : genericDeadline.signal);
+    let signals: (AbortSignal | null | undefined)[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal);
+      return Response.json({ success: true, result: [] });
+    });
+    let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
+
+    await client.syncBusinessObject("namedAccount", [{}], "updateOnly", "idField");
+    await client.syncBusinessObject("company", [{}], "updateOnly", "idField");
+    await client.deleteBusinessObject("namedAccount", [{}], "idField");
+
+    expect(timeout.mock.calls).toEqual([[120_000], [60_000], [60_000]]);
+    expect(signals).toEqual([
+      namedAccountDeadline.signal,
+      genericDeadline.signal,
+      genericDeadline.signal,
+    ]);
+  });
+
   it("maps schema fields and preserves compound searchable groups", async () => {
     let { ctx } = businessContext({
       describeBusinessObject: async () => ({

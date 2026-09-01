@@ -304,6 +304,9 @@ const RATE_LIMIT_RETRIES = RATE_LIMIT_BACKOFF_MS.length;
 /** Marketo's documented timeout for Asset API requests and activity paging-token generation. */
 const LONG_RUNNING_REQUEST_TIMEOUT_MS = 300_000;
 
+/** Marketo's documented timeout for named-account sync requests. */
+const NAMED_ACCOUNT_SYNC_TIMEOUT_MS = 120_000;
+
 /** Marketo rejects activity queries carrying more than this many activity type ids. */
 export const MAX_ACTIVITY_TYPE_IDS = 10;
 
@@ -2333,6 +2336,7 @@ export class MarketoClient {
     return await this.#result<RawSyncResult>(`/v1/${businessObjectPath(kind)}.json`, {
       method: "POST",
       body: { action, dedupeBy, input },
+      timeoutMs: kind === "namedAccount" ? NAMED_ACCOUNT_SYNC_TIMEOUT_MS : undefined,
     });
   }
 
