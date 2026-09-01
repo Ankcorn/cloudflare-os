@@ -1231,6 +1231,12 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     }
   }
 
+  #programId(summary: MarketoSmartCampaignSummary): string | undefined {
+    return summary.folder?.type === "program"
+      ? requireLogicalId(summary.folder.id, "program")
+      : undefined;
+  }
+
   async #summary(
     id = this.#campaignId,
     seen = new Set<string>(),
@@ -1275,6 +1281,11 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       if (!campaign) throw notFound("smart campaign", id);
       if (campaign.id !== physicalId) {
         throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${physicalId}.`);
+      }
+      let folderId = campaign.folder?.id ?? campaign.folder?.value;
+      if (campaign.folder?.type?.toLowerCase() === "program" &&
+          (!Number.isSafeInteger(folderId) || Number(folderId) <= 0)) {
+        throw new MarketoError(`Marketo returned invalid owning Program identity for campaign ${physicalId}.`);
       }
       summary = normalizeCampaign(campaign);
     }
@@ -1405,6 +1416,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       targetId: this.#campaignId,
       campaignName: summary.name,
       campaignType: summary.type,
+      programId: this.#programId(summary),
       operation: "activate",
     });
   }
@@ -1420,6 +1432,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       targetId: this.#campaignId,
       campaignName: summary.name,
       campaignType: summary.type,
+      programId: this.#programId(summary),
       operation: "deactivate",
     });
   }
@@ -1431,6 +1444,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       targetId: this.#campaignId,
       campaignName: summary.name,
       campaignType: summary.type,
+      programId: this.#programId(summary),
       operation: "delete",
     });
   }
@@ -1445,8 +1459,10 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       throw new Error(`Marketo campaign requests accept at most ${MAX_CAMPAIGN_INPUTS} people.`);
     }
     this.#rejectPendingDeletion();
+    let beforeId = this.#ctx.pendingCampaign().reduce((next, action) => Math.max(next, action.id + 1), 0);
+    let summary = await this.#summary(this.#campaignId, new Set(), beforeId);
+    this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
-    let summary = normalizeCampaign(campaign);
     if (campaign.isTriggerable !== true) {
       throw new Error(
         `Smart campaign "${summary.name}" (${summary.id}) is not configured with a ` +
@@ -1458,6 +1474,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       type: "campaignTrigger",
       campaignId: requireResolvedCampaignId(this.#ctx, this.#campaignId),
       campaignName: summary.name,
+      programId: this.#programId(summary),
       personIds,
       tokens,
     });
@@ -1473,8 +1490,10 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       throw new Error("Marketo campaign schedules must be between 5 minutes and 2 years from now.");
     }
     this.#rejectPendingDeletion();
+    let beforeId = this.#ctx.pendingCampaign().reduce((next, action) => Math.max(next, action.id + 1), 0);
+    let summary = await this.#summary(this.#campaignId, new Set(), beforeId);
+    this.#rejectPendingDeletion();
     let campaign = await this.#campaign();
-    let summary = normalizeCampaign(campaign);
     if (campaign.type?.toLowerCase() !== "batch") {
       throw new Error(
         `Smart campaign "${summary.name}" (${summary.id}) is not a batch campaign, so it cannot ` +
@@ -1486,6 +1505,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
       type: "campaignSchedule",
       campaignId: requireResolvedCampaignId(this.#ctx, this.#campaignId),
       campaignName: summary.name,
+      programId: this.#programId(summary),
       runAt: runAt.toISOString(),
       tokens,
     });

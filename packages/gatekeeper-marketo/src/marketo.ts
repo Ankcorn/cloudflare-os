@@ -1628,6 +1628,7 @@ export class MarketoGatekeeperImpl
         }
       }
       landingPageTemplateId = await this.#preflightClassicAsset(pending.action, client);
+      await this.#preflightCampaignOwnership(pending.action, client);
       await this.#preflightDesignerReferences(pending.action, client);
       await client.prepare();
       if (!this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)) {
@@ -2021,6 +2022,9 @@ export class MarketoGatekeeperImpl
     if (isCampaignAction(action)) this.#validateCampaignReferences(action, ready);
     if (isProgramAction(action)) this.#validateProgramReferences(action, ready);
     if (isEmailDesignerAction(action)) this.#validateDesignerReferences(action, ready);
+    if ((action.type === "campaignTrigger" || action.type === "campaignSchedule") && action.programId !== undefined) {
+      this.#validateLogicalReference(action.programId, "program", ready);
+    }
   }
 
   #validateLogicalReference(id: string, kind: LogicalKind, ready: boolean): void {
@@ -2053,6 +2057,9 @@ export class MarketoGatekeeperImpl
 
   #validateCampaignReferences(action: CampaignAction, ready: boolean): void {
     if ("targetId" in action) this.#validateLogicalReference(action.targetId, "campaign", ready);
+    if (action.type === "campaignLifecycle" && action.programId !== undefined) {
+      this.#validateLogicalReference(action.programId, "program", ready);
+    }
     if (action.type === "campaignClone") this.#validateLogicalReference(action.sourceId, "campaign", ready);
     if (action.type === "campaignCreate" || action.type === "campaignClone") {
       this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
@@ -2160,6 +2167,37 @@ export class MarketoGatekeeperImpl
       if (!program || program.id !== physical) {
         throw new DesignerPreDispatchError(`Marketo program ${programId} was not found; nothing was dispatched.`);
       }
+    }
+  }
+
+  async #preflightCampaignOwnership(action: MarketoAction, client: MarketoClient): Promise<void> {
+    if (!(action.type === "campaignTrigger" || action.type === "campaignSchedule" ||
+        action.type === "campaignLifecycle") || !("programId" in action)) return;
+    let campaignId = action.type === "campaignLifecycle"
+      ? this.#requireLogicalId(action.targetId)
+      : action.campaignId;
+    let campaign = await client.getSmartCampaign(campaignId);
+    if (!campaign || campaign.id !== campaignId) {
+      throw new DesignerPreDispatchError(`Marketo smart campaign ${campaignId} was not found; nothing was dispatched.`);
+    }
+    let folderId = campaign.folder?.id ?? campaign.folder?.value;
+    if (campaign.folder?.type?.toLowerCase() === "program" &&
+        (!Number.isSafeInteger(folderId) || Number(folderId) <= 0)) {
+      throw new DesignerPreDispatchError(
+        "Marketo returned invalid owning Program identity for the smart campaign; nothing was dispatched.",
+      );
+    }
+    let actualProgramId = campaign.folder?.type?.toLowerCase() === "program" &&
+        Number.isSafeInteger(folderId) && Number(folderId) > 0
+      ? String(folderId)
+      : undefined;
+    let expectedProgramId = action.programId === undefined
+      ? undefined
+      : String(this.#requireLogicalId(action.programId));
+    if (actualProgramId !== expectedProgramId) {
+      throw new DesignerPreDispatchError(
+        "The Marketo smart campaign's owning Program changed after approval; nothing was dispatched.",
+      );
     }
   }
 
@@ -2285,16 +2323,19 @@ export class MarketoGatekeeperImpl
     if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
       add(`campaign:${action.campaignId}`, true);
       add("campaignRecipientEffects", true);
+      if (action.programId !== undefined) add(`program:${this.#requireLogicalId(action.programId)}`, false);
       if (action.type === "campaignTrigger") {
         for (let personId of action.personIds) add(`person:${personId}`, true);
       }
     } else if (action.type === "programStatus") {
       add(`program:${action.programId}`, false);
+      add("campaignRecipientEffects", true);
       for (let personId of action.personIds) {
         add(`person:${personId}`, false);
         add(`programStatus:${action.programId}:${personId}`, true);
       }
     } else if (action.type === "listAdd" || action.type === "listRemove") {
+      add("campaignRecipientEffects", true);
       for (let personId of action.personIds) {
         add(`person:${personId}`, false);
         add(`list:${action.listId}:${personId}`, true);
@@ -2302,9 +2343,11 @@ export class MarketoGatekeeperImpl
     } else if (isBusinessObjectAction(action)) {
       for (let key of this.#businessObjectKeys(action)) add(key, true);
     } else if (action.type === "updatePerson" || action.type === "deletePerson") {
+      add("campaignRecipientEffects", true);
       add("person:unresolved lookup alias", false);
       add(`person:${action.personId}`, true);
     } else if (action.type === "upsertPeople") {
+      add("campaignRecipientEffects", true);
       // An alias may resolve to any numeric id, so it conflicts with every person write.
       add("person:unresolved lookup alias", action.lookupField !== "id");
       for (let record of action.records) {
@@ -2394,6 +2437,9 @@ export class MarketoGatekeeperImpl
       });
     }
     if (action.type === "campaignClone") references.push({ id: action.sourceId, kind: "campaign" });
+    if (action.type === "campaignLifecycle" && action.programId !== undefined) {
+      references.push({ id: action.programId, kind: "program" });
+    }
     if (action.type === "campaignCreate" || action.type === "campaignClone") {
       references.push({ id: action.parent.id, kind: action.parent.type === "Program" ? "program" : "folder" });
     }

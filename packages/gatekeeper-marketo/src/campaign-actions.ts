@@ -40,6 +40,8 @@ export type CampaignAction =
       targetId: string;
       campaignName: string;
       campaignType?: string;
+      /** Owning Program, when the campaign is contained by one. */
+      programId?: string;
       operation: "activate" | "deactivate" | "delete";
     };
 

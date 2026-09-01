@@ -59,6 +59,8 @@ type ExistingMarketoAction =
       type: "campaignTrigger";
       campaignId: number;
       campaignName: string;
+      /** Owning Program, when the campaign is contained by one. */
+      programId?: string;
       personIds: number[];
       tokens?: { name: string; value: string }[];
     }
@@ -67,6 +69,8 @@ type ExistingMarketoAction =
       type: "campaignSchedule";
       campaignId: number;
       campaignName: string;
+      /** Owning Program, when the campaign is contained by one. */
+      programId?: string;
       /** ISO 8601; Date isn't stable across DO storage round-trips. */
       runAt: string;
       tokens?: { name: string; value: string }[];

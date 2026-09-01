@@ -1420,8 +1420,12 @@ describe("smart campaign management", () => {
       sourceId: "7",
       parent: { id: "20", type: "Program" },
     });
-    expect(actions[1]).toMatchObject({ type: "campaignLifecycle", operation: "activate" });
-    expect(actions[2]).toMatchObject({ type: "campaignLifecycle", operation: "deactivate" });
+    expect(actions[1]).toMatchObject({
+      type: "campaignLifecycle", operation: "activate", programId: "20",
+    });
+    expect(actions[2]).toMatchObject({
+      type: "campaignLifecycle", operation: "deactivate", programId: "20",
+    });
   });
 
   it("includes source changes submitted before campaign cloning", async () => {
@@ -2925,7 +2929,7 @@ describe("custom object normalization", () => {
     let ctx = makeSessionContext({
       client: async () => ({}) as MarketoClient,
       approvalQueue: {} as never,
-      submit: async action => void submitted.push(action),
+      submit: async (action: MarketoActionInput) => void submitted.push(action),
     });
     let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
 
@@ -5187,6 +5191,12 @@ describe("campaign kind pre-validation", () => {
     return new MarketoSmartCampaignImpl(
       {
         client: async () => ({
+          getSmartCampaign: async () => ({
+            id: 7800,
+            name: "Quarterly Batch",
+            type,
+            folder: { id: 42, type: "Program" },
+          }),
           getCampaign: async () => ({
             id: 7800,
             name: "Quarterly Batch",
@@ -5196,6 +5206,8 @@ describe("campaign kind pre-validation", () => {
         }) as never,
         observe: async () => {},
         submit: async action => void submitted.push(action),
+        pendingCampaign: () => [],
+        resolveId: (id: string) => Number(id),
         retain: () => {},
         dispose: () => {},
       },
@@ -5226,10 +5238,13 @@ describe("campaign kind pre-validation", () => {
     let notRequestable = new MarketoSmartCampaignImpl(
       {
         client: async () => ({
+          getSmartCampaign: async () => ({ id: 7800, name: "Trigger", type: "trigger" }),
           getCampaign: async () => ({ id: 7800, name: "Trigger", type: "trigger" }),
         }) as never,
         observe: async () => {},
         submit: async action => void submitted.push(action),
+        pendingCampaign: () => [],
+        resolveId: (id: string) => Number(id),
         retain: () => {},
         dispose: () => {},
       },
@@ -5278,10 +5293,31 @@ describe("campaign kind pre-validation", () => {
     let requested: MarketoActionInput[] = [];
     await campaign("trigger", requested).requestCampaign([1]);
     expect(requested.map(a => a.type)).toEqual(["campaignTrigger"]);
+    expect(requested[0]).toMatchObject({ programId: "42" });
 
     let scheduled: MarketoActionInput[] = [];
     await campaign("batch", scheduled).schedule(new Date(Date.now() + 10 * 60 * 1000));
     expect(scheduled.map(a => a.type)).toEqual(["campaignSchedule"]);
+    expect(scheduled[0]).toMatchObject({ programId: "42" });
+  });
+
+  it("rejects invalid owning Program identity before submission", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let campaign = new MarketoSmartCampaignImpl({
+      client: async () => ({
+        getSmartCampaign: async () => ({
+          id: 7800, name: "Campaign", type: "trigger", folder: { id: 0, type: "Program" },
+        }),
+      }) as never,
+      observe: async () => {},
+      submit: async (action: MarketoActionInput) => void submitted.push(action),
+      pendingCampaign: () => [],
+      resolveId: (id: string) => Number(id),
+      dispose: () => {},
+    } as never, 7800);
+
+    await expect(campaign.delete()).rejects.toThrow(/invalid owning Program identity/);
+    expect(submitted).toEqual([]);
   });
 
   it.each([
@@ -5330,11 +5366,12 @@ describe("campaign kind pre-validation", () => {
     let submitted: MarketoActionInput[] = [];
     let campaign = new MarketoSmartCampaignImpl({
       client: async () => ({
-        getCampaign: async () => {
+        getSmartCampaign: async () => {
           entered.resolve();
           await new Promise<void>(resolve => void (release = resolve));
-          return { id: 7800, name: "Deleting", type, isTriggerable: true };
+          return { id: 7800, name: "Deleting", type };
         },
+        getCampaign: async () => ({ id: 7800, name: "Deleting", type, isTriggerable: true }),
       }) as never,
       observe: async () => {},
       submit: async (action: MarketoActionInput) => void submitted.push(action),
@@ -8362,6 +8399,30 @@ describe("action dispatch lifecycle", () => {
         { id: 2, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
       ],
       [
+        { id: 1, type: "updatePerson", personId: 7, fields: { subscribed: true } },
+        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "listAdd", listId: 5, listName: "Customers", personIds: [7] },
+        { id: 2, type: "campaignSchedule", campaignId: 41, campaignName: "Campaign", runAt: "2027-01-01T00:00:00.000Z" },
+      ],
+      [
+        { id: 1, type: "programStatus", programId: 31, programName: "Program", personIds: [7], status: "Member" },
+        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
+        { id: 2, type: "campaignLifecycle", targetId: "41", campaignName: "Campaign", programId: "31", operation: "deactivate" },
+      ],
+      [
+        { id: 1, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
+        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", programId: "31", personIds: [7] },
+      ],
+      [
+        { id: 1, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
+        { id: 2, type: "campaignSchedule", campaignId: 41, campaignName: "Campaign", programId: "31", runAt: "2027-01-01T00:00:00.000Z" },
+      ],
+      [
         { id: 1, type: "customObjectUpsert", apiName: "orders", records: [{ orderId: "one" }] },
         { id: 2, type: "customObjectDelete", apiName: "orders", records: [{ orderId: "two" }], deleteBy: "dedupeFields" },
       ],
@@ -8392,20 +8453,72 @@ describe("action dispatch lifecycle", () => {
       expect(calls).toBe(0);
       vi.unstubAllGlobals();
     }
-  });
+  }, 15_000);
 
-  it("does not serialize distinct id-based person mutations", async () => {
+  it("serializes distinct recipient mutations through campaign effects", async () => {
     let actions: MarketoAction[] = [
       { id: 1, type: "deletePerson", personId: 7 },
       { id: 2, type: "deletePerson", personId: 8 },
     ];
+    let deleted = 0;
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({ success: true, result: [{ id: 8, status: "deleted" }] }));
+      : Response.json({ success: true, result: [{ id: 7 + deleted++, status: "deleted" }] }));
     let stub = await campaignActionGatekeeper(actions);
     await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/campaignRecipientEffects.*earlier pending mutation/);
+      await instance.applyAction(1);
       await expect(instance.applyAction(2)).resolves.toBeUndefined();
     });
+  });
+
+  it("allows a campaign action after its earlier program deletion is rejected", async () => {
+    let actions: MarketoAction[] = [
+      { id: 1, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
+      { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", programId: "31", personIds: [7] },
+    ];
+    let campaignWrites = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      let path = new URL(url).pathname;
+      if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (path === "/rest/asset/v1/smartCampaign/41.json") {
+        return Response.json({ success: true, result: [{ id: 41, folder: { id: 31, type: "Program" } }] });
+      }
+      campaignWrites++;
+      return Response.json({ success: true, result: [{ id: 41 }] });
+    });
+    let stub = await campaignActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/program 31 has an earlier pending mutation/);
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+    });
+    expect(campaignWrites).toBe(1);
+  });
+
+  it("rejects changed campaign Program ownership before dispatch", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign",
+      programId: "31", personIds: [7],
+    };
+    let campaignWrites = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      let path = new URL(url).pathname;
+      if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (path === "/rest/asset/v1/smartCampaign/41.json") {
+        return Response.json({ success: true, result: [{ id: 41, folder: { id: 32, type: "Program" } }] });
+      }
+      campaignWrites++;
+      return Response.json({ success: true, result: [{ id: 41 }] });
+    });
+    let stub = await campaignActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/owning Program changed.*nothing was dispatched/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(campaignWrites).toBe(0);
   });
 
   it("orders business-object records across id and dedupe strategies without aliasing incomplete identities", async () => {
@@ -9614,6 +9727,7 @@ describe("smart campaign Asset API encoding", () => {
       .rejects.toThrow(/wrong smart list/i);
 
     let requestCampaign = campaignContext({
+      getSmartCampaign: async () => ({ id: 77, name: "Campaign", type: "trigger" }),
       getCampaign: async () => ({ id: 78, name: "Wrong", type: "trigger", isTriggerable: true }),
     });
     requestCampaign.ctx.observe = async title => { notes.push(title); };
