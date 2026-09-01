@@ -133,6 +133,25 @@ describe("classic Design Studio regressions", () => {
     expect(updateEmailContent).not.toHaveBeenCalled();
   });
 
+  it("neither exposes nor rewrites non-static classic email regions", async () => {
+    let { actions, ctx } = context({
+      getEmailContent: async () => [
+        { htmlId: "static", contentType: "Text", value: "Static" },
+        { htmlId: "dynamic", contentType: "DynamicContent", value: "123" },
+        { htmlId: "snippet", contentType: "Snippet", value: "456" },
+        { htmlId: "module", contentType: "Module", value: [{ type: "Text", value: "Child" }] },
+      ],
+    });
+    let email = new MarketoDesignStudioImpl(ctx).getEmail("21");
+
+    expect((await email.getContent()).map(section => section.id)).toEqual(["static"]);
+    for (let id of ["dynamic", "snippet", "module"]) {
+      await expect(email.updateContent(id, { html: "replacement" }))
+        .rejects.toThrow(/not editable static Text content/);
+    }
+    expect(actions).toEqual([]);
+  });
+
   it("does not copy generated source identity into pending clone summaries", async () => {
     let { ctx } = context({
       getLandingPages: async () => [],

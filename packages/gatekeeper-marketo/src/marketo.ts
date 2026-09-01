@@ -83,7 +83,7 @@ import {
   matchesProgramApprovalDates,
   type ProgramAction,
 } from "./program-actions";
-import { MarketoDesignStudioImpl } from "./design-studio";
+import { emailSections, MarketoDesignStudioImpl } from "./design-studio";
 import type { EmailDesignerContext } from "./email-designer";
 import {
   DesignerPreDispatchError,
@@ -1680,6 +1680,7 @@ export class MarketoGatekeeperImpl
     this.#preparingActions.delete(actionId);
 
     let results;
+    let designWriteOccurred = false;
     try {
       if (isDesignStudioAction(pending.action)) {
         let asset = pending.action.type === "designDeleteFolder" ? "folder" : pending.action.asset;
@@ -1696,6 +1697,7 @@ export class MarketoGatekeeperImpl
           },
           realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
           landingPageTemplateId,
+          () => { designWriteOccurred = true; },
         );
         results = undefined;
       } else if (isCampaignAction(pending.action)) {
@@ -1765,9 +1767,7 @@ export class MarketoGatekeeperImpl
       }
       if (isDesignStudioAction(pending.action) && (
         pending.action.type === "designCreate" && this.#resolveLogicalId(pending.action.provisionalId) !== undefined ||
-        pending.action.type === "designMetadata" && pending.action.asset === "email" ||
-        pending.action.type === "designContent" && pending.action.asset === "snippet" &&
-          pending.action.html !== undefined && pending.action.text !== undefined
+        designWriteOccurred
       )) definitive = false;
       if (isCampaignAction(pending.action) &&
           (pending.action.type === "campaignCreate" || pending.action.type === "campaignClone") &&
@@ -2242,6 +2242,15 @@ export class MarketoGatekeeperImpl
   }
 
   async #preflightClassicAsset(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
+    if (isDesignStudioAction(action) && action.type === "designContent" && action.asset === "email") {
+      let id = this.#requireLogicalId(action.targetId);
+      let sectionId = action.sectionId;
+      if (!sectionId || !emailSections(await client.getEmailContent(id)).some(section => section.id === sectionId)) {
+        throw new DesignerPreDispatchError(
+          `Marketo email section ${sectionId ?? "(missing)"} is not editable static Text content; nothing was dispatched.`,
+        );
+      }
+    }
     if (isDesignStudioAction(action) &&
         (action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
           action.type === "designClone" && action.asset === "emailTemplate")) {

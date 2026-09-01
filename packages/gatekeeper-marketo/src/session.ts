@@ -1760,11 +1760,14 @@ function requireTokens(tokens: { name: string; value: string }[] | undefined): v
     throw new Error(`Marketo campaigns accept at most ${MAX_CAMPAIGN_INPUTS} token overrides.`);
   }
   for (let token of tokens) {
-    if (!token || typeof token.name !== "string" || token.name !== token.name.trim() ||
-        !token.name.startsWith("{{my.") || !token.name.endsWith("}}")) {
-      throw new Error("Each campaign token name must use the {{my.*}} form.");
+    if (!token || typeof token.name !== "string" || token.name !== token.name.trim()) {
+      throw new Error("Each campaign token name must be bare or use the {{my.*}} form.");
     }
-    let name = token.name.slice(5, -2);
+    let qualified = token.name.startsWith("{{my.") && token.name.endsWith("}}");
+    if (!qualified && (token.name.includes("{") || token.name.includes("}"))) {
+      throw new Error("Each campaign token name must be bare or use the {{my.*}} form.");
+    }
+    let name = qualified ? token.name.slice(5, -2) : token.name;
     if (!name || name !== name.trim() || [...name].some(character => {
       let code = character.codePointAt(0)!;
       return character === "{" || character === "}" || code <= 0x1f ||

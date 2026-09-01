@@ -244,10 +244,11 @@ function textualContent(value: unknown): string | undefined {
   return textualContent(record.value ?? record.content ?? record.html ?? record.text);
 }
 
-function emailSections(raw: { htmlId?: string; contentType?: string; value?: unknown; isLocked?: boolean }[]): MarketoEmailContentSection[] {
+/** Return only editable static sections from Marketo's mixed classic-email content response. */
+export function emailSections(raw: { htmlId?: string; contentType?: string; value?: unknown; isLocked?: boolean }[]): MarketoEmailContentSection[] {
   return raw.flatMap(item => {
     let id = textValue(item.htmlId);
-    if (!id || item.isLocked) return [];
+    if (!id || item.isLocked || item.contentType && item.contentType.toLowerCase() !== "text") return [];
     let values = Array.isArray(item.value) ? item.value : [item];
     let section: MarketoEmailContentSection = { id };
     for (let value of values) {
@@ -1382,13 +1383,17 @@ export class MarketoEmailImpl extends AssetImpl {
   updateMetadata(patch: MarketoEmailMetadataPatch) {
     return this.metadata(metadataPatch(patch, ["name", "description", "preHeader", "subject", "fromName", "fromEmail", "replyEmail"]));
   }
-  updateContent(sectionId: string, update: MarketoEmailContentUpdate) {
+  async updateContent(sectionId: string, update: MarketoEmailContentUpdate): Promise<void> {
     this.assertReadable();
     allowInput(update, "Email content update", ["html", "text"]);
     let html = requireContent(update.html, "HTML content");
     let text = update.text === undefined ? undefined : requireContent(update.text, "Text content");
-    return submitDesign(this.ctx, { type: "designContent", asset: this.kind, targetId: this.id,
-      sectionId: requiredText(sectionId, "Section id"), html, text });
+    let id = requiredText(sectionId, "Section id");
+    if (!(await this.getContent()).some(section => section.id === id)) {
+      throw new Error(`Email section \`${id}\` is not editable static Text content.`);
+    }
+    await submitDesign(this.ctx, { type: "designContent", asset: this.kind, targetId: this.id,
+      sectionId: id, html, text });
   }
   approve() { return this.lifecycle("approve"); } unapprove() { return this.lifecycle("unapprove"); } discardDraft() { return this.lifecycle("discardDraft"); } delete() { return this.lifecycle("delete"); }
 }

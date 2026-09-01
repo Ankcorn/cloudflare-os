@@ -104,13 +104,19 @@ export function validatePeopleUpsertLookup(
   action: MarketoUpsertAction,
   lookupField: string,
 ): void {
-  if (lookupField !== "id") return;
-  if (action !== "updateOnly") {
-    throw new Error("Marketo person id matching is available only for updateOnly.");
+  if (lookupField === "id") {
+    if (action !== "updateOnly") {
+      throw new Error("Marketo person id matching is available only for updateOnly.");
+    }
+    if (records.some(record =>
+      typeof record.id !== "number" || !Number.isSafeInteger(record.id) || record.id <= 0)) {
+      throw new Error("Each record matched by id must contain a positive safe integer id.");
+    }
+    return;
   }
-  if (records.some(record =>
-    typeof record.id !== "number" || !Number.isSafeInteger(record.id) || record.id <= 0)) {
-    throw new Error("Each record matched by id must contain a positive safe integer id.");
+  if (records.some(record => !Object.hasOwn(record, lookupField) ||
+      record[lookupField] === undefined || record[lookupField] === null || record[lookupField] === "")) {
+    throw new Error(`Each person record must contain a non-null \`${lookupField}\` lookup field.`);
   }
 }
 
@@ -199,10 +205,10 @@ export function describeAction(action: MarketoAction): ActionDescription {
     case "programStatus":
       return {
         ...base,
-        title: `Set ${action.personIds.length} to "${action.status}" in "${action.programName}"`,
+        title: `Set ${action.personIds.length} to "${action.status}" in program ${action.programId}`,
         description:
           `Set program membership status to **${markdownText(action.status)}** for **${action.personIds.length}** ` +
-          `person(s) in program **${markdownText(action.programName)}** (${action.programId}).\n\n` +
+          `person(s) in program ${action.programId}.\n\n` +
           `Person ids: ${action.personIds.join(", ")}\n\n` +
           `Progression changes can trigger campaigns listening for that status.`,
         implementsRevert: false,

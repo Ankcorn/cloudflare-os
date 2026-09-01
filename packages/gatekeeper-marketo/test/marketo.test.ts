@@ -4494,6 +4494,22 @@ describe("program token names", () => {
     expect((await program.getTokens()).map(t => t.name))
       .toEqual(["{{my.discount}}", "{{my.CurrentYear}}"]);
   });
+
+  it("accepts documented bare token names for campaign requests and schedules", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({
+      getCampaign: async () => ({ id: 7, name: "Campaign", type: "batch", isTriggerable: true }),
+    });
+    ctx.submit = async action => void submitted.push(action);
+    let campaign = new MarketoSmartCampaignImpl(ctx, 7);
+
+    await campaign.requestCampaign([1], [{ name: "Discount", value: "10%" }]);
+    await campaign.schedule(new Date(Date.now() + 10 * 60 * 1000), [
+      { name: "CurrentYear", value: "2026" },
+    ]);
+
+    expect(submitted.map(action => action.type)).toEqual(["campaignTrigger", "campaignSchedule"]);
+  });
 });
 
 describe("program channel metadata", () => {
@@ -5353,9 +5369,9 @@ describe("campaign kind pre-validation", () => {
     expect(submitted).toEqual([]);
   });
 
-  it("accepts only fully-qualified My Token override names", async () => {
+  it("accepts bare or fully-qualified My Token override names", async () => {
     let submitted: MarketoActionInput[] = [];
-    for (let name of ["Year", "{{lead.Email}}", "{{anything}}", "{{my.bad}}suffix"]) {
+    for (let name of ["{{lead.Email}}", "{{anything}}", "{{my.bad}}suffix"]) {
       await expect(campaign("trigger", submitted).requestCampaign([1], [{ name, value: "x" }]))
         .rejects.toThrow(/\{\{my\.\*\}\}/);
     }
@@ -5372,9 +5388,10 @@ describe("campaign kind pre-validation", () => {
       await expect(campaign("trigger", submitted).requestCampaign([1], [{ name, value: "x" }]))
         .rejects.toThrow(/non-whitespace single-line/);
     }
+    await campaign("trigger", submitted).requestCampaign([1], [{ name: "Year", value: "x" }]);
     await campaign("trigger", submitted).requestCampaign([1], [{ name: "{{my.Year}}", value: "x" }]);
     await campaign("trigger", submitted).requestCampaign([1], [{ name: "{{my.Event Date}}", value: "x" }]);
-    expect(submitted).toHaveLength(2);
+    expect(submitted).toHaveLength(3);
   });
 
   it("still submits each operation for the kind that supports it", async () => {
@@ -5557,6 +5574,21 @@ describe("actions report no outcome at submission time", () => {
       upsertAction: "createOrUpdate",
       lookupField: "externalPersonKey",
     }]);
+  });
+
+  it("requires every person record to contain the selected lookup field", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({});
+    ctx.submit = async action => void submitted.push(action);
+    let session = new MarketoSessionImpl(ctx);
+
+    await expect(session.createOrUpdatePeople([{ firstName: "No email" }]))
+      .rejects.toThrow(/`email` lookup field/);
+    await expect(session.createOrUpdatePeople(
+      [{ externalKey: "one" }, { firstName: "Missing key" }],
+      { lookupField: "externalKey" },
+    )).rejects.toThrow(/`externalKey` lookup field/);
+    expect(submitted).toEqual([]);
   });
 
   it("permits canonical person ids with updateOnly", async () => {
@@ -8540,7 +8572,43 @@ describe("Design Studio action lifecycle", () => {
     expect(mutationCalls).toBe(1);
   });
 
-  it("keeps a two-rendition snippet update uncertain when either dispatched step fails", async () => {
+  it("keeps explicitly rejected first writes retryable for compound classic-email actions", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1,
+        type: "designMetadata",
+        asset: "email",
+        targetId: "44",
+        patch: { name: "New name", subject: "New subject" },
+      },
+      {
+        id: 2,
+        type: "designContent",
+        asset: "snippet",
+        targetId: "44",
+        html: "<p>new</p>",
+        text: "new",
+      },
+    ];
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({
+        success: false,
+        errors: [{ code: "1003", message: "Rejected before writing" }],
+      }));
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      for (let id of [1, 2]) {
+        await expect(instance.applyAction(id)).rejects.toThrow(/code 1003/);
+        expect(state.storage.kv.get(`applying:${id}`)).toBeUndefined();
+        await instance.rejectAction(id);
+        expect(state.storage.kv.get(`pending:${id}`)).toBeUndefined();
+      }
+    });
+  });
+
+  it("keeps a two-rendition snippet update uncertain when a later dispatched step fails", async () => {
     let action: DesignStudioAction = {
       id: 1,
       type: "designContent",
@@ -8655,6 +8723,12 @@ describe("Design Studio action lifecycle", () => {
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (url.endsWith("/rest/asset/v1/email/31/content.json")) {
+        return Response.json({
+          success: true,
+          result: [{ htmlId: "hero/main", contentType: "Text", value: "Current" }],
+        });
+      }
       if (init?.body instanceof URLSearchParams) submitted = init.body;
       else if (typeof init?.body === "string") submitted = new URLSearchParams(init.body);
       else throw new Error("Expected an email section form body.");
@@ -8859,6 +8933,37 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get("applying:1")).toBeUndefined();
     });
     expect(campaignWrites).toBe(0);
+  });
+
+  it("does not expose a rejected simulated program rename in later status approval text", async () => {
+    let actions: MarketoAction[] = [
+      {
+        id: 1,
+        type: "programUpdate",
+        targetId: "31",
+        programName: "Original",
+        patch: { name: "Rejected simulated name" },
+      },
+      {
+        id: 2,
+        type: "programStatus",
+        programId: 31,
+        programName: "Rejected simulated name",
+        personIds: [7],
+        status: "Member",
+      },
+    ];
+    let stub = await campaignActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      let row = state.storage.kv.get<{ action: MarketoAction }>("pending:2");
+      expect(row).toBeDefined();
+      expect(describeAction(row!.action)).toEqual(expect.objectContaining({
+        title: 'Set 1 to "Member" in program 31',
+        description: expect.not.stringContaining("Rejected simulated name"),
+      }));
+    });
   });
 
   it("orders business-object records across id and dedupe strategies without aliasing incomplete identities", async () => {

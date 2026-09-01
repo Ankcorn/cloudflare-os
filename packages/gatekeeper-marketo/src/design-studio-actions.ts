@@ -289,6 +289,7 @@ export async function executeDesignStudioAction(
   recordCreation: RecordCreation,
   recordCandidate: (realId: number) => void = () => {},
   landingPageTemplateId?: number,
+  recordCompletedWrite: () => void = () => {},
 ): Promise<void> {
   if (action.type === "designCreate") {
     if ((action.asset === "emailTemplate" || action.asset === "file") && action.parent.type !== "Folder") {
@@ -414,11 +415,15 @@ export async function executeDesignStudioAction(
       case "folder": assertTargetResult(await client.updateFolder(id, action.patch), id, "folder update"); return;
       case "email": {
         let { subject, fromName, fromEmail, replyEmail, ...metadata } = action.patch;
-        if (Object.values(metadata).some(value => value !== undefined)) assertTargetResult(await client.updateEmail(id, metadata), id, "email metadata update");
+        if (Object.values(metadata).some(value => value !== undefined)) {
+          assertTargetResult(await client.updateEmail(id, metadata), id, "email metadata update");
+          recordCompletedWrite();
+        }
         if ([subject, fromName, fromEmail, replyEmail].some(value => value !== undefined)) {
           assertTargetResult(await client.updateEmailContent(id, {
             subject: header(subject), fromName: header(fromName), fromEmail: header(fromEmail), replyEmail: header(replyEmail),
           }), id, "email header update");
+          recordCompletedWrite();
         }
         return;
       }
@@ -443,8 +448,14 @@ export async function executeDesignStudioAction(
         if (action.html === undefined && action.text === undefined) {
           throw new Error("Missing snippet content rendition.");
         }
-        if (action.html !== undefined) assertTargetResult(await client.updateSnippetContent(id, "HTML", action.html), id, "snippet HTML update");
-        if (action.text !== undefined) assertTargetResult(await client.updateSnippetContent(id, "Text", action.text), id, "snippet text update");
+        if (action.html !== undefined) {
+          assertTargetResult(await client.updateSnippetContent(id, "HTML", action.html), id, "snippet HTML update");
+          recordCompletedWrite();
+        }
+        if (action.text !== undefined) {
+          assertTargetResult(await client.updateSnippetContent(id, "Text", action.text), id, "snippet text update");
+          recordCompletedWrite();
+        }
         return;
       case "file": {
         let bytes = required(action.data, "file bytes");
