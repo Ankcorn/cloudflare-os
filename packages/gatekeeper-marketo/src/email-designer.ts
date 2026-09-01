@@ -691,12 +691,40 @@ abstract class DesignerAssetImpl extends RpcTarget {
     if (!Number.isSafeInteger(pageIndex) || pageIndex < 0) throw new Error("pageIndex must be a non-negative integer.");
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("pageSize must be between 1 and 50.");
     let physical = this.ctx.resolveDesignerId(this.assetId);
-    let affected = this.kind === "designerTemplate" ? this.ctx.pendingDesigner().filter(action =>
+    let client = await this.ctx.client();
+    let pending = this.kind === "designerTemplate" ? this.ctx.pendingDesigner().filter(action =>
       action.asset === "designerEmail" && (
         action.type === "designerCreate" || action.type === "designerClone" || action.type === "designerDelete" ||
         action.type === "designerUpdate" && action.patch.templateId !== undefined
       )) : [];
-    let client = await this.ctx.client();
+    let affected: { candidateId: string; physicalCandidate?: string; final?: Record<string, unknown> }[] = [];
+    let candidateIds: string[] = [];
+    for (let action of pending) {
+      let candidate = action.type === "designerCreate" || action.type === "designerClone"
+        ? action.provisionalId
+        : action.targetId;
+      if (!candidateIds.some(existing => same(this.ctx, existing, candidate))) candidateIds.push(candidate);
+    }
+    for (let candidateId of candidateIds) {
+      let candidateActions = actions(this.ctx, "designerEmail", candidateId);
+      let creation = candidateActions.find(action =>
+        action.type === "designerCreate" || action.type === "designerClone");
+      let physicalCandidate = this.ctx.resolveDesignerId(candidateId);
+      let resolvedCreation = creation !== undefined && physicalCandidate !== undefined && physicalCandidate !== candidateId;
+      let firstMutation = candidateActions.find(action =>
+        action.type === "designerDelete" || action.type === "designerUpdate" && action.patch.templateId !== undefined);
+      let original = creation
+        ? resolvedCreation ? await summary(this.ctx, "designerEmail", candidateId, firstMutation?.id) : undefined
+        : firstMutation === undefined ? undefined : await summary(this.ctx, "designerEmail", candidateId, firstMutation.id);
+      let final = candidateActions.some(action => action.type === "designerDelete")
+        ? undefined
+        : await summary(this.ctx, "designerEmail", candidateId);
+      let originalMatches = original?.templateId !== undefined && same(this.ctx, String(original.templateId), this.assetId);
+      let finalMatches = final?.templateId !== undefined && same(this.ctx, String(final.templateId), this.assetId);
+      if (originalMatches !== finalMatches) {
+        affected.push({ candidateId, physicalCandidate, final: finalMatches ? final : undefined });
+      }
+    }
     if (affected.length === 0) {
       if (physical === undefined) throw new Error(`Designer asset ${this.assetId} is still pending creation.`);
       let raw = await client.getDesignerAssetUsedBy(path(this.kind), { assetId: physical, pageIndex, pageSize, type: "all" });
@@ -715,7 +743,9 @@ abstract class DesignerAssetImpl extends RpcTarget {
     let items: MarketoDesignerUsedBy[] = [];
     if (physical !== undefined) {
       let providerCount = 0;
-      let pageFingerprints = new Set<string>();
+      let providerIds = new Set<string>();
+      let expectedTotal: number | undefined;
+      let firstPage = true;
       for (let providerPage = 0; ; providerPage++) {
         let raw = await client.getDesignerAssetUsedBy(path(this.kind), {
           assetId: physical, pageIndex: providerPage, pageSize: DESIGNER_PAGE_SIZE, type: "all",
@@ -727,54 +757,50 @@ abstract class DesignerAssetImpl extends RpcTarget {
             raw.pageDetails.totalItems > MAX_SIMULATED_USED_BY_ITEMS) {
           throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
         }
-        let fingerprint = JSON.stringify(raw.result);
-        if (raw.result.length === DESIGNER_PAGE_SIZE && pageFingerprints.has(fingerprint)) {
-          throw new Error("Marketo returned a repeated full used-by page.");
+        if (!firstPage && raw.pageDetails.totalItems !== expectedTotal) {
+          throw new Error("Marketo returned inconsistent used-by paging totals.");
         }
-        pageFingerprints.add(fingerprint);
+        firstPage = false;
+        expectedTotal = raw.pageDetails.totalItems;
         if (providerCount + raw.result.length > MAX_SIMULATED_USED_BY_ITEMS) {
           throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
         }
-        items.push(...raw.result.flatMap(item => item.id === undefined ? [] : [usedBySummary({
-          ...item,
-          workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
-          folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
-        })]));
         providerCount += raw.result.length;
-        if (raw.result.length < DESIGNER_PAGE_SIZE ||
-            raw.pageDetails.totalItems !== undefined && providerCount >= raw.pageDetails.totalItems) break;
+        let seenBefore = providerIds.size;
+        for (let item of raw.result) {
+          if (item.id === undefined) continue;
+          let itemId = String(item.id);
+          if (providerIds.has(itemId)) {
+            throw new Error("Marketo returned overlapping used-by pages.");
+          }
+          providerIds.add(itemId);
+          items.push(usedBySummary({
+            ...item,
+            workspaceId: item.appData?.workspaceId === undefined ? undefined : String(item.appData.workspaceId),
+            folderId: item.appData?.folderId === undefined ? undefined : String(item.appData.folderId),
+          }));
+        }
+        if (raw.result.length === DESIGNER_PAGE_SIZE && providerIds.size === seenBefore) {
+          throw new Error("Marketo returned non-advancing used-by paging state.");
+        }
+        if (expectedTotal !== undefined) {
+          if (providerIds.size > expectedTotal) throw new Error("Marketo returned invalid used-by paging state.");
+          if (providerIds.size === expectedTotal) break;
+          if (raw.result.length < DESIGNER_PAGE_SIZE) {
+            throw new Error("Marketo exhausted used-by pages before its reported total.");
+          }
+        } else if (raw.result.length < DESIGNER_PAGE_SIZE) {
+          break;
+        }
         if (providerCount >= MAX_SIMULATED_USED_BY_ITEMS) {
           throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
         }
       }
     }
 
-    let candidateIds: string[] = [];
-    for (let action of affected) {
-      let candidate = action.type === "designerCreate" || action.type === "designerClone"
-        ? action.provisionalId
-        : action.targetId;
-      if (!candidateIds.some(existing => same(this.ctx, existing, candidate))) candidateIds.push(candidate);
-    }
-    for (let candidateId of candidateIds) {
-      let candidateActions = actions(this.ctx, "designerEmail", candidateId);
-      let first = affected.find(action =>
-        action.asset === "designerEmail" && (action.type === "designerCreate" || action.type === "designerClone"
-          ? same(this.ctx, action.provisionalId, candidateId)
-          : same(this.ctx, action.targetId, candidateId)));
-      if (!first) continue;
-      let isCreation = candidateActions.some(action =>
-        action.type === "designerCreate" || action.type === "designerClone");
-      let original = isCreation ? undefined : await summary(this.ctx, "designerEmail", candidateId, first.id);
-      let deleted = candidateActions.some(action => action.type === "designerDelete");
-      let final = deleted ? undefined : await summary(this.ctx, "designerEmail", candidateId);
-      let originalMatches = original?.templateId !== undefined && same(this.ctx, String(original.templateId), this.assetId);
-      let finalMatches = final?.templateId !== undefined && same(this.ctx, String(final.templateId), this.assetId);
-      let physicalCandidate = this.ctx.resolveDesignerId(candidateId);
-      if (originalMatches || finalMatches || (isCreation && physicalCandidate !== undefined)) {
-        items = items.filter(item => item.id !== candidateId && item.id !== physicalCandidate);
-      }
-      if (finalMatches && final) items.push(usedBySummary(final));
+    for (let change of affected) {
+      items = items.filter(item => item.id !== change.candidateId && item.id !== change.physicalCandidate);
+      if (change.final) items.push(usedBySummary(change.final));
     }
     if (items.length > MAX_SIMULATED_USED_BY_ITEMS) {
       throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} records.`);

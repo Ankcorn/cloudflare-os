@@ -556,6 +556,40 @@ describe("Email Designer pending-state simulation", () => {
     });
   });
 
+  it("keeps direct paging when pending creates, clones, and deletes belong to other templates", async () => {
+    let requests: { assetId: string; pageIndex?: number; pageSize?: number }[] = [];
+    let { ctx } = context({
+      getDesignerAsset: async (_kind, assetId) => ({ id: assetId, templateId: "template-other" }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        requests.push(request);
+        return {
+          result: [{ id: "email-page", name: "Paged email" }],
+          pageDetails: { totalItems: 1_500, currentPage: (request.pageIndex ?? 0) + 1, pageSize: request.pageSize },
+        };
+      },
+    }, [
+      {
+        id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
+        body: { name: "Other create", templateId: "template-other" },
+      },
+      {
+        id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-source",
+        name: "Other clone", sourceSnapshot: designerCloneSnapshot({ templateId: "template-other" }),
+      },
+      { id: 3, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" },
+    ], id => id.startsWith("~") ? undefined : id);
+
+    expect(await new MarketoDesignerEmailTemplateImpl(ctx, "template-large").getUsedBy(3, 20)).toMatchObject({
+      items: [{ id: "email-page", name: "Paged email" }],
+      totalItems: 1_500,
+      pageIndex: 3,
+      pageSize: 20,
+    });
+    expect(requests).toEqual([
+      { assetId: "template-large", pageIndex: 3, pageSize: 20, type: "all" },
+    ]);
+  });
+
   it("rejects oversized pending used-by simulation after its first provider page", async () => {
     let requestedPages: number[] = [];
     let { ctx } = context({
@@ -589,9 +623,50 @@ describe("Email Designer pending-state simulation", () => {
     ctx.observe = async () => { observations++; };
 
     await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
-      .rejects.toThrow(/repeated full used-by page/);
+      .rejects.toThrow(/overlapping used-by pages/);
     expect(requestedPages).toEqual([0, 1]);
     expect(observations).toBe(0);
+  });
+
+  it("rejects partially overlapping used-by pages without satisfying the reported total", async () => {
+    let requestedPages: number[] = [];
+    let observations = 0;
+    let { ctx } = context({
+      getDesignerAsset: async () => ({ id: "email-delete", templateId: "template-A" }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        let pageIndex = request.pageIndex ?? 0;
+        requestedPages.push(pageIndex);
+        let start = pageIndex === 0 ? 1 : 50;
+        return {
+          result: Array.from({ length: 50 }, (_, index) => ({ id: pageIndex === 0 ? start + index : String(start + index) })),
+          pageDetails: { totalItems: 100, currentPage: pageIndex + 1, pageSize: request.pageSize },
+        };
+      },
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" }]);
+    ctx.observe = async () => { observations++; };
+
+    await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
+      .rejects.toThrow(/overlapping used-by pages/);
+    expect(requestedPages).toEqual([0, 1]);
+    expect(observations).toBe(0);
+  });
+
+  it("rejects a full used-by page with no dependency IDs as non-advancing", async () => {
+    let requestedPages: number[] = [];
+    let { ctx } = context({
+      getDesignerAsset: async () => ({ id: "email-delete", templateId: "template-A" }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        requestedPages.push(request.pageIndex ?? 0);
+        return {
+          result: Array.from({ length: 50 }, () => ({ name: "Missing ID" })),
+          pageDetails: { currentPage: 1, pageSize: request.pageSize },
+        };
+      },
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" }]);
+
+    await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
+      .rejects.toThrow(/non-advancing used-by paging state/);
+    expect(requestedPages).toEqual([0]);
   });
 
   it("merges a page without materializing an upstream collection over 1000 rows", async () => {
