@@ -715,7 +715,11 @@ abstract class DesignerAssetImpl extends RpcTarget {
     if (!raw || String(raw.id) !== physical) throw new Error(`Marketo designer asset ${this.assetId} was not found.`);
     let state = raw.associatedStates?.find(item => item.state?.toLowerCase() === sourceState);
     if (!state?.contentId) throw new Error(`Marketo designer asset ${this.assetId} has no ${sourceState} content.`);
-    let sourceSnapshot = designerCloneSnapshot(raw as Record<string, unknown>);
+    let current = overlay(
+      normalize(raw, this.assetId, true),
+      actions(this.ctx, this.kind, this.assetId),
+    );
+    let sourceSnapshot = current.cloneSnapshot as DesignerCloneSnapshot;
     let affectedDependents = await this.allAffectedDependents();
     await this.ctx.observe(`Read Marketo designer ${sourceState} state`, `Resolved the content version for designer asset ${this.assetId}.`);
     return await submitDesigner(this.ctx, {

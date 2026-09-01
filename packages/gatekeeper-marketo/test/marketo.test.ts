@@ -44,6 +44,7 @@ import {
   executeEmailDesignerAction,
   isEmailDesignerAction,
   resolveDesignerCloneSnapshot,
+  updateDesignerCloneSnapshot,
   type EmailDesignerAction,
   type EmailDesignerActionInput,
 } from "../src/email-designer-actions";
@@ -8465,6 +8466,78 @@ describe("Email Designer action lifecycle", () => {
     expect(requests).toEqual([
       { path: "/rest/asset/v2/email/email-A/update", body: { name: "First" } },
       { path: "/rest/asset/v2/email/clone", body: { assetId: "email-A", newAsset: { name: "Copy" } } },
+    ]);
+  });
+
+  it.each([
+    ["content", { data: { html: { body: "<p>Pending</p>" } } }],
+    ["settings", { settings: { isOperational: true } }],
+    ["template", { templateId: "template-2" }],
+  ] as const)("applies a Designer %s update before approving its reviewed result", async (_label, patch) => {
+    let original = {
+      id: "email-1",
+      name: "Launch",
+      status: "draft",
+      state: "draft",
+      contentId: "draft-1",
+      associatedStates: [{ contentId: "draft-1", state: "draft" }],
+      templateId: "template-1",
+      data: {
+        html: { body: "<p>Original</p>" },
+        text: { body: "Original", syncFromHtml: false },
+      },
+      settings: { isOperational: false, enableUrlTracking: true },
+    };
+    let reviewed = updateDesignerCloneSnapshot(designerCloneSnapshot(original), patch);
+    let actions: EmailDesignerAction[] = [
+      { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-1", patch },
+      {
+        id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
+        operation: "approve", contentId: "draft-1", sourceState: "draft",
+        sourceSnapshot: reviewed, affectedDependents: [],
+      },
+    ];
+    let current = structuredClone(original);
+    let writes: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/usedby")) {
+        return Response.json({
+          success: true, result: [],
+          pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+        });
+      }
+      if (!init?.body) {
+        if (path.endsWith("/emailtemplate/template-2")) {
+          return Response.json({ success: true, result: [{ id: "template-2" }] });
+        }
+        return Response.json({ success: true, result: [current] });
+      }
+      writes.push(path);
+      if (path.endsWith("/update")) {
+        current = {
+          ...current,
+          ...("templateId" in patch ? { templateId: patch.templateId } : {}),
+          ...("data" in patch ? {
+            data: { ...current.data, ...patch.data, html: { ...current.data.html, ...patch.data.html } },
+          } : {}),
+          ...("settings" in patch ? { settings: { ...current.settings, ...patch.settings } } : {}),
+        };
+        return Response.json({ success: true, result: [{ id: "email-1" }] });
+      }
+      return Response.json({ success: true, result: [{ contentId: "draft-1", status: "approved" }] });
+    });
+    let stub = await emailDesignerActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/earlier pending mutation/);
+      await instance.applyAction(1);
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+    });
+    expect(writes).toEqual([
+      "/rest/asset/v2/email/email-1/update",
+      "/rest/asset/v2/email/state/transition",
     ]);
   });
 

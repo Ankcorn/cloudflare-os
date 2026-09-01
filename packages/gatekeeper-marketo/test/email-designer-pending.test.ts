@@ -530,6 +530,58 @@ describe("Email Designer pending-state simulation", () => {
     });
   });
 
+  it.each([
+    {
+      label: "content",
+      update: (email: MarketoDesignerEmailImpl) => email.update({ content: { html: "<p>Pending</p>" } }),
+      patch: { data: { html: { body: "<p>Pending</p>" } } },
+    },
+    {
+      label: "settings",
+      update: (email: MarketoDesignerEmailImpl) => email.update({ settings: { isOperational: true } }),
+      patch: { settings: { isOperational: true } },
+    },
+    {
+      label: "template",
+      update: (email: MarketoDesignerEmailImpl) => email.update({ templateId: "template-2" }),
+      patch: { templateId: "template-2" },
+    },
+  ])("snapshots a pending $label update before approval", async ({ update, patch }) => {
+    let raw = {
+      id: "email-1",
+      name: "Launch",
+      status: "draft",
+      state: "draft",
+      contentId: "draft-1",
+      associatedStates: [{ contentId: "draft-1", state: "draft" }],
+      templateId: "template-1",
+      data: {
+        html: { body: "<p>Original</p>" },
+        text: { body: "Original", syncFromHtml: false },
+      },
+      settings: { isOperational: false, enableUrlTracking: true },
+    };
+    let dependent = { id: "campaign-1", name: "Launch campaign", contentType: "Smart Campaign" };
+    let { actions, ctx } = context({
+      getDesignerAsset: async () => raw,
+      getDesignerAssetUsedBy: async (_kind, request) => ({
+        result: [dependent],
+        pageDetails: { totalItems: 1, currentPage: 1, pageSize: request.pageSize },
+      }),
+    });
+    let email = new MarketoDesignerEmailImpl(ctx, "email-1");
+
+    await update(email);
+    await email.approve();
+
+    let lifecycle = actions[1] as Extract<EmailDesignerAction, { type: "designerLifecycle" }>;
+    expect(lifecycle.sourceSnapshot).toEqual(updateDesignerCloneSnapshot(
+      designerCloneSnapshot(raw),
+      patch,
+    ));
+    expect(lifecycle.affectedDependents).toEqual([dependent]);
+  });
+
   it("snapshots the simulated delete target and its affected dependents", async () => {
     let raw = {
       id: "email-1",
