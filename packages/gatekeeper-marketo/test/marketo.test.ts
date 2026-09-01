@@ -8422,6 +8422,45 @@ describe("smart campaign action lifecycle", () => {
     });
   });
 
+  it.each(["campaignTrigger", "campaignSchedule"] as const)(
+    "blocks a later %s approval whose reviewed name came from a rejected rename",
+    async type => {
+      let actions: MarketoAction[] = [
+        {
+          id: 1,
+          type: "campaignMetadata",
+          targetId: "31",
+          campaignName: "Source",
+          patch: { name: "Renamed" },
+        },
+        type === "campaignTrigger"
+          ? {
+              id: 2,
+              type,
+              campaignId: 31,
+              campaignName: "Renamed",
+              programId: null,
+              personIds: [7],
+            }
+          : {
+              id: 2,
+              type,
+              campaignId: 31,
+              campaignName: "Renamed",
+              programId: null,
+              runAt: "2027-01-01T00:00:00.000Z",
+            },
+      ];
+      let stub = await campaignActionGatekeeper(actions);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+        expect(state.storage.kv.get("dependencyBlocked:2")).toBe(1);
+        await expect(instance.applyAction(2)).rejects.toThrow(/depends on an earlier rejected action/);
+      });
+    },
+  );
+
   it("purges later campaign actions using an equivalent resolved id", async () => {
     let actions: CampaignAction[] = [
       {
@@ -9774,6 +9813,37 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(4)).rejects.toThrow(/folder 10.*earlier pending/);
       await expect(instance.applyAction(5)).rejects.toThrow(/designerTemplate template-1.*earlier pending/);
     });
+  });
+
+  it("orders Designer lifecycle propagation after pending dependent email mutations", async () => {
+    let lifecycle = (id: number, dependent: { id: string; name: string; contentType?: string }): EmailDesignerAction => ({
+      id,
+      type: "designerLifecycle",
+      asset: "designerFragment",
+      targetId: `fragment-${id}`,
+      operation: "approve",
+      contentId: `draft-${id}`,
+      sourceState: "draft",
+      sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT,
+      affectedDependents: [dependent],
+    });
+    let cases: MarketoAction[][] = [
+      [
+        { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-7", patch: { name: "Pending" } },
+        lifecycle(2, { id: "email-7", name: "Known email", contentType: "email" }),
+      ],
+      [
+        { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-8", patch: { name: "Pending" } },
+        lifecycle(2, { id: "email-8", name: "Untyped dependent" }),
+      ],
+    ];
+
+    for (let actions of cases) {
+      let stub = await emailDesignerActionGatekeeper(actions);
+      await runInDurableObject(stub, async instance => {
+        await expect(instance.applyAction(2)).rejects.toThrow(/designerEmail.*earlier pending mutation/);
+      });
+    }
   });
 
   it("keeps rejected content dependents rejectable without allowing stale dispatch", async () => {

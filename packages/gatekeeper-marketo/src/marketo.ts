@@ -2121,7 +2121,8 @@ export class MarketoGatekeeperImpl
           if (!dependent || dependent.ownerGeneration !== sourceRow?.ownerGeneration) continue;
           let row = dependent.action;
           if (row.id <= pending.id ||
-              !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row)) continue;
+              !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row) &&
+              row.type !== "campaignTrigger" && row.type !== "campaignSchedule") continue;
           let sameFamily = this.#sameActionFamily(pending, row);
           let depends = this.#actionReferences(row).some(reference =>
             purge.some(rejected => this.#sameReference(reference, rejected) && (
@@ -2795,6 +2796,13 @@ export class MarketoGatekeeperImpl
       for (let reference of this.#actionReferences(action)) {
         add(this.#referenceKey(reference), identity !== undefined && this.#sameReference(reference, identity));
       }
+      if (isEmailDesignerAction(action) && action.type === "designerLifecycle") {
+        for (let dependent of action.affectedDependents) {
+          if (dependent.contentType === undefined || dependent.contentType.toLowerCase() === "email") {
+            add(this.#referenceKey({ id: dependent.id, kind: "designerEmail" }), true);
+          }
+        }
+      }
       return resources;
     }
     if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
@@ -2874,7 +2882,7 @@ export class MarketoGatekeeperImpl
     return firstId !== undefined && firstId === this.#resolveLogicalId(second);
   }
 
-  #actionIdentity(action: DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction): LogicalReference | undefined {
+  #actionIdentity(action: MarketoAction): LogicalReference | undefined {
     if (action.type === "designCreate" || action.type === "designClone" ||
         action.type === "designerCreate" || action.type === "designerClone") {
       return { id: action.provisionalId, kind: action.asset };
@@ -2894,7 +2902,7 @@ export class MarketoGatekeeperImpl
     return undefined;
   }
 
-  #actionReferences(action: DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction): LogicalReference[] {
+  #actionReferences(action: MarketoAction): LogicalReference[] {
     let references: LogicalReference[] = [];
     let identity = this.#actionIdentity(action);
     if (identity) references.push(identity);
@@ -2914,6 +2922,9 @@ export class MarketoGatekeeperImpl
       });
     }
     if (action.type === "campaignClone") references.push({ id: action.sourceId, kind: "campaign" });
+    if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
+      references.push({ id: String(action.campaignId), kind: "campaign" });
+    }
     if (action.type === "campaignLifecycle" && action.programId !== null) {
       references.push({ id: action.programId, kind: "program" });
     }
@@ -2958,11 +2969,12 @@ export class MarketoGatekeeperImpl
   }
 
   #sameActionFamily(
-    first: DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction,
-    second: DesignStudioAction | CampaignAction | ProgramAction | EmailDesignerAction,
+    first: MarketoAction,
+    second: MarketoAction,
   ): boolean {
     return isDesignStudioAction(first) && isDesignStudioAction(second) ||
-      isCampaignAction(first) && isCampaignAction(second) ||
+      (isCampaignAction(first) || first.type === "campaignTrigger" || first.type === "campaignSchedule") &&
+        (isCampaignAction(second) || second.type === "campaignTrigger" || second.type === "campaignSchedule") ||
       isProgramAction(first) && isProgramAction(second) ||
       isEmailDesignerAction(first) && isEmailDesignerAction(second);
   }
