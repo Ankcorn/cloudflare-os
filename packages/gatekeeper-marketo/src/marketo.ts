@@ -1656,9 +1656,9 @@ export class MarketoGatekeeperImpl
     if (this.ctx.storage.kv.get(`applying:${actionId}`)) {
       throw new Error("This Marketo action was already dispatched and cannot be repeated.");
     }
+    validateActionForDispatch(pending.action);
     this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
     this.#validateMutationOrder(pending.action, pending.ownerGeneration);
-    validateActionForDispatch(pending.action);
     // Resolve authentication only after every local dispatch check. Token failures cannot have
     // applied the action and remain safe to retry.
     this.#preparingActions.add(actionId);
@@ -2093,6 +2093,13 @@ export class MarketoGatekeeperImpl
   }
 
   #validateDesignReferences(action: DesignStudioAction, ready: boolean, ownerGeneration: number): void {
+    if (action.type === "designLifecycle" &&
+        (!action.snapshot || typeof action.snapshot !== "object" ||
+          !action.snapshot.metadata || typeof action.snapshot.metadata !== "object" ||
+          Array.isArray(action.snapshot.metadata) || action.snapshot.content === undefined ||
+          !Array.isArray(action.snapshot.affectedDependents))) {
+      throw new Error("A persisted Marketo classic lifecycle action is missing its complete review snapshot.");
+    }
     if ((action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
         action.type === "designClone" && action.asset === "emailTemplate") && action.parent.type !== "Folder") {
       throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
@@ -2114,8 +2121,12 @@ export class MarketoGatekeeperImpl
   }
 
   #validateCampaignReferences(action: CampaignAction, ready: boolean, ownerGeneration: number): void {
+    if (action.type === "campaignLifecycle" &&
+        (!Object.hasOwn(action, "programId") || action.programId !== null && typeof action.programId !== "string")) {
+      throw new Error("A persisted Marketo campaign lifecycle action is missing its reviewed parent ownership.");
+    }
     if ("targetId" in action) this.#validateLogicalReference(action.targetId, "campaign", ready, ownerGeneration);
-    if ("programId" in action && action.programId !== undefined) {
+    if ("programId" in action && typeof action.programId === "string") {
       this.#validateLogicalReference(action.programId, "program", ready, ownerGeneration);
     }
     if (action.type === "campaignClone") this.#validateLogicalReference(action.sourceId, "campaign", ready, ownerGeneration);
@@ -2135,6 +2146,15 @@ export class MarketoGatekeeperImpl
   #validateDesignerReferences(action: EmailDesignerAction, ready: boolean, ownerGeneration: number): void {
     if (action.type === "designerClone" && !this.#validDesignerCloneSnapshot(action.sourceSnapshot)) {
       throw new Error("A persisted Marketo designer clone is missing its complete source snapshot.");
+    }
+    if (action.type === "designerLifecycle" &&
+        (!this.#validDesignerCloneSnapshot(action.sourceSnapshot) ||
+          !Array.isArray(action.affectedDependents) || action.affectedDependents.some(dependent =>
+            !dependent || typeof dependent !== "object" || typeof dependent.id !== "string" ||
+            typeof dependent.name !== "string" ||
+            [dependent.channel, dependent.contentType, dependent.workspaceId, dependent.folderId]
+              .some(value => value !== undefined && typeof value !== "string")))) {
+      throw new Error("A persisted Marketo designer lifecycle action is missing its complete review state.");
     }
     let references: { id: string; kind: EmailDesignerKind }[] = [];
     if ("targetId" in action) references.push({ id: action.targetId, kind: action.asset });
@@ -2196,7 +2216,7 @@ export class MarketoGatekeeperImpl
       if (state?.contentId !== action.contentId) {
         throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
       }
-      if (action.sourceSnapshot && !matchesDesignerCloneSnapshot(
+      if (!matchesDesignerCloneSnapshot(
         current as Record<string, unknown>,
         resolveDesignerCloneSnapshot(
           action.sourceSnapshot,
@@ -2208,7 +2228,7 @@ export class MarketoGatekeeperImpl
           "The Marketo designer publishable state changed after approval; nothing was dispatched.",
         );
       }
-      if (action.affectedDependents !== undefined) {
+      {
         let dependents: MarketoDesignerUsedBy[] = [];
         let ids = new Set<string>();
         let expectedTotal: number | undefined;
@@ -2292,7 +2312,7 @@ export class MarketoGatekeeperImpl
 
   async #preflightCampaignOwnership(action: MarketoAction, client: MarketoClient): Promise<void> {
     if (!(action.type === "campaignTrigger" || action.type === "campaignSchedule" ||
-        action.type === "campaignLifecycle") || !("programId" in action)) return;
+        action.type === "campaignLifecycle")) return;
     let campaignId = action.type === "campaignLifecycle"
       ? this.#requireLogicalId(action.targetId)
       : action.campaignId;
@@ -2310,9 +2330,9 @@ export class MarketoGatekeeperImpl
     let actualProgramId = campaign.folder?.type?.toLowerCase() === "program" &&
         Number.isSafeInteger(folderId) && Number(folderId) > 0
       ? String(folderId)
-      : undefined;
-    let expectedProgramId = action.programId === undefined
-      ? undefined
+      : null;
+    let expectedProgramId = action.programId === null
+      ? null
       : String(this.#requireLogicalId(action.programId));
     if (actualProgramId !== expectedProgramId) {
       throw new DesignerPreDispatchError(
@@ -2331,7 +2351,7 @@ export class MarketoGatekeeperImpl
         );
       }
     }
-    if (isDesignStudioAction(action) && action.type === "designLifecycle" && action.snapshot) {
+    if (isDesignStudioAction(action) && action.type === "designLifecycle") {
       let id = this.#requireLogicalId(action.targetId);
       let current;
       try {
@@ -2471,7 +2491,7 @@ export class MarketoGatekeeperImpl
     if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
       add(`campaign:${action.campaignId}`, true);
       add("campaignRecipientEffects", true);
-      if (action.programId !== undefined) add(`program:${this.#requireLogicalId(action.programId)}`, false);
+      if (action.programId !== null) add(`program:${this.#requireLogicalId(action.programId)}`, false);
       if (action.type === "campaignTrigger") {
         for (let personId of action.personIds) add(`person:${personId}`, true);
       }
@@ -2585,7 +2605,7 @@ export class MarketoGatekeeperImpl
       });
     }
     if (action.type === "campaignClone") references.push({ id: action.sourceId, kind: "campaign" });
-    if (action.type === "campaignLifecycle" && action.programId !== undefined) {
+    if (action.type === "campaignLifecycle" && action.programId !== null) {
       references.push({ id: action.programId, kind: "program" });
     }
     if (action.type === "campaignCreate" || action.type === "campaignClone") {

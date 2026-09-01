@@ -13,6 +13,8 @@ import type {
   MarketoDesignStudioStatus,
 } from "../src/types";
 
+const EMPTY_LIFECYCLE_SNAPSHOT = { metadata: {}, content: [], affectedDependents: [] };
+
 function context(client: Partial<MarketoClient>, initial: DesignStudioAction[] = []) {
   let actions = [...initial];
   let nextProvisional = 0;
@@ -489,6 +491,7 @@ describe("classic Design Studio regressions", () => {
           asset,
           targetId: String(index + 2),
           operation: "delete",
+          snapshot: EMPTY_LIFECYCLE_SNAPSHOT,
         })),
     ];
     let { ctx } = context({}, deleted);
@@ -533,8 +536,8 @@ describe("classic Design Studio regressions", () => {
 
   it("guards deleted asset dependencies, but allows work after rejection", async () => {
     let initial: DesignStudioAction[] = [
-      { id: 1, type: "designLifecycle", asset: "email", targetId: "10", operation: "delete" },
-      { id: 2, type: "designLifecycle", asset: "emailTemplate", targetId: "11", operation: "delete" },
+      { id: 1, type: "designLifecycle", asset: "email", targetId: "10", operation: "delete", snapshot: EMPTY_LIFECYCLE_SNAPSHOT },
+      { id: 2, type: "designLifecycle", asset: "emailTemplate", targetId: "11", operation: "delete", snapshot: EMPTY_LIFECYCLE_SNAPSHOT },
       { id: 3, type: "designDeleteFolder", targetId: "12" },
     ];
     let { actions, ctx } = context({}, initial);
@@ -599,10 +602,19 @@ describe("classic Design Studio regressions", () => {
       }),
       getEmailContent: async () => [{
         htmlId: "main",
+        index: 2,
         value: [
           { type: "HTML", value: "<h1>Exact draft</h1>" },
           { type: "Text", value: "Exact draft" },
         ],
+      }, {
+        htmlId: "hero",
+        contentType: "DynamicContent",
+        index: 1,
+        parentHtmlId: "body",
+        isLocked: true,
+        value: { type: "DynamicContent", segmentationId: 17, default: "Fallback" },
+        secretProviderExtension: "not approved" as never,
       }],
     });
 
@@ -615,9 +627,51 @@ describe("classic Design Studio regressions", () => {
           fromEmail: "marketing@example.com",
           settings: { operational: true, isOpenTrackingDisabled: false, textOnly: false },
         },
-        content: [{ id: "main", html: "<h1>Exact draft</h1>", text: "Exact draft" }],
+        content: [{
+          htmlId: "hero",
+          contentType: "DynamicContent",
+          index: 1,
+          parentHtmlId: "body",
+          isLocked: true,
+          value: { type: "DynamicContent", segmentationId: 17, default: "Fallback" },
+        }, {
+          htmlId: "main",
+          index: 2,
+          value: [
+            { type: "HTML", value: "<h1>Exact draft</h1>" },
+            { type: "Text", value: "Exact draft" },
+          ],
+        }],
         affectedDependents: [],
       },
     });
+    expect(JSON.stringify(actions[0])).not.toContain("secretProviderExtension");
+  });
+
+  it("snapshots every landing-page and form publish property", async () => {
+    let landingContent = [{
+      id: "hero", type: "form", index: 3, content: { formId: 21 },
+      formattingOptions: { visibility: "mobile", zIndex: 4 },
+      followupType: "url", followupValue: "https://example.com/thanks",
+    }];
+    let fields = [{
+      id: "Email", label: "Email", dataType: "email", defaultValue: "person@example.com",
+      validationMessage: { required: "Required" }, rowNumber: 2, columnNumber: 1, maxLength: 255,
+      required: true, formPrefill: false, fieldWidth: 200, labelWidth: 100, hintText: "Work email",
+      instructions: "Use your work address", text: "Email address",
+      fieldMetaData: { values: ["one", "two"] }, visibilityRules: { ruleType: "always" },
+    }];
+    let { actions, ctx } = context({
+      getLandingPage: async () => ({ id: 41, name: "Page", status: "draft" }),
+      getLandingPageContent: async () => landingContent,
+      getForm: async () => ({ id: 51, name: "Form", status: "draft" }),
+      getFormFields: async () => fields,
+    });
+
+    await new MarketoDesignStudioImpl(ctx).getLandingPage("41").approve();
+    await new MarketoDesignStudioImpl(ctx).getForm("51").approve();
+
+    expect(actions[0]).toMatchObject({ snapshot: { content: landingContent } });
+    expect(actions[1]).toMatchObject({ snapshot: { content: fields } });
   });
 });

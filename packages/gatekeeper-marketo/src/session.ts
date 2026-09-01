@@ -1272,10 +1272,10 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     }
   }
 
-  #programId(summary: MarketoSmartCampaignSummary): string | undefined {
+  #programId(summary: MarketoSmartCampaignSummary): string | null {
     return summary.folder?.type === "program"
       ? requireLogicalId(summary.folder.id, "program")
-      : undefined;
+      : null;
   }
 
   async #summary(

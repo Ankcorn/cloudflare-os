@@ -59,8 +59,8 @@ type ExistingMarketoAction =
       type: "campaignTrigger";
       campaignId: number;
       campaignName: string;
-      /** Owning Program, when the campaign is contained by one. */
-      programId?: string;
+      /** Owning Program, or null when the campaign is not contained by a Program. */
+      programId: string | null;
       personIds: number[];
       tokens?: { name: string; value: string }[];
     }
@@ -69,8 +69,8 @@ type ExistingMarketoAction =
       type: "campaignSchedule";
       campaignId: number;
       campaignName: string;
-      /** Owning Program, when the campaign is contained by one. */
-      programId?: string;
+      /** Owning Program, or null when the campaign is not contained by a Program. */
+      programId: string | null;
       /** ISO 8601; Date isn't stable across DO storage round-trips. */
       runAt: string;
       tokens?: { name: string; value: string }[];
@@ -346,6 +346,10 @@ const MAX_SCHEDULE_DELAY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
 /** Revalidate approved inputs immediately before dispatch. */
 export function validateActionForDispatch(action: MarketoAction, now = Date.now()): void {
+  if ((action.type === "campaignTrigger" || action.type === "campaignSchedule") &&
+      (!Object.hasOwn(action, "programId") || action.programId !== null && typeof action.programId !== "string")) {
+    throw new Error("A persisted Marketo campaign action is missing its reviewed parent ownership.");
+  }
   if (action.type === "upsertPeople") {
     validatePeopleUpsertLookup(action.records, action.upsertAction, action.lookupField);
   } else if (action.type === "campaignSchedule") {

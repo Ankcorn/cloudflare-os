@@ -42,8 +42,11 @@ import type {
   MarketoClient,
   MarketoFolderRef,
   RawDesignStudioAsset,
+  RawEmailContent,
   RawFile,
   RawFolder,
+  RawFormField,
+  RawLandingPageContent,
 } from "./marketo-api";
 import { ASSET_PAGE_MAX, parseMarketoDate } from "./marketo-api";
 import type {
@@ -267,6 +270,68 @@ export function emailSections(raw: { htmlId?: string; contentType?: string; valu
     }
     return section.html !== undefined || section.text !== undefined ? [section] : [];
   });
+}
+
+function definedFields(value: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  return Object.fromEntries(fields.flatMap(field =>
+    value[field] === undefined ? [] : [[field, structuredClone(value[field])]]));
+}
+
+function replaceTextualValue(value: unknown, content: string | undefined): unknown {
+  if (content === undefined) return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return content;
+  let record = recordValue(value);
+  for (let key of ["value", "content", "html", "text"]) {
+    if (record[key] !== undefined) return { ...record, [key]: replaceTextualValue(record[key], content) };
+  }
+  return content;
+}
+
+function canonicalEmailContent(
+  raw: RawEmailContent[],
+  sections: MarketoEmailContentSection[],
+): Record<string, unknown>[] {
+  return raw.map(item => {
+    let result = definedFields(item as Record<string, unknown>, [
+      "htmlId", "contentType", "value", "index", "parentHtmlId", "isLocked",
+    ]);
+    let section = sections.find(candidate => candidate.id === item.htmlId);
+    if (!section) return result;
+    let values = Array.isArray(item.value) ? item.value : [item.value];
+    let normalizedValues = values.map(value => {
+      let record = recordValue(value);
+      let type = textValue(record.type) ?? textValue(record.contentType) ?? item.contentType;
+      let normalized = { ...record };
+      if (record.textValue !== undefined) {
+        normalized.textValue = replaceTextualValue(record.textValue, section.text);
+        return replaceTextualValue(normalized, section.html);
+      }
+      return replaceTextualValue(normalized, type?.toLowerCase() === "text" ? section.text : section.html);
+    });
+    result.value = Array.isArray(item.value) ? normalizedValues : normalizedValues[0];
+    return result;
+  }).toSorted((left, right) =>
+    Number(left.index ?? Number.MAX_SAFE_INTEGER) - Number(right.index ?? Number.MAX_SAFE_INTEGER) ||
+    String(left.htmlId ?? "").localeCompare(String(right.htmlId ?? "")));
+}
+
+function canonicalLandingPageContent(raw: RawLandingPageContent[]): Record<string, unknown>[] {
+  return raw.map(item => definedFields(item as Record<string, unknown>, [
+    "id", "type", "index", "content", "formattingOptions", "followupType", "followupValue",
+  ])).toSorted((left, right) =>
+    Number(left.index ?? Number.MAX_SAFE_INTEGER) - Number(right.index ?? Number.MAX_SAFE_INTEGER) ||
+    String(left.id ?? "").localeCompare(String(right.id ?? "")));
+}
+
+function canonicalFormFields(raw: RawFormField[]): Record<string, unknown>[] {
+  return raw.map(field => definedFields(field as Record<string, unknown>, [
+    "id", "label", "dataType", "defaultValue", "validationMessage", "rowNumber", "columnNumber",
+    "maxLength", "required", "formPrefill", "fieldWidth", "labelWidth", "hintText", "instructions",
+    "text", "fieldMetaData", "visibilityRules",
+  ])).toSorted((left, right) =>
+    Number(left.rowNumber ?? Number.MAX_SAFE_INTEGER) - Number(right.rowNumber ?? Number.MAX_SAFE_INTEGER) ||
+    Number(left.columnNumber ?? Number.MAX_SAFE_INTEGER) - Number(right.columnNumber ?? Number.MAX_SAFE_INTEGER) ||
+    String(left.id ?? "").localeCompare(String(right.id ?? "")));
 }
 
 function headerValue(value: unknown): string | undefined {
@@ -1226,7 +1291,7 @@ abstract class AssetImpl extends RpcTarget {
     }
     let snapshot: DesignStudioLifecycleSnapshot = {
       metadata: lifecycleMetadata(metadata),
-      content: await this.publishableContent(),
+      content: await this.lifecycleSnapshotContent(),
       // Unlike Email Designer, the classic Asset API has no used-by endpoint.
       affectedDependents: [],
     };
@@ -1235,6 +1300,7 @@ abstract class AssetImpl extends RpcTarget {
     });
   }
 
+  protected async lifecycleSnapshotContent(): Promise<unknown> { return await this.publishableContent(); }
   protected abstract publishableContent(): Promise<unknown>;
 }
 
@@ -1324,7 +1390,8 @@ export async function readDesignStudioLifecycleSnapshot(
   if (!raw || readId(raw) !== id) throw new Error(`Marketo ${kind} ${id} was not found.`);
   let content: unknown;
   if (kind === "email") {
-    content = emailSections(await client.getEmailContent(id));
+    let rawContent = await client.getEmailContent(id);
+    content = canonicalEmailContent(rawContent, emailSections(rawContent));
   } else if (kind === "emailTemplate" || kind === "landingPageTemplate") {
     let response = kind === "emailTemplate"
       ? await client.getEmailTemplateContent(id)
@@ -1334,19 +1401,9 @@ export async function readDesignStudioLifecycleSnapshot(
     }
     content = response.content;
   } else if (kind === "landingPage") {
-    content = (await client.getLandingPageContent(id)).map(item => ({
-      id: String(item.id ?? ""),
-      type: textValue(item.type) ?? "",
-      content: textualContent(item.content),
-    })).filter(item => item.id);
+    content = canonicalLandingPageContent(await client.getLandingPageContent(id));
   } else if (kind === "form") {
-    content = (await client.getFormFields(id)).map(field => ({
-      id: textValue(field.id) ?? "",
-      label: textValue(field.label),
-      dataType: textValue(field.dataType),
-      required: typeof field.required === "boolean" ? field.required : undefined,
-      hintText: textValue(field.hintText),
-    })).filter(field => field.id);
+    content = canonicalFormFields(await client.getFormFields(id));
   } else {
     let result: MarketoSnippetContent = {};
     for (let item of await client.getSnippetContent(id)) {
@@ -1419,6 +1476,14 @@ export class MarketoDesignStudioFolderImpl extends AssetImpl {
 export class MarketoEmailImpl extends AssetImpl {
   protected kind = "email" as const;
   protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
+  protected async lifecycleSnapshotContent(): Promise<unknown> {
+    let creation = findCreation(this.ctx, this.kind, this.id);
+    let raw = creation?.type === "designCreate" ? [] : creation?.type === "designClone"
+      ? await new MarketoEmailImpl(beforeAction(this.ctx, creation.id), creation.sourceId)
+        .lifecycleSnapshotContent() as RawEmailContent[]
+      : await (await this.ctx.client()).getEmailContent(physicalId(this.ctx, this.id));
+    return canonicalEmailContent(raw, await this.getContent());
+  }
   async describe(): Promise<MarketoEmailSummary> { return await this.summary() as MarketoEmailSummary; }
   async getContent(): Promise<MarketoEmailContentSection[]> {
     this.assertReadable();
@@ -1508,6 +1573,17 @@ export class MarketoEmailTemplateImpl extends TemplateImpl {
 export class MarketoLandingPageImpl extends AssetImpl {
   protected kind = "landingPage" as const;
   protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
+  protected async lifecycleSnapshotContent(): Promise<unknown> {
+    let creation = findCreation(this.ctx, this.kind, this.id);
+    if (creation?.type === "designCreate") return [];
+    if (creation?.type === "designClone") {
+      return await new MarketoLandingPageImpl(beforeAction(this.ctx, creation.id), creation.sourceId)
+        .lifecycleSnapshotContent();
+    }
+    return canonicalLandingPageContent(
+      await (await this.ctx.client()).getLandingPageContent(physicalId(this.ctx, this.id)),
+    );
+  }
   async describe(): Promise<MarketoLandingPageSummary> { return await this.summary() as MarketoLandingPageSummary; }
   async getContent(): Promise<MarketoLandingPageContentSection[]> {
     this.assertReadable();
@@ -1533,6 +1609,15 @@ export class MarketoLandingPageTemplateImpl extends TemplateImpl {
 export class MarketoFormImpl extends AssetImpl {
   protected kind = "form" as const;
   protected async publishableContent(): Promise<unknown> { return await this.getFields(); }
+  protected async lifecycleSnapshotContent(): Promise<unknown> {
+    let creation = findCreation(this.ctx, this.kind, this.id);
+    if (creation?.type === "designCreate") return [];
+    if (creation?.type === "designClone") {
+      return await new MarketoFormImpl(beforeAction(this.ctx, creation.id), creation.sourceId)
+        .lifecycleSnapshotContent();
+    }
+    return canonicalFormFields(await (await this.ctx.client()).getFormFields(physicalId(this.ctx, this.id)));
+  }
   async describe(): Promise<MarketoFormSummary> { return await this.summary() as MarketoFormSummary; }
   async getFields(): Promise<MarketoFormField[]> {
     this.assertReadable();

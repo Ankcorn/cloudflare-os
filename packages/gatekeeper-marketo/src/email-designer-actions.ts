@@ -27,7 +27,7 @@ export type EmailDesignerAction =
   | { id: number; type: "designerCreate"; asset: EmailDesignerKind; provisionalId: string; body: Record<string, unknown> }
   | { id: number; type: "designerClone"; asset: EmailDesignerKind; provisionalId: string; sourceId: string; name: string; description?: string; sourceSnapshot: DesignerCloneSnapshot }
   | { id: number; type: "designerUpdate"; asset: EmailDesignerKind; targetId: string; patch: Record<string, unknown> }
-  | { id: number; type: "designerLifecycle"; asset: EmailDesignerKind; targetId: string; operation: "createDraft" | "approve" | "unapprove" | "discard"; contentId: string; sourceState: "draft" | "approved"; sourceSnapshot?: DesignerCloneSnapshot; affectedDependents?: MarketoDesignerUsedBy[] }
+  | { id: number; type: "designerLifecycle"; asset: EmailDesignerKind; targetId: string; operation: "createDraft" | "approve" | "unapprove" | "discard"; contentId: string; sourceState: "draft" | "approved"; sourceSnapshot: DesignerCloneSnapshot; affectedDependents: MarketoDesignerUsedBy[] }
   | { id: number; type: "designerDelete"; asset: EmailDesignerKind; targetId: string };
 
 export type EmailDesignerActionInput = EmailDesignerAction extends infer T
@@ -264,10 +264,8 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
         title: `${action.operation} Marketo designer ${name}`,
         description: `${action.operation} ${name} ${markdownCode(target ?? "")} using its snapshotted ` +
           `${action.sourceState} content ${markdownCode(action.contentId)}.${risk}\n\n` +
-          (action.sourceSnapshot
-            ? `Complete publishable content, headers, and settings:\n\n${markdownJsonCodeBlock(designerCloneSnapshotRecord(action.sourceSnapshot))}\n\n` +
-              `Affected dependents:\n\n${markdownJsonCodeBlock(action.affectedDependents ?? [])}`
-            : "No lifecycle snapshot is available for this legacy queued action."),
+          `Complete publishable content, headers, and settings:\n\n${markdownJsonCodeBlock(designerCloneSnapshotRecord(action.sourceSnapshot))}\n\n` +
+          `Affected dependents:\n\n${markdownJsonCodeBlock(action.affectedDependents)}`,
       };
     }
     case "designerDelete":

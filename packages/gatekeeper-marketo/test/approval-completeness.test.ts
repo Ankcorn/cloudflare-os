@@ -81,7 +81,7 @@ describe("Marketo approval completeness", () => {
     let personIds = Array.from({ length: 300 }, (_, index) => index + 1);
     let actions: MarketoAction[] = [
       { id: 1, type: "listAdd", listId: 7, listName: "All leads", personIds },
-      { id: 2, type: "campaignTrigger", campaignId: 8, campaignName: "Launch", personIds },
+      { id: 2, type: "campaignTrigger", campaignId: 8, campaignName: "Launch", programId: null, personIds },
       { id: 3, type: "programStatus", programId: 9, programName: "Nurture", personIds, status: "Member" },
     ];
 

@@ -96,7 +96,7 @@ export type DesignStudioAction =
       asset: Exclude<DesignStudioAssetKind, "folder" | "file">;
       targetId: string;
       operation: "approve" | "unapprove" | "discardDraft" | "delete";
-      snapshot?: DesignStudioLifecycleSnapshot;
+      snapshot: DesignStudioLifecycleSnapshot;
     }
   | { id: number; type: "designDeleteFolder"; targetId: string };
 
@@ -191,11 +191,9 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         title: `${action.operation} Marketo ${label(action.asset)} ${target ?? ""}`,
         description: `${action.operation === "delete" ? "Permanently delete" : action.operation} ` +
           `Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}\n\n` +
-          (action.snapshot
-            ? `Publishable metadata, headers, and settings:\n\n${codeBlock(action.snapshot.metadata)}\n\n` +
-              `Publishable content:\n\n${codeBlock(action.snapshot.content)}\n\n` +
-              `Affected dependents:\n\n${codeBlock(action.snapshot.affectedDependents)}`
-            : "No lifecycle snapshot is available for this legacy queued action."),
+          `Publishable metadata, headers, and settings:\n\n${codeBlock(action.snapshot.metadata)}\n\n` +
+          `Publishable content:\n\n${codeBlock(action.snapshot.content)}\n\n` +
+          `Affected dependents:\n\n${codeBlock(action.snapshot.affectedDependents)}`,
       };
     case "designDeleteFolder":
       return {

@@ -106,6 +106,8 @@ import type { MarketoBusinessObjectQuery } from "../src/types";
 
 const TEST_ENV = env as unknown as Env;
 const ORIGIN = "https://123-abc-456.mktorest.com";
+const EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT = { metadata: {}, content: [], affectedDependents: [] };
+const EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT = designerCloneSnapshot({});
 
 describe("endpoint normalization", () => {
   it("accepts what people actually paste", () => {
@@ -740,7 +742,7 @@ describe("action descriptions", () => {
     let actions: MarketoAction[] = [
       { id: 1, type: "listAdd", listId: 1, listName: "L", personIds: [1] },
       { id: 2, type: "deletePerson", personId: 5 },
-      { id: 3, type: "campaignTrigger", campaignId: 9, campaignName: "C", personIds: [1] },
+      { id: 3, type: "campaignTrigger", campaignId: 9, campaignName: "C", programId: null, personIds: [1] },
     ];
     for (let action of actions) {
       expect(describeAction(action).awaitDecision).toBe(true);
@@ -752,7 +754,7 @@ describe("action descriptions", () => {
       { id: 1, type: "listAdd", listId: 1, listName: "L", personIds: [1] },
       { id: 2, type: "updatePerson", personId: 1, fields: { firstName: "A" } },
       { id: 3, type: "deletePerson", personId: 1 },
-      { id: 4, type: "campaignTrigger", campaignId: 1, campaignName: "C", personIds: [1] },
+      { id: 4, type: "campaignTrigger", campaignId: 1, campaignName: "C", programId: null, personIds: [1] },
     ];
     for (let action of actions) expect(describeAction(action).implementsRevert).toBe(false);
   });
@@ -763,6 +765,7 @@ describe("action descriptions", () => {
       type: "campaignTrigger",
       campaignId: 7,
       campaignName: "Welcome Blast",
+      programId: null,
       personIds: [1, 2],
     });
     expect(description.title).toContain("7");
@@ -843,6 +846,7 @@ describe("action descriptions", () => {
       asset: "emailTemplate",
       targetId: "21",
       operation: "discardDraft",
+      snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT,
     }).awaitDecision).toBe(true);
   });
 
@@ -1320,8 +1324,8 @@ describe("new Email Designer", () => {
   });
 
   it("describes publication, discard, and deletion risks and tracks dependencies", () => {
-    let approve = describeAction({ id: 1, type: "designerLifecycle", asset: "designerFragment", targetId: "f", operation: "approve", contentId: "f-draft", sourceState: "draft" });
-    let discard = describeAction({ id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "discard", contentId: "e-draft", sourceState: "draft" });
+    let approve = describeAction({ id: 1, type: "designerLifecycle", asset: "designerFragment", targetId: "f", operation: "approve", contentId: "f-draft", sourceState: "draft", sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [] });
+    let discard = describeAction({ id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "discard", contentId: "e-draft", sourceState: "draft", sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [] });
     let remove = describeAction({ id: 3, type: "designerDelete", asset: "designerTemplate", targetId: "t" });
     expect(approve.description).toMatch(/every inheriting/);
     expect(discard).toMatchObject({ awaitDecision: true });
@@ -1506,6 +1510,7 @@ describe("smart campaign management", () => {
       type: "campaignLifecycle",
       targetId: "7",
       campaignName: "Campaign",
+      programId: null,
       operation: "activate",
     });
     let deletion = describeAction({
@@ -1513,6 +1518,7 @@ describe("smart campaign management", () => {
       type: "campaignLifecycle",
       targetId: "7",
       campaignName: "Campaign",
+      programId: null,
       operation: "delete",
     });
 
@@ -2159,7 +2165,7 @@ describe("Design Studio simulation", () => {
     let getEmail = vi.fn(async () => ({ id: 21, name: "Old", status: "draft" }));
     let { ctx } = designContext({ getEmailsByName, getEmail }, [
       { id: 1, type: "designMetadata", asset: "email", targetId: "21", patch: { name: "New" } },
-      { id: 2, type: "designLifecycle", asset: "email", targetId: "21", operation: "approve" },
+      { id: 2, type: "designLifecycle", asset: "email", targetId: "21", operation: "approve", snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT },
     ]);
 
     expect(await new MarketoDesignStudioImpl(ctx).listEmails({ name: "New", status: "approved" }))
@@ -2283,7 +2289,7 @@ describe("Design Studio simulation", () => {
     let { ctx } = designContext({
       getEmails,
       getEmail: async () => records[0],
-    }, [{ id: 1, type: "designLifecycle", asset: "email", targetId: "1", operation: "delete" }]);
+    }, [{ id: 1, type: "designLifecycle", asset: "email", targetId: "1", operation: "delete", snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT }]);
     let studio = new MarketoDesignStudioImpl(ctx);
 
     let first = await studio.listEmails({ maxResults: 2 });
@@ -2571,6 +2577,7 @@ describe("Design Studio simulation", () => {
       asset: "email",
       targetId: "21",
       operation: "delete",
+      snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT,
     }]);
 
     await expect(new MarketoDesignStudioImpl(ctx).getEmail("21").getContent())
@@ -3543,7 +3550,7 @@ describe("whole-instance listings", () => {
         parent: { id: "10", type: "Folder" }, name: "Pending",
       },
       { id: 2, type: "campaignMetadata", targetId: "1", campaignName: "One", patch: { name: "Updated" } },
-      { id: 3, type: "campaignLifecycle", targetId: "2", campaignName: "Two", operation: "delete" },
+      { id: 3, type: "campaignLifecycle", targetId: "2", campaignName: "Two", programId: null, operation: "delete" },
     ];
     let calls: (string | undefined)[] = [];
     let firstPage = Array.from({ length: 300 }, (_, index) => ({ id: index + 1, name: `C${index + 1}` }));
@@ -3610,7 +3617,7 @@ describe("whole-instance listings", () => {
       { id: 1, type: "campaignMetadata", targetId: "1", campaignName: "Old", patch: { name: "Renamed" } },
       {
         id: 2, type: "campaignLifecycle", targetId: "2", campaignName: "Activate me",
-        campaignType: "trigger", operation: "activate",
+        campaignType: "trigger", programId: "10", operation: "activate",
       },
     ];
     let { ctx } = campaignContext({
@@ -4921,6 +4928,7 @@ describe("Marketo request encoding", () => {
     });
     let action: MarketoAction = {
       id: 1, type: "campaignSchedule", campaignId: 7, campaignName: "Campaign",
+      programId: null,
       runAt: new Date(now + 5 * 60 * 1000 + 1).toISOString(),
     };
 
@@ -5454,6 +5462,7 @@ describe("campaign kind pre-validation", () => {
         targetId: "~1",
         campaignName: "Deleted",
         campaignType: type,
+        programId: null,
         operation: "delete",
       }],
       resolveId: (id: string) => id === "~1" ? 7800 : Number(id),
@@ -5503,6 +5512,7 @@ describe("campaign kind pre-validation", () => {
       targetId: "7800",
       campaignName: "Deleting",
       campaignType: type,
+      programId: null,
       operation: "delete",
     });
     release?.();
@@ -7367,7 +7377,7 @@ describe("Email Designer action lifecycle", () => {
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [] },
       { action: { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "e" }, result: [{}] },
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [{ id: "other" }] },
-      { action: { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "approve", contentId: "e-draft", sourceState: "draft" }, result: [{ contentId: "e-draft", status: "draft" }] },
+      { action: { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "approve", contentId: "e-draft", sourceState: "draft", sourceSnapshot: designerCloneSnapshot({ associatedStates: [{ contentId: "e-draft", state: "draft" }] }), affectedDependents: [] }, result: [{ contentId: "e-draft", status: "draft" }] },
     ];
     for (let { action, result } of cases) {
       vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -7376,6 +7386,12 @@ describe("Email Designer action lifecycle", () => {
           return Response.json({ success: true, result: [{
             id: "e", associatedStates: [{ contentId: "e-draft", state: "draft" }],
           }] });
+        }
+        if (action.type === "designerLifecycle" && url.endsWith("/usedby")) {
+          return Response.json({
+            success: true, result: [],
+            pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+          });
         }
         return Response.json({ success: true, result });
       });
@@ -7447,6 +7463,11 @@ describe("Email Designer action lifecycle", () => {
       {
         id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-A",
         operation, contentId: "content-1", sourceState,
+        sourceSnapshot: designerCloneSnapshot({
+          ...configuration, status: sourceState, state: sourceState,
+          associatedStates: [{ contentId: "content-1", state: sourceState }],
+        }),
+        affectedDependents: [],
       },
       {
         id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~1",
@@ -7464,6 +7485,12 @@ describe("Email Designer action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       if (init?.body) {
+        if (path.endsWith("/usedby")) {
+          return Response.json({
+            success: true, result: [],
+            pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+          });
+        }
         writes.push(path);
         if (path.endsWith("/state/transition")) {
           state = targetState;
@@ -7837,6 +7864,7 @@ describe("smart campaign action lifecycle", () => {
         targetId: "31",
         campaignName: "Renamed",
         campaignType: "trigger",
+        programId: null,
         operation: "activate",
       },
     ];
@@ -7931,6 +7959,7 @@ describe("smart campaign action lifecycle", () => {
         targetId: "~2",
         campaignName: "Clone",
         campaignType: "trigger",
+        programId: null,
         operation: "delete",
       },
     ];
@@ -8109,10 +8138,20 @@ describe("Design Studio action lifecycle", () => {
         fromEmail: "marketing@example.com", replyEmail: "reply@example.com",
         settings: { operational: true },
       },
-      content: [{ id: "main", html: "<h1>Approved</h1>", text: "Approved" }],
+      content: [{
+        htmlId: "hero", contentType: "DynamicContent", index: 1,
+        value: { type: "DynamicContent", segmentationId: 17, default: "Fallback" },
+      }, {
+        htmlId: "main",
+        index: 2,
+        value: [
+          { type: "HTML", value: "<h1>Approved</h1>" },
+          { type: "Text", value: "Approved" },
+        ],
+      }],
       affectedDependents: [],
     };
-    for (let changed of ["content", "header", "settings", undefined] as const) {
+    for (let changed of ["content", "dynamic", "header", "settings", undefined] as const) {
       let action: DesignStudioAction = {
         id: 1, type: "designLifecycle", asset: "email", targetId: "21",
         operation: "approve", snapshot,
@@ -8136,10 +8175,17 @@ describe("Design Studio action lifecycle", () => {
         if (path.endsWith("/email/21/content.json")) {
           return Response.json({ success: true, result: [{
             htmlId: "main",
+            index: 2,
             value: [
               { type: "HTML", value: changed === "content" ? "<h1>Externally changed</h1>" : "<h1>Approved</h1>" },
               { type: "Text", value: "Approved" },
             ],
+          }, {
+            htmlId: "hero", contentType: "DynamicContent", index: 1,
+            value: {
+              type: "DynamicContent", segmentationId: changed === "dynamic" ? 18 : 17,
+              default: "Fallback",
+            },
           }] });
         }
         lifecycleWrites++;
@@ -8431,7 +8477,7 @@ describe("Design Studio action lifecycle", () => {
     let actions: DesignStudioAction[] = [
       { id: 1, type: "designMetadata", asset: "emailTemplate", targetId: "31", patch: { name: "First" } },
       { id: 2, type: "designContent", asset: "emailTemplate", targetId: "31", content: "second" },
-      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "approve" },
+      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "approve", snapshot: { metadata: { name: "First" }, content: "second", affectedDependents: [] } },
       { id: 4, type: "designMetadata", asset: "folder", targetId: "40", patch: { name: "Folder" } },
       { id: 5, type: "designDeleteFolder", targetId: "40" },
     ];
@@ -8440,6 +8486,12 @@ describe("Design Studio action lifecycle", () => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       let path = new URL(url).pathname;
       paths.push(path);
+      if (path.endsWith("/emailTemplate/31/content.json")) {
+        return Response.json({ success: true, result: [{ id: 31, content: "second" }] });
+      }
+      if (path.endsWith("/emailTemplate/31.json")) {
+        return Response.json({ success: true, result: [{ id: 31, name: "First" }] });
+      }
       return Response.json({ success: true, result: [{ id: path.includes("folder/40") ? 40 : 31 }] });
     });
     let stub = await designActionGatekeeper(actions);
@@ -8453,6 +8505,8 @@ describe("Design Studio action lifecycle", () => {
       expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
     });
     expect(paths).toEqual([
+      "/rest/asset/v1/emailTemplate/31.json",
+      "/rest/asset/v1/emailTemplate/31/content.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/content.json",
       "/rest/asset/v1/emailTemplate/31/approveDraft.json",
@@ -8473,7 +8527,7 @@ describe("Design Studio action lifecycle", () => {
         name: "Snapshot",
       },
       { id: 2, type: "designMetadata", asset: "emailTemplate", targetId: "31", patch: { name: "Later" } },
-      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "delete" },
+      { id: 3, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "delete", snapshot: { metadata: { name: "Later" }, content: "source", affectedDependents: [] } },
     ];
     let paths: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => {
@@ -8483,9 +8537,14 @@ describe("Design Studio action lifecycle", () => {
       if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
         id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
       }] });
+      if (path.endsWith("/emailTemplate/31/content.json")) {
+        return Response.json({ success: true, result: [{ id: 31, content: "source" }] });
+      }
       return Response.json({ success: true, result: [{
         id: path.includes("clone") || path.includes("emailTemplate/32.json") ? 32 : 31,
-        ...(path.includes("emailTemplate/32.json") ? { name: "Snapshot", folder: { id: 10, type: "Folder" } } : {}),
+        ...(path.includes("emailTemplate/32.json")
+          ? { name: "Snapshot", folder: { id: 10, type: "Folder" } }
+          : { name: "Later" }),
       }] });
     });
     let stub = await designActionGatekeeper(actions);
@@ -8502,6 +8561,8 @@ describe("Design Studio action lifecycle", () => {
       "/rest/asset/v1/emailTemplate/31/clone.json",
       "/rest/asset/v1/emailTemplate/32.json",
       "/rest/asset/v1/emailTemplate/31.json",
+      "/rest/asset/v1/emailTemplate/31.json",
+      "/rest/asset/v1/emailTemplate/31/content.json",
       "/rest/asset/v1/emailTemplate/31/delete.json",
     ]);
   });
@@ -8921,24 +8982,24 @@ describe("action dispatch lifecycle", () => {
         { id: 2, type: "listRemove", listId: 5, listName: "Customers", personIds: [7, 8] },
       ],
       [
-        { id: 1, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", operation: "deactivate" },
-        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+        { id: 1, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", programId: null, operation: "deactivate" },
+        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", programId: null, personIds: [7] },
       ],
       [
-        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
-        { id: 2, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", operation: "deactivate" },
+        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", programId: null, personIds: [7] },
+        { id: 2, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", programId: null, operation: "deactivate" },
       ],
       [
-        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign", runAt: "2027-01-01T00:00:00.000Z" },
-        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign", programId: null, runAt: "2027-01-01T00:00:00.000Z" },
+        { id: 2, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", programId: null, personIds: [7] },
       ],
       [
-        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "First", personIds: [7] },
-        { id: 2, type: "campaignTrigger", campaignId: 32, campaignName: "Second", personIds: [7] },
+        { id: 1, type: "campaignTrigger", campaignId: 31, campaignName: "First", programId: null, personIds: [7] },
+        { id: 2, type: "campaignTrigger", campaignId: 32, campaignName: "Second", programId: null, personIds: [7] },
       ],
       [
-        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "First", runAt: "2027-01-01T00:00:00.000Z" },
-        { id: 2, type: "campaignSchedule", campaignId: 32, campaignName: "Second", runAt: "2027-01-02T00:00:00.000Z" },
+        { id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "First", programId: null, runAt: "2027-01-01T00:00:00.000Z" },
+        { id: 2, type: "campaignSchedule", campaignId: 32, campaignName: "Second", programId: null, runAt: "2027-01-02T00:00:00.000Z" },
       ],
       [
         { id: 1, type: "businessObjectDelete", kind: "company", records: [{ externalCompanyId: "acme" }], matchBy: "dedupeFields", changedFields: ["externalCompanyId"] },
@@ -8950,15 +9011,15 @@ describe("action dispatch lifecycle", () => {
       ],
       [
         { id: 1, type: "updatePerson", personId: 7, fields: { subscribed: true } },
-        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", personIds: [7] },
+        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", programId: null, personIds: [7] },
       ],
       [
         { id: 1, type: "listAdd", listId: 5, listName: "Customers", personIds: [7] },
-        { id: 2, type: "campaignSchedule", campaignId: 41, campaignName: "Campaign", runAt: "2027-01-01T00:00:00.000Z" },
+        { id: 2, type: "campaignSchedule", campaignId: 41, campaignName: "Campaign", programId: null, runAt: "2027-01-01T00:00:00.000Z" },
       ],
       [
         { id: 1, type: "programStatus", programId: 31, programName: "Program", personIds: [7], status: "Member" },
-        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", personIds: [7] },
+        { id: 2, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign", programId: null, personIds: [7] },
       ],
       [
         { id: 1, type: "programLifecycle", targetId: "31", programName: "Program", operation: "delete" },
@@ -9071,6 +9132,33 @@ describe("action dispatch lifecycle", () => {
     expect(campaignWrites).toBe(0);
   });
 
+  it("fails closed when persisted actions lack mandatory review state", async () => {
+    let actions = [
+      { id: 1, type: "designLifecycle", asset: "email", targetId: "21", operation: "approve" },
+      {
+        id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
+        operation: "approve", contentId: "draft-1", sourceState: "draft",
+      },
+      { id: 3, type: "campaignTrigger", campaignId: 31, campaignName: "Campaign", personIds: [7] },
+      { id: 4, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign", operation: "delete" },
+    ] as unknown as MarketoAction[];
+    let providerCalls = 0;
+    vi.stubGlobal("fetch", async () => {
+      providerCalls++;
+      throw new Error("No provider call expected");
+    });
+    let stub = await campaignActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      for (let action of actions) {
+        await expect(instance.applyAction(action.id)).rejects.toThrow(/missing.*review/i);
+        expect(state.storage.kv.get(`applying:${action.id}`)).toBeUndefined();
+        expect(state.storage.kv.get(`pending:${action.id}`)).toBeDefined();
+      }
+    });
+    expect(providerCalls).toBe(0);
+  });
+
   it("does not expose a rejected simulated program rename in later status approval text", async () => {
     let actions: MarketoAction[] = [
       {
@@ -9162,6 +9250,7 @@ describe("action dispatch lifecycle", () => {
   it("rejects an expired campaign schedule before any provider request", async () => {
     let action: MarketoAction = {
       id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign",
+      programId: null,
       runAt: new Date(Date.now() + 4 * 60 * 1000).toISOString(),
     };
     let calls = 0;
@@ -9179,6 +9268,7 @@ describe("action dispatch lifecycle", () => {
     let clock = vi.spyOn(Date, "now").mockImplementation(() => now);
     let action: MarketoAction = {
       id: 1, type: "campaignSchedule", campaignId: 31, campaignName: "Campaign",
+      programId: null,
       runAt: new Date(now + 6 * 60 * 1000).toISOString(),
     };
     let campaignCalls = 0;
@@ -9188,14 +9278,14 @@ describe("action dispatch lifecycle", () => {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
       campaignCalls++;
-      return Response.json({ success: true, result: [{ status: "scheduled" }] });
+      return Response.json({ success: true, result: [{ id: 31, name: "Campaign" }] });
     });
     let stub = await actionGatekeeper(action);
     await runInDurableObject(stub, async (instance, state) => {
       await expect(instance.applyAction(1)).rejects.toThrow(/no longer between 5 minutes and 2 years/);
       expect(state.storage.kv.get("applying:1")).toBeUndefined();
     });
-    expect(campaignCalls).toBe(0);
+    expect(campaignCalls).toBe(1);
     clock.mockRestore();
   });
 
@@ -9335,10 +9425,17 @@ describe("action dispatch lifecycle", () => {
     let action: EmailDesignerAction = {
       id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
       operation: "approve", contentId: "draft-7", sourceState: "draft",
+      sourceSnapshot: designerCloneSnapshot({
+        id: "email-1", associatedStates: [{ contentId: "draft-7", state: "draft" }],
+      }),
+      affectedDependents: [],
     };
     let transitionBody: unknown;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (url.endsWith("/usedby")) return Response.json({
+        success: true, result: [], pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+      });
       if (!init?.body) return Response.json({ success: true, result: [{
         id: "email-1", associatedStates: [{ contentId: "draft-7", state: "draft" }],
       }] });
@@ -9354,6 +9451,8 @@ describe("action dispatch lifecycle", () => {
     let action: EmailDesignerAction = {
       id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
       operation: "approve", contentId: "draft-old", sourceState: "draft",
+      sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT,
+      affectedDependents: [],
     };
     let transitions = 0;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
@@ -9453,7 +9552,7 @@ describe("action dispatch lifecycle", () => {
       [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 7, status: "added" }]],
       [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ seq: 0, marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ seq: 0, marketoGUID: "g-2", status: "deleted" }]],
-      [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7] }, [{ status: "scheduled" }]],
+      [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", programId: null, personIds: [7] }, [{ status: "scheduled" }]],
     ];
     for (let [action, results] of cases) {
       expect(() => assertActionResultIdentity(action, results)).toThrow(/does not identify the approved target/);
@@ -9520,10 +9619,10 @@ describe("action dispatch lifecycle", () => {
 
   it("accepts exact statusless campaign results without weakening other result families", () => {
     let trigger: Extract<MarketoAction, { type: "campaignTrigger" }> = {
-      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", programId: null, personIds: [7],
     };
     let schedule: Extract<MarketoAction, { type: "campaignSchedule" }> = {
-      id: 2, type: "campaignSchedule", campaignId: 4, campaignName: "D", runAt: "2027-01-01T00:00:00.000Z",
+      id: 2, type: "campaignSchedule", campaignId: 4, campaignName: "D", programId: null, runAt: "2027-01-01T00:00:00.000Z",
     };
 
     expect(() => assertCampaignRequestResults(trigger, [{ id: 3 }])).not.toThrow();
@@ -9533,7 +9632,7 @@ describe("action dispatch lifecycle", () => {
 
   it("applies a statusless campaign response through the dispatch lifecycle", async () => {
     let action: MarketoAction = {
-      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", programId: null, personIds: [7],
     };
     vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
       ? Response.json({ access_token: "token", expires_in: 3600 })
@@ -9548,7 +9647,7 @@ describe("action dispatch lifecycle", () => {
 
   it("fails closed on malformed, mismatched, and declined campaign results", () => {
     let action: Extract<MarketoAction, { type: "campaignTrigger" }> = {
-      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7],
+      id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", programId: null, personIds: [7],
     };
 
     expect(() => assertCampaignRequestResults(action, [{ id: 4 }])).toThrow(/approved target/);
