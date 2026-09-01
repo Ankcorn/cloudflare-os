@@ -5475,6 +5475,148 @@ class TestApprovalQueue extends RpcTarget {
   }
 }
 
+describe("read authorization lifetime", () => {
+  it.each([
+    ["session", "instance", (session: MarketoSessionImpl | MarketoDesignStudioImpl) =>
+      (session as MarketoSessionImpl).getChannels()],
+    ["Design Studio", "design-studio", (session: MarketoSessionImpl | MarketoDesignStudioImpl) => {
+      let email = (session as MarketoDesignStudioImpl).getEmail("20");
+      return email.describe().finally(() => email[Symbol.dispose]());
+    }],
+    ["Email Designer", "design-studio", (session: MarketoSessionImpl | MarketoDesignStudioImpl) => {
+      let designer = (session as MarketoDesignStudioImpl).getEmailDesigner();
+      let email = designer.getEmail("email-1");
+      return email.describe().finally(() => {
+        email[Symbol.dispose]();
+        designer[Symbol.dispose]();
+      });
+    }],
+    ["business object", "instance", (session: MarketoSessionImpl | MarketoDesignStudioImpl) => {
+      let object = (session as MarketoSessionImpl).getBusinessObject("company");
+      return object.describe().finally(() => object[Symbol.dispose]());
+    }],
+  ] as const)("blocks a %s read prepared before revoke", async (_label, kind, read) => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), kind);
+    let identityStarted!: () => void;
+    let started = new Promise<void>(resolve => { identityStarted = resolve; });
+    let releaseIdentity!: () => void;
+    let released = new Promise<void>(resolve => { releaseIdentity = resolve; });
+    let apiFetches = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        identityStarted();
+        await released;
+        return Response.json({ access_token: "prepared-token", expires_in: 3600 });
+      }
+      apiFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue);
+      let pending = read(session as MarketoSessionImpl | MarketoDesignStudioImpl);
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(accountId).revoke();
+      releaseIdentity();
+
+      await expect(pending).rejects.toThrow(/account changed/);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(apiFetches).toBe(0);
+  });
+
+  it("blocks a resource description prepared before revoke", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "program", 7);
+    let dispatchStarted!: () => void;
+    let started = new Promise<void>(resolve => { dispatchStarted = resolve; });
+    let releaseDispatch!: () => void;
+    let released = new Promise<void>(resolve => { releaseDispatch = resolve; });
+    let originalDispatch = UserAccount.prototype.dispatch;
+    let dispatchSpy = vi.spyOn(UserAccount.prototype, "dispatch").mockImplementation(async function(
+      this: UserAccount,
+      ...args: Parameters<UserAccount["dispatch"]>
+    ) {
+      dispatchStarted();
+      await released;
+      return await originalDispatch.apply(this, args);
+    });
+    let apiFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      apiFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let description = instance.describe();
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(accountId).revoke();
+      releaseDispatch();
+      await expect(description).resolves.toMatchObject({ title: "Program: Program 7" });
+    });
+    expect(apiFetches).toBe(0);
+    dispatchSpy.mockRestore();
+  });
+
+  it("routes configurator reads through the captured account generation", async () => {
+    let credentials = { endpoint: ORIGIN, clientId: "client", clientSecret: "secret" };
+    let generation = 1;
+    let tokenStarted!: () => void;
+    let started = new Promise<void>(resolve => { tokenStarted = resolve; });
+    let releaseToken!: () => void;
+    let released = new Promise<void>(resolve => { releaseToken = resolve; });
+    let generationMatched: boolean | undefined;
+    let apiFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      apiFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+    let account = {
+      getCredentials: async () => credentials,
+      getCredentialState: async () => ({ credentials, generation }),
+      credentialsExpired: async () => {},
+      dispatch: async (expected: { generation: number }) => {
+        tokenStarted();
+        await released;
+        generationMatched = expected.generation === generation;
+        return { ok: true, response: Response.json({ success: true, result: [] }) };
+      },
+    };
+    let ctx = {
+      props: { userObjectId: "account-id" },
+      exports: {
+        UserAccount: { idFromString: () => "account-id", get: () => account },
+        MarketoTokenCache: {
+          idFromName: () => "cache-id",
+          get: () => ({ getToken: async () => ({ ok: true, value: "token" }) }),
+        },
+      },
+    } as unknown as ExecutionContext;
+    let user = new MarketoUserImpl(ctx, TEST_ENV);
+    let pattern = SUPPORTED_RESOURCES.find(resource => resource.title === "Marketo Program")!.urlPattern;
+    let frame = await user.startResourceConfigurator(pattern);
+    let pending = (frame.ui as unknown as { listPrograms(query: string): Promise<unknown> })
+      .listPrograms("");
+    await started;
+    generation++;
+    releaseToken();
+
+    await expect(pending).resolves.toEqual([]);
+    expect(generationMatched).toBe(false);
+    expect(apiFetches).toBe(0);
+    frame.ui[Symbol.dispose]();
+  });
+});
+
 describe("Design Studio scoped binding", () => {
   it("describes and starts the narrow Design Studio session type", async () => {
     let accountId = await accountWithCredentials({

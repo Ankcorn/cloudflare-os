@@ -597,13 +597,33 @@ function userAccountStub(
   return exports.UserAccount.get(exports.UserAccount.idFromString(userObjectId));
 }
 
-async function requireAccountCredentials(
+async function makeAccountClient(
   exports: Cloudflare.Exports,
   userObjectId: string,
-): Promise<MarketoCredentials> {
-  let credentials = await userAccountStub(exports, userObjectId).getCredentials();
-  if (!credentials) throw new Error("This Marketo account is no longer connected.");
-  return credentials;
+  state?: AccountCredentialState,
+): Promise<MarketoClient> {
+  let account = userAccountStub(exports, userObjectId);
+  let captured = state ?? await account.getCredentialState();
+  if (!captured.credentials) {
+    throw new Error("This Marketo account is no longer connected.");
+  }
+  let expected = { ...captured, credentials: captured.credentials };
+  return await makeClient(
+    exports,
+    captured.credentials,
+    () => account.credentialsExpired(),
+    async (url, init, forceRefresh, timeoutMs) => {
+      let result = await account.dispatch(expected, url, init, forceRefresh, timeoutMs);
+      if (!result.ok) {
+        if ("error" in result) return unwrapTokenCacheResult<never>(result);
+        if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
+        throw new MarketoDispatchAbortedError(
+          "The Marketo account changed before the request was dispatched.",
+        );
+      }
+      return result.response;
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -860,10 +880,8 @@ class ProgramConfiguratorUI extends RpcTarget {
   }
 
   async listPrograms(query: string): Promise<MarketoConfiguratorOption[]> {
-    let creds = await requireAccountCredentials(this.#exports, this.#userObjectId);
-    let account = userAccountStub(this.#exports, this.#userObjectId);
     return await resolveProgramOptions(
-      await makeClient(this.#exports, creds, () => account.credentialsExpired()),
+      await makeAccountClient(this.#exports, this.#userObjectId),
       query,
     );
   }
@@ -887,9 +905,7 @@ class ListConfiguratorUI extends RpcTarget {
   }
 
   async listStaticLists(query: string): Promise<MarketoConfiguratorOption[]> {
-    let creds = await requireAccountCredentials(this.#exports, this.#userObjectId);
-    let account = userAccountStub(this.#exports, this.#userObjectId);
-    let client = await makeClient(this.#exports, creds, () => account.credentialsExpired());
+    let client = await makeAccountClient(this.#exports, this.#userObjectId);
     let search = query.trim();
     let lists: RawList[];
     if (!search) {
@@ -974,40 +990,19 @@ export class MarketoGatekeeperImpl
     ).getCredentialState();
   }
 
-  async #client(
-    credentials?: MarketoCredentials,
-    credentialState?: AccountCredentialState & { credentials: MarketoCredentials },
-  ): Promise<MarketoClient> {
-    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
-    return await makeClient(
-      this.ctx.exports,
-      credentials ?? await this.#credentials(),
-      () => account.credentialsExpired(),
-      credentialState ? async (url, init, forceRefresh, timeoutMs) => {
-        let result = await account.dispatch(
-          credentialState,
-          url,
-          init,
-          forceRefresh,
-          timeoutMs,
-        );
-        if (!result.ok) {
-          if ("error" in result) return unwrapTokenCacheResult<never>(result);
-          if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
-          throw new MarketoDispatchAbortedError(
-            "The Marketo account changed before the request was dispatched.",
-          );
-        }
-        return result.response;
-      } : undefined,
-    );
+  async #client(state?: AccountCredentialState): Promise<MarketoClient> {
+    return await makeAccountClient(this.ctx.exports, this.ctx.props.userObjectId, state);
   }
 
   async describe(): Promise<ResourceDescription> {
     let { kind, resourceId } = this.ctx.props;
-    let credentials = await this.#credentials();
+    let credentialState = await this.#credentialState();
+    let credentials = credentialState.credentials;
+    if (!credentials) {
+      throw new Error("The Marketo account behind this binding has been disconnected.");
+    }
     let origin = new URL(credentials.endpoint).origin;
-    let client = await this.#client(credentials);
+    let client = await this.#client(credentialState);
 
     switch (kind) {
       case "instance": {
@@ -1223,10 +1218,7 @@ export class MarketoGatekeeperImpl
       if (!credentialState.credentials) {
         throw new Error("The Marketo account behind this binding has been disconnected.");
       }
-      client = await this.#client(credentialState.credentials, {
-        ...credentialState,
-        credentials: credentialState.credentials,
-      });
+      client = await this.#client(credentialState);
       if (isBusinessObjectAction(pending.action)) {
         let access = await this.#probeBusinessObjectAccess(pending.action.kind, client);
         if (access !== "read-write") {
