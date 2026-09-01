@@ -39,6 +39,7 @@ import {
 } from "../src/design-studio-actions";
 import {
   designerCloneSnapshot,
+  designerDeleteSnapshot,
   emailDesignerActionReferences,
   executeEmailDesignerAction,
   isEmailDesignerAction,
@@ -121,6 +122,10 @@ const TEST_ENV = env as unknown as Env;
 const ORIGIN = "https://123-abc-456.mktorest.com";
 const EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT = { metadata: {}, content: [], affectedDependents: [] };
 const EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT = designerCloneSnapshot({});
+const EMPTY_DESIGNER_DELETE_REVIEW = {
+  targetSnapshot: designerDeleteSnapshot({ name: "Target" }),
+  affectedDependents: [],
+};
 
 describe("endpoint normalization", () => {
   it("accepts what people actually paste", () => {
@@ -1483,7 +1488,7 @@ describe("new Email Designer", () => {
   it("describes publication, discard, and deletion risks and tracks dependencies", () => {
     let approve = describeAction({ id: 1, type: "designerLifecycle", asset: "designerFragment", targetId: "f", operation: "approve", contentId: "f-draft", sourceState: "draft", sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [] });
     let discard = describeAction({ id: 2, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "discard", contentId: "e-draft", sourceState: "draft", sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [] });
-    let remove = describeAction({ id: 3, type: "designerDelete", asset: "designerTemplate", targetId: "t" });
+    let remove = describeAction({ id: 3, type: "designerDelete", asset: "designerTemplate", targetId: "t", ...EMPTY_DESIGNER_DELETE_REVIEW });
     expect(approve.description).toMatch(/every inheriting/);
     expect(discard).toMatchObject({ awaitDecision: true });
     expect(discard.description).toMatch(/cannot be recovered/);
@@ -8132,18 +8137,31 @@ describe("Email Designer action lifecycle", () => {
   });
 
   it("accepts a successful resultless Email Designer delete", async () => {
+    let target = { id: "email-1", name: "Target" };
     let action: EmailDesignerAction = {
       id: 1,
       type: "designerDelete",
       asset: "designerEmail",
       targetId: "email-1",
+      targetSnapshot: designerDeleteSnapshot(target),
+      affectedDependents: [],
     };
     let requests: { path: string; method: string; body: BodyInit | null | undefined }[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       if (url.includes("/identity/")) {
         return Response.json({ access_token: "token", expires_in: 3600 });
       }
-      requests.push({ path: new URL(url).pathname, method: init?.method ?? "GET", body: init?.body });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/email/email-1")) {
+        return Response.json({ success: true, result: [target] });
+      }
+      if (path.endsWith("/email/usedby")) {
+        return Response.json({
+          success: true, result: [],
+          pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+        });
+      }
+      requests.push({ path, method: init?.method ?? "GET", body: init?.body });
       return Response.json({ success: true });
     });
     let stub = await emailDesignerActionGatekeeper([action]);
@@ -8167,10 +8185,22 @@ describe("Email Designer action lifecycle", () => {
         type: "designerDelete",
         asset: "designerEmail",
         targetId: "email-1",
+        ...EMPTY_DESIGNER_DELETE_REVIEW,
       };
-      vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
-        ? Response.json({ access_token: "token", expires_in: 3600 })
-        : Response.json(response));
+      vi.stubGlobal("fetch", async (url: string) => {
+        if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        let path = new URL(url).pathname;
+        if (path.endsWith("/email/email-1")) {
+          return Response.json({ success: true, result: [{ id: "email-1", name: "Target" }] });
+        }
+        if (path.endsWith("/email/usedby")) {
+          return Response.json({
+            success: true, result: [],
+            pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+          });
+        }
+        return Response.json(response);
+      });
       let stub = await emailDesignerActionGatekeeper([action]);
 
       await runInDurableObject(stub, async (instance, state) => {
@@ -8182,16 +8212,80 @@ describe("Email Designer action lifecycle", () => {
     }
   });
 
+  it("rejects Email Designer delete target drift immediately before dispatch", async () => {
+    let approved = {
+      id: "email-1",
+      name: "Production renewal",
+      appData: { workspaceId: "production", programId: "renewal" },
+      status: "approved",
+      data: { html: { body: "<h1>Approved</h1>" } },
+      headers: { subject: "Approved subject" },
+      settings: { isOperational: true },
+    };
+    let action: EmailDesignerAction = {
+      id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1",
+      targetSnapshot: designerDeleteSnapshot(approved),
+      affectedDependents: [{ id: "campaign-1", name: "Renewal campaign" }],
+    };
+    let deletes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/email/email-1")) {
+        return Response.json({ success: true, result: [{
+          ...approved,
+          data: { html: { body: "<h1>Changed externally</h1>" } },
+        }] });
+      }
+      deletes++;
+      return Response.json({ success: true });
+    });
+    let stub = await emailDesignerActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/delete target changed after approval/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+    });
+    expect(deletes).toBe(0);
+  });
+
+  it("rejects a Designer delete without a complete snapshot before provider access", async () => {
+    let fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    let action = {
+      id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1",
+      affectedDependents: [],
+    } as unknown as EmailDesignerAction;
+    let stub = await emailDesignerActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/missing its complete review state/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps empty, malformed, wrong-id, and wrong-status mutation results uncertain", async () => {
     let cases: { action: EmailDesignerAction; result: unknown[] }[] = [
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [] },
-      { action: { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "e" }, result: [{}] },
+      { action: { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "e", ...EMPTY_DESIGNER_DELETE_REVIEW }, result: [{}] },
       { action: { id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "e", patch: { name: "New" } }, result: [{ id: "other" }] },
       { action: { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "e", operation: "approve", contentId: "e-draft", sourceState: "draft", sourceSnapshot: designerCloneSnapshot({ associatedStates: [{ contentId: "e-draft", state: "draft" }] }), affectedDependents: [] }, result: [{ contentId: "e-draft", status: "draft" }] },
     ];
     for (let { action, result } of cases) {
       vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
         if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+        let path = new URL(url).pathname;
+        if (action.type === "designerDelete" && path.endsWith("/email/e")) {
+          return Response.json({ success: true, result: [{ id: "e", name: "Target" }] });
+        }
+        if (action.type === "designerDelete" && path.endsWith("/email/usedby")) {
+          return Response.json({
+            success: true, result: [],
+            pageDetails: { currentPage: 1, pageSize: 50, totalItems: 0 },
+          });
+        }
         if (action.type === "designerLifecycle" && !init?.body) {
           return Response.json({ success: true, result: [{
             id: "e", associatedStates: [{ contentId: "e-draft", state: "draft" }],
@@ -8957,7 +9051,7 @@ describe("provisional id kind safety", () => {
       { id: 3, type: "designerCreate", asset: "designerTemplate", provisionalId: "~3", body: { name: "Designer template" } },
       { id: 4, type: "designMetadata", asset: "email", targetId: "~1", patch: { name: "Wrong" } },
       { id: 5, type: "programUpdate", targetId: "~2", programName: "Wrong", patch: { name: "Wrong" } },
-      { id: 6, type: "designerDelete", asset: "designerEmail", targetId: "~3" },
+      { id: 6, type: "designerDelete", asset: "designerEmail", targetId: "~3", ...EMPTY_DESIGNER_DELETE_REVIEW },
       { id: 7, type: "designCreate", asset: "email", provisionalId: "~4",
         parent: { id: "10", type: "Folder" }, input: { name: "Wrong", templateId: "~2" } },
       { id: 8, type: "designerCreate", asset: "designerEmail", provisionalId: "~5",

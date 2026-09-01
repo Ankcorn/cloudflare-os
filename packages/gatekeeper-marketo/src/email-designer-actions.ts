@@ -18,18 +18,25 @@ const SOURCE_COMPARISON_FIELDS = [
   "templateId", "appType", "appData", "data", "headers", "settings",
   "contentId", "associatedStates", "state", "status",
 ] as const;
+const DELETE_COMPARISON_FIELDS = [
+  "name", "description", ...SOURCE_COMPARISON_FIELDS,
+] as const;
 type DesignerCloneField = typeof SOURCE_COMPARISON_FIELDS[number];
+type DesignerDeleteField = typeof DELETE_COMPARISON_FIELDS[number];
 type DesignerSnapshotValue = { present: false } | { present: true; value: unknown };
 
 /** Clone-relevant Email Designer source state captured when approval is submitted. */
 export type DesignerCloneSnapshot = { [K in DesignerCloneField]: DesignerSnapshotValue };
+
+/** Complete Email Designer target state captured for irreversible deletion review. */
+export type DesignerDeleteSnapshot = { [K in DesignerDeleteField]: DesignerSnapshotValue };
 
 export type EmailDesignerAction =
   | { id: number; type: "designerCreate"; asset: EmailDesignerKind; provisionalId: string; body: Record<string, unknown> }
   | { id: number; type: "designerClone"; asset: EmailDesignerKind; provisionalId: string; sourceId: string; name: string; description?: string; sourceSnapshot: DesignerCloneSnapshot }
   | { id: number; type: "designerUpdate"; asset: EmailDesignerKind; targetId: string; patch: Record<string, unknown> }
   | { id: number; type: "designerLifecycle"; asset: EmailDesignerKind; targetId: string; operation: "createDraft" | "approve" | "unapprove" | "discard"; contentId: string; sourceState: "draft" | "approved"; sourceSnapshot: DesignerCloneSnapshot; affectedDependents: MarketoDesignerUsedBy[] }
-  | { id: number; type: "designerDelete"; asset: EmailDesignerKind; targetId: string };
+  | { id: number; type: "designerDelete"; asset: EmailDesignerKind; targetId: string; targetSnapshot: DesignerDeleteSnapshot; affectedDependents: MarketoDesignerUsedBy[] };
 
 export type EmailDesignerActionInput = EmailDesignerAction extends infer T
   ? T extends EmailDesignerAction ? Omit<T, "id"> : never
@@ -67,6 +74,11 @@ function label(kind: EmailDesignerKind): string {
 /** Validate persisted Email Designer discriminants before dispatch preparation. */
 export function validateEmailDesignerActionForDispatch(action: EmailDesignerAction): void {
   path(action.asset);
+  if (action.type === "designerDelete" &&
+      (!validDesignerDeleteSnapshot(action.targetSnapshot) ||
+        !validDesignerDependents(action.affectedDependents))) {
+    throw new Error("A persisted Marketo designer delete is missing its complete review state.");
+  }
   if (action.type !== "designerLifecycle") return;
   if (action.sourceState !== "draft" && action.sourceState !== "approved") {
     throw new Error("Unknown persisted Marketo Email Designer source state.");
@@ -80,6 +92,32 @@ export function validateEmailDesignerActionForDispatch(action: EmailDesignerActi
     default:
       throw new Error("Unknown persisted Marketo Email Designer lifecycle operation.");
   }
+}
+
+function validDesignerSnapshot(value: unknown, fields: readonly string[]): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return fields.every(field => {
+    let item = Reflect.get(value, field);
+    return Boolean(item && typeof item === "object" && !Array.isArray(item) &&
+      typeof Reflect.get(item as object, "present") === "boolean" &&
+      (!Reflect.get(item as object, "present") || Object.hasOwn(item as object, "value")));
+  });
+}
+
+/** Whether a persisted delete snapshot contains every required review field. */
+export function validDesignerDeleteSnapshot(value: unknown): value is DesignerDeleteSnapshot {
+  if (!validDesignerSnapshot(value, DELETE_COMPARISON_FIELDS)) return false;
+  let name = Reflect.get(value as object, "name") as object;
+  return Reflect.get(name, "present") === true && typeof Reflect.get(name, "value") === "string";
+}
+
+/** Whether a persisted dependency review contains complete, normalized records. */
+export function validDesignerDependents(value: unknown): value is MarketoDesignerUsedBy[] {
+  return Array.isArray(value) && value.every(dependent =>
+    dependent && typeof dependent === "object" && typeof dependent.id === "string" &&
+    typeof dependent.name === "string" &&
+    [dependent.channel, dependent.contentType, dependent.workspaceId, dependent.folderId]
+      .every(item => item === undefined || typeof item === "string"));
 }
 
 function jsonValue(value: unknown): unknown {
@@ -150,6 +188,67 @@ export function designerCloneSnapshot(source: Record<string, unknown>): Designer
       ? { present: false }
       : { present: true, value: jsonValue(normalized[field]) },
   ])) as DesignerCloneSnapshot;
+}
+
+/** Build a stable, complete snapshot for irreversible deletion review. */
+export function designerDeleteSnapshot(source: Record<string, unknown>): DesignerDeleteSnapshot {
+  let clone = designerCloneSnapshot(source);
+  return Object.fromEntries(DELETE_COMPARISON_FIELDS.map(field => {
+    if (field in clone) return [field, clone[field as DesignerCloneField]];
+    return [field, source[field] === undefined
+      ? { present: false }
+      : { present: true, value: jsonValue(source[field]) }];
+  })) as DesignerDeleteSnapshot;
+}
+
+/** Convert a persisted delete snapshot back to its complete target fields. */
+export function designerDeleteSnapshotRecord(
+  snapshot: DesignerDeleteSnapshot,
+): Record<DesignerDeleteField, unknown> {
+  return Object.fromEntries(DELETE_COMPARISON_FIELDS.map(field => [
+    field,
+    snapshot[field].present ? snapshot[field].value : undefined,
+  ])) as Record<DesignerDeleteField, unknown>;
+}
+
+/** Resolve provisional references captured inside a deletion review snapshot. */
+export function resolveDesignerDeleteSnapshot(
+  snapshot: DesignerDeleteSnapshot,
+  resolveDesigner: (id: string) => string,
+  resolveAsset: (id: string) => number | string,
+): DesignerDeleteSnapshot {
+  return designerDeleteSnapshot(resolvedBody(
+    designerDeleteSnapshotRecord(snapshot),
+    resolveDesigner,
+    resolveAsset,
+  ));
+}
+
+/** Apply a simulated target mutation to an irreversible deletion snapshot. */
+export function updateDesignerDeleteSnapshot(
+  snapshot: DesignerDeleteSnapshot,
+  patch: Record<string, unknown>,
+): DesignerDeleteSnapshot {
+  let target = designerDeleteSnapshotRecord(snapshot);
+  for (let field of DELETE_COMPARISON_FIELDS) {
+    if (patch[field] === undefined) continue;
+    if (field === "data") {
+      target[field] = mergeDesignerData(target[field], patch[field]);
+    } else if (["appData", "headers", "settings"].includes(field)) {
+      target[field] = mergeDefinedRecords(target[field], patch[field]);
+    } else {
+      target[field] = patch[field];
+    }
+  }
+  return designerDeleteSnapshot(target);
+}
+
+/** Whether a current target still exactly matches its approved deletion snapshot. */
+export function matchesDesignerDeleteSnapshot(
+  target: Record<string, unknown>,
+  snapshot: DesignerDeleteSnapshot,
+): boolean {
+  return JSON.stringify(designerDeleteSnapshot(target)) === JSON.stringify(snapshot);
 }
 
 /** Resolve provisional asset references captured inside a clone snapshot. */
@@ -323,7 +422,10 @@ export function describeEmailDesignerAction(action: EmailDesignerAction): Action
       return {
         ...base,
         title: `Delete Marketo designer ${name}`,
-        description: `Permanently delete ${name} ${markdownCode(target ?? "")}. This is irreversible and can break assets that depend on it.`,
+        description: `Permanently delete ${name} ${markdownCode(target ?? "")}. This is irreversible and can break assets that depend on it.\n\n` +
+          `Complete target review snapshot (name, destination, lifecycle state, content, headers, and settings):\n\n` +
+          `${markdownJsonCodeBlock(action.targetSnapshot)}\n\n` +
+          `Affected dependents:\n\n${markdownJsonCodeBlock(action.affectedDependents)}`,
       };
   }
 }

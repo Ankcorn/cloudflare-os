@@ -95,7 +95,9 @@ import {
   isEmailDesignerAction,
   matchesDesignerCloneConfiguration,
   matchesDesignerCloneSnapshot,
+  matchesDesignerDeleteSnapshot,
   resolveDesignerCloneSnapshot,
+  resolveDesignerDeleteSnapshot,
   type EmailDesignerAction,
   type EmailDesignerKind,
 } from "./email-designer-actions";
@@ -2565,22 +2567,35 @@ export class MarketoGatekeeperImpl
         throw new DesignerPreDispatchError("The Marketo designer clone source changed after approval; nothing was dispatched.");
       }
     }
-    if (action.type === "designerLifecycle") {
+    if (action.type === "designerLifecycle" || action.type === "designerDelete") {
       let current = await requireDesigner(action.asset, action.targetId);
-      let state = current.associatedStates?.find(item => item.state?.toLowerCase() === action.sourceState);
-      if (state?.contentId !== action.contentId) {
-        throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
-      }
-      if (!matchesDesignerCloneSnapshot(
+      if (action.type === "designerLifecycle") {
+        let state = current.associatedStates?.find(item => item.state?.toLowerCase() === action.sourceState);
+        if (state?.contentId !== action.contentId) {
+          throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
+        }
+        if (!matchesDesignerCloneSnapshot(
+          current as Record<string, unknown>,
+          resolveDesignerCloneSnapshot(
+            action.sourceSnapshot,
+            id => this.#requireDesignerId(id),
+            id => this.#requireLogicalId(id),
+          ),
+        )) {
+          throw new DesignerPreDispatchError(
+            "The Marketo designer publishable state changed after approval; nothing was dispatched.",
+          );
+        }
+      } else if (!matchesDesignerDeleteSnapshot(
         current as Record<string, unknown>,
-        resolveDesignerCloneSnapshot(
-          action.sourceSnapshot,
+        resolveDesignerDeleteSnapshot(
+          action.targetSnapshot,
           id => this.#requireDesignerId(id),
           id => this.#requireLogicalId(id),
         ),
       )) {
         throw new DesignerPreDispatchError(
-          "The Marketo designer publishable state changed after approval; nothing was dispatched.",
+          "The Marketo designer delete target changed after approval; nothing was dispatched.",
         );
       }
       {
@@ -2594,7 +2609,7 @@ export class MarketoGatekeeperImpl
           if (page.pageDetails?.currentPage !== pageIndex + 1 || page.pageDetails.pageSize !== 50 ||
               pageIndex > 0 && page.pageDetails.totalItems !== expectedTotal) {
             throw new DesignerPreDispatchError(
-              "Marketo returned inconsistent lifecycle dependency paging; nothing was dispatched.",
+              "Marketo returned inconsistent designer dependency paging; nothing was dispatched.",
             );
           }
           expectedTotal ??= page.pageDetails.totalItems;
@@ -2602,7 +2617,7 @@ export class MarketoGatekeeperImpl
             let id = item.id === undefined ? undefined : String(item.id);
             if (!id || ids.has(id)) {
               throw new DesignerPreDispatchError(
-                "Marketo returned invalid lifecycle dependencies; nothing was dispatched.",
+                "Marketo returned invalid designer dependencies; nothing was dispatched.",
               );
             }
             ids.add(id);
@@ -2621,7 +2636,7 @@ export class MarketoGatekeeperImpl
               expectedTotal !== undefined && dependents.length > expectedTotal ||
               page.result.length < 50 && expectedTotal !== undefined && dependents.length < expectedTotal) {
             throw new DesignerPreDispatchError(
-              "Marketo returned inconsistent lifecycle dependency paging; nothing was dispatched.",
+              "Marketo returned inconsistent designer dependency paging; nothing was dispatched.",
             );
           }
           if (expectedTotal === undefined ? page.result.length < 50 : dependents.length === expectedTotal) break;
@@ -2841,7 +2856,8 @@ export class MarketoGatekeeperImpl
       for (let reference of this.#actionReferences(action)) {
         add(this.#referenceKey(reference), identity !== undefined && this.#sameReference(reference, identity));
       }
-      if (isEmailDesignerAction(action) && action.type === "designerLifecycle") {
+      if (isEmailDesignerAction(action) &&
+          (action.type === "designerLifecycle" || action.type === "designerDelete")) {
         for (let dependent of action.affectedDependents) {
           if (dependent.contentType === undefined || dependent.contentType.toLowerCase() === "email") {
             add(this.#referenceKey({ id: dependent.id, kind: "designerEmail" }), true);

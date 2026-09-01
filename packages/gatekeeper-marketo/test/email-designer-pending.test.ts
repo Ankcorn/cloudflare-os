@@ -8,11 +8,17 @@ import {
 } from "../src/email-designer";
 import {
   designerCloneSnapshot,
+  designerDeleteSnapshot,
   updateDesignerCloneSnapshot,
   type EmailDesignerAction,
   type EmailDesignerActionInput,
 } from "../src/email-designer-actions";
 import type { MarketoClient } from "../src/marketo-api";
+
+const EMPTY_DELETE_REVIEW = {
+  targetSnapshot: designerDeleteSnapshot({ name: "Pending target" }),
+  affectedDependents: [],
+};
 
 function context(
   client: Partial<MarketoClient>,
@@ -188,7 +194,7 @@ describe("Email Designer pending-state simulation", () => {
           }],
           totalItems: 1, currentPage: 0, pageSize: 50,
         }),
-      }, [{ id: 1, type: "designerDelete", asset, targetId: "pending-target" }]);
+      }, [{ id: 1, type: "designerDelete", asset, targetId: "pending-target", ...EMPTY_DELETE_REVIEW }]);
       ctx.observe = async () => { observations++; };
       let designer = new MarketoEmailDesignerImpl(ctx);
 
@@ -267,7 +273,7 @@ describe("Email Designer pending-state simulation", () => {
         totalItems: 1, currentPage: 0, pageSize: 50,
       }),
       getDesignerAsset: async () => ({ id: "email-1", name: "Delete me", appData: { workspaceId: "1" } }),
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1", ...EMPTY_DELETE_REVIEW }]);
 
     expect(await new MarketoEmailDesignerImpl(ctx).listEmails("1")).toMatchObject({ items: [], totalItems: 0 });
   });
@@ -305,7 +311,7 @@ describe("Email Designer pending-state simulation", () => {
         id, name: id === "c" ? "Charlie" : "", status: "draft", appData: { workspaceId: "1" },
       }),
     }, [
-      { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "b" },
+      { id: 1, type: "designerDelete", asset: "designerEmail", targetId: "b", ...EMPTY_DELETE_REVIEW },
       { id: 2, type: "designerUpdate", asset: "designerEmail", targetId: "c", patch: { name: "Able" } },
     ]);
     let designer = new MarketoEmailDesignerImpl(ctx);
@@ -336,7 +342,7 @@ describe("Email Designer pending-state simulation", () => {
       getDesignerAsset: async () => ({
         id: "pending", name: "Same", status: "draft", appData: { workspaceId: "1" },
       }),
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending", ...EMPTY_DELETE_REVIEW }]);
     let designer = new MarketoEmailDesignerImpl(ctx);
 
     let first = await designer.listEmails("1", { pageSize: 2, sortKey: "name" });
@@ -355,7 +361,7 @@ describe("Email Designer pending-state simulation", () => {
         return { items: [], totalItems: 1_001, currentPage: 0, pageSize: 50 };
       },
       getDesignerAsset: async () => ({ id: "pending", name: "Pending", appData: { workspaceId: "1" } }),
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending", ...EMPTY_DELETE_REVIEW }]);
 
     await expect(new MarketoEmailDesignerImpl(ctx).listEmails("1", { sortKey: "name" }))
       .rejects.toThrow(/cannot exceed 1000 assets/);
@@ -381,7 +387,7 @@ describe("Email Designer pending-state simulation", () => {
       getDesignerAsset: async () => ({
         id: "pending", name: "Pending", status: "draft", appData: { workspaceId: "1" },
       }),
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending", ...EMPTY_DELETE_REVIEW }]);
 
     await expect(new MarketoEmailDesignerImpl(ctx).listEmails("1", { pageIndex: 1, pageSize: 1 }))
       .rejects.toThrow(/page 0 when page 1 was requested/);
@@ -523,6 +529,47 @@ describe("Email Designer pending-state simulation", () => {
     });
   });
 
+  it("snapshots the simulated delete target and its affected dependents", async () => {
+    let raw = {
+      id: "email-1",
+      name: "Production email",
+      status: "approved",
+      appData: { workspaceId: "production", programId: "renewal" },
+      data: { html: { body: "<h1>Original</h1>" }, text: { body: "Original" } },
+      headers: { subject: "Original subject" },
+      settings: { isOperational: true },
+    };
+    let update: EmailDesignerAction = {
+      id: 1, type: "designerUpdate", asset: "designerEmail", targetId: "email-1",
+      patch: { name: "Production email v2", data: { html: { body: "<h1>Pending</h1>" } } },
+    };
+    let { actions, ctx } = context({
+      getDesignerAsset: async () => raw,
+      getDesignerAssetUsedBy: async () => ({
+        result: [{
+          id: "campaign-1", name: "Renewal campaign", contentType: "Smart Campaign",
+          appData: { workspaceId: "production", folderId: "campaigns" },
+        }],
+        pageDetails: { totalItems: 1, currentPage: 1, pageSize: 50 },
+      }),
+    }, [update]);
+
+    await new MarketoDesignerEmailImpl(ctx, "email-1").delete();
+
+    expect(actions[1]).toEqual({
+      id: 2, type: "designerDelete", asset: "designerEmail", targetId: "email-1",
+      targetSnapshot: designerDeleteSnapshot({
+        ...raw,
+        name: "Production email v2",
+        data: { html: { body: "<h1>Pending</h1>" }, text: { body: "Original" } },
+      }),
+      affectedDependents: [{
+        id: "campaign-1", name: "Renewal campaign", contentType: "Smart Campaign",
+        workspaceId: "production", folderId: "campaigns",
+      }],
+    });
+  });
+
   it("rejects every post-delete operation before provider or approval access", async () => {
     let providerReads = 0;
     let providerWrites = 0;
@@ -535,7 +582,7 @@ describe("Email Designer pending-state simulation", () => {
         providerReads++;
         return { result: [] };
       },
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1", ...EMPTY_DELETE_REVIEW }]);
     ctx.submitDesigner = async () => { providerWrites++; };
     let email = new MarketoDesignerEmailImpl(ctx, "email-1");
 
@@ -642,7 +689,7 @@ describe("Email Designer pending-state simulation", () => {
         id: 2, type: "designerClone", asset: "designerEmail", provisionalId: "~2", sourceId: "email-source",
         name: "Other clone", sourceSnapshot: designerCloneSnapshot({ templateId: "template-other" }),
       },
-      { id: 3, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" },
+      { id: 3, type: "designerDelete", asset: "designerEmail", targetId: "email-delete", ...EMPTY_DELETE_REVIEW },
     ], id => id.startsWith("~") ? undefined : id);
 
     expect(await new MarketoDesignerEmailTemplateImpl(ctx, "template-large").getUsedBy(3, 20)).toMatchObject({
@@ -667,7 +714,7 @@ describe("Email Designer pending-state simulation", () => {
           pageDetails: { totalItems: 1_500, currentPage: 1, pageSize: request.pageSize },
         };
       },
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1", ...EMPTY_DELETE_REVIEW }]);
 
     await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
       .rejects.toThrow(/cannot exceed 1000 provider records/);
@@ -685,7 +732,7 @@ describe("Email Designer pending-state simulation", () => {
         requestedPages.push(pageIndex);
         return { result: page, pageDetails: { currentPage: pageIndex + 1, pageSize: request.pageSize } };
       },
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1", ...EMPTY_DELETE_REVIEW }]);
     ctx.observe = async () => { observations++; };
 
     await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
@@ -708,7 +755,7 @@ describe("Email Designer pending-state simulation", () => {
           pageDetails: { totalItems: 100, currentPage: pageIndex + 1, pageSize: request.pageSize },
         };
       },
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete", ...EMPTY_DELETE_REVIEW }]);
     ctx.observe = async () => { observations++; };
 
     await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
@@ -728,7 +775,7 @@ describe("Email Designer pending-state simulation", () => {
           pageDetails: { currentPage: 1, pageSize: request.pageSize },
         };
       },
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-delete", ...EMPTY_DELETE_REVIEW }]);
 
     await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
       .rejects.toThrow(/non-advancing used-by paging state/);
@@ -758,7 +805,7 @@ describe("Email Designer pending-state simulation", () => {
       getDesignerAsset: async () => ({
         id: "email-1200", name: "Email 1200", status: "draft", appData: { workspaceId: "1" },
       }),
-    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1200" }]);
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1200", ...EMPTY_DELETE_REVIEW }]);
 
     let result = await new MarketoEmailDesignerImpl(ctx).listEmails("1", { pageSize: 20 });
 

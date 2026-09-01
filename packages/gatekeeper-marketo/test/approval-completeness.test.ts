@@ -8,7 +8,7 @@ import {
 } from "../src/actions";
 import { markdownCodeBlock, markdownText } from "../src/approval-markdown";
 import { DESIGN_STUDIO_RESOURCE, INSTANCE_RESOURCE, PROGRAM_RESOURCE } from "../src/config";
-import { designerCloneSnapshot } from "../src/email-designer-actions";
+import { designerCloneSnapshot, designerDeleteSnapshot } from "../src/email-designer-actions";
 import { matchesProgramApprovalDates } from "../src/program-actions";
 
 describe("Marketo approval completeness", () => {
@@ -234,6 +234,39 @@ describe("Marketo approval completeness", () => {
     expect(classic).toContain("Affected dependents");
     expect(designer).toMatch(/Hero.*Fragment subject.*fragmentType.*supportedChannels/s);
     expect(designer).toMatch(/Affected dependents.*email-7.*Dependent email/s);
+  });
+
+  it("shows the complete Email Designer irreversible delete target and dependents", () => {
+    let description = describeAction({
+      id: 3,
+      type: "designerDelete",
+      asset: "designerEmail",
+      targetId: "email-production",
+      targetSnapshot: designerDeleteSnapshot({
+        name: "Production renewal",
+        description: "Live customer renewal",
+        appData: { workspaceId: "production", programId: "renewal-program" },
+        status: "approved",
+        state: "approved",
+        contentId: "approved-content-7",
+        associatedStates: [{ contentId: "approved-content-7", state: "approved" }],
+        templateId: "template-production",
+        data: { html: { body: "<h1>Renew now</h1>" }, text: { body: "Renew now" } },
+        headers: { subject: "Your renewal", fromEmail: "billing@example.com" },
+        settings: { isOperational: true, enableUrlTracking: false },
+      }),
+      affectedDependents: [{
+        id: "campaign-9", name: "Production renewal campaign", contentType: "Smart Campaign",
+        workspaceId: "production", folderId: "campaigns",
+      }],
+    }).description;
+
+    expect(description).toMatch(/email-production.*Production renewal.*Live customer renewal/s);
+    expect(description).toMatch(/programId.*renewal-program.*workspaceId.*production/s);
+    expect(description).toMatch(/approved-content-7.*approved/s);
+    expect(description).toMatch(/template-production.*Renew now.*billing@example.com.*Your renewal/s);
+    expect(description).toMatch(/enableUrlTracking.*isOperational/s);
+    expect(description).toMatch(/Affected dependents.*campaign-9.*Production renewal campaign/s);
   });
 
   it("rejects an oversized Email Designer clone approval instead of truncating it", () => {

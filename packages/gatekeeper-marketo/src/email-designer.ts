@@ -20,9 +20,13 @@ import { retainSessionContext, type SessionContext } from "./session";
 import {
   designerCloneSnapshot,
   designerCloneSnapshotRecord,
+  designerDeleteSnapshot,
+  designerDeleteSnapshotRecord,
   resolveDesignerCloneSnapshot,
   updateDesignerCloneSnapshot,
+  updateDesignerDeleteSnapshot,
   type DesignerCloneSnapshot,
+  type DesignerDeleteSnapshot,
   type EmailDesignerAction,
   type EmailDesignerActionInput,
   type EmailDesignerKind,
@@ -205,6 +209,10 @@ function normalize(
   };
   if (includeCloneSnapshot) {
     result.cloneSnapshot = designerCloneSnapshot(raw as Record<string, unknown>);
+    result.deleteSnapshot = designerDeleteSnapshot({
+      ...raw as Record<string, unknown>,
+      name: raw.name ?? "",
+    });
   }
   return result;
 }
@@ -268,6 +276,12 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
           patch,
         );
       }
+      if (result.deleteSnapshot) {
+        result.deleteSnapshot = updateDesignerDeleteSnapshot(
+          result.deleteSnapshot as DesignerDeleteSnapshot,
+          patch,
+        );
+      }
       if (patch.name !== undefined) result.name = patch.name;
       if (patch.description !== undefined) result.description = patch.description;
       if (patch.data !== undefined) {
@@ -299,6 +313,16 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
             associatedStates: [{ contentId: action.contentId, state }],
           },
         );
+      }
+      if (result.deleteSnapshot) {
+        let current = designerDeleteSnapshotRecord(result.deleteSnapshot as DesignerDeleteSnapshot);
+        result.deleteSnapshot = updateDesignerDeleteSnapshot(result.deleteSnapshot as DesignerDeleteSnapshot, {
+          status: state,
+          state,
+          associatedStates: action.operation === "approve" || action.operation === "unapprove"
+            ? [{ contentId: action.contentId, state }]
+            : current.associatedStates,
+        });
       }
     }
     if (action.type === "designerDelete") throw new Error(`Marketo designer asset ${result.id} was deleted.`);
@@ -631,6 +655,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
     let result = await summary(this.ctx, this.kind, this.assetId);
     await this.ctx.observe(`Read Marketo designer ${this.kind}`, `Read designer asset ${this.assetId}.`);
     delete result.cloneSnapshot;
+    delete result.deleteSnapshot;
     return result;
   }
 
@@ -707,7 +732,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
       if (page.items.length < DESIGNER_PAGE_SIZE ||
           page.totalItems !== undefined && result.length >= page.totalItems) return result;
     }
-    throw new Error(`Designer lifecycle dependencies cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} records.`);
+    throw new Error(`Designer review dependencies cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} records.`);
   }
 
   createDraft() { return this.lifecycle("createDraft"); }
@@ -716,7 +741,21 @@ abstract class DesignerAssetImpl extends RpcTarget {
   discardDraft() { return this.lifecycle("discard"); }
   delete() {
     this.assertNotDeleted();
-    return submitDesigner(this.ctx, { type: "designerDelete", asset: this.kind, targetId: this.assetId });
+    return this.submitDelete();
+  }
+
+  private async submitDelete() {
+    await this.ctx.assertCurrent?.();
+    let target = await summary(this.ctx, this.kind, this.assetId);
+    let targetSnapshot = target.deleteSnapshot as DesignerDeleteSnapshot | undefined;
+    if (!targetSnapshot) throw new Error("The Marketo designer delete target could not be snapshotted.");
+    let affectedDependents = await this.allAffectedDependents();
+    await this.ctx.observe(`Read Marketo designer ${this.kind} delete target`,
+      `Resolved the complete review state for designer asset ${this.assetId}.`);
+    await submitDesigner(this.ctx, {
+      type: "designerDelete", asset: this.kind, targetId: this.assetId,
+      targetSnapshot, affectedDependents,
+    });
   }
 
   async getUsedBy(pageIndex = 0, pageSize = 20) {
