@@ -6013,7 +6013,7 @@ describe("collaborator credentials", () => {
     });
   });
 
-  it("serializes owner revoke with in-flight collaborator verification", async () => {
+  it("does not let a stalled collaborator verifier block owner revoke", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
     let observerId = await accountWithCredentials(OWNER);
@@ -6046,17 +6046,57 @@ describe("collaborator credentials", () => {
         verifier as unknown as Fetcher<GatekeeperUserVerifier>,
       );
       await started;
-      let revokeSettled = false;
-      let revoke = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
-        .UserAccount.get(ownerId).revoke().then(() => { revokeSettled = true; });
-      await new Promise(resolve => setTimeout(resolve, 0));
-      expect(revokeSettled).toBe(false);
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(ownerId).revoke();
       releaseVerification();
 
-      await expect(admission).resolves.toBeUndefined();
-      await revoke;
+      await expect(admission).rejects.toThrow(/account changed/);
     });
     expect(fetches).toBe(1);
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+    );
+  });
+
+  it("rejects admission when revoke wins between verification and observer persistence", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    let commitStarted!: () => void;
+    let started = new Promise<void>(resolve => { commitStarted = resolve; });
+    let releaseCommit!: () => void;
+    let released = new Promise<void>(resolve => { releaseCommit = resolve; });
+    let originalCommit = UserAccount.prototype.commitCollaborator;
+    vi.spyOn(UserAccount.prototype, "commitCollaborator").mockImplementation((async function(
+      this: UserAccount,
+      ...args: Parameters<UserAccount["commitCollaborator"]>
+    ) {
+      commitStarted();
+      await released;
+      return originalCommit.apply(this, args);
+    }) as unknown as UserAccount["commitCollaborator"]);
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let exports = (instance as unknown as { ctx: { exports: Cloudflare.Exports } }).ctx.exports;
+      let verifier = (exports as unknown as {
+        TestMarketoUserVerifier(options: { props: { userObjectId: string } }): Fetcher;
+      }).TestMarketoUserVerifier({ props: { userObjectId: observerId.toString() } });
+      let admission = instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      );
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(ownerId).revoke();
+      releaseCommit();
+
+      await expect(admission).rejects.toThrow(/account changed/);
+    });
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+    );
   });
 
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
