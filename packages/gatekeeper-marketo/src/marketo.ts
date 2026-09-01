@@ -1327,6 +1327,7 @@ type MarketoGatekeeperImplProps = {
 };
 
 type PendingRow = { action: MarketoAction; ownerGeneration: number };
+type StagedRow = PendingRow & { outcome?: "apply" | "reject" };
 type ApplyingState = "preparing" | "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
 /** How long a provider-derived business-object restriction suppresses another safe access probe. */
@@ -1369,7 +1370,6 @@ export class MarketoGatekeeperImpl
   >
 {
   #preparingActions = new Set<number>();
-  #submittingActions = new Set<number>();
 
   async #credentialState(): Promise<AccountCredentialState> {
     return await readAccountCredentialState(userAccountStub(
@@ -1496,24 +1496,40 @@ export class MarketoGatekeeperImpl
           throw new Error("This Marketo business object is read-only or unavailable; no approval was submitted.");
         }
         let index = this.#pendingIndexIncludingBlocked();
-        if (index.length + this.#submittingActions.size >= MAX_PENDING_ACTIONS) {
+        if (index.length + this.#stagedIndex().length >= MAX_PENDING_ACTIONS) {
           throw new Error(`A Marketo binding cannot have more than ${MAX_PENDING_ACTIONS} pending actions.`);
         }
         let id = this.#nextActionId();
         let action = { ...body, id } as MarketoAction;
         this.#validateActionReferences(action, false, credentialState.generation);
         let description = describeActionForSubmission(action);
-        this.#submittingActions.add(id);
-        try {
-          await queue.submitAction(id, description);
-        } finally {
-          this.#submittingActions.delete(id);
-        }
-        this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+        // These synchronous writes happen before the RPC await, so reentrant queue callbacks can
+        // record an outcome without making the action visible through the pending index.
+        this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
           action,
           ownerGeneration: credentialState.generation,
         });
+        this.ctx.storage.kv.put("staged:index", [...this.#stagedIndex(), id]);
+        try {
+          await queue.submitAction(id, description);
+        } catch (error) {
+          this.#removeStaged(id);
+          throw error;
+        }
+
+        let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
+        if (!staged) throw new Error(`Staged Marketo action ${id} disappeared during submission.`);
+        if (staged.outcome === "reject") {
+          this.#removeStaged(id);
+          return;
+        }
+        this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+          action: staged.action,
+          ownerGeneration: staged.ownerGeneration,
+        });
         this.ctx.storage.kv.put("pending:index", [...this.#pendingIndexIncludingBlocked(), id]);
+        this.#removeStaged(id);
+        if (staged.outcome === "apply") await this.applyAction(id);
       },
     });
     let ctx: CampaignContext & EmailDesignerContext & BusinessObjectContext = {
@@ -1617,6 +1633,14 @@ export class MarketoGatekeeperImpl
   }
 
   async applyAction(actionId: number): Promise<void> {
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged) {
+      if (staged.outcome === "reject") {
+        throw new Error("This Marketo action was rejected while its approval was being submitted.");
+      }
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...staged, outcome: "apply" });
+      return;
+    }
     let state = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
     if (state === "preparing") {
       // Older workers persisted this retryable pre-dispatch state. No request was marked as
@@ -1858,6 +1882,14 @@ export class MarketoGatekeeperImpl
   }
 
   async rejectAction(actionId: number): Promise<void | { restart: true }> {
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged) {
+      if (staged.outcome === "apply") {
+        throw new Error("This Marketo action was approved while its approval was being submitted.");
+      }
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...staged, outcome: "reject" });
+      return;
+    }
     let applying = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
     if (applying === "preparing") {
       this.ctx.storage.kv.delete(`applying:${actionId}`);
@@ -2008,6 +2040,19 @@ export class MarketoGatekeeperImpl
 
   #pendingIndexIncludingBlocked(): number[] {
     return this.ctx.storage.kv.get<number[]>("pending:index") ?? [];
+  }
+
+  #stagedIndex(): number[] {
+    return this.ctx.storage.kv.get<number[]>("staged:index") ?? [];
+  }
+
+  #removeStaged(actionId: number): void {
+    this.ctx.storage.kv.delete(`staged:${actionId}`);
+    let index = this.#stagedIndex();
+    if (!index.includes(actionId)) return;
+    let remaining = index.filter(id => id !== actionId);
+    if (remaining.length === 0) this.ctx.storage.kv.delete("staged:index");
+    else this.ctx.storage.kv.put("staged:index", remaining);
   }
 
   #removePending(actionId: number): void {

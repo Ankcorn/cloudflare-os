@@ -6125,7 +6125,7 @@ describe("Design Studio scoped binding", () => {
     });
   });
 
-  it("rolls back durable pending state when queue submission fails", async () => {
+  it("removes staged state and releases capacity when queue submission fails", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN,
       clientId: "client",
@@ -6141,23 +6141,38 @@ describe("Design Studio scoped binding", () => {
     });
 
     await runInDurableObject(gatekeeper, async (instance, state) => {
+      state.storage.kv.put("pending:index", Array.from({ length: 199 }, (_, index) => index + 1));
+      state.storage.kv.put("counter:nextActionId", 199);
+      let failSubmission = true;
       let queue = {
         dup() { return this; },
         async authorizeObservation() {},
-        async submitAction() { throw new Error("approval queue unavailable"); },
+        async submitAction(id: number) {
+          if (failSubmission) {
+            await instance.applyAction(id);
+            throw new Error("approval queue unavailable");
+          }
+        },
         [Symbol.dispose]() {},
       } as unknown as RpcStub<ApprovalQueue>;
       let session = await instance.startSession(queue);
       let studio = session as MarketoDesignStudioImpl;
       await expect(studio.getEmail("20").approve()).rejects.toThrow("approval queue unavailable");
-      expect(state.storage.kv.get("pending:1")).toBeUndefined();
-      expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      expect(state.storage.kv.get("pending:200")).toBeUndefined();
+      expect(state.storage.kv.get("staged:200")).toBeUndefined();
+      expect(state.storage.kv.get("staged:index")).toBeUndefined();
+      expect(state.storage.kv.get("applying:200")).toBeUndefined();
+
+      failSubmission = false;
+      await studio.getEmail("21").updateMetadata({ description: "Uses released capacity" });
+      expect(state.storage.kv.get<number[]>("pending:index")).toHaveLength(200);
+      expect(state.storage.kv.get("pending:201")).toBeDefined();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
   });
 
-  it("does not expose a pending row until queue submission succeeds", async () => {
+  it("stages an action without exposing its simulation, then promotes it on success", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
     });
@@ -6189,11 +6204,73 @@ describe("Design Studio scoped binding", () => {
       })).rejects.toThrow(/~1 is not a emailTemplate/);
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
       expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      expect(state.storage.kv.get("staged:1")).toBeDefined();
+      expect(state.storage.kv.get<number[]>("staged:index")).toEqual([1]);
 
       releaseSubmission();
       let created = await creation;
       expect(state.storage.kv.get("pending:1")).toBeDefined();
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([]);
       (created as MarketoEmailTemplateImpl)[Symbol.dispose]();
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("records rejection delivered before queue submission returns", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [] }));
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue(async id => {
+        await instance.rejectAction(id);
+        expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      })) as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let created = await studio.createEmailTemplate(
+        { id: "10", type: "folder" },
+        { name: "Rejected", content: "<p>Rejected</p>" },
+      );
+
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([]);
+      (created as MarketoEmailTemplateImpl)[Symbol.dispose]();
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("records apply delivered before queue submission returns and dispatches after success", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (new URL(url).pathname.endsWith("/email/20.json")) writes++;
+      return Response.json({ success: true, result: [{ id: 20 }] });
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue(async id => {
+        await instance.applyAction(id);
+        expect(writes).toBe(0);
+        expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      })) as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      await studio.getEmail("20").updateMetadata({ description: "Apply immediately" });
+
+      expect(writes).toBe(1);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("applied");
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
