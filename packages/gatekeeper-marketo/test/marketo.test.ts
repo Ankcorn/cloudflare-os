@@ -6116,10 +6116,10 @@ describe("collaborator credentials", () => {
     let started = new Promise<void>(resolve => { commitStarted = resolve; });
     let releaseCommit!: () => void;
     let released = new Promise<void>(resolve => { releaseCommit = resolve; });
-    let originalCommit = MarketoUserVerifier.prototype.commitCredentialGeneration;
-    vi.spyOn(MarketoUserVerifier.prototype, "commitCredentialGeneration").mockImplementation(async function(
+    let originalCommit = MarketoUserVerifier.prototype.commitObserverAdmission;
+    vi.spyOn(MarketoUserVerifier.prototype, "commitObserverAdmission").mockImplementation(async function(
       this: MarketoUserVerifier,
-      ...args: Parameters<MarketoUserVerifier["commitCredentialGeneration"]>
+      ...args: Parameters<MarketoUserVerifier["commitObserverAdmission"]>
     ) {
       commitStarted();
       await released;
@@ -6187,7 +6187,7 @@ describe("collaborator credentials", () => {
     );
   });
 
-  it("makes an observer persisted after the final revoke gap unusable", async () => {
+  it("orders collaborator revoke after an in-progress atomic admission", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
     let observerId = await accountWithCredentials(OWNER);
@@ -6224,10 +6224,14 @@ describe("collaborator credentials", () => {
         verifier as unknown as Fetcher<GatekeeperUserVerifier>,
       );
       await started;
-      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
-        .UserAccount.get(observerId).revoke();
+      let revokeSettled = false;
+      let revoke = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(observerId).revoke().then(() => { revokeSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(revokeSettled).toBe(false);
       releaseCommit();
       await expect(admission).resolves.toBeUndefined();
+      await revoke;
 
       let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
       let session = await instance.startSession(queue) as MarketoSessionImpl;
@@ -6238,7 +6242,11 @@ describe("collaborator credentials", () => {
     expect(providerFetches).toBe(0);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      async instance => expect(await instance.getExcludedObservers()).toEqual(["observer"]),
+      async (instance, state) => {
+        expect(state.storage.kv.get("observer:observer")).toBeUndefined();
+        expect(state.storage.kv.get("revokedObserver:observer")).toBeDefined();
+        expect(await instance.getExcludedObservers()).toEqual(["observer"]);
+      },
     );
   });
 

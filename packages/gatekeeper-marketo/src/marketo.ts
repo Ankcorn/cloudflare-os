@@ -391,10 +391,22 @@ type ObserverAdmissionState = AccountCredentialState & {
   reconnecting: boolean;
 };
 
+type ObserverCommitExpectation = {
+  ownerGeneration: number;
+  observerEpoch: number;
+};
+
 type StoredObserver = {
+  admissionId: string;
   accountId: string;
   ownerGeneration: number;
   collaboratorGeneration: number;
+};
+
+type StoredObserverAuthority = {
+  admissionId: string;
+  observerId: string;
+  ownerAccountId: string;
 };
 
 type AccountDispatchResult =
@@ -420,6 +432,20 @@ function copyCredentialState(state: AccountCredentialState): AccountCredentialSt
 }
 
 export class UserAccount extends DurableObject<Env> {
+  #credentialLifecycle = Promise.resolve();
+
+  async #withCredentialLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    let previous = this.#credentialLifecycle;
+    let release!: () => void;
+    this.#credentialLifecycle = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   #credentialGeneration(): number {
     return this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0;
   }
@@ -486,8 +512,13 @@ export class UserAccount extends DurableObject<Env> {
     if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
-    generation = this.#advanceCredentialGeneration();
-    this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
+    let installed = await this.#withCredentialLifecycle(async () => {
+      if (generation !== this.#credentialGeneration()) return false;
+      generation = this.#advanceCredentialGeneration();
+      this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
+      return true;
+    });
+    if (!installed) return { kind: "error", message: "Connection state changed. Please retry." };
 
     try {
       if (reconnecting) {
@@ -528,11 +559,14 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(nonce: string): Promise<void> {
-    this.#advanceCredentialGeneration();
-    this.ctx.storage.kv.put("reconnecting", true);
-    this.ctx.storage.kv.put<StoredNonce>("nonce", {
-      value: nonce,
-      expiresAt: Date.now() + NONCE_LIFETIME_MS,
+    await this.#withCredentialLifecycle(async () => {
+      this.#advanceCredentialGeneration();
+      this.ctx.storage.kv.put("reconnecting", true);
+      this.ctx.storage.kv.put<StoredNonce>("nonce", {
+        value: nonce,
+        expiresAt: Date.now() + NONCE_LIFETIME_MS,
+      });
+      await this.#revokeObserverAuthorities();
     });
   }
 
@@ -705,17 +739,23 @@ export class UserAccount extends DurableObject<Env> {
   /** Persist collaborator authority if the owner generation and observer admission epoch are current. */
   commitCollaborator(
     observerId: string,
-    expected: ObserverAdmissionState & { credentials: MarketoCredentials },
+    expected: ObserverCommitExpectation,
     collaboratorAccountId: string,
     collaboratorGeneration: number,
+    admissionId: string,
   ): boolean {
     let observerEpoch = this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0;
-    if (!this.#matchesCredentialState(expected) || observerEpoch !== expected.observerEpoch) return false;
+    if (this.ctx.storage.kv.get<boolean>("reconnecting") ||
+        !this.ctx.storage.kv.get<MarketoCredentials>("credentials") ||
+        this.#credentialGeneration() !== expected.ownerGeneration ||
+        observerEpoch !== expected.observerEpoch) return false;
     this.ctx.storage.kv.put<StoredObserver>(`observer:${observerId}`, {
+      admissionId,
       accountId: collaboratorAccountId,
-      ownerGeneration: expected.generation,
+      ownerGeneration: expected.ownerGeneration,
       collaboratorGeneration,
     });
+    this.ctx.storage.kv.delete(`revokedObserver:${observerId}`);
     return true;
   }
 
@@ -724,6 +764,17 @@ export class UserAccount extends DurableObject<Env> {
     let epoch = (this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0) + 1;
     this.ctx.storage.kv.put(`observerEpoch:${observerId}`, epoch);
     this.ctx.storage.kv.delete(`observer:${observerId}`);
+    this.ctx.storage.kv.delete(`revokedObserver:${observerId}`);
+  }
+
+  /** Tombstone an admission whose collaborator authority was revoked. */
+  revokeCollaborator(observerId: string, admissionId: string): void {
+    let observer = this.ctx.storage.kv.get<StoredObserver>(`observer:${observerId}`);
+    if (!observer || observer.admissionId !== admissionId) return;
+    let epoch = (this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0) + 1;
+    this.ctx.storage.kv.put(`observerEpoch:${observerId}`, epoch);
+    this.ctx.storage.kv.delete(`observer:${observerId}`);
+    this.ctx.storage.kv.put(`revokedObserver:${observerId}`, admissionId);
   }
 
   /** Confirm that phase-one collaborator verification is still authoritative. */
@@ -731,6 +782,44 @@ export class UserAccount extends DurableObject<Env> {
     return !this.ctx.storage.kv.get<boolean>("reconnecting") &&
       Boolean(this.ctx.storage.kv.get<MarketoCredentials>("credentials")) &&
       this.#credentialGeneration() === expectedGeneration;
+  }
+
+  /** Commit one admission while its collaborator credential generation is serialization-locked. */
+  async commitObserverAdmission(
+    expectedGeneration: number,
+    ownerAccountId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean> {
+    return await this.#withCredentialLifecycle(async () => {
+      if (!this.commitCollaboratorGeneration(expectedGeneration)) return false;
+      let admissionId = crypto.randomUUID();
+      let key = `observerAuthority:${admissionId}`;
+      this.ctx.storage.kv.put<StoredObserverAuthority>(key, {
+        admissionId,
+        observerId,
+        ownerAccountId,
+      });
+      let committed = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
+        observerId,
+        expected,
+        this.ctx.id.toString(),
+        expectedGeneration,
+        admissionId,
+      );
+      if (!committed) this.ctx.storage.kv.delete(key);
+      return committed;
+    });
+  }
+
+  async #revokeObserverAuthorities(): Promise<void> {
+    let prefix = "observerAuthority:";
+    let authorities = [...this.ctx.storage.kv.list<StoredObserverAuthority>({ prefix })];
+    for (let [key] of authorities) this.ctx.storage.kv.delete(key);
+    await Promise.all(authorities.map(([, authority]) =>
+      userAccountStub(this.ctx.exports, authority.ownerAccountId)
+        .revokeCollaborator(authority.observerId, authority.admissionId)
+    ));
   }
 
   /** Whether a captured credential set remains active outside a reconnect transition. */
@@ -750,9 +839,14 @@ export class UserAccount extends DurableObject<Env> {
         userAccountStub(this.ctx.exports, observer.accountId)
           .commitCollaboratorGeneration(observer.collaboratorGeneration)
     ));
-    return observers
+    let excluded = observers
       .filter((_, index) => !current[index])
       .map(([key]) => key.slice(prefix.length));
+    let revokedPrefix = "revokedObserver:";
+    for (let [key] of this.ctx.storage.kv.list({ prefix: revokedPrefix })) {
+      excluded.push(key.slice(revokedPrefix.length));
+    }
+    return [...new Set(excluded)];
   }
 
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
@@ -771,10 +865,19 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
-    let generation = this.#advanceCredentialGeneration();
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
-    this.ctx.storage.kv.put("credentialGeneration", generation);
+    await this.#withCredentialLifecycle(async () => {
+      let generation = this.#advanceCredentialGeneration();
+      let authorities = [...this.ctx.storage.kv.list<StoredObserverAuthority>({
+        prefix: "observerAuthority:",
+      })];
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.ctx.storage.kv.put("credentialGeneration", generation);
+      await Promise.all(authorities.map(([, authority]) =>
+        userAccountStub(this.ctx.exports, authority.ownerAccountId)
+          .revokeCollaborator(authority.observerId, authority.admissionId)
+      ));
+    });
   }
 
   async alarm(): Promise<void> {
@@ -850,10 +953,15 @@ type MarketoUserVerifierProps = { userObjectId: string };
 interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
   hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<
     { valid: false } |
-    { valid: true; accountId: string; generation: number } |
+    { valid: true; generation: number } |
     { error: TokenCacheError }
   >;
-  commitCredentialGeneration(generation: number): Promise<boolean>;
+  commitObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean>;
 }
 
 async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
@@ -881,7 +989,7 @@ export class MarketoUserVerifier
     fingerprint: string,
   ): Promise<
     { valid: false } |
-    { valid: true; accountId: string; generation: number } |
+    { valid: true; generation: number } |
     { error: TokenCacheError }
   > {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
@@ -903,13 +1011,18 @@ export class MarketoUserVerifier
     }
     if (!valid) await account.credentialsExpired();
     return valid
-      ? { valid: true, accountId: this.ctx.props.userObjectId, generation: state.generation }
+      ? { valid: true, generation: state.generation }
       : { valid: false };
   }
 
-  async commitCredentialGeneration(generation: number): Promise<boolean> {
+  async commitObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean> {
     return await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
-      .commitCollaboratorGeneration(generation);
+      .commitObserverAdmission(generation, ownerAccountId, observerId, expected);
   }
 }
 
@@ -1420,7 +1533,6 @@ export class MarketoGatekeeperImpl
       credentials.clientId,
       await credentialFingerprint(credentials),
     );
-    let collaboratorAccountId: string;
     let collaboratorGeneration: number;
     try {
       if ("error" in verification) {
@@ -1431,19 +1543,15 @@ export class MarketoGatekeeperImpl
           "This collaborator is not connected with the same Marketo LaunchPoint service.",
         );
       }
-      collaboratorAccountId = verification.accountId;
       collaboratorGeneration = verification.generation;
     } finally {
       disposeRpcResult(verification);
     }
-    if (!await verifier.commitCredentialGeneration(collaboratorGeneration)) {
-      throw new Error("The collaborator's Marketo account changed while access was being verified.");
-    }
-    if (!await account.commitCollaborator(
-      id,
-      { ...ownerState, credentials },
-      collaboratorAccountId,
+    if (!await verifier.commitObserverAdmission(
       collaboratorGeneration,
+      this.ctx.props.userObjectId,
+      id,
+      { ownerGeneration: ownerState.generation, observerEpoch: ownerState.observerEpoch },
     )) {
       throw new Error("The Marketo account changed while collaborator access was being verified.");
     }
