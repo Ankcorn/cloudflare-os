@@ -6125,7 +6125,7 @@ describe("Design Studio scoped binding", () => {
     });
   });
 
-  it("retains a blocked, rejectable tombstone when queue submission fails", async () => {
+  it("removes only an untouched staged row when queue submission fails", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN,
       clientId: "client",
@@ -6156,17 +6156,11 @@ describe("Design Studio scoped binding", () => {
       let studio = session as MarketoDesignStudioImpl;
       await expect(studio.getEmail("20").approve()).rejects.toThrow("approval queue unavailable");
       expect(state.storage.kv.get("pending:200")).toBeUndefined();
-      expect(state.storage.kv.get("staged:200")).toMatchObject({
-        state: "blocked", submissionActive: false,
-      });
-      expect(state.storage.kv.get<number[]>("staged:index")).toEqual([200]);
+      expect(state.storage.kv.get("staged:200")).toBeUndefined();
+      expect(state.storage.kv.get("staged:index")).toBeUndefined();
       expect(state.storage.kv.get("applying:200")).toBeUndefined();
 
       failSubmission = false;
-      await expect(studio.getEmail("21").updateMetadata({ description: "Capacity remains reserved" }))
-        .rejects.toThrow(/more than 200 pending actions/);
-      await expect(instance.applyAction(200)).rejects.toThrow(/registration failed/);
-      await instance.rejectAction(200);
       await studio.getEmail("21").updateMetadata({ description: "Uses released capacity" });
       expect(state.storage.kv.get<number[]>("pending:index")).toHaveLength(200);
       expect(state.storage.kv.get("pending:201")).toBeDefined();
@@ -6258,7 +6252,7 @@ describe("Design Studio scoped binding", () => {
 
       await expect(submission).rejects.toThrow("approval queue response failed");
       expect(state.storage.kv.get("staged:1")).toMatchObject({
-        state: "applying", submissionActive: false,
+        state: "preflight",
       });
       releasePreparation();
       await callback;
@@ -6306,11 +6300,17 @@ describe("Design Studio scoped binding", () => {
       releaseWrite();
       expect(await callback).toBeInstanceOf(Error);
       expect(state.storage.kv.get("staged:1")).toMatchObject({
-        state: "applying", submissionActive: false,
+        state: "dispatching",
       });
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(1)).rejects.toThrow(/can no longer be rejected/);
+      await expect(instance.rejectAction(1)).resolves.toBeUndefined();
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain-discarded");
+      expect(state.storage.kv.get("audit:1")).toMatchObject({
+        outcome: "uncertain-discarded",
+        action: { id: 1, type: "designMetadata" },
+      });
 
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
@@ -6329,7 +6329,8 @@ describe("Design Studio scoped binding", () => {
       let queue = new RpcStub(new TestApprovalQueue(async id => {
         restart = await instance.rejectAction(id);
         expect(state.storage.kv.get("pending:1")).toBeUndefined();
-        expect(state.storage.kv.get("staged:1")).toMatchObject({ state: "rejected" });
+        expect(state.storage.kv.get("staged:1")).toBeUndefined();
+        expect(state.storage.kv.get("applying:1")).toBe("rejected");
       })) as unknown as RpcStub<ApprovalQueue>;
       let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
       let creation = studio.createEmailTemplate(
@@ -6369,7 +6370,6 @@ describe("Design Studio scoped binding", () => {
           expect(writes).toBe(1);
           expect(state.storage.kv.get("pending:1")).toBeUndefined();
           expect(state.storage.kv.get("staged:1")).toBeUndefined();
-          throw new Error("submit response failed after callback");
         },
         [Symbol.dispose]() {},
       } as unknown as RpcStub<ApprovalQueue>;
@@ -6416,10 +6416,10 @@ describe("Design Studio scoped binding", () => {
       expect(writes).toBe(1);
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
       expect(state.storage.kv.get("staged:1")).toMatchObject({
-        state: "blocked", submissionActive: false,
+        state: "blocked",
       });
       expect(state.storage.kv.get("applying:1")).toBeUndefined();
-      await expect(instance.applyAction(1)).rejects.toThrow(/registration failed/);
+      await expect(instance.applyAction(1)).rejects.toThrow(/approval callback failed/);
       await instance.rejectAction(1);
       expect(state.storage.kv.get("staged:1")).toBeUndefined();
       studio[Symbol.dispose]();
@@ -6436,6 +6436,7 @@ describe("Design Studio scoped binding", () => {
     let started = new Promise<void>(resolve => { dependentStarted = resolve; });
     let releaseDependent!: () => void;
     let released = new Promise<void>(resolve => { releaseDependent = resolve; });
+    let dependentRestart: void | { restart: true } = undefined;
     vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [] }));
 
     await runInDurableObject(gatekeeper, async (instance, state) => {
@@ -6443,6 +6444,7 @@ describe("Design Studio scoped binding", () => {
         if (id === 2) {
           dependentStarted();
           await released;
+          dependentRestart = await instance.rejectAction(id);
         }
       })) as unknown as RpcStub<ApprovalQueue>;
       let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
@@ -6459,18 +6461,14 @@ describe("Design Studio scoped binding", () => {
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
       expect(state.storage.kv.get("staged:2")).toMatchObject({
-        state: "blocked", blockedBy: 1, submissionActive: true,
+        state: "blocked", blockedBy: 1,
       });
       releaseDependent();
-      await expect(dependent).rejects.toThrow(/depends on an earlier rejected action/);
+      await expect(dependent).rejects.toThrow(/rejected while its approval was being submitted/);
+      expect(dependentRestart).toEqual({ restart: true });
       expect(state.storage.kv.get("pending:2")).toBeUndefined();
-      expect(state.storage.kv.get("staged:2")).toMatchObject({
-        state: "blocked", blockedBy: 1, submissionActive: false,
-      });
+      expect(state.storage.kv.get("staged:2")).toBeUndefined();
       expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
-      expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([2]);
-      await expect(instance.applyAction(2)).rejects.toThrow(/depends on an earlier rejected action/);
-      await expect(instance.rejectAction(2)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([]);
 
       (parent as MarketoEmailTemplateImpl)[Symbol.dispose]();
@@ -6514,7 +6512,7 @@ describe("Design Studio scoped binding", () => {
       await expect(dependent).rejects.toThrow(/became blocked while approval was being registered/);
       expect(state.storage.kv.get("pending:2")).toBeUndefined();
       expect(state.storage.kv.get("staged:2")).toMatchObject({
-        state: "blocked", submissionActive: false,
+        state: "blocked",
       });
       await expect(instance.applyAction(2)).rejects.toThrow(/referenced Marketo resource changed/);
       await instance.rejectAction(2);
@@ -7571,7 +7569,12 @@ describe("post-dispatch creation response validation", () => {
           expect(state.storage.kv.get(`applying:${creation.action.id}`)).toBe("uncertain");
           expect(state.storage.kv.get(`pending:${creation.action.id}`)).toBeDefined();
           await expect(instance.applyAction(creation.action.id)).rejects.toThrow(/already dispatched/);
-          await expect(instance.rejectAction(creation.action.id)).rejects.toThrow(/already dispatched/);
+          await expect(instance.rejectAction(creation.action.id)).resolves.toEqual({ restart: true });
+          expect(state.storage.kv.get(`pending:${creation.action.id}`)).toBeUndefined();
+          expect(state.storage.kv.get(`applying:${creation.action.id}`)).toBe("uncertain-discarded");
+          expect(state.storage.kv.get(`audit:${creation.action.id}`)).toMatchObject({
+            outcome: "uncertain-discarded",
+          });
         });
         expect(writes).toBe(1);
       });
@@ -9207,14 +9210,14 @@ describe("Design Studio action lifecycle", () => {
       expect(state.storage.kv.get("applying:2")).toBeUndefined();
       expect(state.storage.kv.get("applying:3")).toBeUndefined();
       await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
-      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1, 2, 3]);
-      expect(state.storage.kv.get("pending:1")).toBeDefined();
-      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBeUndefined();
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain-discarded");
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([2, 3]);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      for (let id of [2, 3]) expect(state.storage.kv.get(`dependencyBlocked:${id}`)).toBe(1);
       expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
       expect(state.storage.kv.get("provisionalKind:~1")).toBeUndefined();
-      await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
+      await expect(instance.applyAction(1)).rejects.toThrow(/discarded/);
     });
     expect(mutationCalls).toBe(1);
   });
@@ -9325,9 +9328,9 @@ describe("Design Studio action lifecycle", () => {
         expect(state.storage.kv.get("pending:1")).toBeDefined();
         expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1]);
         await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
-        await expect(instance.rejectAction(1)).rejects.toThrow(/already dispatched/);
-        expect(state.storage.kv.get("applying:1")).toBe("uncertain");
-        expect(state.storage.kv.get("pending:1")).toBeDefined();
+        await expect(instance.rejectAction(1)).resolves.toBeUndefined();
+        expect(state.storage.kv.get("applying:1")).toBe("uncertain-discarded");
+        expect(state.storage.kv.get("pending:1")).toBeUndefined();
       });
       vi.unstubAllGlobals();
     }
@@ -10183,7 +10186,7 @@ describe("action dispatch lifecycle", () => {
     await runInDurableObject(stub, async instance => {
       let first = instance.applyAction(ACTION.id);
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already (being prepared|dispatched)/);
-      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/preflight|dispatched/);
       release?.();
       await first;
       await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
@@ -10271,7 +10274,7 @@ describe("action dispatch lifecycle", () => {
     dispatchSpy.mockRestore();
   });
 
-  it("allows pre-dispatch rejection but rejects every state that may have applied", async () => {
+  it("allows preflight and uncertain discard but rejects known terminal dispatch states", async () => {
     let preparing = await actionGatekeeper(ACTION);
     await runInDurableObject(preparing, async (instance, state) => {
       state.storage.kv.put(`applying:${ACTION.id}`, "preparing");
@@ -10279,7 +10282,7 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
     });
 
-    for (let applying of ["dispatching", "uncertain", "partial", "applied"] as const) {
+    for (let applying of ["partial", "applied"] as const) {
       let stub = await actionGatekeeper(ACTION);
       await runInDurableObject(stub, async (instance, state) => {
         state.storage.kv.put(`applying:${ACTION.id}`, applying);
@@ -10289,7 +10292,7 @@ describe("action dispatch lifecycle", () => {
     }
   });
 
-  it("recovers legacy persisted preparation state without treating it as dispatched", async () => {
+  it("retries persisted preflight after worker restart", async () => {
     let calls = 0;
     vi.stubGlobal("fetch", async (url: string) => {
       if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
@@ -10298,11 +10301,34 @@ describe("action dispatch lifecycle", () => {
     });
     let stub = await actionGatekeeper(ACTION);
     await runInDurableObject(stub, async (instance, state) => {
+      let row = state.storage.kv.get<Record<string, unknown>>(`pending:${ACTION.id}`)!;
+      state.storage.kv.put(`pending:${ACTION.id}`, { ...row, state: "preflight" });
       state.storage.kv.put(`applying:${ACTION.id}`, "preparing");
       await expect(instance.applyAction(ACTION.id)).resolves.toBeUndefined();
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("applied");
     });
     expect(calls).toBe(1);
+  });
+
+  it("converts persisted dispatch to uncertain and allows audited discard", async () => {
+    let stub = await actionGatekeeper(ACTION);
+    await runInDurableObject(stub, async (instance, state) => {
+      let row = state.storage.kv.get<Record<string, unknown>>(`pending:${ACTION.id}`)!;
+      state.storage.kv.put(`pending:${ACTION.id}`, { ...row, state: "dispatching" });
+      state.storage.kv.put(`applying:${ACTION.id}`, "dispatching");
+
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
+      await expect(instance.rejectAction(ACTION.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain-discarded");
+      expect(state.storage.kv.get(`audit:${ACTION.id}`)).toMatchObject({
+        outcome: "uncertain-discarded",
+        action: ACTION,
+      });
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/discarded/);
+    });
   });
 
   it("deletes stale creation candidates when an action is definitively rejected", async () => {
@@ -10372,10 +10398,10 @@ describe("action dispatch lifecycle", () => {
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow("Could not reach the Marketo API.");
       expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
       await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
-      await expect(instance.rejectAction(ACTION.id)).rejects.toThrow(/already dispatched/);
-      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeDefined();
-      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain");
-      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(ACTION.id)).resolves.toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeUndefined();
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("uncertain-discarded");
+      await expect(instance.applyAction(ACTION.id)).rejects.toThrow(/discarded/);
     });
     expect(calls).toBe(1);
   });
