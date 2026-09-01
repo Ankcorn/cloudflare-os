@@ -22,6 +22,13 @@ export type DesignStudioAssetKind =
 
 export type DesignStudioMetadata = Record<string, string | undefined>;
 
+/** Complete overlaid state shown when an existing classic asset changes lifecycle state. */
+export type DesignStudioLifecycleSnapshot = {
+  metadata: Record<string, unknown>;
+  content: unknown;
+  affectedDependents: Record<string, unknown>[];
+};
+
 export type DesignStudioCreateInput = {
   name: string;
   description?: string;
@@ -89,6 +96,7 @@ export type DesignStudioAction =
       asset: Exclude<DesignStudioAssetKind, "folder" | "file">;
       targetId: string;
       operation: "approve" | "unapprove" | "discardDraft" | "delete";
+      snapshot?: DesignStudioLifecycleSnapshot;
     }
   | { id: number; type: "designDeleteFolder"; targetId: string };
 
@@ -181,9 +189,13 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         // Discarding a draft exposes approved content that cannot be reconstructed locally.
         awaitDecision: action.operation === "discardDraft",
         title: `${action.operation} Marketo ${label(action.asset)} ${target ?? ""}`,
-        description: action.operation === "delete"
-          ? `Permanently delete Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}`
-          : `${action.operation} Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}`,
+        description: `${action.operation === "delete" ? "Permanently delete" : action.operation} ` +
+          `Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}\n\n` +
+          (action.snapshot
+            ? `Publishable metadata, headers, and settings:\n\n${codeBlock(action.snapshot.metadata)}\n\n` +
+              `Publishable content:\n\n${codeBlock(action.snapshot.content)}\n\n` +
+              `Affected dependents:\n\n${codeBlock(action.snapshot.affectedDependents)}`
+            : "No lifecycle snapshot is available for this legacy queued action."),
       };
     case "designDeleteFolder":
       return {

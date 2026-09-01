@@ -398,7 +398,12 @@ describe("Email Designer pending-state simulation", () => {
       associatedStates: [{ contentId: "content-1", state: sourceState }],
       data: { html: { body: "<p>Source</p>" } },
     };
-    let { actions, ctx } = context({ getDesignerAsset: async () => raw });
+    let { actions, ctx } = context({
+      getDesignerAsset: async () => raw,
+      getDesignerAssetUsedBy: async () => ({
+        result: [], pageDetails: { totalItems: 0, currentPage: 1, pageSize: 50 },
+      }),
+    });
     let email = new MarketoDesignerEmailImpl(ctx, "email-1");
 
     await email[operation]();
@@ -415,6 +420,40 @@ describe("Email Designer pending-state simulation", () => {
       status: sourceState,
       state: sourceState,
       associatedStates: [{ contentId: "content-1", state: sourceState }],
+    });
+  });
+
+  it("snapshots complete publishable Designer state and affected dependents", async () => {
+    let raw = {
+      id: "fragment-1",
+      name: "Hero",
+      status: "draft",
+      state: "draft",
+      contentId: "draft-1",
+      associatedStates: [{ contentId: "draft-1", state: "draft" }],
+      data: { html: { body: "<section>Hero</section>" }, text: { body: "Hero" } },
+      headers: { subject: "Hero subject" },
+      settings: { fragmentType: "email", supportedChannels: ["email"] },
+    };
+    let { actions, ctx } = context({
+      getDesignerAsset: async () => raw,
+      getDesignerAssetUsedBy: async () => ({
+        result: [{
+          id: "email-7", name: "Dependent", contentType: "email",
+          appData: { workspaceId: "1", folderId: "10" },
+        }],
+        pageDetails: { totalItems: 1, currentPage: 1, pageSize: 50 },
+      }),
+    });
+
+    await new MarketoDesignerFragmentImpl(ctx, "fragment-1").approve();
+
+    expect(actions[0]).toMatchObject({
+      sourceSnapshot: designerCloneSnapshot(raw),
+      affectedDependents: [{
+        id: "email-7", name: "Dependent", contentType: "email",
+        workspaceId: "1", folderId: "10",
+      }],
     });
   });
 

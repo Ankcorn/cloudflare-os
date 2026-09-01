@@ -194,6 +194,48 @@ describe("Marketo approval completeness", () => {
     expect(description).not.toMatch(/more|\.\.\.|…/);
   });
 
+  it("shows complete classic and Designer lifecycle snapshots", () => {
+    let classic = describeAction({
+      id: 1,
+      type: "designLifecycle",
+      asset: "email",
+      targetId: "21",
+      operation: "approve",
+      snapshot: {
+        metadata: {
+          name: "Launch",
+          subject: "Exact subject",
+          fromEmail: "sender@example.com",
+          settings: { operational: true, isOpenTrackingDisabled: false },
+        },
+        content: [{ id: "main", html: "<h1>Exact draft</h1>", text: "Exact draft" }],
+        affectedDependents: [],
+      },
+    }).description;
+    let designer = describeAction({
+      id: 2,
+      type: "designerLifecycle",
+      asset: "designerFragment",
+      targetId: "fragment-1",
+      operation: "approve",
+      contentId: "draft-1",
+      sourceState: "draft",
+      sourceSnapshot: designerCloneSnapshot({
+        data: { html: { body: "<section>Hero</section>" } },
+        headers: { subject: "Fragment subject" },
+        settings: { fragmentType: "email", supportedChannels: ["email"] },
+      }),
+      affectedDependents: [{
+        id: "email-7", name: "Dependent email", workspaceId: "1", folderId: "10",
+      }],
+    }).description;
+
+    expect(classic).toMatch(/Exact subject.*sender@example.com.*operational.*Exact draft/s);
+    expect(classic).toContain("Affected dependents");
+    expect(designer).toMatch(/Hero.*Fragment subject.*fragmentType.*supportedChannels/s);
+    expect(designer).toMatch(/Affected dependents.*email-7.*Dependent email/s);
+  });
+
   it("rejects an oversized Email Designer clone approval instead of truncating it", () => {
     let action: MarketoAction = {
       id: 1,

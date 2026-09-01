@@ -51,6 +51,7 @@ import type {
   DesignStudioActionInput,
   DesignStudioAssetKind,
   DesignStudioCreateInput,
+  DesignStudioLifecycleSnapshot,
   DesignStudioMetadata,
 } from "./design-studio-actions";
 import { retainSessionContext, type SessionContext } from "./session";
@@ -305,13 +306,44 @@ function normalize(kind: DesignStudioAssetKind, raw: unknown): Summary {
       fromEmail: headerValue(value.fromEmail),
       replyEmail: headerValue(value.replyEmail),
     }).filter((entry): entry is [string, string] => entry[1] !== undefined));
-    return { ...summary, ...headers, preHeader: textValue(value.preHeader) };
+    return {
+      ...summary,
+      ...headers,
+      preHeader: textValue(value.preHeader),
+      settings: Object.fromEntries([
+        "operational", "textOnly", "publishToMSI", "webView", "template",
+        "isOpenTrackingDisabled", "autoCopyToText", "ccFields",
+      ].flatMap(key => value[key] === undefined ? [] : [[key, value[key]]])),
+    };
   }
   if (kind === "landingPage") {
-    return { ...summary, url: textValue(value.computedUrl) ?? textValue(value.URL) ?? textValue(value.url) };
+    return {
+      ...summary,
+      url: textValue(value.computedUrl) ?? textValue(value.URL) ?? textValue(value.url),
+      settings: Object.fromEntries([
+        "customHeadHTML", "facebookOgTags", "formPrefill", "keywords", "mobileEnabled",
+        "robots", "template", "title",
+      ].flatMap(key => value[key] === undefined ? [] : [[key, value[key]]])),
+    };
   }
   if (kind === "form") {
-    return { ...summary, locale: textValue(value.locale), language: textValue(value.language) };
+    return {
+      ...summary,
+      locale: textValue(value.locale),
+      language: textValue(value.language),
+      settings: Object.fromEntries([
+        "theme", "progressiveProfiling", "labelPosition", "fontFamily", "fontSize",
+        "knownVisitor", "thankYouList", "buttonLocation", "buttonLabel", "waitingLabel",
+      ].flatMap(key => value[key] === undefined ? [] : [[key, value[key]]])),
+    };
+  }
+  if (kind === "landingPageTemplate") {
+    return {
+      ...summary,
+      settings: Object.fromEntries([
+        ["templateType", value.templateType], ["enableMunchkin", value.enableMunchkin],
+      ].filter((entry): entry is [string, unknown] => entry[1] !== undefined)),
+    };
   }
   if (kind === "file") {
     return { ...summary, url: textValue(value.url), mimeType: textValue(value.mimeType), size: numberValue(value.size) };
@@ -1158,11 +1190,33 @@ abstract class AssetImpl extends RpcTarget {
     await submitDesign(this.ctx, { type: "designMetadata", asset: this.kind, targetId: this.id, patch });
   }
 
-  protected lifecycle(operation: "approve" | "unapprove" | "discardDraft" | "delete"): Promise<void> {
+  protected async lifecycle(operation: "approve" | "unapprove" | "discardDraft" | "delete"): Promise<void> {
     this.assertReadable();
+    await this.ctx.assertCurrent?.();
     if (this.kind === "folder" || this.kind === "file") throw new Error("This asset has no approval lifecycle.");
-    return submitDesign(this.ctx, { type: "designLifecycle", asset: this.kind, targetId: this.id, operation });
+    if (this.id.startsWith("~") && this.ctx.logicalKind(this.id) !== this.kind) {
+      throw new Error(`Provisional Marketo asset ${this.id} is not a ${this.kind}.`);
+    }
+    let metadata = await simulatedSummary(this.ctx, this.kind, this.id, this.folderType);
+    let status = metadata.status?.toLocaleLowerCase();
+    if (operation === "approve" && status !== "draft" && status !== "approved with draft") {
+      throw new Error(`Marketo ${this.kind} ${this.id} has no draft to approve.`);
+    }
+    if (operation === "unapprove" && status !== "approved" && status !== "approved with draft") {
+      throw new Error(`Marketo ${this.kind} ${this.id} is not approved.`);
+    }
+    let snapshot: DesignStudioLifecycleSnapshot = {
+      metadata,
+      content: await this.publishableContent(),
+      // Unlike Email Designer, the classic Asset API has no used-by endpoint.
+      affectedDependents: [],
+    };
+    await submitDesign(this.ctx, {
+      type: "designLifecycle", asset: this.kind, targetId: this.id, operation, snapshot,
+    });
   }
+
+  protected abstract publishableContent(): Promise<unknown>;
 }
 
 async function simulatedSummary(
@@ -1282,6 +1336,7 @@ function assertAcyclicCloneSource(
 @validateRpc()
 export class MarketoDesignStudioFolderImpl extends AssetImpl {
   protected kind = "folder" as const;
+  protected async publishableContent(): Promise<unknown> { return undefined; }
   async describe(): Promise<MarketoDesignStudioFolderSummary> {
     return await this.summary() as MarketoDesignStudioFolderSummary;
   }
@@ -1300,6 +1355,7 @@ export class MarketoDesignStudioFolderImpl extends AssetImpl {
 @validateRpc()
 export class MarketoEmailImpl extends AssetImpl {
   protected kind = "email" as const;
+  protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
   async describe(): Promise<MarketoEmailSummary> { return await this.summary() as MarketoEmailSummary; }
   async getContent(): Promise<MarketoEmailContentSection[]> {
     this.assertReadable();
@@ -1333,6 +1389,7 @@ export class MarketoEmailImpl extends AssetImpl {
 }
 
 abstract class TemplateImpl extends AssetImpl {
+  protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
   async getContent(): Promise<string> {
     this.assertReadable();
     let creation = findCreation(this.ctx, this.kind, this.id);
@@ -1383,6 +1440,7 @@ export class MarketoEmailTemplateImpl extends TemplateImpl {
 @validateRpc()
 export class MarketoLandingPageImpl extends AssetImpl {
   protected kind = "landingPage" as const;
+  protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
   async describe(): Promise<MarketoLandingPageSummary> { return await this.summary() as MarketoLandingPageSummary; }
   async getContent(): Promise<MarketoLandingPageContentSection[]> {
     this.assertReadable();
@@ -1407,6 +1465,7 @@ export class MarketoLandingPageTemplateImpl extends TemplateImpl {
 @validateRpc()
 export class MarketoFormImpl extends AssetImpl {
   protected kind = "form" as const;
+  protected async publishableContent(): Promise<unknown> { return await this.getFields(); }
   async describe(): Promise<MarketoFormSummary> { return await this.summary() as MarketoFormSummary; }
   async getFields(): Promise<MarketoFormField[]> {
     this.assertReadable();
@@ -1427,6 +1486,7 @@ export class MarketoFormImpl extends AssetImpl {
 @validateRpc()
 export class MarketoSnippetImpl extends AssetImpl {
   protected kind = "snippet" as const;
+  protected async publishableContent(): Promise<unknown> { return await this.getContent(); }
   async describe(): Promise<MarketoSnippetSummary> { return await this.summary() as MarketoSnippetSummary; }
   async getContent(): Promise<MarketoSnippetContent> {
     this.assertReadable();
@@ -1461,6 +1521,7 @@ export class MarketoSnippetImpl extends AssetImpl {
 @validateRpc()
 export class MarketoFileImpl extends AssetImpl {
   protected kind = "file" as const;
+  protected async publishableContent(): Promise<unknown> { return undefined; }
   async describe(): Promise<MarketoFileSummary> { return await this.summary() as MarketoFileSummary; }
   async updateContent(data: Uint8Array, mimeType: string) {
     this.assertReadable();

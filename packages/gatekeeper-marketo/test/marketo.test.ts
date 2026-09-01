@@ -1054,6 +1054,9 @@ describe("new Email Designer", () => {
             { contentId: "approved-1", state: "approved" },
           ],
         }),
+        getDesignerAssetUsedBy: async () => ({
+          result: [], pageDetails: { totalItems: 0, currentPage: 1, pageSize: 50 },
+        }),
       });
       await new MarketoDesignerEmailImpl(ctx, "email-1")[operation]();
       expect(actions).toMatchObject([{ contentId, sourceState }]);
@@ -5816,6 +5819,13 @@ describe("Design Studio scoped binding", () => {
       clientSecret: crypto.randomUUID(),
     });
     let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      return Response.json({ success: true, result: path.endsWith("/content.json")
+        ? [{ htmlId: "main", contentType: "HTML", value: "<p>Draft</p>" }]
+        : [{ id: 20, name: "Email", status: "draft" }] });
+    });
 
     await runInDurableObject(gatekeeper, async (instance, state) => {
       let queue = {
@@ -5828,7 +5838,49 @@ describe("Design Studio scoped binding", () => {
       let studio = session as MarketoDesignStudioImpl;
       await expect(studio.getEmail("20").approve()).rejects.toThrow("approval queue unavailable");
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
-      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([]);
+      expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("does not expose a pending row until queue submission succeeds", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    let submissionStarted!: () => void;
+    let started = new Promise<void>(resolve => { submissionStarted = resolve; });
+    let releaseSubmission!: () => void;
+    let released = new Promise<void>(resolve => { releaseSubmission = resolve; });
+    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
+      ? Response.json({ access_token: "token", expires_in: 3600 })
+      : Response.json({ success: true, result: [] }));
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue(async () => {
+        submissionStarted();
+        await released;
+      })) as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let creation = studio.createEmailTemplate(
+        { id: "10", type: "folder" },
+        { name: "Preparing", content: "<p>Preparing</p>" },
+      );
+      await started;
+
+      expect((await studio.listEmailTemplates()).items).toEqual([]);
+      await expect(studio.createEmail({ id: "10", type: "folder" }, {
+        name: "Dependent", templateId: "~1", subject: "Subject", fromName: "Sender",
+        fromEmail: "sender@example.com", replyEmail: "reply@example.com",
+      })).rejects.toThrow(/~1 is not a emailTemplate/);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+
+      releaseSubmission();
+      let created = await creation;
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+      (created as MarketoEmailTemplateImpl)[Symbol.dispose]();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
@@ -5848,9 +5900,10 @@ describe("Design Studio scoped binding", () => {
       let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
       let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
 
-      await studio.getEmail("20").approve();
+      await studio.getEmail("20").updateMetadata({ description: "200th" });
       expect(state.storage.kv.get<number[]>("pending:index")).toHaveLength(200);
-      await expect(studio.getEmail("21").approve()).rejects.toThrow(/more than 200 pending actions/);
+      await expect(studio.getEmail("21").updateMetadata({ description: "Too many" }))
+        .rejects.toThrow(/more than 200 pending actions/);
 
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
@@ -5893,6 +5946,13 @@ describe("Design Studio scoped binding", () => {
       let path = new URL(url).pathname;
       let body = init?.body ? JSON.parse(String(init.body)) : undefined;
       assetRequests.push({ path, ...(body === undefined ? {} : { body }) });
+      if (path.endsWith("/usedby")) {
+        return Response.json({
+          success: true,
+          result: [],
+          pageDetails: { totalItems: 0, currentPage: 1, pageSize: 50 },
+        });
+      }
       if (body) {
         state = body.action === "approve" ? "approved" : "draft";
         return Response.json({ success: true, result: [{
@@ -5900,7 +5960,8 @@ describe("Design Studio scoped binding", () => {
         }] });
       }
       return Response.json({ success: true, result: [{
-        id: "email-1", associatedStates: [{ contentId: "content-1", state }],
+        id: "email-1", status: state, state,
+        associatedStates: [{ contentId: "content-1", state }],
       }] });
     });
 
@@ -5932,6 +5993,13 @@ describe("Design Studio scoped binding", () => {
 
       expect(assetRequests).toEqual([
         { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/usedby", body: {
+          assetId: "email-1", pageIndex: 0, pageSize: 50, type: "all",
+        } },
+        { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/usedby", body: {
+          assetId: "email-1", pageIndex: 0, pageSize: 50, type: "all",
+        } },
         { path: "/rest/asset/v2/email/email-1" },
         { path: "/rest/asset/v2/email/state/transition", body: { contentId: "content-1", action: "approve" } },
         { path: "/rest/asset/v2/email/email-1" },
@@ -8104,6 +8172,27 @@ describe("Design Studio action lifecycle", () => {
       expect(state.storage.kv.get("pending:4")).toBeDefined();
     });
   });
+
+  it.each(["designMetadata", "designContent"] as const)(
+    "blocks a clone derived from a rejected %s update",
+    async type => {
+      let update: DesignStudioAction = type === "designMetadata"
+        ? { id: 1, type, asset: "emailTemplate", targetId: "31", patch: { name: "Updated" } }
+        : { id: 1, type, asset: "emailTemplate", targetId: "31", content: "Updated content" };
+      let clone: DesignStudioAction = {
+        id: 2, type: "designClone", asset: "emailTemplate", provisionalId: "~1",
+        sourceId: "31", parent: { id: "10", type: "Folder" }, name: "Derived clone",
+      };
+      let stub = await designActionGatekeeper([update, clone]);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+        expect(state.storage.kv.get("pending:1")).toBeUndefined();
+        expect(state.storage.kv.get("dependencyBlocked:2")).toBe(1);
+        await expect(instance.applyAction(2)).rejects.toThrow(/depends on an earlier rejected action/);
+      });
+    },
+  );
 
   it("does not persist or order landing-page clones by a snapshotted template", async () => {
     let actions: DesignStudioAction[] = [

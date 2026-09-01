@@ -1324,6 +1324,7 @@ export class MarketoGatekeeperImpl
   >
 {
   #preparingActions = new Set<number>();
+  #submittingActions = new Set<number>();
 
   async #credentialState(): Promise<AccountCredentialState> {
     return await readAccountCredentialState(userAccountStub(
@@ -1420,6 +1421,11 @@ export class MarketoGatekeeperImpl
     let sessionCtx = makeSessionContext({
       client: () => this.#client(credentialState),
       approvalQueue: queue,
+      assertCurrent: async () => {
+        if (!await account.isCredentialStateCurrent({ ...credentialState, credentials })) {
+          throw new Error("This Marketo session belongs to an older account credential generation.");
+        }
+      },
       excludeObservers: async () => {
         let excluded = await account.getExcludedObservers();
         try {
@@ -1437,24 +1443,24 @@ export class MarketoGatekeeperImpl
           throw new Error("This Marketo business object is read-only or unavailable; no approval was submitted.");
         }
         let index = this.#pendingIndexIncludingBlocked();
-        if (index.length >= MAX_PENDING_ACTIONS) {
+        if (index.length + this.#submittingActions.size >= MAX_PENDING_ACTIONS) {
           throw new Error(`A Marketo binding cannot have more than ${MAX_PENDING_ACTIONS} pending actions.`);
         }
         let id = this.#nextActionId();
         let action = { ...body, id } as MarketoAction;
         this.#validateActionReferences(action, false);
         let description = describeActionForSubmission(action);
+        this.#submittingActions.add(id);
+        try {
+          await queue.submitAction(id, description);
+        } finally {
+          this.#submittingActions.delete(id);
+        }
         this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
           action,
           ownerGeneration: credentialState.generation,
         });
-        this.ctx.storage.kv.put("pending:index", [...index, id]);
-        try {
-          await queue.submitAction(id, description).catch(error => { throw error; });
-        } catch (e) {
-          this.#removePending(id);
-          throw e;
-        }
+        this.ctx.storage.kv.put("pending:index", [...this.#pendingIndexIncludingBlocked(), id]);
       },
     });
     let ctx: CampaignContext & EmailDesignerContext & BusinessObjectContext = {
@@ -1814,7 +1820,8 @@ export class MarketoGatekeeperImpl
     let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
     if (pending && (
       isDesignStudioAction(pending) && (
-        pending.type === "designCreate" || pending.type === "designClone" || pending.type === "designContent"
+        pending.type === "designCreate" || pending.type === "designClone" ||
+        pending.type === "designMetadata" || pending.type === "designContent"
       ) ||
       isCampaignAction(pending) ||
       isProgramAction(pending) ||
@@ -2137,6 +2144,18 @@ export class MarketoGatekeeperImpl
       let state = current.associatedStates?.find(item => item.state?.toLowerCase() === action.sourceState);
       if (state?.contentId !== action.contentId) {
         throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
+      }
+      if (action.sourceSnapshot && !matchesDesignerCloneSnapshot(
+        current as Record<string, unknown>,
+        resolveDesignerCloneSnapshot(
+          action.sourceSnapshot,
+          id => this.#requireDesignerId(id),
+          id => this.#requireLogicalId(id),
+        ),
+      )) {
+        throw new DesignerPreDispatchError(
+          "The Marketo designer publishable state changed after approval; nothing was dispatched.",
+        );
       }
     }
 

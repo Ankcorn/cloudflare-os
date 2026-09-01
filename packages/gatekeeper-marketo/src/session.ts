@@ -98,6 +98,8 @@ export type SessionContext = {
   observe(title: string, description: string): Promise<void>;
   /** Queue a write for approval. Resolves once submitted, not once applied. */
   submit(action: MarketoActionInput): Promise<void>;
+  /** Reject snapshot preparation after this session's account generation is replaced. */
+  assertCurrent?(): Promise<void>;
   /** Acquire another owner before handing this context to an independently-lived capability. */
   retain(): void;
   /** Release one owner. The ApprovalQueue stub is disposed with the final owner. */
@@ -2365,6 +2367,7 @@ export function makeSessionContext(options: {
   approvalQueue: RpcStub<ApprovalQueue>;
   excludeObservers?(): Promise<string[]>;
   submit(action: MarketoActionInput): Promise<void>;
+  assertCurrent?(): Promise<void>;
 }): SessionContext {
   let owners = 1;
   return {
@@ -2378,6 +2381,7 @@ export function makeSessionContext(options: {
       });
     },
     submit: options.submit,
+    assertCurrent: options.assertCurrent,
     retain: () => {
       if (owners === 0) throw new Error("Cannot retain a disposed Marketo session context.");
       owners++;

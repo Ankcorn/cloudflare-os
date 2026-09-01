@@ -482,4 +482,65 @@ describe("classic Design Studio regressions", () => {
     await studio.getEmail("10").updateMetadata({ name: "Allowed" });
     expect(submit).toHaveBeenCalledOnce();
   });
+
+  it("validates approve and unapprove against the overlaid lifecycle state", async () => {
+    let { actions, ctx } = context({
+      getEmailTemplate: async () => ({ id: 31, name: "Template", status: "draft" }),
+      getEmailTemplateContent: async () => ({ id: 31, content: "<p>Draft</p>" }),
+    });
+    let template = new MarketoDesignStudioImpl(ctx).getEmailTemplate("31");
+
+    await template.approve();
+    await expect(template.approve()).rejects.toThrow(/no draft to approve/);
+    await template.unapprove();
+    await expect(template.unapprove()).rejects.toThrow(/not approved/);
+
+    expect(actions.map(action => action.type === "designLifecycle" && action.operation))
+      .toEqual(["approve", "unapprove"]);
+    expect(actions[0]).toMatchObject({
+      snapshot: {
+        metadata: { id: "31", name: "Template", status: "draft" },
+        content: "<p>Draft</p>",
+        affectedDependents: [],
+      },
+    });
+  });
+
+  it("snapshots complete classic email publishable state", async () => {
+    let { actions, ctx } = context({
+      getEmail: async () => ({
+        id: 21,
+        name: "Launch",
+        status: "draft",
+        subject: { type: "Text", value: "Exact subject" },
+        fromName: { type: "Text", value: "Marketing" },
+        fromEmail: { type: "Text", value: "marketing@example.com" },
+        replyEmail: { type: "Text", value: "reply@example.com" },
+        operational: true,
+        isOpenTrackingDisabled: false,
+        textOnly: false,
+      }),
+      getEmailContent: async () => [{
+        htmlId: "main",
+        value: [
+          { type: "HTML", value: "<h1>Exact draft</h1>" },
+          { type: "Text", value: "Exact draft" },
+        ],
+      }],
+    });
+
+    await new MarketoDesignStudioImpl(ctx).getEmail("21").approve();
+
+    expect(actions[0]).toMatchObject({
+      snapshot: {
+        metadata: {
+          subject: "Exact subject",
+          fromEmail: "marketing@example.com",
+          settings: { operational: true, isOpenTrackingDisabled: false, textOnly: false },
+        },
+        content: [{ id: "main", html: "<h1>Exact draft</h1>", text: "Exact draft" }],
+        affectedDependents: [],
+      },
+    });
+  });
 });

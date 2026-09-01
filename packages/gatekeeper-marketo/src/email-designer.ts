@@ -628,6 +628,7 @@ abstract class DesignerAssetImpl extends RpcTarget {
 
   protected async lifecycle(operation: "createDraft" | "approve" | "unapprove" | "discard") {
     this.assertNotDeleted();
+    await this.ctx.assertCurrent?.();
     let sourceState: "draft" | "approved" = operation === "approve" || operation === "discard" ? "draft" : "approved";
     let prior = actions(this.ctx, this.kind, this.assetId)
       .filter((action): action is Extract<EmailDesignerAction, { type: "designerLifecycle" }> =>
@@ -639,9 +640,13 @@ abstract class DesignerAssetImpl extends RpcTarget {
         throw new Error(`Designer asset ${this.assetId} has a pending ${pendingState} state, not ${sourceState} content.`);
       }
       if (prior.operation === "approve" || prior.operation === "unapprove") {
+        let current = await summary(this.ctx, this.kind, this.assetId);
+        let sourceSnapshot = current.cloneSnapshot as DesignerCloneSnapshot | undefined;
+        if (!sourceSnapshot) throw new Error("The Marketo designer lifecycle source could not be snapshotted.");
         return await submitDesigner(this.ctx, {
           type: "designerLifecycle", asset: this.kind, targetId: this.assetId, operation,
-          contentId: prior.contentId, sourceState,
+          contentId: prior.contentId, sourceState, sourceSnapshot,
+          affectedDependents: await this.allAffectedDependents(),
         });
       }
       throw new Error(`Designer asset ${this.assetId} has a pending lifecycle change that must be decided first.`);
@@ -652,11 +657,24 @@ abstract class DesignerAssetImpl extends RpcTarget {
     if (!raw || String(raw.id) !== physical) throw new Error(`Marketo designer asset ${this.assetId} was not found.`);
     let state = raw.associatedStates?.find(item => item.state?.toLowerCase() === sourceState);
     if (!state?.contentId) throw new Error(`Marketo designer asset ${this.assetId} has no ${sourceState} content.`);
+    let sourceSnapshot = designerCloneSnapshot(raw as Record<string, unknown>);
+    let affectedDependents = await this.allAffectedDependents();
     await this.ctx.observe(`Read Marketo designer ${sourceState} state`, `Resolved the content version for designer asset ${this.assetId}.`);
     return await submitDesigner(this.ctx, {
       type: "designerLifecycle", asset: this.kind, targetId: this.assetId, operation,
-      contentId: state.contentId, sourceState,
+      contentId: state.contentId, sourceState, sourceSnapshot, affectedDependents,
     });
+  }
+
+  private async allAffectedDependents(): Promise<MarketoDesignerUsedBy[]> {
+    let result: MarketoDesignerUsedBy[] = [];
+    for (let pageIndex = 0; result.length <= MAX_SIMULATED_USED_BY_ITEMS; pageIndex++) {
+      let page = await this.getUsedBy(pageIndex, DESIGNER_PAGE_SIZE);
+      result.push(...page.items);
+      if (page.items.length < DESIGNER_PAGE_SIZE ||
+          page.totalItems !== undefined && result.length >= page.totalItems) return result;
+    }
+    throw new Error(`Designer lifecycle dependencies cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} records.`);
   }
 
   createDraft() { return this.lifecycle("createDraft"); }
