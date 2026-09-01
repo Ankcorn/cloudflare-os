@@ -461,6 +461,46 @@ describe("client delivery filtering", () => {
     // The stored metadata was not mutated.
     expect(meta.codeBase!.pins).toHaveLength(1);
   }));
+
+  it("worktree-only changes propose nothing: no banner, no chat-scoped gadget loads",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id, baseCommit } = await createThroughBarrier(impl, 1, c1);
+    await barrier(impl, 1, { changes: [
+      { change: { [id]: [["a.txt", { set: "edited\n" }]] } },
+    ]});
+    await barrier(impl, 1, { worktreeCommits: [{
+      worktreeId: id,
+      commit: await commitFiles(impl, { "a.txt": "edited\n" }, [baseCommit]),
+      previousHead: baseCommit,
+    }]});
+
+    // The worktree is created, edited, and committed -- as proposed as a worktree gets -- yet
+    // the chat proposes nothing a client could see or act on: worktrees have no UI, so the
+    // pending-changes affordances must not prompt for them (see proposedChangeWorkpieceIds; its
+    // doc comment covers why worktree pins can never drive this even once worktrees get UI).
+    let meta = impl.storage.chatMeta.get(1)!;
+    expect(impl.proposedChangeWorkpieceIds(1, meta)).toEqual([]);
+    expect(impl.chatMetaForClient(meta).proposedChangeWorkpieces).toBeUndefined();
+  }));
+
+  it("a mixed chat proposes only its gadget workpieces", () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let { id } = await createThroughBarrier(impl, 1, c1);
+    let gadget = impl.createGadget("Gadget", "GADGET_X", 1);
+    await barrier(impl, 1, { changes: [
+      { change: {
+        [gadget.id]: [["main.js", { set: "code\n" }]],
+        [id]: [["secret.txt", { set: "worktree content\n" }]],
+      } },
+    ]});
+
+    let meta = impl.storage.chatMeta.get(1)!;
+    expect(impl.proposedChangeWorkpieceIds(1, meta)).toEqual([gadget.id]);
+    expect(impl.chatMetaForClient(meta).proposedChangeWorkpieces).toEqual([gadget.id]);
+  }));
 });
 
 describe("worktree commit head advancements", () => {

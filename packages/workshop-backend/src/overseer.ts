@@ -916,6 +916,12 @@ type ChatModelDataRecord = {
   message: StoredAssistantMessage;
 };
 
+// A stored chat metadata row. Rows written before proposed-ness became derived (see
+// Overseer.proposedChangeWorkpieceIds) carried a cached `hasProposedChanges` flag; nothing
+// writes or reads it anymore, but old rows still hold stale values, so the stored shape admits
+// it and chatMetaForClient strips it from deliveries.
+type StoredChatMetadata = AiChatMetadata & {hasProposedChanges?: boolean};
+
 // If live change rows exist whose newest author differs from a new submission's author and the
 // stream has been idle this long, the older author's rows are materialized into their own
 // "changes" message first, keeping attribution per author (see submitCodeChange).
@@ -1247,12 +1253,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: (r) => `${r.gatekeeperId}:${r.actionKind.tag}`,
       }),
 
-      chatMeta: collection<AiChatMetadata>()({
+      chatMeta: collection<StoredChatMetadata>()({
         primaryKey: "id",
 
         // Allow quick lookup of chats with active agents.
         uniqueIndexes: {
-          byLastActive(meta: AiChatMetadata) { return meta.lastActive.valueOf(); }
+          byLastActive(meta: StoredChatMetadata) { return meta.lastActive.valueOf(); }
         }
       }),
 
@@ -2359,9 +2365,11 @@ class OverseerImpl implements AgentHooks {
       }));
       reverted = stamped.filter(g => statuses.get(g.pending!.sequence!) === "reverted");
     }
+    let reaped = false;
     for (let gadget of [...reverted, ...unstamped]) {
       try {
         await this.removeWorkpiece(gadget.id);
+        reaped = true;
       } catch (err) {
         this.logger.warn("failed to reap pending gadget", {
           event: "gadget.pending.reconcile.failed", chatId, error: err,
@@ -2380,6 +2388,18 @@ class OverseerImpl implements AgentHooks {
       for (let name of orphanNames) delete gadget.bindings[name];
       this.storage.gadgets.put(gadget);
       this.bumpVersion([gadget.id]);
+      reaped = true;
+    }
+
+    // A reap changes the chat's derived proposedChangeWorkpieces (see
+    // proposedChangeWorkpieceIds) without any chatMeta write of its own, so re-put the metadata
+    // to re-broadcast it -- notably for the revert tail, whose own meta write precedes the
+    // awaited record deletions here (see #revertChanges on why that order is fixed). A put
+    // always notifies subscribers (typed-storage doesn't compare values), and the chat may be
+    // gone by now (reconciliation runs after awaits), in which case there is nobody to update.
+    if (reaped) {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta) this.storage.chatMeta.put(meta);
     }
   }
 
@@ -3062,14 +3082,54 @@ class OverseerImpl implements AgentHooks {
         ? pins.filter(pin => !this.isWorktree(pin.gadgetId)) : pins;
   }
 
-  // A chat metadata record as delivered to clients: identical, except that worktree pins are
-  // stripped from `codeBase` (see stripWorktreeChangeEntries). Returns the input object when
-  // nothing is stripped; never mutates it.
-  chatMetaForClient(meta: AiChatMetadata): AiChatMetadata {
-    if (meta.codeBase === undefined) return meta;
-    let pins = this.stripWorktreePins(meta.codeBase.pins);
-    if (pins === meta.codeBase.pins) return meta;
-    return {...meta, codeBase: {...meta.codeBase, pins}};
+  // The gadgets this chat currently proposes changes to: pinned in the chat's current epoch (a
+  // gadget joins the pin stream when its code is first modified -- see ChatCodeBase), created
+  // provisionally by the chat, or targeted by a provisional binding edge the chat added (which
+  // changes the gadget's env even though its code is untouched). Purely derived: pins and
+  // pending records are maintained transactionally with the changes themselves (established
+  // with their rows, rolled back by revert/discard, evaporated by the accept's epoch reset), so
+  // there is no cached flag to drift out of step -- this replaces the stored
+  // `hasProposedChanges` bit and the recompute machinery that existed to fight exactly that.
+  //
+  // Deliberately gadgets-only: a worktree is *born* pinned and re-pinned at every epoch reset,
+  // so a worktree pin proves nothing about pending content -- and worktrees have no UI yet, so
+  // worktree-only changes must not prompt the user to accept or discard changes they cannot
+  // see. When worktree UI lands, worktree entries must be derived differently: from the current
+  // epoch's rows touching the worktree (the dirtiness the accept's auto-commit planning
+  // computes), pending creations, and proposed head advancements -- never from pins.
+  proposedChangeWorkpieceIds(chatId: number, meta: AiChatMetadata): WorkpieceId[] {
+    let ids = new Set<WorkpieceId>();
+    for (let pin of meta.codeBase?.pins ?? []) {
+      if (!this.isWorktree(pin.gadgetId)) ids.add(pin.gadgetId);
+    }
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.type !== "gadget" || ids.has(gadget.id)) continue;
+      if (gadget.pending?.chatId === chatId ||
+          Object.values(gadget.bindings).some(edge => edge.pending?.chatId === chatId)) {
+        ids.add(gadget.id);
+      }
+    }
+    return [...ids].toSorted((a, b) => a - b);
+  }
+
+  // A chat metadata record as delivered to clients: the stored row with the derived
+  // `proposedChangeWorkpieces` list attached (see proposedChangeWorkpieceIds), worktree pins
+  // stripped from `codeBase` (see stripWorktreeChangeEntries), and the retired
+  // `hasProposedChanges` flag dropped (see StoredChatMetadata). Never mutates the input.
+  chatMetaForClient(stored: StoredChatMetadata): AiChatMetadata {
+    let meta: StoredChatMetadata = {...stored};
+    delete meta.hasProposedChanges;
+    let proposed = this.proposedChangeWorkpieceIds(stored.id, stored);
+    if (proposed.length > 0) {
+      meta.proposedChangeWorkpieces = proposed;
+    }
+    if (meta.codeBase !== undefined) {
+      let pins = this.stripWorktreePins(meta.codeBase.pins);
+      if (pins !== meta.codeBase.pins) {
+        meta.codeBase = {...meta.codeBase, pins};
+      }
+    }
+    return meta;
   }
 
   // Broadcast one accepted row to chat subscribers (see AiChatSubscriber.changeApplied).
@@ -3134,7 +3194,6 @@ class OverseerImpl implements AgentHooks {
     }
 
     meta.lastActive = row.timestamp;
-    meta.hasProposedChanges = true;
     this.storage.chatMeta.put(meta);
     this.emitChatChangeApplied(row);
     return row;
@@ -3329,28 +3388,6 @@ class OverseerImpl implements AgentHooks {
       id: first.id,
       name: "Multiple Authors",
     };
-  }
-
-  recomputeHasProposedChanges(chatId: number,
-                              meta?: AiChatMetadata): AiChatMetadata | undefined {
-    if (!meta) {
-      meta = this.storage.chatMeta.get(chatId);
-      if (!meta) {
-        return;
-      }
-    }
-
-    // (Provisional gadget creations need no special accounting here: each is recorded on a
-    // "changes" message, which getProposedChanges() already counts.)
-    if (this.listLiveChatChanges(chatId, this.chatCodeBase(meta).generation).length > 0 ||
-        this.getProposedChanges(chatId).length > 0) {
-      meta.hasProposedChanges = true;
-    } else {
-      delete meta.hasProposedChanges;
-    }
-
-    this.storage.chatMeta.put(meta);
-    return meta;
   }
 
   // Materialize the chat's live change rows into exactly one durable "changes" message. The
@@ -4442,7 +4479,6 @@ class OverseerImpl implements AgentHooks {
         this.storage.gadgets.put(record);
       }
     }
-    this.recomputeHasProposedChanges(chatId, freshMeta);
 
     // Maybe generate gadget title if this was the first accepted code. (A merge covering only
     // binding additions to existing gadgets doesn't count: it creates no commits, so the first
@@ -4640,7 +4676,6 @@ class OverseerImpl implements AgentHooks {
     meta.lastActive = timestamp;
     this.rollbackChatCompaction(meta, revertFrom);
     this.storage.chatMeta.put(meta);
-    this.recomputeHasProposedChanges(chatId, meta);
     this.proposedChangesChanged(chatId);
 
     // Only now delete the provisional gadgets whose creation the revert rejected -- the revert
@@ -4683,7 +4718,6 @@ class OverseerImpl implements AgentHooks {
 
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
-    this.recomputeHasProposedChanges(chatId, meta);
     this.proposedChangesChanged(chatId);
   }
 
@@ -4780,10 +4814,12 @@ class OverseerImpl implements AgentHooks {
     this.getGadgetRecord(gadgetId);  // validate it exists
 
     if (chatId !== undefined) {
-      // Check if the requested chat has proposed changes. If not, then we don't want to load the
-      // chat-specific facet, we just want to load the main-branch facet.
+      // Check if the requested chat proposes changes to *this gadget* (code, provisional
+      // creation, or a provisional binding edge -- see proposedChangeWorkpieceIds). If not, load
+      // the main-branch facet: the chat context would run identical code (chatDocOwnsGadget) but
+      // as a needlessly separate instance, restarted on every proposedChangesChanged().
       let meta = this.storage.chatMeta.get(chatId);
-      if (!meta?.hasProposedChanges) {
+      if (!meta || !this.proposedChangeWorkpieceIds(chatId, meta).includes(gadgetId)) {
         chatId = undefined;
       }
     }
@@ -8010,8 +8046,8 @@ class OverseerImpl implements AgentHooks {
         // (A message's `pins` need no validation or mirroring here: pins are validated and
         // mirrored into the chat's code base when the establishing row is *appended* -- see
         // submitCodeChange / commitAgentStep -- and the message merely makes the
-        // establishment durable log history.)
-        meta.hasProposedChanges = true;
+        // establishment durable log history. Proposed-ness needs no bookkeeping either: it is
+        // derived from pins and pending records, see proposedChangeWorkpieceIds.)
         this.proposedChangesChanged(chatId);
       }
 

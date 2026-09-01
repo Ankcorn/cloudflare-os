@@ -528,9 +528,8 @@ function convertLegacyChat(
   }
 
   meta.codeBase = { pins, generation: 0, epoch: sequence, revision: 0 };
-  // A non-empty conversion change is a proposed change (uncommitted content survived the
-  // conversion); an empty one changes nothing about the chat's proposedness (pre-conversion
-  // creation-only batches may still be proposed, which the stored flag already reflects).
-  if (change !== undefined) meta.hasProposedChanges = true;
+  // Proposed-ness needs no stamping: it is derived from exactly what this conversion just wrote
+  // (see Overseer.proposedChangeWorkpieceIds) -- the pins seeded above for surviving uncommitted
+  // content, and the pending records re-stamped onto the boundary for carried creations.
   storage.chatMeta.put(meta);
 }

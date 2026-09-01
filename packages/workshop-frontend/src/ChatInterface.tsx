@@ -4450,13 +4450,22 @@ interface ChatInterfaceProps {
   onSidebarResize?: (width: number) => void;
   renderExtraTab?: () => React.ReactNode;
   onHasAnyCodeChange?: (hasAnyCode: boolean) => void;
-  onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
+  // The workpieces the selected chat proposes changes to (empty when none is selected or it
+  // proposes nothing); see AiChatMetadata.proposedChangeWorkpieces.
+  onSelectedChatProposedChangesChange?: (workpieceIds: readonly WorkpieceId[]) => void;
   constrainChatWidth?: boolean;
   onOpenGadget: (gadgetId: WorkpieceId) => void;
 
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
   // Document (or whatever) it is rather than a generic app.
   outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
+}
+
+// Whether a chat proposes changes the client can act on: the server delivers the touched
+// workpieces (worktree-only changes deliver none, deliberately -- see
+// AiChatMetadata.proposedChangeWorkpieces), so the pending-changes affordances key off this.
+function chatHasProposedChanges(meta: AiChatMetadata): boolean {
+  return (meta.proposedChangeWorkpieces?.length ?? 0) > 0;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -4632,7 +4641,7 @@ function ChatInterface({
   onSidebarResize,
   renderExtraTab,
   onHasAnyCodeChange,
-  onSelectedChatHasProposedChangesChange,
+  onSelectedChatProposedChangesChange,
   constrainChatWidth,
   onOpenGadget,
   outputOfWorkpiece,
@@ -4952,7 +4961,7 @@ function ChatInterface({
   // Notify parent when any chat has proposed changes (code written but not merged).
   const onHasAnyCodeChangeRef = useRef(onHasAnyCodeChange);
   onHasAnyCodeChangeRef.current = onHasAnyCodeChange;
-  const anyHasProposedChanges = chatList.some(c => c.hasProposedChanges);
+  const anyHasProposedChanges = chatList.some(chatHasProposedChanges);
   useEffect(() => {
     if (chatListReady) {
       onHasAnyCodeChangeRef.current?.(anyHasProposedChanges);
@@ -5092,17 +5101,22 @@ function ChatInterface({
     }
   }, [overseer, toasts]);
 
-  const onSelectedChatHasProposedChangesChangeRef = useRef(onSelectedChatHasProposedChangesChange);
-  onSelectedChatHasProposedChangesChangeRef.current = onSelectedChatHasProposedChangesChange;
+  const onSelectedChatProposedChangesChangeRef = useRef(onSelectedChatProposedChangesChange);
+  onSelectedChatProposedChangesChangeRef.current = onSelectedChatProposedChangesChange;
+  // Keyed on the list's *content*: metadata is redelivered wholesale on every lastActive bump,
+  // and pushing a fresh (but equal) array into the parent's state each time would re-render it
+  // for nothing.
+  const currentProposedWorkpieces = currentChatMetadata?.proposedChangeWorkpieces;
+  const currentProposedWorkpiecesKey = currentProposedWorkpieces?.join(",") ?? "";
+  const metadataLoaded = currentChatMetadata !== undefined;
   useEffect(() => {
-    if (selectedChatId !== null && currentChatMetadata === undefined) {
+    if (selectedChatId !== null && !metadataLoaded) {
       return;
     }
 
-    onSelectedChatHasProposedChangesChangeRef.current?.(
-      currentChatMetadata?.hasProposedChanges === true,
-    );
-  }, [currentChatMetadata?.hasProposedChanges, currentChatMetadata, selectedChatId]);
+    onSelectedChatProposedChangesChangeRef.current?.(currentProposedWorkpieces ?? []);
+    // oxlint-disable-next-line exhaustive-deps -- currentProposedWorkpieces is covered by its key.
+  }, [currentProposedWorkpiecesKey, metadataLoaded, selectedChatId]);
 
   const currentProvisionalState =
     selectedChatId !== null
@@ -7174,7 +7188,7 @@ function ChatInterface({
                             <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-pulse" />
                             Working
                           </span>
-                        ) : !isRenaming && chat.hasProposedChanges ? (
+                        ) : !isRenaming && chatHasProposedChanges(chat) ? (
                           <Tooltip content="This conversation has pending changes" asChild>
                             <span className="inline-flex flex-shrink-0 cursor-pointer items-center gap-1 text-[11px] leading-4 font-medium text-kumo-warning">
                               <span className="h-1.5 w-1.5 rounded-full bg-kumo-warning" />
@@ -8262,7 +8276,8 @@ function ChatInterface({
                           : undefined
                     }
                     draftUpdateBanner={(() => {
-                      if (!currentChatMetadata?.hasProposedChanges) return null;
+                      if (!currentChatMetadata ||
+                          !chatHasProposedChanges(currentChatMetadata)) return null;
 
                       // Accepting always merges everything the chat proposes (drafts swept in,
                       // no partial accepts -- see Overseer.mergeChanges()), so the banner needs

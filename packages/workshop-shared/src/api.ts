@@ -2234,10 +2234,19 @@ export type AiChatMetadata = {
   activeAgent?: AiChatAuthorInfo,
 
   /**
-   * If true, this chat thread has proposed changes which have not been accepted yet,
-   * including any changes that have not yet been materialized into a durable `changes` message.
+   * The workpieces to which this chat has proposed changes that have not been accepted yet
+   * (including changes not yet materialized into a durable `changes` message): gadgets whose
+   * code the chat modified, gadgets it provisionally created, and gadgets it added a binding to.
+   * Absent (or empty) when the chat proposes nothing -- the pending-changes accept/discard
+   * affordances and per-gadget draft previews key off this list. Derived server-side and
+   * delivered on metadata updates; never submitted by clients.
+   *
+   * Worktrees never appear here for now: the UI has no worktree surface yet, so worktree-only
+   * changes must not prompt the user to accept or discard changes they cannot see. (This
+   * replaces the earlier `hasProposedChanges` boolean; values of that retired field may linger
+   * in stored metadata but are never delivered as truth.)
    */
-  hasProposedChanges?: boolean;
+  proposedChangeWorkpieces?: WorkpieceId[];
 
   /** If this was started from an agent spawner, the spawner's display name. */
   spawnerName?: string;
