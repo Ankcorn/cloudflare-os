@@ -2343,15 +2343,18 @@ function escapeObservationText(value: string): string {
 export function makeSessionContext(options: {
   client(): Promise<MarketoClient>;
   approvalQueue: RpcStub<ApprovalQueue>;
+  excludeObservers?(): Promise<string[]>;
   submit(action: MarketoActionInput): Promise<void>;
 }): SessionContext {
   let owners = 1;
   return {
     client: options.client,
     observe: async (title, description) => {
+      let excludeObservers = await options.excludeObservers?.() ?? [];
       await options.approvalQueue.authorizeObservation({
         title: escapeObservationText(title),
         description: escapeObservationText(description),
+        excludeObservers: excludeObservers.length > 0 ? excludeObservers : undefined,
       });
     },
     submit: options.submit,

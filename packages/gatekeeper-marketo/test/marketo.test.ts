@@ -5529,11 +5529,16 @@ async function gatekeeperForAccount(
 }
 
 class TestApprovalQueue extends RpcTarget {
-  constructor(private readonly submit: (id: number, description: ActionDescription) => Promise<void> = async () => {}) {
+  constructor(
+    private readonly submit: (id: number, description: ActionDescription) => Promise<void> = async () => {},
+    private readonly authorize: (description: ObservationDescription) => Promise<void> = async () => {},
+  ) {
     super();
   }
 
-  async authorizeObservation(_description: ObservationDescription): Promise<void> {}
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    await this.authorize(description);
+  }
 
   async submitAction(id: number, description: ActionDescription): Promise<void> {
     await this.submit(id, description);
@@ -6180,6 +6185,146 @@ describe("collaborator credentials", () => {
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
       (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
     );
+  });
+
+  it("makes an observer persisted after the final revoke gap unusable", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    let commitStarted!: () => void;
+    let started = new Promise<void>(resolve => { commitStarted = resolve; });
+    let releaseCommit!: () => void;
+    let released = new Promise<void>(resolve => { releaseCommit = resolve; });
+    let originalCommit = UserAccount.prototype.commitCollaborator;
+    vi.spyOn(UserAccount.prototype, "commitCollaborator").mockImplementation((async function(
+      this: UserAccount,
+      ...args: Parameters<UserAccount["commitCollaborator"]>
+    ) {
+      commitStarted();
+      await released;
+      return originalCommit.apply(this, args);
+    }) as unknown as UserAccount["commitCollaborator"]);
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      providerFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let exports = (instance as unknown as { ctx: { exports: Cloudflare.Exports } }).ctx.exports;
+      let verifier = (exports as unknown as {
+        TestMarketoUserVerifier(options: { props: { userObjectId: string } }): Fetcher;
+      }).TestMarketoUserVerifier({ props: { userObjectId: observerId.toString() } });
+      let admission = instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      );
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(observerId).revoke();
+      releaseCommit();
+      await expect(admission).resolves.toBeUndefined();
+
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      await expect(session.getChannels()).rejects.toThrow(/observer's credentials were revoked/);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(0);
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      async instance => expect(await instance.getExcludedObservers()).toEqual(["observer"]),
+    );
+  });
+
+  it("blocks provider reads after an admitted observer revokes", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, observerId.toString());
+    await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+      .UserAccount.get(observerId).revoke();
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      providerFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      await expect(session.getChannels()).rejects.toThrow(/observer's credentials were revoked/);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(0);
+  });
+
+  it("excludes an observer revoked after provider dispatch begins", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, observerId.toString());
+    let providerStarted!: () => void;
+    let started = new Promise<void>(resolve => { providerStarted = resolve; });
+    let releaseProvider!: () => void;
+    let released = new Promise<void>(resolve => { releaseProvider = resolve; });
+    vi.stubGlobal("fetch", async () => {
+      providerStarted();
+      await released;
+      return Response.json({ success: true, result: [] });
+    });
+    let observations: ObservationDescription[] = [];
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue(
+        undefined,
+        async description => { observations.push(description); },
+      )) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      let read = session.getChannels();
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(observerId).revoke();
+      releaseProvider();
+      await expect(read).resolves.toEqual([]);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(observations).toHaveLength(1);
+    expect(observations[0].excludeObservers).toEqual(["observer"]);
+  });
+
+  it("allows provider reads and observations for a live observer", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, observerId.toString());
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      providerFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+    let observations: ObservationDescription[] = [];
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue(
+        undefined,
+        async description => { observations.push(description); },
+      )) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      await expect(session.getChannels()).resolves.toEqual([]);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(1);
+    expect(observations).toHaveLength(1);
+    expect(observations[0].excludeObservers).toBeUndefined();
   });
 
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
