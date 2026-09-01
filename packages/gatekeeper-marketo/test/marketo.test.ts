@@ -6327,6 +6327,65 @@ describe("collaborator credentials", () => {
     expect(observations[0].excludeObservers).toBeUndefined();
   });
 
+  it("does not transfer observer authority across an owner reconnect", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let oldObserverId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, oldObserverId.toString());
+    let replacement = { ...OWNER, clientSecret: "replacement-secret" };
+    let nonce = crypto.randomUUID();
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      async (instance, state) => {
+        await instance.prepareReconnect(nonce);
+        let get = state.storage.kv.get.bind(state.storage.kv);
+        vi.spyOn(state.storage.kv, "get").mockImplementation((key: string) =>
+          key === "callback" ? { credentialsRestored: async () => {} } : get(key));
+        await expect(instance.completeConnection(nonce, replacement)).resolves.toEqual({ kind: "ok" });
+      },
+    );
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      providerFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      await expect(session.getChannels()).rejects.toThrow(/observer's credentials were revoked/);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(0);
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      async instance => expect(await instance.getExcludedObservers()).toEqual(["observer"]),
+    );
+
+    let freshObserverId = await accountWithCredentials(replacement);
+    await expect(addObserverFromAccount(gatekeeper, freshObserverId.toString())).resolves.toBeUndefined();
+    providerFetches = 0;
+    let observations: ObservationDescription[] = [];
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue(
+        undefined,
+        async description => { observations.push(description); },
+      )) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      await expect(session.getChannels()).resolves.toEqual([]);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(1);
+    expect(observations).toHaveLength(1);
+    expect(observations[0].excludeObservers).toBeUndefined();
+  });
+
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());

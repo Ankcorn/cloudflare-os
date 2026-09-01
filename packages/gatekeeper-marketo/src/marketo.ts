@@ -390,7 +390,8 @@ type ObserverAdmissionState = AccountCredentialState & { observerEpoch: number }
 
 type StoredObserver = {
   accountId: string;
-  generation: number;
+  ownerGeneration: number;
+  collaboratorGeneration: number;
 };
 
 type AccountDispatchResult =
@@ -707,7 +708,8 @@ export class UserAccount extends DurableObject<Env> {
     if (!this.#matchesCredentialState(expected) || observerEpoch !== expected.observerEpoch) return false;
     this.ctx.storage.kv.put<StoredObserver>(`observer:${observerId}`, {
       accountId: collaboratorAccountId,
-      generation: collaboratorGeneration,
+      ownerGeneration: expected.generation,
+      collaboratorGeneration,
     });
     return true;
   }
@@ -725,13 +727,15 @@ export class UserAccount extends DurableObject<Env> {
       this.#credentialGeneration() === expectedGeneration;
   }
 
-  /** Observer IDs whose persisted collaborator credential generation is no longer authoritative. */
+  /** Observer IDs whose persisted owner or collaborator credential generation is no longer authoritative. */
   async getExcludedObservers(): Promise<string[]> {
     let prefix = "observer:";
     let observers = [...this.ctx.storage.kv.list<StoredObserver>({ prefix })];
+    let ownerGeneration = this.#credentialGeneration();
     let current = await Promise.all(observers.map(([, observer]) =>
-      userAccountStub(this.ctx.exports, observer.accountId)
-        .commitCollaboratorGeneration(observer.generation)
+      observer.ownerGeneration === ownerGeneration &&
+        userAccountStub(this.ctx.exports, observer.accountId)
+          .commitCollaboratorGeneration(observer.collaboratorGeneration)
     ));
     return observers
       .filter((_, index) => !current[index])
