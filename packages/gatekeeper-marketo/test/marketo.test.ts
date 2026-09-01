@@ -4499,6 +4499,13 @@ describe("program token names", () => {
     let submitted: MarketoActionInput[] = [];
     let ctx = stubContext({
       getCampaign: async () => ({ id: 7, name: "Campaign", type: "batch", isTriggerable: true }),
+      getSmartCampaign: async () => ({
+        id: 7,
+        name: "Campaign",
+        type: "batch",
+        isTriggerable: true,
+        folder: { id: 44, type: "Program" },
+      }),
     });
     ctx.submit = async action => void submitted.push(action);
     let campaign = new MarketoSmartCampaignImpl(ctx, 7);
