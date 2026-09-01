@@ -1284,7 +1284,10 @@ abstract class AssetImpl extends RpcTarget {
     if (this.id.startsWith("~") && this.ctx.logicalKind(this.id) !== this.kind) {
       throw new Error(`Provisional Marketo asset ${this.id} is not a ${this.kind}.`);
     }
-    let metadata = await simulatedSummary(this.ctx, this.kind, this.id, this.folderType);
+    let pending = [...this.ctx.pending()];
+    let snapshotCtx = { ...this.ctx, pending: () => pending };
+    let resolvedId = this.ctx.resolveId(this.id);
+    let metadata = await simulatedSummary(snapshotCtx, this.kind, this.id, this.folderType, pending);
     let status = metadata.status?.toLocaleLowerCase();
     if (operation === "approve" && status !== "draft" && status !== "approved with draft") {
       throw new Error(`Marketo ${this.kind} ${this.id} has no draft to approve.`);
@@ -1294,9 +1297,9 @@ abstract class AssetImpl extends RpcTarget {
     }
     let snapshot: DesignStudioLifecycleSnapshot = {
       metadata: lifecycleMetadata(metadata),
-      content: await this.lifecycleSnapshotContent(),
+      content: await handle(snapshotCtx, this.kind, this.id, this.folderType).lifecycleSnapshotContent(),
       affectedDependents: await readClassicDependents(
-        await this.ctx.client(), this.kind, physicalId(this.ctx, this.id), operation,
+        await this.ctx.client(), this.kind, resolvedId, operation,
       ),
     };
     await submitDesign(this.ctx, {
@@ -1427,11 +1430,12 @@ export async function readDesignStudioLifecycleSnapshot(
 async function readClassicDependents(
   client: MarketoClient,
   kind: Exclude<DesignStudioAssetKind, "folder" | "file">,
-  id: number,
+  id: number | undefined,
   operation: "approve" | "unapprove" | "discardDraft" | "delete",
 ): Promise<Record<string, unknown>[] | null> {
   if (operation !== "approve" && operation !== "delete") return null;
   if (kind !== "emailTemplate" && kind !== "form") return null;
+  if (id === undefined) return [];
 
   let dependents: Record<string, unknown>[] = [];
   let identities = new Map<string, string>();

@@ -2953,6 +2953,20 @@ export class MarketoGatekeeperImpl
           }
         }
       }
+      if (isDesignStudioAction(action) && action.type === "designLifecycle" &&
+          action.snapshot.affectedDependents) {
+        for (let dependent of action.snapshot.affectedDependents) {
+          let type = typeof dependent.type === "string"
+            ? dependent.type.toLowerCase().replaceAll(/[^a-z]/g, "") : "";
+          let kind: LogicalKind | undefined = type === "email" ? "email"
+            : type === "landingpage" ? "landingPage"
+              : type === "smartcampaign" ? "campaign"
+                : type === "program" ? "program" : undefined;
+          if (kind && (typeof dependent.id === "number" || typeof dependent.id === "string")) {
+            add(this.#referenceKey({ id: String(dependent.id), kind }), true);
+          }
+        }
+      }
       return resources;
     }
     if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {

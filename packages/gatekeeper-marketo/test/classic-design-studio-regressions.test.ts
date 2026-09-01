@@ -599,6 +599,68 @@ describe("classic Design Studio regressions", () => {
     });
   });
 
+  it.each([
+    ["create", "emailTemplate", "Created template", "<p>Created</p>"],
+    ["clone", "emailTemplate", "Cloned template", "<p>Source</p>"],
+    ["create", "snippet", "Created snippet", { html: "<p>Created</p>", text: "Created" }],
+    ["clone", "snippet", "Cloned snippet", { html: "<p>Source</p>", text: "Source" }],
+  ] as const)("prepares an unresolved %s %s approval from simulated state", async (mode, asset, name, content) => {
+    let getEmailTemplateUsedBy = vi.fn(async () => []);
+    let { actions, ctx } = context({
+      getEmailTemplate: async () => ({ id: 31, name: "Source", status: "approved" }),
+      getEmailTemplateContent: async () => ({ id: 31, content: "<p>Source</p>" }),
+      getEmailTemplateUsedBy,
+      getSnippet: async () => ({ id: 41, name: "Source", status: "approved" }),
+      getSnippetContent: async () => [
+        { type: "HTML", content: "<p>Source</p>" },
+        { type: "Text", content: "Source" },
+      ],
+    });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let parent = { id: "10", type: "folder" } as const;
+    let provisional = mode === "create"
+      ? asset === "emailTemplate"
+        ? await studio.createEmailTemplate(parent, { name, content: content as string })
+        : await studio.createSnippet(parent, { name, ...(content as { html: string; text: string }) })
+      : asset === "emailTemplate"
+        ? await studio.cloneEmailTemplate("31", name, parent)
+        : await studio.cloneSnippet("41", name, parent);
+
+    await provisional.approve();
+
+    expect(actions.at(-1)).toMatchObject({
+      type: "designLifecycle",
+      targetId: "~1",
+      operation: "approve",
+      snapshot: {
+        metadata: { name },
+        content,
+        affectedDependents: asset === "emailTemplate" ? [] : null,
+      },
+    });
+    expect(getEmailTemplateUsedBy).not.toHaveBeenCalled();
+  });
+
+  it("uses one complete pending-state snapshot for provisional lifecycle review", async () => {
+    let { actions, ctx } = context({});
+    let template = await new MarketoDesignStudioImpl(ctx).createEmailTemplate(
+      { id: "10", type: "folder" },
+      { name: "Initial", description: "Initial description", content: "initial" },
+    );
+    await template.updateMetadata({ name: "Final", description: "Final description" });
+    await template.updateContent("final");
+
+    await template.approve();
+
+    expect(actions.at(-1)).toMatchObject({
+      snapshot: {
+        metadata: { name: "Final", description: "Final description" },
+        content: "final",
+        affectedDependents: [],
+      },
+    });
+  });
+
   it("snapshots complete classic email publishable state", async () => {
     let { actions, ctx } = context({
       getEmail: async () => ({

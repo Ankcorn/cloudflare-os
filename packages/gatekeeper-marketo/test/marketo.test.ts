@@ -9521,6 +9521,65 @@ describe("Design Studio action lifecycle", () => {
     expect(emailRequest?.get("template")).toBe("201");
   });
 
+  it("creates then approves a provisional classic template in order", async () => {
+    let actions: DesignStudioAction[] = [
+      {
+        id: 1, type: "designCreate", asset: "emailTemplate", provisionalId: "~1",
+        parent: { id: "10", type: "Folder" },
+        input: { name: "Template", description: "Reviewed", content: "<p>Draft</p>" },
+      },
+      {
+        id: 2, type: "designLifecycle", asset: "emailTemplate", targetId: "~1", operation: "approve",
+        snapshot: {
+          metadata: { name: "Template", description: "Reviewed" },
+          content: "<p>Draft</p>",
+          affectedDependents: [],
+        },
+      },
+    ];
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      paths.push(path);
+      if (path.endsWith("/folder/10.json")) return Response.json({ success: true, result: [{
+        id: 10, name: "Destination", folderId: { id: 10, type: "Folder" }, workspace: "Default",
+      }] });
+      if (path.endsWith("/emailTemplates.json")) {
+        return Response.json({ success: true, result: [{ id: 201 }] });
+      }
+      if (path.endsWith("/emailTemplate/201/content.json")) {
+        return Response.json({ success: true, result: [{ id: 201, content: "<p>Draft</p>" }] });
+      }
+      if (path.endsWith("/emailTemplates/201/usedBy.json")) {
+        return Response.json({ success: true, result: [] });
+      }
+      return Response.json({ success: true, result: [{
+        id: 201, name: "Template", description: "Reviewed", status: "draft",
+        folder: { id: 10, type: "Folder" },
+      }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/~1 is still pending creation/);
+      expect(paths).toEqual([]);
+      await instance.applyAction(1);
+      expect(state.storage.kv.get("provisional:~1")).toBe(201);
+      await expect(instance.applyAction(2)).resolves.toBeUndefined();
+    });
+
+    expect(paths).toEqual([
+      "/rest/asset/v1/folder/10.json",
+      "/rest/asset/v1/emailTemplates.json",
+      "/rest/asset/v1/emailTemplate/201.json",
+      "/rest/asset/v1/emailTemplate/201.json",
+      "/rest/asset/v1/emailTemplate/201/content.json",
+      "/rest/asset/v1/emailTemplates/201/usedBy.json",
+      "/rest/asset/v1/emailTemplate/201/approveDraft.json",
+    ]);
+  });
+
   it("reads and sends the landing page's current source template when cloning", async () => {
     let action: DesignStudioAction = {
       id: 1,
@@ -10525,6 +10584,30 @@ describe("action dispatch lifecycle", () => {
         await expect(instance.applyAction(2)).rejects.toThrow(/designerEmail.*earlier pending mutation/);
       });
     }
+  });
+
+  it("orders classic lifecycle propagation after pending dependent mutations", async () => {
+    let actions: MarketoAction[] = [
+      { id: 1, type: "designMetadata", asset: "email", targetId: "91", patch: { name: "Pending email" } },
+      {
+        id: 2, type: "designLifecycle", asset: "emailTemplate", targetId: "31", operation: "approve",
+        snapshot: { metadata: { name: "Template" }, content: "draft", affectedDependents: [
+          { id: 91, name: "Dependent email", type: "Email" },
+        ] },
+      },
+      { id: 3, type: "designMetadata", asset: "landingPage", targetId: "92", patch: { name: "Pending page" } },
+      {
+        id: 4, type: "designLifecycle", asset: "form", targetId: "32", operation: "approve",
+        snapshot: { metadata: { name: "Form" }, content: [], affectedDependents: [
+          { id: 92, name: "Dependent page", type: "Landing Page" },
+        ] },
+      },
+    ];
+    let stub = await campaignActionGatekeeper(actions);
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/email 91.*earlier pending mutation/);
+      await expect(instance.applyAction(4)).rejects.toThrow(/landingPage 92.*earlier pending mutation/);
+    });
   });
 
   it("keeps rejected content dependents rejectable without allowing stale dispatch", async () => {
