@@ -71,7 +71,6 @@ import {
 } from "../src/business-object-actions";
 import {
   MarketoDesignStudioImpl,
-  MarketoEmailImpl,
   MarketoEmailTemplateImpl,
   MarketoLandingPageTemplateImpl,
   type DesignStudioContext,
@@ -6126,7 +6125,7 @@ describe("Design Studio scoped binding", () => {
     });
   });
 
-  it("removes staged state and releases capacity when queue submission fails", async () => {
+  it("retains a blocked, rejectable tombstone when queue submission fails", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN,
       clientId: "client",
@@ -6157,11 +6156,17 @@ describe("Design Studio scoped binding", () => {
       let studio = session as MarketoDesignStudioImpl;
       await expect(studio.getEmail("20").approve()).rejects.toThrow("approval queue unavailable");
       expect(state.storage.kv.get("pending:200")).toBeUndefined();
-      expect(state.storage.kv.get("staged:200")).toBeUndefined();
-      expect(state.storage.kv.get("staged:index")).toBeUndefined();
+      expect(state.storage.kv.get("staged:200")).toMatchObject({
+        state: "blocked", submissionActive: false,
+      });
+      expect(state.storage.kv.get<number[]>("staged:index")).toEqual([200]);
       expect(state.storage.kv.get("applying:200")).toBeUndefined();
 
       failSubmission = false;
+      await expect(studio.getEmail("21").updateMetadata({ description: "Capacity remains reserved" }))
+        .rejects.toThrow(/more than 200 pending actions/);
+      await expect(instance.applyAction(200)).rejects.toThrow(/registration failed/);
+      await instance.rejectAction(200);
       await studio.getEmail("21").updateMetadata({ description: "Uses released capacity" });
       expect(state.storage.kv.get<number[]>("pending:index")).toHaveLength(200);
       expect(state.storage.kv.get("pending:201")).toBeDefined();
@@ -6216,7 +6221,103 @@ describe("Design Studio scoped binding", () => {
     });
   });
 
-  it("records rejection delivered before queue submission returns", async () => {
+  it("retains payload while a callback prepares after queue submission fails", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    let preparationStarted!: () => void;
+    let started = new Promise<void>(resolve => { preparationStarted = resolve; });
+    let releasePreparation!: () => void;
+    let released = new Promise<void>(resolve => { releasePreparation = resolve; });
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        preparationStarted();
+        await released;
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      writes++;
+      return Response.json({ success: true, result: [{ id: 20 }] });
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let callback: Promise<void> | undefined;
+      let queue = {
+        dup() { return this; },
+        async authorizeObservation() {},
+        async submitAction(id: number) {
+          callback = instance.applyAction(id);
+          await started;
+          throw new Error("approval queue response failed");
+        },
+        [Symbol.dispose]() {},
+      } as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let submission = studio.getEmail("20").updateMetadata({ description: "Concurrent apply" });
+
+      await expect(submission).rejects.toThrow("approval queue response failed");
+      expect(state.storage.kv.get("staged:1")).toMatchObject({
+        state: "applying", submissionActive: false,
+      });
+      releasePreparation();
+      await callback;
+      expect(writes).toBe(1);
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("applied");
+
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("keeps an uncertain tombstone when queue and provider outcomes race", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString(), "design-studio");
+    let writeStarted!: () => void;
+    let started = new Promise<void>(resolve => { writeStarted = resolve; });
+    let releaseWrite!: () => void;
+    let released = new Promise<void>(resolve => { releaseWrite = resolve; });
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      writeStarted();
+      await released;
+      throw new Error("provider response lost");
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let callback: Promise<unknown> | undefined;
+      let queue = {
+        dup() { return this; },
+        async authorizeObservation() {},
+        async submitAction(id: number) {
+          callback = instance.applyAction(id).catch(error => error);
+          await started;
+          throw new Error("approval queue response failed");
+        },
+        [Symbol.dispose]() {},
+      } as unknown as RpcStub<ApprovalQueue>;
+      let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let submission = studio.getEmail("20").updateMetadata({ description: "Uncertain apply" });
+
+      await expect(submission).rejects.toThrow("approval queue response failed");
+      releaseWrite();
+      expect(await callback).toBeInstanceOf(Error);
+      expect(state.storage.kv.get("staged:1")).toMatchObject({
+        state: "applying", submissionActive: false,
+      });
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain");
+      await expect(instance.applyAction(1)).rejects.toThrow(/already dispatched/);
+      await expect(instance.rejectAction(1)).rejects.toThrow(/can no longer be rejected/);
+
+      studio[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+
+  it("cascades staged rejection, requests restart, and fails the submitting caller", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
     });
@@ -6224,22 +6325,24 @@ describe("Design Studio scoped binding", () => {
     vi.stubGlobal("fetch", async () => Response.json({ success: true, result: [] }));
 
     await runInDurableObject(gatekeeper, async (instance, state) => {
+      let restart: void | { restart: true } = undefined;
       let queue = new RpcStub(new TestApprovalQueue(async id => {
-        await instance.rejectAction(id);
+        restart = await instance.rejectAction(id);
         expect(state.storage.kv.get("pending:1")).toBeUndefined();
-        expect(state.storage.kv.get("staged:1")).toBeUndefined();
+        expect(state.storage.kv.get("staged:1")).toMatchObject({ state: "rejected" });
       })) as unknown as RpcStub<ApprovalQueue>;
       let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
-      let created = await studio.createEmailTemplate(
+      let creation = studio.createEmailTemplate(
         { id: "10", type: "folder" },
         { name: "Rejected", content: "<p>Rejected</p>" },
       );
 
+      await expect(creation).rejects.toThrow(/rejected while its approval was being submitted/);
+      expect(restart).toEqual({ restart: true });
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
       expect(state.storage.kv.get("staged:1")).toBeUndefined();
       expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
       expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([]);
-      (created as MarketoEmailTemplateImpl)[Symbol.dispose]();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
@@ -6312,14 +6415,19 @@ describe("Design Studio scoped binding", () => {
         .rejects.toThrow(/code 1003/);
       expect(writes).toBe(1);
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
-      expect(state.storage.kv.get("staged:1")).toBeUndefined();
+      expect(state.storage.kv.get("staged:1")).toMatchObject({
+        state: "blocked", submissionActive: false,
+      });
       expect(state.storage.kv.get("applying:1")).toBeUndefined();
+      await expect(instance.applyAction(1)).rejects.toThrow(/registration failed/);
+      await instance.rejectAction(1);
+      expect(state.storage.kv.get("staged:1")).toBeUndefined();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
   });
 
-  it("removes a staged dependent when its pending parent is rejected", async () => {
+  it("retains a blocked staged dependent when its pending parent is rejected", async () => {
     let accountId = await accountWithCredentials({
       endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
     });
@@ -6350,15 +6458,22 @@ describe("Design Studio scoped binding", () => {
 
       await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get("pending:1")).toBeUndefined();
-      expect(state.storage.kv.get("staged:2")).toBeUndefined();
+      expect(state.storage.kv.get("staged:2")).toMatchObject({
+        state: "blocked", blockedBy: 1, submissionActive: true,
+      });
       releaseDependent();
-      let dependentHandle = await dependent;
+      await expect(dependent).rejects.toThrow(/depends on an earlier rejected action/);
       expect(state.storage.kv.get("pending:2")).toBeUndefined();
+      expect(state.storage.kv.get("staged:2")).toMatchObject({
+        state: "blocked", blockedBy: 1, submissionActive: false,
+      });
       expect(state.storage.kv.get<number[]>("pending:index") ?? []).toEqual([]);
+      expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([2]);
+      await expect(instance.applyAction(2)).rejects.toThrow(/depends on an earlier rejected action/);
+      await expect(instance.rejectAction(2)).resolves.toEqual({ restart: true });
       expect(state.storage.kv.get<number[]>("staged:index") ?? []).toEqual([]);
 
       (parent as MarketoEmailTemplateImpl)[Symbol.dispose]();
-      (dependentHandle as MarketoEmailImpl)[Symbol.dispose]();
       studio[Symbol.dispose]();
       queue[Symbol.dispose]();
     });
@@ -6396,8 +6511,13 @@ describe("Design Studio scoped binding", () => {
       state.storage.kv.delete("pending:1");
       state.storage.kv.put("pending:index", []);
       releaseDependent();
-      await expect(dependent).rejects.toThrow(/~1 is not a emailTemplate/);
+      await expect(dependent).rejects.toThrow(/became blocked while approval was being registered/);
       expect(state.storage.kv.get("pending:2")).toBeUndefined();
+      expect(state.storage.kv.get("staged:2")).toMatchObject({
+        state: "blocked", submissionActive: false,
+      });
+      await expect(instance.applyAction(2)).rejects.toThrow(/referenced Marketo resource changed/);
+      await instance.rejectAction(2);
       expect(state.storage.kv.get("staged:2")).toBeUndefined();
 
       (parent as MarketoEmailTemplateImpl)[Symbol.dispose]();

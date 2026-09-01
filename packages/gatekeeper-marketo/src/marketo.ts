@@ -1326,8 +1326,16 @@ type MarketoGatekeeperImplProps = {
   resourceId?: number;
 };
 
-type PendingRow = { action: MarketoAction; ownerGeneration: number };
-type StagedRow = PendingRow;
+type ActionLifecycle = "submitting" | "registered" | "applying" | "rejected" | "blocked";
+type PendingRow = {
+  action: MarketoAction;
+  ownerGeneration: number;
+  state?: ActionLifecycle;
+  blockedBy?: number;
+  blockedReason?: string;
+  submissionActive?: boolean;
+};
+type StagedRow = PendingRow & { state: Exclude<ActionLifecycle, "registered">; submissionActive: boolean };
 type ApplyingState = "preparing" | "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
 /** How long a provider-derived business-object restriction suppresses another safe access probe. */
@@ -1508,33 +1516,62 @@ export class MarketoGatekeeperImpl
         this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
           action,
           ownerGeneration: credentialState.generation,
+          state: "submitting",
+          submissionActive: true,
         });
         this.ctx.storage.kv.put("staged:index", [...this.#stagedIndex(), id]);
         try {
           await queue.submitAction(id, description);
         } catch (error) {
-          // A reentrant callback may have completed the action before submitAction itself failed.
-          if (!this.ctx.storage.kv.get<StagedRow>(`staged:${id}`)) {
+          let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
+          if (!staged) {
             if (this.ctx.storage.kv.get<ApplyingState>(`applying:${id}`) === "applied") return;
-            if (!this.ctx.storage.kv.get<ApplyingState>(`applying:${id}`)) return;
             throw error;
           }
-          this.#removeStaged(id);
+          if (staged.state === "rejected") {
+            this.#removeStaged(id);
+            throw new Error("This Marketo action was rejected while its approval was being submitted.", { cause: error });
+          }
+          this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
+            ...staged,
+            state: staged.state === "applying" ? "applying" : "blocked",
+            blockedReason: staged.state === "applying" ? staged.blockedReason :
+              "Approval queue registration failed or has an uncertain outcome.",
+            submissionActive: false,
+          });
           throw error;
         }
 
         let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
         if (!staged) return;
+        if (staged.state === "rejected") {
+          this.#removeStaged(id);
+          throw new Error("This Marketo action was rejected while its approval was being submitted.");
+        }
+        if (staged.state === "applying") {
+          this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, { ...staged, submissionActive: false });
+          throw new Error("This Marketo action is still being applied by the approval queue.");
+        }
+        if (staged.state === "blocked") {
+          this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, { ...staged, submissionActive: false });
+          throw new Error(staged.blockedReason ?? "This Marketo action is blocked and cannot be promoted.");
+        }
         try {
           validateActionForDispatch(staged.action);
           this.#validateActionReferences(staged.action, false, staged.ownerGeneration);
         } catch (error) {
-          this.#removeStaged(id);
-          throw error;
+          this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
+            ...staged,
+            state: "blocked",
+            blockedReason: "A referenced Marketo resource changed while approval was being registered.",
+            submissionActive: false,
+          });
+          throw new Error("This Marketo action became blocked while approval was being registered.", { cause: error });
         }
         this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
           action: staged.action,
           ownerGeneration: staged.ownerGeneration,
+          state: "registered",
         });
         this.ctx.storage.kv.put("pending:index", [...this.#pendingIndexIncludingBlocked(), id]);
         this.#removeStaged(id);
@@ -1661,9 +1698,20 @@ export class MarketoGatekeeperImpl
           "confirm its outcome.",
       );
     }
-    let pending = this.#actionRow(actionId);
+    let stagedRow = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`) ?? stagedRow;
     if (!pending) {
       throw new Error(`No queued Marketo action with id ${actionId}.`);
+    }
+    let lifecycle = pending.state ?? (stagedRow ? "submitting" : "registered");
+    if (lifecycle === "blocked") {
+      throw new Error(pending.blockedReason ?? "This Marketo action is blocked and cannot be dispatched; reject it to resolve the approval.");
+    }
+    if (lifecycle === "rejected") {
+      throw new Error("This Marketo action was rejected and cannot be dispatched.");
+    }
+    if (lifecycle === "applying") {
+      throw new Error("This Marketo action is already being applied.");
     }
     if (this.ctx.storage.kv.get(`dependencyBlocked:${actionId}`)) {
       throw new Error("This Marketo action depends on an earlier rejected action and cannot be dispatched; reject it to resolve the approval.");
@@ -1681,6 +1729,7 @@ export class MarketoGatekeeperImpl
     validateActionForDispatch(pending.action);
     this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
     this.#validateMutationOrder(pending.action, pending.ownerGeneration);
+    this.#setActionLifecycle(actionId, "applying");
     // Resolve authentication only after every local dispatch check. Token failures cannot have
     // applied the action and remain safe to retry.
     this.#preparingActions.add(actionId);
@@ -1708,10 +1757,15 @@ export class MarketoGatekeeperImpl
       await this.#preflightCampaignOwnership(pending.action, client);
       await this.#preflightDesignerReferences(pending.action, client);
       await client.prepare();
-      if (!this.#actionRow(actionId)) {
+      let current = this.#actionRow(actionId);
+      if (!current) {
         throw new Error("This Marketo action was rejected while dispatch was being prepared.");
       }
+      if (current.state === "blocked" || current.state === "rejected") {
+        throw new Error(current.blockedReason ?? "This Marketo action was blocked while dispatch was being prepared.");
+      }
       validateActionForDispatch(pending.action);
+      this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
       let currentCredentialState = await this.#credentialState();
       if (
         currentCredentialState.generation !== credentialState.generation ||
@@ -1724,6 +1778,7 @@ export class MarketoGatekeeperImpl
       }
     } catch (error) {
       this.#preparingActions.delete(actionId);
+      this.#restoreActionAfterDefiniteFailure(actionId);
       throw error;
     }
     // Mark before the side-effecting request. A timeout can happen after Marketo accepted it, so
@@ -1833,6 +1888,7 @@ export class MarketoGatekeeperImpl
       if (this.ctx.storage.kv.get(`creationCandidate:${actionId}`) !== undefined) definitive = false;
       if (definitive) {
         this.ctx.storage.kv.delete(`applying:${actionId}`);
+        this.#restoreActionAfterDefiniteFailure(actionId);
       } else {
         this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
       }
@@ -1869,6 +1925,8 @@ export class MarketoGatekeeperImpl
           if (e.disposition === "partial") {
             this.#removeAction(actionId);
             this.ctx.storage.kv.put(`applying:${actionId}`, "partial");
+          } else {
+            this.#restoreActionAfterDefiniteFailure(actionId);
           }
         }
       }
@@ -1888,12 +1946,14 @@ export class MarketoGatekeeperImpl
     if (this.#preparingActions.has(actionId) || (applying !== undefined && applying !== "nothing-changed")) {
       throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
     }
-    if (this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`)) {
-      this.#removeStaged(actionId);
-      return;
-    }
+    let stagedRow = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
     let pendingRow = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
-    let pending = pendingRow?.action;
+    let sourceRow = pendingRow ?? stagedRow;
+    let pending = sourceRow?.action;
+    if (stagedRow?.state === "rejected") {
+      if (!stagedRow.submissionActive) this.#removeStaged(actionId);
+      return "provisionalId" in stagedRow.action ? { restart: true } : undefined;
+    }
     if (pending && (
       isDesignStudioAction(pending) && (
         pending.type === "designCreate" || pending.type === "designClone" ||
@@ -1920,7 +1980,7 @@ export class MarketoGatekeeperImpl
         for (let id of [...this.#pendingIndexIncludingBlocked(), ...this.#stagedIndex()]) {
           let stagedDependent = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
           let dependent = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`) ?? stagedDependent;
-          if (!dependent || dependent.ownerGeneration !== pendingRow?.ownerGeneration) continue;
+          if (!dependent || dependent.ownerGeneration !== sourceRow?.ownerGeneration) continue;
           let row = dependent.action;
           if (row.id <= pending.id ||
               !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row)) continue;
@@ -1938,13 +1998,33 @@ export class MarketoGatekeeperImpl
               changed = true;
             }
             recordProvisional(row);
-            if (stagedDependent) this.#removeStaged(id);
-            else this.ctx.storage.kv.put(`dependencyBlocked:${id}`, actionId);
+            if (stagedDependent) {
+              this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
+                ...stagedDependent,
+                state: "blocked",
+                blockedBy: actionId,
+                blockedReason: "This Marketo action depends on an earlier rejected action.",
+              });
+            } else {
+              this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+                ...dependent,
+                state: "blocked",
+                blockedBy: actionId,
+                blockedReason: "This Marketo action depends on an earlier rejected action.",
+              });
+              this.ctx.storage.kv.put(`dependencyBlocked:${id}`, actionId);
+            }
             blockedDependents = true;
           }
         }
       }
-      this.#removePending(actionId);
+      if (stagedRow?.submissionActive) {
+        this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...stagedRow, state: "rejected" });
+      } else if (stagedRow) {
+        this.#removeStaged(actionId);
+      } else {
+        this.#removePending(actionId);
+      }
       for (let provisional of provisionalIds) {
         this.ctx.storage.kv.delete(`${provisional.designer ? "designerProvisional" : "provisional"}:${provisional.id}`);
         this.ctx.storage.kv.delete(`provisionalKind:${provisional.id}`);
@@ -1953,7 +2033,13 @@ export class MarketoGatekeeperImpl
       if (blockedDependents || "provisionalId" in pending || !isDesignStudioAction(pending)) return { restart: true };
       return;
     }
-    this.#removePending(actionId);
+    if (stagedRow?.submissionActive) {
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...stagedRow, state: "rejected" });
+    } else if (stagedRow) {
+      this.#removeStaged(actionId);
+    } else {
+      this.#removePending(actionId);
+    }
     if (applying === undefined) this.ctx.storage.kv.delete(`applying:${actionId}`);
   }
 
@@ -2054,6 +2140,36 @@ export class MarketoGatekeeperImpl
   #actionRow(actionId: number): PendingRow | undefined {
     return this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`) ??
       this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+  }
+
+  #setActionLifecycle(actionId: number, state: ActionLifecycle): void {
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    if (pending) {
+      this.ctx.storage.kv.put<PendingRow>(`pending:${actionId}`, { ...pending, state });
+      return;
+    }
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged && state !== "registered") {
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...staged, state });
+    }
+  }
+
+  #restoreActionAfterDefiniteFailure(actionId: number): void {
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged) {
+      if (staged.state === "blocked" || staged.state === "rejected") return;
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, {
+        ...staged,
+        state: staged.submissionActive ? "submitting" : "blocked",
+        blockedReason: staged.submissionActive ? undefined :
+          "Approval registration failed while its apply callback was running.",
+      });
+      return;
+    }
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    if (pending && pending.state !== "blocked" && pending.state !== "rejected") {
+      this.ctx.storage.kv.put<PendingRow>(`pending:${actionId}`, { ...pending, state: "registered" });
+    }
   }
 
   #removeAction(actionId: number): void {
