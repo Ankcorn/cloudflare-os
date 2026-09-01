@@ -23,6 +23,7 @@ import { connectPageHtml } from "../src/connect-ui";
 import {
   assertApplied,
   assertActionResultIdentity,
+  assertActionResults,
   assertCampaignRequestResults,
   describeAction,
   executeAction,
@@ -2925,7 +2926,7 @@ describe("custom object normalization", () => {
     let body: unknown;
     vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
-      return Response.json({ success: true, result: [{ marketoGUID: "guid-1", status: "deleted" }] });
+      return Response.json({ success: true, result: [{ seq: 0, marketoGUID: "guid-1", status: "deleted" }] });
     });
     let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
 
@@ -3970,7 +3971,7 @@ describe("standard CRM business objects", () => {
     let calls: { path: string; body: unknown }[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
       calls.push({ path: new URL(url).pathname, body: JSON.parse(String(init?.body)) });
-      return Response.json({ success: true, result: [{ id: 1, status: "updated" }] });
+      return Response.json({ success: true, result: [{ seq: 0, id: 1, status: "updated" }] });
     });
     let client = new MarketoClient(ORIGIN, { getToken: async () => "t" });
     for (let kind of ["company", "opportunity", "opportunityRole", "salesPerson", "namedAccount"] as const) {
@@ -7505,7 +7506,7 @@ describe("action dispatch lifecycle", () => {
       ? Response.json({ access_token: "token", expires_in: 3600 })
       : url.includes("/describe.json")
         ? Response.json({ success: true, result: [{ name: "Opportunity", fields: [] }] })
-        : Response.json({ success: true, result: [{ marketoGUID: "g-2", status: "deleted" }] }));
+        : Response.json({ success: true, result: [{ seq: 0, marketoGUID: "g-2", status: "deleted" }] }));
     stub = await campaignActionGatekeeper(distinct);
     await runInDurableObject(stub, async instance => {
       await expect(instance.applyAction(2)).resolves.toBeUndefined();
@@ -7767,12 +7768,77 @@ describe("action dispatch lifecycle", () => {
     });
   });
 
+  const SEQUENCED_ACTIONS: MarketoAction[] = [
+    {
+      id: 1, type: "customObjectUpsert", apiName: "order",
+      records: [{ marketoGUID: "g-0" }, { marketoGUID: "g-1" }],
+    },
+    {
+      id: 1, type: "customObjectDelete", apiName: "order",
+      records: [{ marketoGUID: "g-0" }, { marketoGUID: "g-1" }], deleteBy: "idField",
+    },
+    {
+      id: 1, type: "businessObjectUpsert", kind: "opportunity",
+      records: [{ marketoGUID: "g-0" }, { marketoGUID: "g-1" }],
+      matchBy: "idField", action: "updateOnly", changedFields: [],
+    },
+    {
+      id: 1, type: "businessObjectDelete", kind: "opportunity",
+      records: [{ marketoGUID: "g-0" }, { marketoGUID: "g-1" }],
+      matchBy: "idField", changedFields: ["marketoGUID"],
+    },
+  ];
+
+  it.each(SEQUENCED_ACTIONS)("correlates reordered $type identities and statuses through seq", action => {
+    let success = action.type.endsWith("Upsert") ? "updated" : "deleted";
+    let results = [
+      { seq: 1, status: "skipped", reasons: [{ code: "1004" }] },
+      { seq: 0, marketoGUID: "g-0", status: success },
+    ];
+
+    expect(() => {
+      assertActionResults(action, results);
+      assertActionResultIdentity(action, results);
+    }).not.toThrow();
+  });
+
+  it.each(SEQUENCED_ACTIONS)("rejects incomplete or invalid $type seq sets", action => {
+    let status = action.type.endsWith("Upsert") ? "updated" : "deleted";
+    let row = (seq?: unknown) => ({ ...(seq === undefined ? {} : { seq }), status });
+    let invalidResults: unknown[][] = [
+      [row(0)],
+      [row(0), row()],
+      [row(0), row(0)],
+      [row(-1), row(1)],
+      [row(0), row(2)],
+      [row(0), row(1.5)],
+      [row(0), row("1")],
+    ];
+
+    for (let results of invalidResults) {
+      expect(() => assertActionResults(action, results)).toThrow(/outcome is uncertain/);
+    }
+  });
+
+  it("does not require or interpret seq for mutation endpoints that do not document it", () => {
+    let action: MarketoAction = { ...ACTION, personIds: [7, 8] };
+    let results = [
+      { seq: "not-used", id: 7, status: "added" },
+      { seq: 99, id: 8, status: "added" },
+    ];
+
+    expect(() => {
+      assertActionResults(action, results);
+      assertActionResultIdentity(action, results);
+    }).not.toThrow();
+  });
+
   it("validates endpoint-specific target identities and statuses", () => {
-    let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
+    let cases: [MarketoAction, { seq?: number; id?: number; marketoGUID?: string; status: string }[]][] = [
       [{ id: 1, type: "deletePerson", personId: 7 }, [{ id: 8, status: "deleted" }]],
       [{ id: 1, type: "programStatus", programId: 3, programName: "P", personIds: [7], status: "Member" }, [{ id: 7, status: "added" }]],
-      [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ marketoGUID: "g-2", status: "deleted" }]],
-      [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ marketoGUID: "g-2", status: "deleted" }]],
+      [{ id: 1, type: "businessObjectDelete", kind: "opportunity", records: [{ marketoGUID: "g-1" }], matchBy: "idField", changedFields: ["marketoGUID"] }, [{ seq: 0, marketoGUID: "g-2", status: "deleted" }]],
+      [{ id: 1, type: "customObjectDelete", apiName: "order", records: [{ marketoGUID: "g-1" }], deleteBy: "idField" }, [{ seq: 0, marketoGUID: "g-2", status: "deleted" }]],
       [{ id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", personIds: [7] }, [{ status: "scheduled" }]],
     ];
     for (let [action, results] of cases) {
@@ -7811,7 +7877,7 @@ describe("action dispatch lifecycle", () => {
 
     for (let { action, allowed } of cases) {
       for (let status of ["created", "updated", "skipped"]) {
-        let assertion = () => assertActionResultIdentity(action, [{ status }]);
+        let assertion = () => assertActionResultIdentity(action, [{ seq: 0, status }]);
         if (allowed.includes(status)) expect(assertion).not.toThrow();
         else expect(assertion).toThrow(/does not identify the approved target/);
       }
@@ -7819,17 +7885,17 @@ describe("action dispatch lifecycle", () => {
   });
 
   it("keeps upsert identity checks when the result status is permitted", () => {
-    let cases: [MarketoAction, { id?: number; marketoGUID?: string; status: string }[]][] = [
+    let cases: [MarketoAction, { seq?: number; id?: number; marketoGUID?: string; status: string }[]][] = [
       [{
         id: 1, type: "upsertPeople", records: [{ id: 7 }], upsertAction: "updateOnly", lookupField: "id",
       }, [{ id: 8, status: "updated" }]],
       [{
         id: 1, type: "businessObjectUpsert", kind: "opportunity", records: [{ marketoGUID: "g-1" }],
         matchBy: "idField", action: "updateOnly", changedFields: [],
-      }, [{ marketoGUID: "g-2", status: "updated" }]],
+      }, [{ seq: 0, marketoGUID: "g-2", status: "updated" }]],
       [{
         id: 1, type: "customObjectUpsert", apiName: "order", records: [{ marketoGUID: "g-1" }],
-      }, [{ marketoGUID: "g-2", status: "updated" }]],
+      }, [{ seq: 0, marketoGUID: "g-2", status: "updated" }]],
     ];
 
     for (let [action, results] of cases) {
@@ -8208,7 +8274,7 @@ describe("action dispatch lifecycle", () => {
       mutationCalls++;
       return mutationCalls === 1
         ? Response.json({ success: false, errors: [{ code: "1018", message: "CRM Enabled" }] })
-        : Response.json({ success: true, result: [{ id: 7, status: "updated" }] });
+        : Response.json({ success: true, result: [{ seq: 0, id: 7, status: "updated" }] });
     });
     let action: BusinessObjectAction = {
       id: 18,
@@ -8268,7 +8334,7 @@ describe("action dispatch lifecycle", () => {
         });
       }
       mutationCalls++;
-      return Response.json({ success: true, result: [{ id: 7, status: "updated" }] });
+      return Response.json({ success: true, result: [{ seq: 0, id: 7, status: "updated" }] });
     });
     let action: BusinessObjectAction = {
       id: 22, type: "businessObjectUpsert", kind: "company",
@@ -8337,7 +8403,7 @@ describe("action dispatch lifecycle", () => {
         ? Response.json({ success: true, result: [{ name: "Company", fields: [] }] })
         : Response.json({
           success: true,
-          result: [{ status: "Skipped", reasons: [{ code: "1018", message: "CRM Enabled" }] }],
+          result: [{ seq: 0, status: "Skipped", reasons: [{ code: "1018", message: "CRM Enabled" }] }],
         }));
     let action: BusinessObjectAction = {
       id: 20, type: "businessObjectDelete", kind: "company",

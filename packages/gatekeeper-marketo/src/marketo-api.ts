@@ -3087,6 +3087,7 @@ export type RawLeadField = {
 export type RawLead = { id?: number } & Record<string, unknown>;
 
 export type RawSyncResult = {
+  seq?: number;
   id?: number;
   status?: string;
   reasons?: { code?: string; message?: string }[];

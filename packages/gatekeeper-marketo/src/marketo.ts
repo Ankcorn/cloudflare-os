@@ -1373,7 +1373,7 @@ export class MarketoGatekeeperImpl
         if (pending.action.type === "campaignTrigger" || pending.action.type === "campaignSchedule") {
           assertCampaignRequestResults(pending.action, results);
         } else {
-          assertActionResults(results, expectedActionResults(pending.action));
+          assertActionResults(pending.action, results);
           assertActionResultIdentity(pending.action, results);
         }
       }

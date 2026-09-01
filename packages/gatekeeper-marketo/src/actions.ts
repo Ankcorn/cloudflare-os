@@ -344,6 +344,29 @@ function resultStatus(result: RawSyncResult): string {
   return result.status.toLowerCase();
 }
 
+function hasSubmittedRecordSequence(action: MarketoAction): boolean {
+  return action.type === "customObjectUpsert" || action.type === "customObjectDelete" ||
+    action.type === "businessObjectUpsert" || action.type === "businessObjectDelete";
+}
+
+function assertResultSequence(action: MarketoAction, results: RawSyncResult[]): void {
+  if (!hasSubmittedRecordSequence(action)) return;
+  let expected = expectedActionResults(action);
+  let sequences = new Set<number>();
+  if (results.length !== expected || results.some(result => {
+    let seq = result.seq;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0 || seq >= expected ||
+        sequences.has(seq)) return true;
+    sequences.add(seq);
+    return false;
+  })) {
+    throw new MarketoActionResultError(
+      "Marketo returned invalid submitted-record sequence indexes, so its outcome is uncertain.",
+      "uncertain",
+    );
+  }
+}
+
 const UPSERT_RESULT_STATUSES: Record<MarketoUpsertAction, string[]> = {
   createOnly: ["created", "skipped"],
   updateOnly: ["updated", "skipped"],
@@ -352,6 +375,7 @@ const UPSERT_RESULT_STATUSES: Record<MarketoUpsertAction, string[]> = {
 
 /** Correlate result identities and endpoint statuses with the approved request where Marketo supplies them. */
 export function assertActionResultIdentity(action: MarketoAction, results: RawSyncResult[]): void {
+  assertResultSequence(action, results);
   let expected: (number | string | undefined)[] | undefined;
   let identity: "id" | "marketoGUID" = "id";
   let statuses: string[] | undefined;
@@ -404,14 +428,15 @@ export function assertActionResultIdentity(action: MarketoAction, results: RawSy
     }
   }
   for (let [index, result] of results.entries()) {
+    let submittedIndex = hasSubmittedRecordSequence(action) ? result.seq! : index;
     let status = (action.type === "campaignTrigger" || action.type === "campaignSchedule") &&
         result.status === undefined
       ? undefined
       : resultStatus(result);
     if (statuses && status !== undefined && !statuses.includes(status)) identityError(action);
-    // Marketo commonly omits identity fields for skipped rows. Exact result count and ordering
-    // still correlate them with the input, and no target mutation was reported for that row.
-    if (expected && status !== "skipped" && result[identity] !== expected[index]) identityError(action);
+    // Marketo commonly omits identity fields for skipped rows. The endpoint's result correlation
+    // still identifies the input, and no target mutation was reported for that row.
+    if (expected && status !== "skipped" && result[identity] !== expected[submittedIndex]) identityError(action);
   }
 }
 
@@ -493,15 +518,16 @@ export function expectedActionResults(action: MarketoAction): number {
 
 /** Validate the per-record outcomes returned for an action. */
 export function assertActionResults(
+  action: MarketoAction,
   results: unknown[],
-  expected = results.length,
 ): asserts results is RawSyncResult[] {
-  assertResultShapes(results, expected, true);
+  assertResultShapes(results, expectedActionResults(action), true);
+  assertResultSequence(action, results);
 }
 
 /** Fail unless Marketo reports a complete, non-skipped result. */
 export function assertApplied(results: unknown[], expected = results.length): void {
-  assertActionResults(results, expected);
+  assertResultShapes(results, expected, true);
   let skipped = results.filter(r => resultStatus(r) === "skipped");
   if (skipped.length === 0) return;
   let codes = [
