@@ -862,7 +862,7 @@ export class UserAccount extends DurableObject<Env> {
         observerId,
         ownerAccountId,
       });
-      let result = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
+      let rpcResult = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
         bindingId,
         observerId,
         expected,
@@ -870,6 +870,17 @@ export class UserAccount extends DurableObject<Env> {
         expectedGeneration,
         admissionId,
       );
+      let result: CollaboratorCommitResult;
+      try {
+        result = rpcResult.committed
+          ? {
+              committed: true,
+              ...(rpcResult.replaced ? { replaced: { ...rpcResult.replaced } } : {}),
+            }
+          : { committed: false };
+      } finally {
+        disposeRpcResult(rpcResult);
+      }
       if (!result.committed) {
         this.ctx.storage.kv.delete(key);
         return false;
