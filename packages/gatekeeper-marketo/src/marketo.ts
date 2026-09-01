@@ -407,14 +407,21 @@ function copyCredentialState(state: AccountCredentialState): AccountCredentialSt
   };
 }
 
-function sameCredentialState(left: AccountCredentialState, right: AccountCredentialState): boolean {
-  return left.generation === right.generation && left.credentials !== undefined &&
-    right.credentials !== undefined && left.credentials.endpoint === right.credentials.endpoint &&
-    left.credentials.clientId === right.credentials.clientId &&
-    left.credentials.clientSecret === right.credentials.clientSecret;
-}
-
 export class UserAccount extends DurableObject<Env> {
+  #credentialLifecycle = Promise.resolve();
+
+  async #withCredentialLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    let previous = this.#credentialLifecycle;
+    let release!: () => void;
+    this.#credentialLifecycle = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   #credentialGeneration(): number {
     return this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0;
   }
@@ -680,6 +687,29 @@ export class UserAccount extends DurableObject<Env> {
     }
   }
 
+  /** Verify and admit a collaborator without allowing revoke to interleave with the decision. */
+  async authorizeCollaborator(
+    verifier: Fetcher<MarketoUserVerifierApi>,
+  ): Promise<{ valid: boolean } | { error: TokenCacheError }> {
+    return await this.#withCredentialLifecycle(async () => {
+      let credentials = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+      if (!credentials) return { valid: false };
+      let fingerprint = await credentialFingerprint(credentials);
+      let verification = await verifier.hasLiveCredential(
+        credentials.endpoint,
+        credentials.clientId,
+        fingerprint,
+      );
+      try {
+        return "error" in verification
+          ? { error: { ...verification.error } }
+          : { valid: verification.valid };
+      } finally {
+        disposeRpcResult(verification);
+      }
+    });
+  }
+
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
     let current = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
     return this.#credentialGeneration() === expected.generation && current !== undefined &&
@@ -695,10 +725,12 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
-    let generation = this.#advanceCredentialGeneration();
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
-    this.ctx.storage.kv.put("credentialGeneration", generation);
+    await this.#withCredentialLifecycle(async () => {
+      let generation = this.#advanceCredentialGeneration();
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.ctx.storage.kv.put("credentialGeneration", generation);
+    });
   }
 
   async alarm(): Promise<void> {
@@ -1279,21 +1311,9 @@ export class MarketoGatekeeperImpl
   }
 
   async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    let ownerState = await this.#credentialState();
-    let credentials = ownerState.credentials;
-    if (!credentials) {
-      throw new Error("The Marketo account behind this binding has been disconnected.");
-    }
-    let fingerprint = await credentialFingerprint(credentials);
-    if (!sameCredentialState(ownerState, await this.#credentialState())) {
-      throw new Error("The Marketo account changed while collaborator access was being verified.");
-    }
     let verifier = user as unknown as Fetcher<MarketoUserVerifierApi>;
-    let verification = await verifier.hasLiveCredential(
-      credentials.endpoint,
-      credentials.clientId,
-      fingerprint,
-    );
+    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let verification = await account.authorizeCollaborator(verifier);
     try {
       if ("error" in verification) {
         throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });

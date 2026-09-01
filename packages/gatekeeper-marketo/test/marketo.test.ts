@@ -6013,19 +6013,22 @@ describe("collaborator credentials", () => {
     });
   });
 
-  it("does not verify a collaborator after owner revoke completes during fingerprinting", async () => {
+  it("serializes owner revoke with in-flight collaborator verification", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
     let observerId = await accountWithCredentials(OWNER);
-    let fingerprintStarted!: () => void;
-    let started = new Promise<void>(resolve => { fingerprintStarted = resolve; });
-    let releaseFingerprint!: () => void;
-    let released = new Promise<void>(resolve => { releaseFingerprint = resolve; });
-    let digest = crypto.subtle.digest.bind(crypto.subtle);
-    vi.spyOn(crypto.subtle, "digest").mockImplementation(async (...args) => {
-      fingerprintStarted();
+    let verificationStarted!: () => void;
+    let started = new Promise<void>(resolve => { verificationStarted = resolve; });
+    let releaseVerification!: () => void;
+    let released = new Promise<void>(resolve => { releaseVerification = resolve; });
+    let originalVerification = MarketoUserVerifier.prototype.hasLiveCredential;
+    vi.spyOn(MarketoUserVerifier.prototype, "hasLiveCredential").mockImplementation(async function(
+      this: MarketoUserVerifier,
+      ...args: Parameters<MarketoUserVerifier["hasLiveCredential"]>
+    ) {
+      verificationStarted();
       await released;
-      return await digest(...args);
+      return await originalVerification.apply(this, args);
     });
     let fetches = 0;
     vi.stubGlobal("fetch", async () => {
@@ -6043,13 +6046,17 @@ describe("collaborator credentials", () => {
         verifier as unknown as Fetcher<GatekeeperUserVerifier>,
       );
       await started;
-      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
-        .UserAccount.get(ownerId).revoke();
-      releaseFingerprint();
+      let revokeSettled = false;
+      let revoke = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(ownerId).revoke().then(() => { revokeSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(revokeSettled).toBe(false);
+      releaseVerification();
 
-      await expect(admission).rejects.toThrow(/account changed/);
+      await expect(admission).resolves.toBeUndefined();
+      await revoke;
     });
-    expect(fetches).toBe(0);
+    expect(fetches).toBe(1);
   });
 
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
