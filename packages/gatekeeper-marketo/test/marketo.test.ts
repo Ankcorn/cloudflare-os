@@ -3130,7 +3130,7 @@ describe("custom object normalization", () => {
       .rejects.toThrow(/leadID/);
   });
 
-  it("rejects custom-object rows outside scalar and compound filter keys before observation", async () => {
+  it("rejects custom-object rows outside scalar and compound filter keys before record observation", async () => {
     let notes: string[] = [];
     let scalar = new MarketoCustomObjectImpl(stubContext({
       queryCustomObject: async () => [{ marketoGUID: "g1", sourceID: "other" }],
@@ -3147,7 +3147,10 @@ describe("custom object normalization", () => {
     }, notes), "orderStatus");
     await expect(compound.queryByDedupeKeys([{ sourceID: "source-1", leadID: 7 }], ["status"]))
       .rejects.toThrow(/outside the requested dedupe keys/);
-    expect(notes).toEqual([]);
+    expect(notes).toEqual([
+      "Read schema of Marketo custom object `orderStatus`",
+      "Read the field schema of custom object `orderStatus`.",
+    ]);
   });
 
   it.each([
@@ -3157,7 +3160,7 @@ describe("custom object normalization", () => {
       { marketoGUID: "g1", sourceID: "source-1" },
       { marketoGUID: "g1", sourceID: "source-1" },
     ]],
-  ])("rejects %s custom-object GUIDs before observation", async (_label, rows) => {
+  ])("rejects %s custom-object GUIDs before record observation", async (_label, rows) => {
     let notes: string[] = [];
     let scalar = new MarketoCustomObjectImpl(stubContext({
       queryCustomObject: async () => rows,
@@ -3170,7 +3173,27 @@ describe("custom object normalization", () => {
     }, notes), "orderStatus");
     await expect(compound.queryByDedupeKeys([{ sourceID: "source-1", leadID: 7 }]))
       .rejects.toThrow(/marketoGUID/);
-    expect(notes).toEqual([]);
+    expect(notes).toEqual([
+      "Read schema of Marketo custom object `orderStatus`",
+      "Read the field schema of custom object `orderStatus`.",
+    ]);
+  });
+
+  it("does not reveal compound dedupe fields when schema observation is denied", async () => {
+    let queried = false;
+    let ctx = stubContext({
+      describeCustomObject: async () => SCHEMA,
+      queryCustomObjectByDedupeKeys: async () => {
+        queried = true;
+        return [];
+      },
+    });
+    ctx.observe = async () => { throw new Error("Observation denied."); };
+    let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
+
+    await expect(object.queryByDedupeKeys([{ sourceID: "source-1" }]))
+      .rejects.toThrow("Observation denied.");
+    expect(queried).toBe(false);
   });
 
   it("uses omitted scalar filter fields internally without widening the public projection", async () => {
@@ -3217,11 +3240,13 @@ describe("custom object normalization", () => {
 
   it("requires every schema dedupe field before submitting a custom-object delete", async () => {
     let submitted: MarketoActionInput[] = [];
-    let object = new MarketoCustomObjectImpl(makeSessionContext({
+    let ctx = makeSessionContext({
       client: async () => ({ describeCustomObject: async () => SCHEMA }) as unknown as MarketoClient,
       approvalQueue: {} as never,
       submit: async action => void submitted.push(action),
-    }), "orderStatus");
+    });
+    ctx.observe = async () => {};
+    let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
 
     await expect(object.delete([{ sourceID: "source-1" }])).rejects.toThrow(/leadID/);
     await expect(object.delete([{ sourceID: "source-1", leadID: null }])).rejects.toThrow(/leadID/);
@@ -3233,6 +3258,75 @@ describe("custom object normalization", () => {
       apiName: "orderStatus",
       deleteBy: "dedupeFields",
       records: [{ sourceID: "source-1", leadID: 7, ignored: "preserved" }],
+    }]);
+  });
+
+  it.each(["createOrUpdate", "delete"] as const)(
+    "authorizes schema observation before validating or submitting custom-object %s",
+    async operation => {
+      let events: string[] = [];
+      let submitted: MarketoActionInput[] = [];
+      let ctx = makeSessionContext({
+        client: async () => ({
+          describeCustomObject: async () => {
+            events.push("schema");
+            return SCHEMA;
+          },
+        }) as unknown as MarketoClient,
+        approvalQueue: {} as never,
+        submit: async action => {
+          events.push("submit");
+          submitted.push(action);
+        },
+      });
+      ctx.observe = async () => void events.push("observe");
+      let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
+
+      await object[operation]([{ sourceID: "source-1", leadID: 7 }]);
+
+      expect(events).toEqual(["schema", "observe", "submit"]);
+      expect(submitted).toHaveLength(1);
+    },
+  );
+
+  it.each(["createOrUpdate", "delete"] as const)(
+    "does not reveal missing custom-object dedupe fields or submit %s when schema observation is denied",
+    async operation => {
+      let submitted: MarketoActionInput[] = [];
+      let ctx = makeSessionContext({
+        client: async () => ({ describeCustomObject: async () => SCHEMA }) as unknown as MarketoClient,
+        approvalQueue: {} as never,
+        submit: async action => void submitted.push(action),
+      });
+      ctx.observe = async () => { throw new Error("Observation denied."); };
+      let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
+
+      await expect(object[operation]([{ sourceID: "source-1" }])).rejects.toThrow("Observation denied.");
+      expect(submitted).toEqual([]);
+    },
+  );
+
+  it("requires every schema dedupe field before submitting a custom-object upsert", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = makeSessionContext({
+      client: async () => ({ describeCustomObject: async () => SCHEMA }) as unknown as MarketoClient,
+      approvalQueue: {} as never,
+      submit: async action => void submitted.push(action),
+    });
+    let observed = 0;
+    ctx.observe = async () => void observed++;
+    let object = new MarketoCustomObjectImpl(ctx, "orderStatus");
+
+    await expect(object.createOrUpdate([{ sourceID: "source-1" }])).rejects.toThrow(/leadID/);
+    await expect(object.createOrUpdate([{ sourceID: "source-1", leadID: null }])).rejects.toThrow(/leadID/);
+    expect(observed).toBe(2);
+    expect(submitted).toEqual([]);
+
+    await object.createOrUpdate([{ sourceID: "source-1", leadID: 7, status: "paid" }]);
+    expect(submitted).toEqual([{
+      type: "customObjectUpsert",
+      apiName: "orderStatus",
+      records: [{ sourceID: "source-1", leadID: 7, status: "paid" }],
     }]);
   });
 

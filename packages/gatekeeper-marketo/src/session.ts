@@ -22,6 +22,7 @@ import {
   type RawCampaignAsset,
   type RawChannel,
   type RawCustomObjectField,
+  type RawCustomObjectSchema,
   type RawLead,
   type RawList,
   type RawProgram,
@@ -1541,13 +1542,18 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     }
   }
 
-  async describe(): Promise<MarketoCustomObjectSchema> {
-    let schema = await (await this.#ctx.client()).describeCustomObject(this.#apiName);
+  async #readSchema(client: MarketoClient): Promise<RawCustomObjectSchema> {
+    let schema = await client.describeCustomObject(this.#apiName);
     if (!schema) throw notFound("custom object", `"${this.#apiName}"`);
     await this.#ctx.observe(
       `Read schema of Marketo custom object \`${this.#apiName}\``,
       `Read the field schema of custom object \`${this.#apiName}\`.`,
     );
+    return schema;
+  }
+
+  async describe(): Promise<MarketoCustomObjectSchema> {
+    let schema = await this.#readSchema(await this.#ctx.client());
     let searchableFieldGroups = schema.searchableFields ?? [];
     let searchableFields = [...new Set(searchableFieldGroups.flatMap(group =>
       group.length === 1 ? group : []))];
@@ -1605,8 +1611,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
   ): Promise<Record<string, unknown>[]> {
     requireRecords(keys);
     let client = await this.#ctx.client();
-    let schema = await client.describeCustomObject(this.#apiName);
-    if (!schema) throw notFound("custom object", `"${this.#apiName}"`);
+    let schema = await this.#readSchema(client);
     let dedupeFields = schema.dedupeFields ?? [];
     let isSearchable = dedupeFields.length > 1 && (schema.searchableFields ?? []).some(group =>
       group.length === dedupeFields.length && group.every((field, index) => field === dedupeFields[index]));
@@ -1653,6 +1658,18 @@ export class MarketoCustomObjectImpl extends RpcTarget {
 
   async createOrUpdate(records: Record<string, unknown>[]): Promise<void> {
     requireRecords(records);
+    let dedupeFields = (await this.#readSchema(await this.#ctx.client())).dedupeFields ?? [];
+    if (dedupeFields.length === 0) {
+      throw new Error("This custom object does not expose dedupe fields.");
+    }
+    records.forEach((record, index) => {
+      for (let field of dedupeFields) {
+        let value = record[field];
+        if (value === undefined || value === null || value === "") {
+          throw new Error(`Create or update record ${index + 1} requires non-null dedupe field \`${field}\`.`);
+        }
+      }
+    });
     await this.#ctx.submit({ type: "customObjectUpsert", apiName: this.#apiName, records });
   }
 
@@ -1672,9 +1689,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
         return { marketoGUID: record.marketoGUID };
       });
     } else {
-      let schema = await (await this.#ctx.client()).describeCustomObject(this.#apiName);
-      if (!schema) throw notFound("custom object", `"${this.#apiName}"`);
-      let dedupeFields = schema.dedupeFields ?? [];
+      let dedupeFields = (await this.#readSchema(await this.#ctx.client())).dedupeFields ?? [];
       if (dedupeFields.length === 0) {
         throw new Error("This custom object does not expose dedupe fields.");
       }
