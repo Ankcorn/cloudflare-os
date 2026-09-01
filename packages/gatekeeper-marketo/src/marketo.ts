@@ -417,6 +417,9 @@ type AccountDispatchResult =
   | { ok: false; credentialChanged: true };
 
 type AccountTokenResult<T> = TokenCacheResult<T> | { ok: false; credentialChanged: true };
+type ObservationAuthorityResult =
+  | { ok: true; excludeObservers: string[] }
+  | { ok: false; credentialChanged: true };
 
 function disposeRpcResult(value: unknown): void {
   if (typeof value !== "object" || value === null) return;
@@ -849,6 +852,16 @@ export class UserAccount extends DurableObject<Env> {
       excluded.push(key.slice(revokedPrefix.length));
     }
     return [...new Set(excluded)];
+  }
+
+  /** Validate a session credential generation and return its current observation exclusions. */
+  async getObservationAuthority(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): Promise<ObservationAuthorityResult> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    let excludeObservers = await this.getExcludedObservers();
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    return { ok: true, excludeObservers };
   }
 
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
@@ -1420,6 +1433,11 @@ export class MarketoGatekeeperImpl
     // Stubs passed as RPC arguments are disposed when the call returns, so keep our own handle.
     let queue = approvalQueue.dup();
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let expectedCredentialState = { ...credentialState, credentials };
+    let pendingActions = () => this.#pendingIndex()
+      .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`))
+      .filter((row): row is PendingRow => row?.ownerGeneration === credentialState.generation)
+      .map(row => row.action);
     let sessionCtx = makeSessionContext({
       client: () => this.#client(credentialState),
       approvalQueue: queue,
@@ -1429,15 +1447,18 @@ export class MarketoGatekeeperImpl
         }
       },
       excludeObservers: async () => {
-        let excluded = await account.getExcludedObservers();
+        let authority = await account.getObservationAuthority(expectedCredentialState);
         try {
-          return [...excluded];
+          if (!authority.ok) {
+            throw new Error("This Marketo session belongs to an older account credential generation.");
+          }
+          return [...authority.excludeObservers];
         } finally {
-          disposeRpcResult(excluded);
+          disposeRpcResult(authority);
         }
       },
       submit: async (body: MarketoActionInput) => {
-        if (!await account.isCredentialStateCurrent({ ...credentialState, credentials })) {
+        if (!await account.isCredentialStateCurrent(expectedCredentialState)) {
           throw new Error("This Marketo session belongs to an older account credential generation.");
         }
         if ((body.type === "businessObjectUpsert" || body.type === "businessObjectDelete") &&
@@ -1450,7 +1471,7 @@ export class MarketoGatekeeperImpl
         }
         let id = this.#nextActionId();
         let action = { ...body, id } as MarketoAction;
-        this.#validateActionReferences(action, false);
+        this.#validateActionReferences(action, false, credentialState.generation);
         let description = describeActionForSubmission(action);
         this.#submittingActions.add(id);
         try {
@@ -1472,22 +1493,18 @@ export class MarketoGatekeeperImpl
         this.ctx.storage.kv.put("counter:nextProvisionalId", next);
         return `~${next}`;
       },
-      pending: () => this.#pendingIndex()
-        .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action)
+      pending: () => pendingActions()
         .filter((action): action is DesignStudioAction => Boolean(action && isDesignStudioAction(action))),
       resolveId: id => this.#resolveLogicalId(id),
-      logicalKind: id => this.#logicalKind(id),
+      logicalKind: id => this.#logicalKind(id, credentialState.generation),
       submitDesign: async body => await sessionCtx.submit(body),
-      pendingCampaign: () => this.#pendingIndex()
-        .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action)
+      pendingCampaign: () => pendingActions()
         .filter((action): action is CampaignAction => Boolean(action && isCampaignAction(action))),
       submitCampaign: async body => await sessionCtx.submit(body),
-      pendingProgram: () => this.#pendingIndex()
-        .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action)
+      pendingProgram: () => pendingActions()
         .filter((action): action is ProgramAction => Boolean(action && isProgramAction(action))),
       submitProgram: async body => await sessionCtx.submit(body),
-      pendingDesigner: () => this.#pendingIndex()
-        .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action)
+      pendingDesigner: () => pendingActions()
         .filter((action): action is EmailDesignerAction => Boolean(action && isEmailDesignerAction(action))),
       resolveAssetId: id => this.#resolveLogicalId(id),
       resolveDesignerId: id => this.#resolveDesignerId(id),
@@ -1609,8 +1626,8 @@ export class MarketoGatekeeperImpl
     if (this.ctx.storage.kv.get(`applying:${actionId}`)) {
       throw new Error("This Marketo action was already dispatched and cannot be repeated.");
     }
-    this.#validateActionReferences(pending.action, true);
-    this.#validateMutationOrder(pending.action);
+    this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
+    this.#validateMutationOrder(pending.action, pending.ownerGeneration);
     validateActionForDispatch(pending.action);
     // Resolve authentication only after every local dispatch check. Token failures cannot have
     // applied the action and remain safe to retry.
@@ -1819,7 +1836,8 @@ export class MarketoGatekeeperImpl
     if (this.#preparingActions.has(actionId) || (applying !== undefined && applying !== "nothing-changed")) {
       throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
     }
-    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
+    let pendingRow = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    let pending = pendingRow?.action;
     if (pending && (
       isDesignStudioAction(pending) && (
         pending.type === "designCreate" || pending.type === "designClone" ||
@@ -1844,8 +1862,10 @@ export class MarketoGatekeeperImpl
       while (changed) {
         changed = false;
         for (let id of this.#pendingIndexIncludingBlocked()) {
-          let row = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`)?.action;
-          if (!row || row.id <= pending.id ||
+          let dependent = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`);
+          if (!dependent || dependent.ownerGeneration !== pendingRow?.ownerGeneration) continue;
+          let row = dependent.action;
+          if (row.id <= pending.id ||
               !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row)) continue;
           let sameFamily = this.#sameActionFamily(pending, row);
           let depends = this.#actionReferences(row).some(reference =>
@@ -1976,11 +1996,13 @@ export class MarketoGatekeeperImpl
     return this.ctx.storage.kv.get<number>(`provisional:${id}`);
   }
 
-  #logicalKind(id: string): LogicalKind | undefined {
+  #logicalKind(id: string, ownerGeneration?: number): LogicalKind | undefined {
     let stored = this.ctx.storage.kv.get<LogicalKind>(`provisionalKind:${id}`);
     if (stored) return stored;
     for (let actionId of this.#pendingIndex()) {
-      let action = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
+      let row = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+      if (ownerGeneration !== undefined && row?.ownerGeneration !== ownerGeneration) continue;
+      let action = row?.action;
       if (action && isDesignStudioAction(action) &&
           (action.type === "designCreate" || action.type === "designClone") &&
           action.provisionalId === id) {
@@ -2026,64 +2048,61 @@ export class MarketoGatekeeperImpl
     return resolved;
   }
 
-  #validateActionReferences(action: MarketoAction, ready: boolean): void {
-    if (isDesignStudioAction(action)) this.#validateDesignReferences(action, ready);
-    if (isCampaignAction(action)) this.#validateCampaignReferences(action, ready);
-    if (isProgramAction(action)) this.#validateProgramReferences(action, ready);
-    if (isEmailDesignerAction(action)) this.#validateDesignerReferences(action, ready);
-    if ((action.type === "campaignTrigger" || action.type === "campaignSchedule") && action.programId !== undefined) {
-      this.#validateLogicalReference(action.programId, "program", ready);
-    }
+  #validateActionReferences(action: MarketoAction, ready: boolean, ownerGeneration: number): void {
+    if (isDesignStudioAction(action)) this.#validateDesignReferences(action, ready, ownerGeneration);
+    if (isCampaignAction(action)) this.#validateCampaignReferences(action, ready, ownerGeneration);
+    if (isProgramAction(action)) this.#validateProgramReferences(action, ready, ownerGeneration);
+    if (isEmailDesignerAction(action)) this.#validateDesignerReferences(action, ready, ownerGeneration);
   }
 
-  #validateLogicalReference(id: string, kind: LogicalKind, ready: boolean): void {
-    if (id.startsWith("~") && this.#logicalKind(id) !== kind) {
+  #validateLogicalReference(id: string, kind: LogicalKind, ready: boolean, ownerGeneration: number): void {
+    if (id.startsWith("~") && this.#logicalKind(id, ownerGeneration) !== kind) {
       throw new Error(`Provisional Marketo asset ${id} is not a ${kind}.`);
     }
     if (ready) this.#requireLogicalId(id);
   }
 
-  #validateDesignReferences(action: DesignStudioAction, ready: boolean): void {
+  #validateDesignReferences(action: DesignStudioAction, ready: boolean, ownerGeneration: number): void {
     if ((action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
         action.type === "designClone" && action.asset === "emailTemplate") && action.parent.type !== "Folder") {
       throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
     }
     if ("targetId" in action) {
-      this.#validateLogicalReference(action.targetId, action.type === "designDeleteFolder" ? "folder" : action.asset, ready);
+      this.#validateLogicalReference(action.targetId, action.type === "designDeleteFolder" ? "folder" : action.asset, ready, ownerGeneration);
     }
     if (action.type === "designClone") {
-      this.#validateLogicalReference(action.sourceId, action.asset, ready);
-      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
+      this.#validateLogicalReference(action.sourceId, action.asset, ready, ownerGeneration);
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
     }
     if (action.type === "designCreate") {
-      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
       if (action.input.templateId) {
         let templateKind: LogicalKind = action.asset === "email" ? "emailTemplate" : "landingPageTemplate";
-        this.#validateLogicalReference(action.input.templateId, templateKind, ready);
+        this.#validateLogicalReference(action.input.templateId, templateKind, ready, ownerGeneration);
       }
     }
   }
 
-  #validateCampaignReferences(action: CampaignAction, ready: boolean): void {
-    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "campaign", ready);
-    if (action.type === "campaignLifecycle" && action.programId !== undefined) {
-      this.#validateLogicalReference(action.programId, "program", ready);
+  #validateCampaignReferences(action: CampaignAction, ready: boolean, ownerGeneration: number): void {
+    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "campaign", ready, ownerGeneration);
+    if ("programId" in action && action.programId !== undefined) {
+      this.#validateLogicalReference(action.programId, "program", ready, ownerGeneration);
     }
-    if (action.type === "campaignClone") this.#validateLogicalReference(action.sourceId, "campaign", ready);
+    if (action.type === "campaignClone") this.#validateLogicalReference(action.sourceId, "campaign", ready, ownerGeneration);
     if (action.type === "campaignCreate" || action.type === "campaignClone") {
-      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready);
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
     }
   }
 
-  #validateProgramReferences(action: ProgramAction, ready: boolean): void {
-    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "program", ready);
-    if (action.type === "programClone") this.#validateLogicalReference(action.sourceId, "program", ready);
+  #validateProgramReferences(action: ProgramAction, ready: boolean, ownerGeneration: number): void {
+    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "program", ready, ownerGeneration);
+    if (action.type === "programClone") this.#validateLogicalReference(action.sourceId, "program", ready, ownerGeneration);
     if (action.type === "programCreate" || action.type === "programClone") {
-      this.#validateLogicalReference(action.parentId, "folder", ready);
+      this.#validateLogicalReference(action.parentId, "folder", ready, ownerGeneration);
     }
   }
 
-  #validateDesignerReferences(action: EmailDesignerAction, ready: boolean): void {
+  #validateDesignerReferences(action: EmailDesignerAction, ready: boolean, ownerGeneration: number): void {
     if (action.type === "designerClone" && !this.#validDesignerCloneSnapshot(action.sourceSnapshot)) {
       throw new Error("A persisted Marketo designer clone is missing its complete source snapshot.");
     }
@@ -2102,10 +2121,10 @@ export class MarketoGatekeeperImpl
     let appData = body?.appData && typeof body.appData === "object" && !Array.isArray(body.appData)
       ? Object.fromEntries(Object.entries(body.appData))
       : undefined;
-    if (typeof appData?.folderId === "string") this.#validateLogicalReference(appData.folderId, "folder", ready);
-    if (typeof appData?.programId === "string") this.#validateLogicalReference(appData.programId, "program", ready);
+    if (typeof appData?.folderId === "string") this.#validateLogicalReference(appData.folderId, "folder", ready, ownerGeneration);
+    if (typeof appData?.programId === "string") this.#validateLogicalReference(appData.programId, "program", ready, ownerGeneration);
     for (let reference of references) {
-      if (reference.id.startsWith("~") && this.#logicalKind(reference.id) !== reference.kind) {
+      if (reference.id.startsWith("~") && this.#logicalKind(reference.id, ownerGeneration) !== reference.kind) {
         throw new Error(`Provisional Marketo asset ${reference.id} is not a ${reference.kind}.`);
       }
       if (ready) this.#requireDesignerId(reference.id);
@@ -2311,11 +2330,13 @@ export class MarketoGatekeeperImpl
       ? Reflect.get(item, "value") : undefined;
   }
 
-  #validateMutationOrder(action: MarketoAction): void {
+  #validateMutationOrder(action: MarketoAction, ownerGeneration: number): void {
     let resources = this.#actionResources(action);
     for (let actionId of this.#pendingIndex()) {
-      let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
-      if (!pending || pending.id >= action.id) continue;
+      let row = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+      if (!row || row.ownerGeneration !== ownerGeneration) continue;
+      let pending = row.action;
+      if (pending.id >= action.id) continue;
       let earlier = this.#actionResources(pending);
       if (resources.some(resource => earlier.some(candidate =>
         candidate.key === resource.key && (candidate.write || resource.write)))) {

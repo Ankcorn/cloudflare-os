@@ -5850,6 +5850,171 @@ describe("read authorization lifetime", () => {
       expect(fetches).toBe(0);
     },
   );
+
+  it.each(["revoke", "prepareReconnect"] as const)(
+    "invalidates entirely simulated and cached reads after %s",
+    async transition => {
+      let accountId = await accountWithCredentials({
+        endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+      });
+      let gatekeeper = await gatekeeperForAccount(accountId.toString());
+      let providerFetches = 0;
+      vi.stubGlobal("fetch", async () => {
+        providerFetches++;
+        throw new Error("No provider request expected.");
+      });
+
+      await runInDurableObject(gatekeeper, async (instance, state) => {
+        state.storage.kv.put("pending:index", [1, 2, 3]);
+        state.storage.kv.put("pending:1", {
+          ownerGeneration: 0,
+          action: {
+            id: 1, type: "designerCreate", asset: "designerEmail", provisionalId: "~1",
+            body: { name: "Designer", appData: { workspaceId: "1" } },
+          } satisfies EmailDesignerAction,
+        });
+        state.storage.kv.put("pending:2", {
+          ownerGeneration: 0,
+          action: {
+            id: 2, type: "designCreate", asset: "emailTemplate", provisionalId: "~2",
+            parent: { id: "10", type: "Folder" }, input: { name: "Classic", content: "cached" },
+          } satisfies DesignStudioAction,
+        });
+        state.storage.kv.put("pending:3", {
+          ownerGeneration: 0,
+          action: {
+            id: 3, type: "programCreate", provisionalId: "~3", parentId: "10",
+            input: { name: "Program", type: "Default", channel: "Default" },
+          } satisfies ProgramAction,
+        });
+        state.storage.kv.put("businessObjects:opportunityRoleUnavailable", {
+          version: 1, expiresAt: Date.now() + 60_000,
+        });
+        let observations = 0;
+        let queue = new RpcStub(new TestApprovalQueue(
+          undefined,
+          async () => { observations++; },
+        )) as unknown as RpcStub<ApprovalQueue>;
+        let session = await instance.startSession(queue) as MarketoSessionImpl;
+        let studio = session.getDesignStudio();
+        let designer = studio.getEmailDesigner();
+        let designerEmail = designer.getEmail("~1");
+        let classicTemplate = studio.getEmailTemplate("~2");
+        let program = session.getProgram("~3");
+        let custom = session.getBusinessObject("opportunityRole");
+        let account = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+          .UserAccount.get(accountId);
+        if (transition === "revoke") await account.revoke();
+        else await account.prepareReconnect(crypto.randomUUID());
+
+        let reads: (() => Promise<unknown>)[] = [
+          () => designerEmail.describe(),
+          () => classicTemplate.getContent(),
+          () => program.getTokens(),
+          () => custom.describe(),
+        ];
+        for (let read of reads) {
+          await expect(Promise.resolve().then(read)).rejects.toThrow(/older account credential/);
+        }
+        expect(observations).toBe(0);
+        for (let handle of [designerEmail, designer, classicTemplate, studio, program, custom, session]) {
+          handle[Symbol.dispose]();
+        }
+        queue[Symbol.dispose]();
+      });
+      expect(providerFetches).toBe(0);
+    },
+  );
+
+  it("hides old-generation provisional assets and refuses new dependencies after reconnect", async () => {
+    let credentials = { endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID() };
+    let accountId = await accountWithCredentials(credentials);
+    let gatekeeper = await gatekeeperForAccount(accountId.toString());
+    await runInDurableObject(gatekeeper, (_instance, state) => {
+      state.storage.kv.put("pending:index", [1, 2, 3]);
+      state.storage.kv.put("pending:1", {
+        ownerGeneration: 0,
+        action: {
+          id: 1, type: "designerCreate", asset: "designerTemplate", provisionalId: "~1",
+          body: { name: "Old designer template", appData: { workspaceId: "1" } },
+        } satisfies EmailDesignerAction,
+      });
+      state.storage.kv.put("pending:2", {
+        ownerGeneration: 0,
+        action: {
+          id: 2, type: "designCreate", asset: "emailTemplate", provisionalId: "~2",
+          parent: { id: "10", type: "Folder" }, input: { name: "Old classic template", content: "old" },
+        } satisfies DesignStudioAction,
+      });
+      state.storage.kv.put("pending:3", {
+        ownerGeneration: 0,
+        action: {
+          id: 3, type: "programCreate", provisionalId: "~3", parentId: "10",
+          input: { name: "Old program", type: "Default", channel: "Default" },
+        } satisfies ProgramAction,
+      });
+    });
+    let accountStub = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+      .UserAccount.get(accountId);
+    let nonce = crypto.randomUUID();
+    await runInDurableObject(accountStub, async (account, state) => {
+      await account.prepareReconnect(nonce);
+      let get = state.storage.kv.get.bind(state.storage.kv);
+      vi.spyOn(state.storage.kv, "get").mockImplementation((key: string) =>
+        key === "callback" ? { credentialsRestored: async () => {} } : get(key));
+      await expect(account.completeConnection(nonce, {
+        ...credentials, clientSecret: "replacement-secret",
+      })).resolves.toEqual({ kind: "ok" });
+    });
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      providerFetches++;
+      throw new Error("No provider request expected.");
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let approvals = 0;
+      let queue = new RpcStub(new TestApprovalQueue(async () => { approvals++; })) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      let studio = session.getDesignStudio();
+      let designer = studio.getEmailDesigner();
+      let staleClassic = studio.getEmailTemplate("~2");
+      let staleProgram = session.getProgram("~3");
+      expect(() => designer.getEmailTemplate("~1")).toThrow(/not a designerTemplate/);
+      let staleReads: (() => Promise<unknown>)[] = [
+        () => staleClassic.getContent(),
+        () => staleProgram.getTokens(),
+      ];
+      for (let read of staleReads) {
+        await expect(Promise.resolve().then(read)).rejects.toThrow(/still pending creation/);
+      }
+
+      await expect(designer.createEmail({
+        location: { workspaceId: "1", folderId: "10" }, name: "Fresh", headers: { subject: "Subject" },
+        templateId: "~1",
+      })).rejects.toThrow(/not a designerTemplate/);
+      await expect(studio.createEmail(
+        { id: "10", type: "folder" },
+        {
+          name: "Fresh classic email", templateId: "~2", subject: "Subject", fromName: "Sender",
+          fromEmail: "sender@example.com", replyEmail: "reply@example.com",
+        },
+      )).rejects.toThrow(/not a emailTemplate/);
+      await expect(session.createSmartCampaign(
+        { id: "~3", type: "program" },
+        { name: "Fresh campaign" },
+      )).rejects.toThrow(/not a program/);
+      expect(approvals).toBe(0);
+      expect(state.storage.kv.get<number[]>("pending:index")).toEqual([1, 2, 3]);
+      staleClassic[Symbol.dispose]();
+      staleProgram[Symbol.dispose]();
+      designer[Symbol.dispose]();
+      studio[Symbol.dispose]();
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(0);
+  });
 });
 
 describe("Design Studio scoped binding", () => {
