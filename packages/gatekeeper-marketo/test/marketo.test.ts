@@ -3242,6 +3242,31 @@ describe("person field normalization", () => {
       .resolves.toMatchObject({ members: [{ id: 7, firstName: "Person" }] });
   });
 
+  it("scopes static-list member continuations to the list and field projection", async () => {
+    let providerTokens: (string | undefined)[] = [];
+    let ctx = stubContext({
+      getListMembers: async (_listId, _fields, pageToken) => {
+        providerTokens.push(pageToken);
+        return pageToken === undefined
+          ? { result: [{ id: 7 }], moreResult: true, nextPageToken: "provider-next" }
+          : { result: [], moreResult: false };
+      },
+    });
+    let list = new MarketoStaticListImpl(ctx, 55);
+    let first = await list.getMembers(["email", "firstName"]);
+
+    expect(first.nextPageToken).not.toBe("provider-next");
+    await list.getMembers(["firstName", "email"], first.nextPageToken);
+    expect(providerTokens).toEqual([undefined, "provider-next"]);
+    await expect(new MarketoStaticListImpl(ctx, 56).getMembers(
+      ["email", "firstName"], first.nextPageToken,
+    )).rejects.toThrow(/for this list and field projection/);
+    await expect(list.getMembers(["email"], first.nextPageToken))
+      .rejects.toThrow(/for this list and field projection/);
+    await expect(list.getMembers(["email", "firstName"], "provider-next"))
+      .rejects.toThrow(/for this list and field projection/);
+  });
+
   it("treats empty person projections as id-only without exposing default PII", async () => {
     let raw = {
       id: 7,
@@ -3327,6 +3352,22 @@ describe("exact static list reads", () => {
       expect(error.operation).toBe("/v1/lists/55.json");
       expect(notes).toEqual([]);
     }
+  });
+
+  it("uses Marketo's singular static-list member endpoint for reads and writes", async () => {
+    let { client, calls } = clientReturning(
+      { success: true, result: [] },
+      { success: true, result: [] },
+      { success: true, result: [] },
+    );
+    await client.getListMembers(55);
+    await client.addLeadsToList(55, [7]);
+    await client.removeLeadsFromList(55, [7]);
+    expect(calls.map(url => new URL(url).pathname)).toEqual([
+      "/rest/v1/list/55/leads.json",
+      "/rest/v1/list/55/leads.json",
+      "/rest/v1/list/55/leads.json",
+    ]);
   });
 });
 
@@ -3922,6 +3963,13 @@ describe("page normalization", () => {
     expect(page.nextPageToken).toBe("next");
   });
 
+  it("fails closed when a successful pageable response omits result", async () => {
+    let { client } = clientReturning({ requestId: "1", success: true, nextPageToken: "next" });
+    let error = await client.getLists().catch(value => value);
+    expect(error).toBeInstanceOf(MarketoResponseValidationError);
+    expect(error.message).toMatch(/missing result array/);
+  });
+
   it("treats an empty page as the end, even though a token is still offered", async () => {
     let { client } = clientReturning({
       requestId: "1", success: true, result: [], nextPageToken: "next",
@@ -4202,6 +4250,21 @@ describe("standard CRM business objects", () => {
     expect(JSON.parse(String(request.init?.body))).toEqual({
       filterType: "dedupeFields", fields: ["role"], input: [key], batchSize: 10, nextPageToken: "p",
     });
+  });
+
+  it("rejects business-object pages larger than maxResults before observation", async () => {
+    let notes: string[] = [];
+    let { ctx } = businessContext({
+      queryBusinessObject: async () => ({
+        result: [{ id: 7 }, { id: 8 }],
+        moreResult: false,
+      }),
+    }, [], notes);
+    await expect(new MarketoBusinessObjectImpl(ctx, "company").query({
+      filter: { field: "id", values: [7, 8] },
+      maxResults: 1,
+    })).rejects.toThrow(/more than the requested 1 company records/);
+    expect(notes).toEqual([]);
   });
 
   it("sends compound custom-object keys as JSON", async () => {
@@ -9954,6 +10017,13 @@ describe("Design Studio REST encoding", () => {
     return new URLSearchParams(String(call.init.body));
   }
 
+  it("uses the .json email-template content path", async () => {
+    let { client, calls } = recordingClient();
+    await client.getEmailTemplateContent(31, "approved");
+    expect(new URL(calls[0]!.url).pathname)
+      .toBe("/rest/asset/v1/emailTemplate/31/content.json");
+  });
+
   it("encodes folder browsing in the query and folder creation as a form", async () => {
     let { client, calls } = recordingClient();
     await client.getFolders({
@@ -10158,5 +10228,58 @@ describe("Email Designer REST encoding", () => {
     expect(requested!.init.headers).toMatchObject({ Authorization: "Bearer t" });
     expect(new URL(requested!.url).searchParams.has("access_token")).toBe(false);
     expect(notes.join(" ")).toMatch(/User Management/);
+  });
+
+  it("allows only the exact same-origin workspace path outside /rest", async () => {
+    let credentials = {
+      endpoint: ORIGIN,
+      clientId: crypto.randomUUID(),
+      clientSecret: crypto.randomUUID(),
+    };
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let id = await accountWithCredentials(credentials);
+    let tokenNamespace = (env as unknown as {
+      MarketoTokenCache: DurableObjectNamespace<MarketoTokenCache>;
+    }).MarketoTokenCache;
+    let tokenId = tokenNamespace.idFromName(await testCredentialFingerprint(credentials));
+    await runInDurableObject(tokenNamespace.get(tokenId), (_instance, state) => {
+      state.storage.kv.put("token", {
+        accessToken: "token",
+        expiresAt: Date.now() + 3_600_000,
+      });
+    });
+    let calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(new URL(url).pathname);
+      return Response.json([]);
+    });
+
+    await runInDurableObject(namespace.get(id), async instance => {
+      let expected = { credentials, generation: 0 };
+      let request = { redirect: "error" as const };
+      await expect(instance.dispatch(
+        expected,
+        `${ORIGIN}/userservice/management/v1/users/workspaces.json/extra`,
+        request,
+        false,
+        60_000,
+      )).rejects.toThrow(/outside the connected Marketo REST API/);
+      await expect(instance.dispatch(
+        expected,
+        `https://other.example/userservice/management/v1/users/workspaces.json`,
+        request,
+        false,
+        60_000,
+      )).rejects.toThrow(/outside the connected Marketo REST API/);
+      let result = await instance.dispatch(
+        expected,
+        `${ORIGIN}/userservice/management/v1/users/workspaces.json`,
+        request,
+        false,
+        60_000,
+      );
+      expect(result.ok).toBe(true);
+    });
+    expect(calls).toEqual(["/userservice/management/v1/users/workspaces.json"]);
   });
 });

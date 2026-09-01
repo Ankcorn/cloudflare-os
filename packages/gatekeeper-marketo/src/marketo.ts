@@ -627,7 +627,9 @@ export class UserAccount extends DurableObject<Env> {
     }
     let endpoint = new URL(expected.credentials.endpoint);
     let url = new URL(urlText);
-    if (url.origin !== endpoint.origin || !url.pathname.startsWith("/rest/")) {
+    let workspacePath = "/userservice/management/v1/users/workspaces.json";
+    if (url.origin !== endpoint.origin ||
+        !url.pathname.startsWith("/rest/") && url.pathname !== workspacePath) {
       throw new Error("Refusing to dispatch a request outside the connected Marketo REST API.");
     }
 

@@ -502,6 +502,7 @@ function normalizeActivity(raw: RawActivity): MarketoActivity {
 
 const ACTIVITY_TOKEN_PREFIX = "gk-activity:";
 const ACTIVITY_TOKEN_MAX_LENGTH = 16_384;
+const LIST_MEMBER_TOKEN_PREFIX = "gk-list-member:";
 
 type ActivityPageState = {
   version: 1;
@@ -545,6 +546,40 @@ function providerActivityPageToken(pageToken: string, scope: string): string {
     return state.providerToken;
   } catch {
     throw new Error("Invalid Marketo activities page token for this query.");
+  }
+}
+
+function listMemberScope(listId: number, fields: string[]): string {
+  return JSON.stringify({ listId, fields: fields.toSorted() });
+}
+
+function listMemberPageToken(providerToken: string, scope: string): string {
+  if (!providerToken || providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH) {
+    throw new MarketoError("Marketo returned an invalid static-list member page token.");
+  }
+  let bytes = new TextEncoder().encode(JSON.stringify({ version: 1, providerToken, scope }));
+  let token = LIST_MEMBER_TOKEN_PREFIX + btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (token.length > ACTIVITY_TOKEN_MAX_LENGTH) {
+    throw new MarketoError("Marketo returned a static-list member page token that is too long.");
+  }
+  return token;
+}
+
+function providerListMemberPageToken(pageToken: string, scope: string): string {
+  try {
+    if (typeof pageToken !== "string" || pageToken.length > ACTIVITY_TOKEN_MAX_LENGTH ||
+        !pageToken.startsWith(LIST_MEMBER_TOKEN_PREFIX)) throw new Error();
+    let encoded = pageToken.slice(LIST_MEMBER_TOKEN_PREFIX.length)
+      .replace(/-/g, "+").replace(/_/g, "/");
+    let bytes = Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")),
+      character => character.charCodeAt(0));
+    let state = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)) as Partial<ActivityPageState>;
+    if (state.version !== 1 || typeof state.providerToken !== "string" || !state.providerToken ||
+        state.providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH || state.scope !== scope) throw new Error();
+    return state.providerToken;
+  } catch {
+    throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
   }
 }
 
@@ -790,8 +825,12 @@ export class MarketoStaticListImpl extends RpcTarget {
     pageToken?: string,
   ): Promise<{ members: MarketoPersonRecord[]; moreResult: boolean; nextPageToken?: string }> {
     let requested = requestedPersonFields(fields);
+    let scope = listMemberScope(this.#listId, requested);
+    let providerToken = pageToken === undefined
+      ? undefined
+      : providerListMemberPageToken(pageToken, scope);
     let page = await onHandle("static list", this.#listId, async () => {
-      return await (await this.#ctx.client()).getListMembers(this.#listId, requested, pageToken);
+      return await (await this.#ctx.client()).getListMembers(this.#listId, requested, providerToken);
     });
     await this.#ctx.observe(
       `Read ${page.result.length} members of Marketo list ${this.#listId}`,
@@ -801,7 +840,7 @@ export class MarketoStaticListImpl extends RpcTarget {
     return {
       members: page.result.map(lead => normalizeLead(lead, requested)),
       moreResult: page.moreResult,
-      nextPageToken: page.nextPageToken,
+      nextPageToken: page.moreResult ? listMemberPageToken(page.nextPageToken!, scope) : undefined,
     };
   }
 

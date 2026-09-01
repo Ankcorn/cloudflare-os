@@ -452,12 +452,12 @@ export class MarketoClient {
       form?: URLSearchParams;
       multipart?: FormData;
       appType?: boolean;
-      withoutRestPrefix?: boolean;
       timeoutMs?: number;
     },
   ): Promise<MarketoEnvelope<T>> {
     let attempt = async (token?: string, forceRefresh = false): Promise<MarketoEnvelope<T>> => {
-      let url = `${this.#endpoint}${options?.withoutRestPrefix ? "" : "/rest"}${path}${buildQuery(options?.query)}`;
+      let prefix = path === "/userservice/management/v1/users/workspaces.json" ? "" : "/rest";
+      let url = `${this.#endpoint}${prefix}${path}${buildQuery(options?.query)}`;
       let longRunning = path.startsWith("/asset/v1/") || path.startsWith("/asset/v2/") ||
         path === "/v1/activities/pagingtoken.json";
       let contentType = options?.form
@@ -494,7 +494,8 @@ export class MarketoClient {
       }
 
       let raw = await response.json().catch(() => undefined);
-      if (options?.withoutRestPrefix && response.ok && Array.isArray(raw)) {
+      if (path === "/userservice/management/v1/users/workspaces.json" &&
+          response.ok && Array.isArray(raw)) {
         return { success: true, result: raw as T };
       }
       let envelope = parseEnvelope<T>(raw);
@@ -654,9 +655,7 @@ export class MarketoClient {
 
   /** List workspaces. This User Management endpoint requires additional role permissions. */
   async getWorkspaces(): Promise<RawWorkspace[]> {
-    let envelope = await this.#request<unknown>("/userservice/management/v1/users/workspaces.json", {
-      withoutRestPrefix: true,
-    });
+    let envelope = await this.#request<unknown>("/userservice/management/v1/users/workspaces.json");
     let result = envelope.result;
     if (!Array.isArray(result)) {
       throw new MarketoError("Marketo returned workspaces with an unexpected shape.", {
@@ -740,12 +739,12 @@ export class MarketoClient {
    */
   async #page<T>(path: string, options?: { method?: string; query?: Query; body?: unknown; form?: URLSearchParams }): Promise<MarketoPage<T>> {
     let envelope = await this.#request<unknown>(path, options);
-    let result = envelope.result ?? [];
-    if (!Array.isArray(result)) {
-      throw new MarketoError("Marketo returned a page with an unexpected shape.", {
+    if (!Array.isArray(envelope.result)) {
+      throw new MarketoResponseValidationError("Marketo returned a page with an unexpected shape (missing result array).", {
         operation: path,
       });
     }
+    let result = envelope.result;
     if (envelope.nextPageToken !== undefined && typeof envelope.nextPageToken !== "string") {
       throw new MarketoError("Marketo returned a nextPageToken with an unexpected shape.", {
         operation: path,
@@ -1094,7 +1093,7 @@ export class MarketoClient {
     id: number,
     status?: MarketoAssetStatus,
   ): Promise<RawEmailTemplateContent | undefined> {
-    let result = await this.#result<RawEmailTemplateContent>(`/asset/v1/emailTemplate/${id}/content`, {
+    let result = await this.#result<RawEmailTemplateContent>(`/asset/v1/emailTemplate/${id}/content.json`, {
       query: { status },
     });
     return result[0];
@@ -1697,7 +1696,7 @@ export class MarketoClient {
   }
 
   async getListMembers(listId: number, fields?: string[], nextPageToken?: string): Promise<MarketoPage<RawLead>> {
-    return await this.#page<RawLead>(`/v1/lists/${listId}/leads.json`, {
+    return await this.#page<RawLead>(`/v1/list/${listId}/leads.json`, {
       query: {
         ...(fields?.length ? { fields: fields.join(",") } : {}),
         ...(nextPageToken ? { nextPageToken } : {}),
@@ -1706,14 +1705,14 @@ export class MarketoClient {
   }
 
   async addLeadsToList(listId: number, ids: number[]): Promise<RawSyncResult[]> {
-    return await this.#result<RawSyncResult>(`/v1/lists/${listId}/leads.json`, {
+    return await this.#result<RawSyncResult>(`/v1/list/${listId}/leads.json`, {
       method: "POST",
       body: { input: ids.map(id => ({ id })) },
     });
   }
 
   async removeLeadsFromList(listId: number, ids: number[]): Promise<RawSyncResult[]> {
-    return await this.#result<RawSyncResult>(`/v1/lists/${listId}/leads.json`, {
+    return await this.#result<RawSyncResult>(`/v1/list/${listId}/leads.json`, {
       method: "DELETE",
       body: { input: ids.map(id => ({ id })) },
     });

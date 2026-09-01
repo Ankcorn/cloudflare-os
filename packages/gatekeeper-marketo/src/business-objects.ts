@@ -204,6 +204,10 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
         ...query,
         fields: requestedFields ? [...new Set([...requestedFields, ...correlationFields])] : query.fields,
       });
+      let maxResults = query.maxResults ?? MAX_FILTER_VALUES;
+      if (page.result.length > maxResults) {
+        throw new MarketoError(`Marketo returned more than the requested ${maxResults} ${this.kind} records.`);
+      }
       let matches = "dedupeKeys" in filter
         ? (record: Record<string, unknown>) => filter.dedupeKeys.some(key =>
           BUSINESS_OBJECTS[this.kind].dedupeFields.every(field => sameFilterValue(record[field], key[field])))
