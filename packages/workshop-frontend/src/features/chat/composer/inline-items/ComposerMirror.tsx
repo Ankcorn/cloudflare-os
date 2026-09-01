@@ -1,8 +1,11 @@
 import {
-  forwardRef, memo, useImperativeHandle, useRef, useState, type ReactNode,
+  forwardRef, memo, useEffect, useImperativeHandle, useRef, useState, type ReactNode,
 } from "react";
+import { Tooltip } from "@cloudflare/kumo";
+import { ScrollIcon } from "@phosphor-icons/react";
 import type { ComposerRange } from "../../../../components/chat/composer-tokens";
 import styles from "./ComposerMirror.module.css";
+import SkillTooltipContent from "./SkillTooltipContent";
 
 const cssLogoUrls = new Map<string, string>();
 
@@ -26,6 +29,11 @@ export const composerTextareaClass = styles.textarea;
 /** A range the mirror paints as one object rather than as text. */
 export type MirrorToken = ComposerRange & {
   kind: "capsule" | "command";
+  /** Display metadata for a command whose underlying text reserves the pill's layout width. */
+  label?: string;
+  description?: string;
+  providerLabel?: string;
+  resourceLabel?: string;
   /** Raw vendor or format logo URL. Only capsules with a logo have one. */
   logoUrl?: string;
 };
@@ -53,6 +61,11 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
   disabled: boolean;
 }>(({value, tokens, disabled}, ref) => {
   const [hoveredToken, setHoveredToken] = useState<number | null>(null);
+  const [tooltipToken, setTooltipToken] = useState<number | null>(null);
+  const tooltipTokenRef = useRef<number | null>(null);
+  const pendingTokenRef = useRef<number | null>(null);
+  const hoverOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const node = useRef<HTMLDivElement>(null);
 
   const syncScroll = (textarea: HTMLTextAreaElement) => {
@@ -118,13 +131,51 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
     return null;
   };
 
+  const updateHoveredToken = (start: number | null) => {
+    if (hoverCloseTimer.current) {
+      clearTimeout(hoverCloseTimer.current);
+      hoverCloseTimer.current = null;
+    }
+    if (start !== null) {
+      setHoveredToken(start);
+      if (tooltipTokenRef.current === start || pendingTokenRef.current === start) return;
+      if (hoverOpenTimer.current) clearTimeout(hoverOpenTimer.current);
+      tooltipTokenRef.current = null;
+      setTooltipToken(null);
+      pendingTokenRef.current = start;
+      hoverOpenTimer.current = setTimeout(() => {
+        tooltipTokenRef.current = start;
+        pendingTokenRef.current = null;
+        hoverOpenTimer.current = null;
+        setTooltipToken(start);
+      }, 300);
+      return;
+    }
+    setHoveredToken(null);
+    if (hoverOpenTimer.current) {
+      clearTimeout(hoverOpenTimer.current);
+      hoverOpenTimer.current = null;
+    }
+    pendingTokenRef.current = null;
+    hoverCloseTimer.current = setTimeout(() => {
+      tooltipTokenRef.current = null;
+      setTooltipToken(null);
+      hoverCloseTimer.current = null;
+    }, 150);
+  };
+
   useImperativeHandle(ref, () => ({
-    setHoveredToken,
+    setHoveredToken: updateHoveredToken,
     syncLayout,
     syncScroll,
     textOffsetTop,
     tokenAtPoint,
   }), []);
+
+  useEffect(() => () => {
+    if (hoverOpenTimer.current) clearTimeout(hoverOpenTimer.current);
+    if (hoverCloseTimer.current) clearTimeout(hoverCloseTimer.current);
+  }, []);
 
   const boundaries = new Set([0, value.length]);
   for (const token of tokens) {
@@ -149,7 +200,11 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
       );
       continue;
     }
-    let className = token.kind === "capsule" ? styles.capsule : styles.command;
+    let className = token.kind === "capsule"
+      ? styles.capsule
+      : text.startsWith("/")
+        ? styles.legacyCommand
+        : styles.command;
     if (!disabled && token.start === hoveredToken) className += ` ${styles.hovered}`;
     const logo = cssLogoUrl(token.logoUrl);
     const tokenNode = (
@@ -162,10 +217,41 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
         data-text-start={start}
         data-text-end={end}
       >
-        {text}
+        {token.kind === "command" && token.label && !text.startsWith("/") ? (
+          <>
+            {text}
+            <span className={styles.commandLabel}>
+              <ScrollIcon size={12} weight="bold" />
+              {token.label}
+            </span>
+          </>
+        ) : text}
       </span>
     );
-    segments.push(<span key={start}>{tokenNode}</span>);
+    const showSkillTooltip = token.kind === "command" && token.label && token.description &&
+      token.providerLabel && !text.startsWith("/");
+    segments.push(showSkillTooltip ? (
+      <Tooltip
+        key={start}
+        open={!disabled && token.start === tooltipToken}
+        delay={0}
+        side="top"
+        align="start"
+        content={
+          <SkillTooltipContent
+            name={token.label!}
+            description={token.description!}
+            providerLabel={token.providerLabel!}
+            resourceLabel={token.resourceLabel}
+            onMouseEnter={() => updateHoveredToken(token.start)}
+            onMouseLeave={() => updateHoveredToken(null)}
+          />
+        }
+        asChild
+      >
+        {tokenNode}
+      </Tooltip>
+    ) : <span key={start}>{tokenNode}</span>);
   }
   // Ensure at least a space so the div has nonzero height when empty.
   if (value.length === 0) segments.push(<span key="empty"> </span>);

@@ -10,6 +10,7 @@ import {
   type StoredComposerDraft,
 } from "./composerDraft";
 import type { SlashCommandChoice } from "@gadgets/workshop-shared/api";
+import { slashCommandComposerText } from "../../../../components/chat/composer-tokens";
 
 const draft: StoredComposerDraft = {
   version: 1,
@@ -103,10 +104,10 @@ describe("composer drafts", () => {
 
   it("preserves an inline slash command through token normalization and decoration", () => {
     const logoSlot = "\u2003\u2060\u00a0";
-    const commandText = "/deploy";
+    const commandText = slashCommandComposerText("deploy", logoSlot);
     const text = `Use Q3 Plan as a ${logoSlot}Document, then ${commandText} it`;
     const formatStart = text.indexOf(logoSlot);
-    const commandStart = text.indexOf(commandText);
+    const commandStart = text.lastIndexOf(logoSlot);
 
     const stored = serializeComposerDraft(
       text,
@@ -129,8 +130,8 @@ describe("composer drafts", () => {
 
     const restored = decorateComposerDraft(stored, ["data:doc"], logoSlot);
     expect(restored.command).toEqual({
-      start: restored.text.indexOf(commandText),
-      length: commandText.length,
+      start: restored.text.lastIndexOf(logoSlot),
+      length: slashCommandComposerText("deploy", logoSlot).length,
       choice: deployCommand,
     });
     expect(restored.text.slice(
@@ -139,9 +140,9 @@ describe("composer drafts", () => {
     )).toBe(commandText);
   });
 
-  it("keeps a following format positioned after a restored slash command", () => {
+  it("shifts a following format when restoring a skill pill", () => {
     const logoSlot = "\u2003\u2060\u00a0";
-    const commandText = "/deploy";
+    const commandText = slashCommandComposerText("deploy", logoSlot);
     const formatStart = commandText.length + " then ".length;
     const stored = serializeComposerDraft(
       `${commandText} then ${logoSlot}Document`,
