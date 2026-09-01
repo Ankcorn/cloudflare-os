@@ -42,10 +42,10 @@ describe("classic Design Studio regressions", () => {
       description: "Original description",
       status: "approved",
       workspace: "Default",
-      subject: { value: "Original subject" },
-      fromName: { value: "Marketing" },
-      fromEmail: { value: "marketing@example.com" },
-      replyEmail: { value: "reply@example.com" },
+      subject: { type: "Text", value: "Original subject" },
+      fromName: { type: "Text", value: "Marketing" },
+      fromEmail: { type: "Text", value: "marketing@example.com" },
+      replyEmail: { type: "Text", value: "reply@example.com" },
       preHeader: "Preview",
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-02T00:00:00Z",
@@ -81,6 +81,51 @@ describe("classic Design Studio regressions", () => {
     let clone = (await studio.listEmails()).items.find(item => item.id === "~1")!;
     expect(clone).not.toHaveProperty("createdAt");
     expect(clone).not.toHaveProperty("updatedAt");
+  });
+
+  it("omits dynamic email headers from descriptions", async () => {
+    let { ctx } = context({
+      getEmail: async () => ({
+        id: 21,
+        name: "Segmented email",
+        status: "draft",
+        subject: { type: "DynamicContent", value: "3898697798" },
+        fromName: { type: "Text", value: "Marketing" },
+      }),
+    });
+
+    let detail = await new MarketoDesignStudioImpl(ctx).getEmail("21").describe();
+
+    expect(detail).toMatchObject({ id: "21", name: "Segmented email", fromName: "Marketing" });
+    expect(detail).not.toHaveProperty("subject");
+  });
+
+  it("does not turn a described dynamic header into text during a metadata round trip", async () => {
+    let { actions, ctx } = context({
+      getEmail: async () => ({
+        id: 21,
+        name: "Segmented email",
+        status: "draft",
+        subject: { type: "DynamicContent", value: "3898697798" },
+      }),
+    });
+    let email = new MarketoDesignStudioImpl(ctx).getEmail("21");
+    let observed = await email.describe();
+
+    await email.updateMetadata({ name: observed.name, subject: observed.subject });
+
+    expect(actions).toEqual([expect.objectContaining({
+      type: "designMetadata",
+      patch: { name: "Segmented email" },
+    })]);
+    let updateEmail = vi.fn(async () => [{ id: 21 }]);
+    let updateEmailContent = vi.fn();
+    await executeDesignStudioAction(actions[0]!, {
+      updateEmail,
+      updateEmailContent,
+    } as unknown as MarketoClient, Number, () => {});
+    expect(updateEmail).toHaveBeenCalledWith(21, { name: "Segmented email" });
+    expect(updateEmailContent).not.toHaveBeenCalled();
   });
 
   it("does not copy generated source identity into pending clone summaries", async () => {

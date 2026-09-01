@@ -270,6 +270,7 @@ function emailSections(raw: { htmlId?: string; contentType?: string; value?: unk
 function headerValue(value: unknown): string | undefined {
   if (Array.isArray(value)) return value.map(item => headerValue(item)).find(item => item !== undefined);
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (textValue(Reflect.get(value, "type"))?.toLowerCase() !== "text") return undefined;
   return textValue(Reflect.get(value, "value"));
 }
 
@@ -298,7 +299,13 @@ function normalize(kind: DesignStudioAssetKind, raw: unknown): Summary {
   let value = recordValue(raw);
   let summary = baseSummary(raw);
   if (kind === "email") {
-    return { ...summary, subject: headerValue(value.subject), fromName: headerValue(value.fromName), fromEmail: headerValue(value.fromEmail), replyEmail: headerValue(value.replyEmail), preHeader: textValue(value.preHeader) };
+    let headers = Object.fromEntries(Object.entries({
+      subject: headerValue(value.subject),
+      fromName: headerValue(value.fromName),
+      fromEmail: headerValue(value.fromEmail),
+      replyEmail: headerValue(value.replyEmail),
+    }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    return { ...summary, ...headers, preHeader: textValue(value.preHeader) };
   }
   if (kind === "landingPage") {
     return { ...summary, url: textValue(value.computedUrl) ?? textValue(value.URL) ?? textValue(value.url) };

@@ -1929,7 +1929,7 @@ describe("Design Studio simulation", () => {
       id: 21,
       name: "Old name",
       status: "draft",
-      subject: { value: "Old subject" },
+      subject: { type: "Text", value: "Old subject" },
     };
     let { ctx, actions } = designContext({
       getEmail: async () => raw,
