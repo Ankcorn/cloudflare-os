@@ -1348,6 +1348,10 @@ export const BUSINESS_OBJECT_RESTRICTION_TTL_MS = 5 * 60 * 1000;
 type BusinessObjectRestriction = { version: 1; expiresAt: number };
 type LogicalKind = DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind;
 type LogicalReference = { id: string; kind: LogicalKind };
+type ListMemberCursor = { providerToken: string; scope: string; expiresAt: number };
+const LIST_MEMBER_CURSOR_PREFIX = "listMemberCursor:";
+const LIST_MEMBER_CURSOR_TTL_MS = 10 * 60 * 1000;
+const MAX_LIST_MEMBER_CURSORS = 256;
 
 function designerAssetKind(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
@@ -1384,6 +1388,41 @@ export class MarketoGatekeeperImpl
 {
   #preparingActions = new Set<number>();
   #dispatchingActions = new Set<number>();
+
+  #issueListMemberCursor(providerToken: string, scope: string): string {
+    if (!providerToken || providerToken.length > 16_384) {
+      throw new MarketoError("Marketo returned an invalid static-list member page token.");
+    }
+    let now = Date.now();
+    let stored = [...this.ctx.storage.kv.list<ListMemberCursor>({ prefix: LIST_MEMBER_CURSOR_PREFIX })];
+    for (let [key, cursor] of stored) {
+      if (cursor.expiresAt <= now) this.ctx.storage.kv.delete(key);
+    }
+    if (stored.filter(([, cursor]) => cursor.expiresAt > now).length >= MAX_LIST_MEMBER_CURSORS) {
+      throw new Error("Too many active Marketo static-list member page tokens.");
+    }
+    let token = crypto.randomUUID();
+    this.ctx.storage.kv.put<ListMemberCursor>(LIST_MEMBER_CURSOR_PREFIX + token, {
+      providerToken,
+      scope,
+      expiresAt: now + LIST_MEMBER_CURSOR_TTL_MS,
+    });
+    return token;
+  }
+
+  #consumeListMemberCursor(pageToken: string, scope: string): string {
+    if (typeof pageToken !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(pageToken)) {
+      throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+    }
+    let key = LIST_MEMBER_CURSOR_PREFIX + pageToken;
+    let cursor = this.ctx.storage.kv.get<ListMemberCursor>(key);
+    this.ctx.storage.kv.delete(key);
+    if (!cursor || cursor.expiresAt <= Date.now() || cursor.scope !== scope) {
+      throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+    }
+    return cursor.providerToken;
+  }
 
   async #credentialState(): Promise<AccountCredentialState> {
     return await readAccountCredentialState(userAccountStub(
@@ -1485,6 +1524,10 @@ export class MarketoGatekeeperImpl
     let sessionCtx = makeSessionContext({
       client: () => this.#client(credentialState),
       approvalQueue: queue,
+      issueListMemberCursor: async (providerToken, scope) =>
+        this.#issueListMemberCursor(providerToken, scope),
+      consumeListMemberCursor: async (pageToken, scope) =>
+        this.#consumeListMemberCursor(pageToken, scope),
       assertCurrent: async () => {
         if (!await account.isCredentialStateCurrent({ ...credentialState, credentials })) {
           throw new Error("This Marketo session belongs to an older account credential generation.");

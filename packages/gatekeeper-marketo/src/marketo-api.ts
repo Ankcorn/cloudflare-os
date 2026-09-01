@@ -1705,14 +1705,14 @@ export class MarketoClient {
   }
 
   async addLeadsToList(listId: number, ids: number[]): Promise<RawSyncResult[]> {
-    return await this.#result<RawSyncResult>(`/v1/list/${listId}/leads.json`, {
+    return await this.#result<RawSyncResult>(`/v1/lists/${listId}/leads.json`, {
       method: "POST",
       body: { input: ids.map(id => ({ id })) },
     });
   }
 
   async removeLeadsFromList(listId: number, ids: number[]): Promise<RawSyncResult[]> {
-    return await this.#result<RawSyncResult>(`/v1/list/${listId}/leads.json`, {
+    return await this.#result<RawSyncResult>(`/v1/lists/${listId}/leads.json`, {
       method: "DELETE",
       body: { input: ids.map(id => ({ id })) },
     });

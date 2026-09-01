@@ -961,10 +961,24 @@ describe("observation descriptions", () => {
  * `notes` to capture what the session would have written to the observation log.
  */
 function stubContext(client: Partial<MarketoClient>, notes?: string[]): SessionContext {
+  let cursors = new Map<string, { providerToken: string; scope: string }>();
   return {
     client: async () => client as MarketoClient,
     observe: async (summary: string, detail: string) => { notes?.push(summary, detail); },
     submit: async () => {},
+    issueListMemberCursor: async (providerToken, scope) => {
+      let token = crypto.randomUUID();
+      cursors.set(token, { providerToken, scope });
+      return token;
+    },
+    consumeListMemberCursor: async (pageToken, scope) => {
+      let cursor = cursors.get(pageToken);
+      cursors.delete(pageToken);
+      if (!cursor || cursor.scope !== scope) {
+        throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+      }
+      return cursor.providerToken;
+    },
     retain: () => {},
     dispose: () => {},
   };
@@ -3127,6 +3141,26 @@ describe("activity normalization", () => {
     expect(notes).toEqual([]);
   });
 
+  it("rejects activity pages larger than maxResults before observing", async () => {
+    let notes: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => "page",
+      getActivities: async () => ({
+        result: [1, 2].map(id => ({
+          id, activityTypeId: 1, leadId: 7, activityDate: "2026-08-31T01:00:00Z",
+        })),
+        moreResult: false,
+      }),
+    }, notes));
+
+    await expect(session.getActivities({
+      sinceDate: new Date("2026-08-31T00:00:00Z"),
+      activityTypeIds: [1],
+      maxResults: 1,
+    })).rejects.toThrow(/more than the requested 1 activities/);
+    expect(notes).toEqual([]);
+  });
+
   it("binds continuation tokens to the originating activity query", async () => {
     let session = new MarketoSessionImpl(stubContext({
       getPagingToken: async () => "provider-1",
@@ -3300,12 +3334,19 @@ describe("person field normalization", () => {
     expect(first.nextPageToken).not.toBe("provider-next");
     await list.getMembers(["firstName", "email"], first.nextPageToken);
     expect(providerTokens).toEqual([undefined, "provider-next"]);
+    let listToken = (await list.getMembers(["email", "firstName"])).nextPageToken;
     await expect(new MarketoStaticListImpl(ctx, 56).getMembers(
-      ["email", "firstName"], first.nextPageToken,
+      ["email", "firstName"], listToken,
     )).rejects.toThrow(/for this list and field projection/);
-    await expect(list.getMembers(["email"], first.nextPageToken))
+    let projectionToken = (await list.getMembers(["email", "firstName"])).nextPageToken;
+    await expect(list.getMembers(["email"], projectionToken))
       .rejects.toThrow(/for this list and field projection/);
-    await expect(list.getMembers(["email", "firstName"], "provider-next"))
+    let tamperToken = (await list.getMembers(["email", "firstName"])).nextPageToken!;
+    await expect(list.getMembers(["email", "firstName"], tamperToken.slice(0, -1) + "0"))
+      .rejects.toThrow(/for this list and field projection/);
+    await expect(list.getMembers(["email", "firstName"], tamperToken))
+      .resolves.toMatchObject({ moreResult: false });
+    await expect(list.getMembers(["email", "firstName"], tamperToken))
       .rejects.toThrow(/for this list and field projection/);
   });
 
@@ -3396,8 +3437,8 @@ describe("exact static list reads", () => {
     }
   });
 
-  it("uses Marketo's singular static-list member endpoint for reads and writes", async () => {
-    let { client, calls } = clientReturning(
+  it("uses singular reads and Adobe's plural mutation endpoint with the correct methods", async () => {
+    let { client, calls, methods } = clientReturning(
       { success: true, result: [] },
       { success: true, result: [] },
       { success: true, result: [] },
@@ -3407,9 +3448,10 @@ describe("exact static list reads", () => {
     await client.removeLeadsFromList(55, [7]);
     expect(calls.map(url => new URL(url).pathname)).toEqual([
       "/rest/v1/list/55/leads.json",
-      "/rest/v1/list/55/leads.json",
-      "/rest/v1/list/55/leads.json",
+      "/rest/v1/lists/55/leads.json",
+      "/rest/v1/lists/55/leads.json",
     ]);
+    expect(methods).toEqual(["GET", "POST", "DELETE"]);
   });
 });
 
@@ -3829,12 +3871,14 @@ describe("program picker", () => {
 /** A MarketoClient whose every request resolves to `envelopes` in order. */
 function clientReturning(...envelopes: unknown[]) {
   let calls: string[] = [];
+  let methods: string[] = [];
   let remaining = [...envelopes];
-  vi.stubGlobal("fetch", async (url: string) => {
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     calls.push(String(url));
+    methods.push(init?.method ?? "GET");
     return Response.json(remaining.shift() ?? {});
   });
-  return { client: new MarketoClient(ORIGIN, { getToken: async () => "t" }), calls };
+  return { client: new MarketoClient(ORIGIN, { getToken: async () => "t" }), calls, methods };
 }
 
 describe("provider result identities", () => {

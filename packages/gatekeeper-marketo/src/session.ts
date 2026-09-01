@@ -98,6 +98,10 @@ export type SessionContext = {
   observe(title: string, description: string): Promise<void>;
   /** Queue a write for approval. Resolves once submitted, not once applied. */
   submit(action: MarketoActionInput): Promise<void>;
+  /** Persist a provider continuation behind a caller-opaque, scoped token. */
+  issueListMemberCursor?(providerToken: string, scope: string): Promise<string>;
+  /** Consume a scoped continuation exactly once. */
+  consumeListMemberCursor?(pageToken: string, scope: string): Promise<string>;
   /** Reject snapshot preparation after this session's account generation is replaced. */
   assertCurrent?(): Promise<void>;
   /** Acquire another owner before handing this context to an independently-lived capability. */
@@ -502,7 +506,6 @@ function normalizeActivity(raw: RawActivity): MarketoActivity {
 
 const ACTIVITY_TOKEN_PREFIX = "gk-activity:";
 const ACTIVITY_TOKEN_MAX_LENGTH = 16_384;
-const LIST_MEMBER_TOKEN_PREFIX = "gk-list-member:";
 
 type ActivityPageState = {
   version: 1;
@@ -551,36 +554,6 @@ function providerActivityPageToken(pageToken: string, scope: string): string {
 
 function listMemberScope(listId: number, fields: string[]): string {
   return JSON.stringify({ listId, fields: fields.toSorted() });
-}
-
-function listMemberPageToken(providerToken: string, scope: string): string {
-  if (!providerToken || providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH) {
-    throw new MarketoError("Marketo returned an invalid static-list member page token.");
-  }
-  let bytes = new TextEncoder().encode(JSON.stringify({ version: 1, providerToken, scope }));
-  let token = LIST_MEMBER_TOKEN_PREFIX + btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  if (token.length > ACTIVITY_TOKEN_MAX_LENGTH) {
-    throw new MarketoError("Marketo returned a static-list member page token that is too long.");
-  }
-  return token;
-}
-
-function providerListMemberPageToken(pageToken: string, scope: string): string {
-  try {
-    if (typeof pageToken !== "string" || pageToken.length > ACTIVITY_TOKEN_MAX_LENGTH ||
-        !pageToken.startsWith(LIST_MEMBER_TOKEN_PREFIX)) throw new Error();
-    let encoded = pageToken.slice(LIST_MEMBER_TOKEN_PREFIX.length)
-      .replace(/-/g, "+").replace(/_/g, "/");
-    let bytes = Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")),
-      character => character.charCodeAt(0));
-    let state = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)) as Partial<ActivityPageState>;
-    if (state.version !== 1 || typeof state.providerToken !== "string" || !state.providerToken ||
-        state.providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH || state.scope !== scope) throw new Error();
-    return state.providerToken;
-  } catch {
-    throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
-  }
 }
 
 function validateActivityQuery(query: MarketoActivityQuery): void {
@@ -652,6 +625,12 @@ async function readActivities(
     leadIds,
     batchSize: query.maxResults,
   });
+  let maxResults = query.maxResults ?? MAX_FILTER_VALUES;
+  if (page.result.length > maxResults) {
+    throw new MarketoError(`Marketo returned more than the requested ${maxResults} activities.`, {
+      operation: "/v1/activities.json",
+    });
+  }
   let requestedTypeIds = new Set(query.activityTypeIds);
   for (let activity of page.result) validateActivity(activity, requestedTypeIds, query.sinceDate);
   if (leadIds && page.result.some(activity => !leadIds.includes(activity.leadId ?? -1))) {
@@ -826,9 +805,13 @@ export class MarketoStaticListImpl extends RpcTarget {
   ): Promise<{ members: MarketoPersonRecord[]; moreResult: boolean; nextPageToken?: string }> {
     let requested = requestedPersonFields(fields);
     let scope = listMemberScope(this.#listId, requested);
-    let providerToken = pageToken === undefined
-      ? undefined
-      : providerListMemberPageToken(pageToken, scope);
+    let providerToken: string | undefined;
+    if (pageToken !== undefined) {
+      if (!this.#ctx.consumeListMemberCursor) {
+        throw new Error("Static-list member pagination is unavailable in this session.");
+      }
+      providerToken = await this.#ctx.consumeListMemberCursor(pageToken, scope);
+    }
     let page = await onHandle("static list", this.#listId, async () => {
       return await (await this.#ctx.client()).getListMembers(this.#listId, requested, providerToken);
     });
@@ -837,10 +820,17 @@ export class MarketoStaticListImpl extends RpcTarget {
       `Read **${page.result.length}** member record(s) from static list \`${this.#listId}\`, ` +
         `fields \`${requested.join("`, `")}\`.`,
     );
+    let nextPageToken: string | undefined;
+    if (page.moreResult) {
+      if (!this.#ctx.issueListMemberCursor) {
+        throw new Error("Static-list member pagination is unavailable in this session.");
+      }
+      nextPageToken = await this.#ctx.issueListMemberCursor(page.nextPageToken!, scope);
+    }
     return {
       members: page.result.map(lead => normalizeLead(lead, requested)),
       moreResult: page.moreResult,
-      nextPageToken: page.moreResult ? listMemberPageToken(page.nextPageToken!, scope) : undefined,
+      nextPageToken,
     };
   }
 
@@ -2425,8 +2415,11 @@ export function makeSessionContext(options: {
   excludeObservers?(): Promise<string[]>;
   submit(action: MarketoActionInput): Promise<void>;
   assertCurrent?(): Promise<void>;
+  issueListMemberCursor?(providerToken: string, scope: string): Promise<string>;
+  consumeListMemberCursor?(pageToken: string, scope: string): Promise<string>;
 }): SessionContext {
   let owners = 1;
+  let cursors = new Map<string, { providerToken: string; scope: string; expiresAt: number }>();
   return {
     client: options.client,
     observe: async (title, description) => {
@@ -2438,6 +2431,24 @@ export function makeSessionContext(options: {
       });
     },
     submit: options.submit,
+    issueListMemberCursor: options.issueListMemberCursor ?? (async (providerToken, scope) => {
+      let now = Date.now();
+      for (let [token, cursor] of cursors) {
+        if (cursor.expiresAt <= now) cursors.delete(token);
+      }
+      if (cursors.size >= 256) throw new Error("Too many active Marketo static-list member page tokens.");
+      let token = crypto.randomUUID();
+      cursors.set(token, { providerToken, scope, expiresAt: now + 10 * 60 * 1000 });
+      return token;
+    }),
+    consumeListMemberCursor: options.consumeListMemberCursor ?? (async (pageToken, scope) => {
+      let cursor = cursors.get(pageToken);
+      cursors.delete(pageToken);
+      if (!cursor || cursor.expiresAt <= Date.now() || cursor.scope !== scope) {
+        throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+      }
+      return cursor.providerToken;
+    }),
     assertCurrent: options.assertCurrent,
     retain: () => {
       if (owners === 0) throw new Error("Cannot retain a disposed Marketo session context.");
