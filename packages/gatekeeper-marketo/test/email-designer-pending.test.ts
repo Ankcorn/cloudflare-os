@@ -517,6 +517,44 @@ describe("Email Designer pending-state simulation", () => {
     });
   });
 
+  it("rejects oversized pending used-by simulation after its first provider page", async () => {
+    let requestedPages: number[] = [];
+    let { ctx } = context({
+      getDesignerAsset: async () => ({ id: "email-1", templateId: "template-A" }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        requestedPages.push(request.pageIndex ?? 0);
+        return {
+          result: Array.from({ length: 50 }, (_, index) => ({ id: `email-${index}`, name: `Email ${index}` })),
+          pageDetails: { totalItems: 1_500, currentPage: 1, pageSize: request.pageSize },
+        };
+      },
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+
+    await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
+      .rejects.toThrow(/cannot exceed 1000 provider records/);
+    expect(requestedPages).toEqual([0]);
+  });
+
+  it("rejects repeated full used-by pages when the provider omits its total", async () => {
+    let requestedPages: number[] = [];
+    let observations = 0;
+    let page = Array.from({ length: 50 }, (_, index) => ({ id: `email-${index}`, name: `Email ${index}` }));
+    let { ctx } = context({
+      getDesignerAsset: async () => ({ id: "email-1", templateId: "template-A" }),
+      getDesignerAssetUsedBy: async (_kind, request) => {
+        let pageIndex = request.pageIndex ?? 0;
+        requestedPages.push(pageIndex);
+        return { result: page, pageDetails: { currentPage: pageIndex + 1, pageSize: request.pageSize } };
+      },
+    }, [{ id: 1, type: "designerDelete", asset: "designerEmail", targetId: "email-1" }]);
+    ctx.observe = async () => { observations++; };
+
+    await expect(new MarketoDesignerEmailTemplateImpl(ctx, "template-A").getUsedBy())
+      .rejects.toThrow(/repeated full used-by page/);
+    expect(requestedPages).toEqual([0, 1]);
+    expect(observations).toBe(0);
+  });
+
   it("merges a page without materializing an upstream collection over 1000 rows", async () => {
     let requestedPages: number[] = [];
     let { ctx } = context({

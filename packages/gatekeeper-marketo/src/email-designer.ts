@@ -43,6 +43,7 @@ const MAX_ARRAY_ITEMS = 100;
 const MAX_DURABLE_PAYLOAD_BYTES = 1280 * 1024;
 const DESIGNER_PAGE_SIZE = 50;
 const MAX_SORTED_DESIGNER_ITEMS = 1_000;
+const MAX_SIMULATED_USED_BY_ITEMS = 1_000;
 
 function path(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
@@ -696,12 +697,25 @@ abstract class DesignerAssetImpl extends RpcTarget {
     let items: MarketoDesignerUsedBy[] = [];
     if (physical !== undefined) {
       let providerCount = 0;
+      let pageFingerprints = new Set<string>();
       for (let providerPage = 0; ; providerPage++) {
         let raw = await client.getDesignerAssetUsedBy(path(this.kind), {
           assetId: physical, pageIndex: providerPage, pageSize: DESIGNER_PAGE_SIZE, type: "all",
         });
         if (raw.pageDetails?.currentPage !== providerPage + 1 || raw.pageDetails.pageSize !== DESIGNER_PAGE_SIZE) {
           throw new Error(`Marketo returned used-by page ${String(raw.pageDetails?.currentPage)} with page size ${String(raw.pageDetails?.pageSize)} when page ${providerPage} with page size ${DESIGNER_PAGE_SIZE} was requested.`);
+        }
+        if (raw.pageDetails.totalItems !== undefined &&
+            raw.pageDetails.totalItems > MAX_SIMULATED_USED_BY_ITEMS) {
+          throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
+        }
+        let fingerprint = JSON.stringify(raw.result);
+        if (raw.result.length === DESIGNER_PAGE_SIZE && pageFingerprints.has(fingerprint)) {
+          throw new Error("Marketo returned a repeated full used-by page.");
+        }
+        pageFingerprints.add(fingerprint);
+        if (providerCount + raw.result.length > MAX_SIMULATED_USED_BY_ITEMS) {
+          throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
         }
         items.push(...raw.result.flatMap(item => item.id === undefined ? [] : [usedBySummary({
           ...item,
@@ -711,6 +725,9 @@ abstract class DesignerAssetImpl extends RpcTarget {
         providerCount += raw.result.length;
         if (raw.result.length < DESIGNER_PAGE_SIZE ||
             raw.pageDetails.totalItems !== undefined && providerCount >= raw.pageDetails.totalItems) break;
+        if (providerCount >= MAX_SIMULATED_USED_BY_ITEMS) {
+          throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} provider records.`);
+        }
       }
     }
 
@@ -740,6 +757,9 @@ abstract class DesignerAssetImpl extends RpcTarget {
         items = items.filter(item => item.id !== candidateId && item.id !== physicalCandidate);
       }
       if (finalMatches && final) items.push(usedBySummary(final));
+    }
+    if (items.length > MAX_SIMULATED_USED_BY_ITEMS) {
+      throw new Error(`Pending Designer used-by simulation cannot exceed ${MAX_SIMULATED_USED_BY_ITEMS} records.`);
     }
 
     let totalItems = items.length;
