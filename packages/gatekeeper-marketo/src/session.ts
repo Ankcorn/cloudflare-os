@@ -86,6 +86,10 @@ const DEFAULT_PERSON_FIELDS = [
   "updatedAt",
 ];
 
+function requestedPersonFields(fields: string[] | undefined): string[] {
+  return fields === undefined ? DEFAULT_PERSON_FIELDS : [...new Set(["id", ...fields])];
+}
+
 /** Plumbing every session object needs. */
 export type SessionContext = {
   /** Resolve a client for each operation so revocation takes effect on existing sessions. */
@@ -675,7 +679,7 @@ export class MarketoPersonImpl extends RpcTarget {
   }
 
   async read(fields?: string[]): Promise<MarketoPersonRecord | null> {
-    let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    let requested = requestedPersonFields(fields);
     if (this.#lookup.field === "id" && parsePersonId(this.#lookup.value) === undefined) {
       throw new Error("A person id lookup must be a canonical positive base-10 safe integer.");
     }
@@ -783,7 +787,7 @@ export class MarketoStaticListImpl extends RpcTarget {
     fields?: string[],
     pageToken?: string,
   ): Promise<{ members: MarketoPersonRecord[]; moreResult: boolean; nextPageToken?: string }> {
-    let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    let requested = requestedPersonFields(fields);
     let page = await onHandle("static list", this.#listId, async () => {
       return await (await this.#ctx.client()).getListMembers(this.#listId, requested, pageToken);
     });
@@ -1049,7 +1053,7 @@ export class MarketoProgramImpl extends RpcTarget {
     nextPageToken?: string;
   }> {
     this.#rejectPendingDeletion();
-    let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    let requested = requestedPersonFields(fields);
     let pendingCreation = this.#pendingCreation();
     if (pendingCreation?.type === "programClone") {
       throw new Error(`Program ${this.#programId} is pending cloning; its members are not readable until creation finishes.`);
@@ -1544,7 +1548,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     if (!field) throw new Error("A filter field is required.");
     if (!values?.length) throw new Error("At least one filter value is required.");
     requireFilterValueCount(values, "filter");
-    let requestedFields = fields?.length ? new Set(fields) : undefined;
+    let requestedFields = fields === undefined ? undefined : new Set(fields);
     let queryFields = requestedFields ? [...new Set([...requestedFields, field])] : fields;
     let records = await (await this.#ctx.client()).queryCustomObject(
       this.#apiName,
@@ -1556,9 +1560,9 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     if (records.some(record => !isRequestedFilterValue(record[field], requested))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested filter.");
     }
-    if (requestedFields && field !== "marketoGUID" && !requestedFields.has(field)) {
+    if (requestedFields) {
       records = records.map(record => Object.fromEntries(
-        Object.entries(record).filter(([name]) => name !== field),
+        Object.entries(record).filter(([name]) => name === "marketoGUID" || requestedFields.has(name)),
       ));
     }
     await this.#ctx.observe(
@@ -1600,18 +1604,16 @@ export class MarketoCustomObjectImpl extends RpcTarget {
     let records = await client.queryCustomObjectByDedupeKeys(
       this.#apiName,
       input,
-      fields?.length ? [...new Set([...fields, ...dedupeFields])] : fields,
+      fields === undefined ? undefined : [...new Set([...fields, ...dedupeFields])],
     );
     if (records.some(record => !input.some(key => dedupeFields.every(field =>
       sameFilterValue(record[field], key[field]))))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested dedupe keys.");
     }
-    if (fields?.length) {
+    if (fields !== undefined) {
       let requestedFields = new Set(fields);
-      let internalFields = new Set(dedupeFields.filter(field =>
-        field !== "marketoGUID" && !requestedFields.has(field)));
       records = records.map(record => Object.fromEntries(
-        Object.entries(record).filter(([field]) => !internalFields.has(field)),
+        Object.entries(record).filter(([field]) => field === "marketoGUID" || requestedFields.has(field)),
       ));
     }
     await this.#ctx.observe(
@@ -1764,7 +1766,7 @@ export class MarketoSessionImpl extends RpcTarget {
     if (!field) throw new Error("A search field is required.");
     if (!values?.length) throw new Error("At least one search value is required.");
     requireFilterValueCount(values, "search");
-    let requested = fields?.length ? [...new Set(["id", ...fields])] : DEFAULT_PERSON_FIELDS;
+    let requested = requestedPersonFields(fields);
     let wireFields = [...new Set([...requested, field])];
     let leads = await (await this.#ctx.client()).getLeads(field, values, wireFields);
     let requestedValues = new Set(values.map(String));

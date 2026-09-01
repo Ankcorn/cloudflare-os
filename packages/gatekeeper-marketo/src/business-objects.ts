@@ -199,7 +199,7 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
       let correlationFields = "dedupeKeys" in filter
         ? BUSINESS_OBJECTS[this.kind].dedupeFields
         : [filter.field];
-      let requestedFields = query.fields?.length ? new Set(query.fields) : undefined;
+      let requestedFields = query.fields === undefined ? undefined : new Set(query.fields);
       let page = await (await this.ctx.client()).queryBusinessObject(this.kind, {
         ...query,
         fields: requestedFields ? [...new Set([...requestedFields, ...correlationFields])] : query.fields,
@@ -215,7 +215,7 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
       let idField = BUSINESS_OBJECTS[this.kind].idField;
       let records = requestedFields
         ? page.result.map(record => Object.fromEntries(Object.entries(record).filter(([field]) =>
-          field === idField || requestedFields.has(field) || !correlationFields.includes(field))))
+          field === idField || requestedFields.has(field))))
         : page.result;
       let count = page.result.length;
       await this.ctx.observe(`Read ${count} Marketo ${this.kind} record(s)`, `Queried one page using ${"dedupeKeys" in query.filter ? "compound dedupe keys" : `field ${query.filter.field}`}; ${count} record(s) returned.`);

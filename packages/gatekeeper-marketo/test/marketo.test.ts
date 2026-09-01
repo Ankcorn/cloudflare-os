@@ -2850,7 +2850,14 @@ describe("custom object normalization", () => {
       describeCustomObject: async () => SCHEMA,
       queryCustomObjectByDedupeKeys: async (apiName, input, fields) => {
         requests.push({ apiName, input, fields });
-        return [{ marketoGUID: "g1", sourceID: "source-1", leadID: 7, status: "paid" }];
+        return [{
+          marketoGUID: "g1",
+          sourceID: "source-1",
+          leadID: 7,
+          status: "paid",
+          contactEmail: "private@example.com",
+          unsolicited: "hidden",
+        }];
       },
     }), "orderStatus");
 
@@ -2891,7 +2898,13 @@ describe("custom object normalization", () => {
     let object = new MarketoCustomObjectImpl(stubContext({
       queryCustomObject: async (_apiName, _field, _values, fields) => {
         requestedFields = fields;
-        return [{ marketoGUID: "g1", sourceID: "source-1", status: "paid" }];
+        return [{
+          marketoGUID: "g1",
+          sourceID: "source-1",
+          status: "paid",
+          contactEmail: "private@example.com",
+          unsolicited: "hidden",
+        }];
       },
     }), "orderStatus");
 
@@ -3213,6 +3226,42 @@ describe("person field normalization", () => {
       .resolves.toEqual([{ id: 7, email: raw.email }]);
     await expect(list.getMembers(["firstName"]))
       .resolves.toMatchObject({ members: [{ id: 7, firstName: "Person" }] });
+  });
+
+  it("treats empty person projections as id-only without exposing default PII", async () => {
+    let raw = {
+      id: 7,
+      email: "private@example.com",
+      firstName: "Private",
+      phone: "+1-555-0100",
+      unsolicited: "hidden",
+    };
+    let person = new MarketoPersonImpl(stubContext({ getLeads: async () => [raw] }), {
+      field: "email",
+      value: raw.email,
+    });
+    let session = new MarketoSessionImpl(stubContext({ getLeads: async () => [raw] }));
+    let list = new MarketoStaticListImpl(stubContext({
+      getListMembers: async () => ({ result: [raw], moreResult: false }),
+    }), 55);
+    let program = new MarketoProgramImpl(stubContext({
+      getProgramMembers: async () => ({
+        result: [{ ...raw, membership: { id: 99, progressionStatus: "Member" } }],
+        moreResult: false,
+      }) as never,
+    }), 99);
+
+    await expect(person.read([])).resolves.toEqual({ id: 7 });
+    await expect(session.findPeople("email", [raw.email], [])).resolves.toEqual([{ id: 7 }]);
+    await expect(list.getMembers([])).resolves.toMatchObject({ members: [{ id: 7 }] });
+    await expect(program.getMembers([])).resolves.toMatchObject({
+      members: [{ id: 7, membership: expect.objectContaining({ status: "Member" }) }],
+    });
+    expect((await list.getMembers([])).members[0]).toEqual({ id: 7 });
+    expect(Object.keys((await program.getMembers([])).members[0]!).toSorted()).toEqual([
+      "id",
+      "membership",
+    ]);
   });
 
   it("correlates projected person searches without exposing an internal filter field", async () => {
@@ -4210,6 +4259,31 @@ describe("standard CRM business objects", () => {
       ["company", "externalCompanyId"],
       ["description", "externalOpportunityId", "leadId", "role"],
     ]);
+  });
+
+  it("strips every unsolicited standard-object field from narrow projections", async () => {
+    let { ctx } = businessContext({
+      queryBusinessObject: async () => ({
+        result: [{
+          id: 7,
+          externalCompanyId: "acme",
+          company: "Acme",
+          billingEmail: "private@example.com",
+          unsolicited: "hidden",
+        }],
+        moreResult: false,
+      }),
+    });
+    let companies = new MarketoBusinessObjectImpl(ctx, "company");
+
+    expect((await companies.query({
+      filter: { field: "externalCompanyId", values: ["acme"] },
+      fields: ["company"],
+    })).records).toEqual([{ id: 7, company: "Acme" }]);
+    expect((await companies.query({
+      filter: { field: "externalCompanyId", values: ["acme"] },
+      fields: [],
+    })).records).toEqual([{ id: 7 }]);
   });
 
   it("submits complete, decision-gated upserts and deletes", async () => {
