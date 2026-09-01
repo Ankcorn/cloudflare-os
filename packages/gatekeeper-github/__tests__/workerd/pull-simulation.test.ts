@@ -251,6 +251,12 @@ class FakeGitHub {
       const ref = decodeURIComponent(path.slice(`${API_BASE}/commits/`.length));
       const commit = this.restCommits.get(ref);
       if (commit === undefined) {
+        // Like GitHub: an unknown full commit id answers 422 ("No commit found for SHA"); only
+        // an unknown branch/tag name answers 404. The pending-chain anchor probe
+        // (#isCommitOnGitHub) always asks by full id, so it sees the 422 shape here.
+        if (/^[0-9a-f]{40}$/.test(ref)) {
+          return Response.json({ message: `No commit found for SHA: ${ref}` }, { status: 422 });
+        }
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
       return Response.json(commitResponse(commit));

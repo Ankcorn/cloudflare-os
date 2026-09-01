@@ -943,8 +943,16 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
   /** Pre-computed injected items, already overlaid and filtered, sorted by #comparator. */
   #injectedItems: T[];
   #injectedIndex = 0;
+  /**
+   * Re-validates an injected item at the moment `next()` serves it (a page may be drained long
+   * after the cursor -- and its injected snapshot -- was built): returns the item to serve,
+   * possibly refreshed, or null to drop it. Must not change the item's sort position. Defaults
+   * to serving the snapshot as-is.
+   */
+  #revalidateInjected: (item: T) => T | null;
 
-  #buffer: T[] = [];
+  /** Rows buffered ahead of what next() has returned; injected ones re-validate when served. */
+  #buffer: {item: T, injected: boolean}[] = [];
   #remotePage = 1;
   #remotePerPage: number;
   #remoteExhausted = false;
@@ -956,6 +964,7 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
     filter: (item: T) => boolean;
     comparator: (a: T, b: T) => number;
     injectedItems: T[];
+    revalidateInjected?: (item: T) => T | null;
     pageSize: number;
     remotePageSize?: number;
   }) {
@@ -965,18 +974,29 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
     this.#filter = options.filter;
     this.#comparator = options.comparator;
     this.#injectedItems = options.injectedItems;
+    this.#revalidateInjected = options.revalidateInjected ?? (item => item);
     this.#pageSize = options.pageSize;
     this.#remotePerPage = options.remotePageSize ?? 100;
   }
 
   async next(): Promise<T[] | null> {
-    // Fill the buffer until we have enough items for a full page, or all sources are exhausted.
-    while (this.#buffer.length < this.#pageSize && !this.#fullyExhausted()) {
-      await this.#loadMore();
+    // Fill the page from the buffer, loading more when it runs dry. Injected rows re-validate
+    // at the moment they are *served*, not when they were buffered: #loadMore buffers a whole
+    // remote page at once, so with a small page size a row can sit in the buffer across many
+    // next() calls -- plenty of time for the state that justified it to change underneath.
+    const page: T[] = [];
+    while (page.length < this.#pageSize) {
+      const entry = this.#buffer.shift();
+      if (entry === undefined) {
+        if (this.#fullyExhausted()) break;
+        await this.#loadMore();
+        continue;
+      }
+      const item = entry.injected ? this.#revalidateInjected(entry.item) : entry.item;
+      if (item !== null) page.push(item);
     }
 
-    if (this.#buffer.length === 0) return null;
-    return this.#buffer.splice(0, this.#pageSize);
+    return page.length === 0 ? null : page;
   }
 
   #fullyExhausted(): boolean {
@@ -986,9 +1006,7 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
   async #loadMore(): Promise<void> {
     if (this.#remoteExhausted) {
       // Remote is done; flush remaining injected items into the buffer.
-      while (this.#injectedIndex < this.#injectedItems.length) {
-        this.#buffer.push(this.#injectedItems[this.#injectedIndex++]);
-      }
+      this.#flushInjectedBefore(undefined);
       return;
     }
 
@@ -1003,18 +1021,27 @@ class StreamingCursor<T> extends RpcTarget implements Cursor<T> {
       if (!this.#filter(overlaid)) continue;
 
       // Before appending this remote item, merge in any injected items that sort before it.
-      while (this.#injectedIndex < this.#injectedItems.length &&
-             this.#comparator(this.#injectedItems[this.#injectedIndex], overlaid) <= 0) {
-        this.#buffer.push(this.#injectedItems[this.#injectedIndex++]);
-      }
-      this.#buffer.push(overlaid);
+      this.#flushInjectedBefore(overlaid);
+      this.#buffer.push({item: overlaid, injected: false});
     }
 
     // If remote just became exhausted, flush remaining injected items.
     if (this.#remoteExhausted) {
-      while (this.#injectedIndex < this.#injectedItems.length) {
-        this.#buffer.push(this.#injectedItems[this.#injectedIndex++]);
+      this.#flushInjectedBefore(undefined);
+    }
+  }
+
+  /**
+   * Buffer the injected items that sort at or before `limit` (all remaining, when `limit` is
+   * undefined). Re-validation happens later, when next() serves them from the buffer.
+   */
+  #flushInjectedBefore(limit: T | undefined): void {
+    while (this.#injectedIndex < this.#injectedItems.length) {
+      if (limit !== undefined &&
+          this.#comparator(this.#injectedItems[this.#injectedIndex], limit) > 0) {
+        return;
       }
+      this.#buffer.push({item: this.#injectedItems[this.#injectedIndex++], injected: true});
     }
   }
 }
@@ -3559,6 +3586,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   async applyAction(actionId: number, cache: RpcStub<GitCache>): Promise<void> {
     const record = this.#requireActionRecord(actionId);
     if (record.state !== "pending" && record.state !== "staged") {
+      // A push this gatekeeper already recorded as applied reports idempotent success, not an
+      // error: the overseer persists its own completion record only after this method returns,
+      // so a crash in that window re-delivers the apply -- and by then the branch may have
+      // legitimately moved on from newSha, so only this durable record (never a desired-state
+      // re-check) can answer the retry. Throwing here would strand the action as forever
+      // un-appliable. Other action types keep the guard: their retried external mutations are a
+      // pre-existing gap the applyAction() contract tracks as future work.
+      if (record.state === "approved" && record.action.type === "push") return;
       throw new Error(`GitHub action ${actionId} is no longer pending.`);
     }
 
@@ -4156,7 +4191,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       await this.#getRemoteCommitDetails(oid);
       return true;
     } catch (error) {
-      if (error instanceof GitHubApiError && error.status === 404) return false;
+      // GitHub answers an unknown branch/tag name with 404 but an unknown full commit id with
+      // 422 ("No commit found for SHA: ..."), and this probe is always a full id.
+      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 422)) {
+        return false;
+      }
       throw error;
     }
   }
@@ -4461,6 +4500,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       if (head === null) continue;
       injectedNames.add(action.branch);
       if (filter?.protected !== true) {
+        // Served-simulated recording (not just isCommitPendingPush coverage): the page carrying
+        // this row may be drained after the push is rejected, and the advertising callback must
+        // still withhold a head that never reached the remote.
+        this.#servedSimulatedCommitIds.add(head);
         injectedItems.push({ name: action.branch, headCommit: head, protected: false });
       }
     }
@@ -4485,14 +4528,29 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           };
         });
       },
-      // A branch a queued push moves reads at the pushed head (see #simulateBranchHead).
-      overlay: item => ({
-        ...item,
-        headCommit: this.#simulateBranchHead(item.name, item.headCommit) ?? item.headCommit,
-      }),
+      // A branch a queued push moves reads at the pushed head (see #simulateBranchHead). The
+      // simulated head is recorded as served so the advertising callback withholds it even if
+      // the push is rejected between this overlay and the page's advertisement.
+      overlay: item => {
+        const head = this.#simulateBranchHead(item.name, item.headCommit) ?? item.headCommit;
+        if (head === item.headCommit) return item;
+        this.#servedSimulatedCommitIds.add(head);
+        return { ...item, headCommit: head };
+      },
       filter: item => !injectedNames.has(item.name),
       comparator: () => 0,
       injectedItems,
+      // Injected rows are snapshots from cursor-build time, but a queued creation can be
+      // rejected (or superseded) before the page carrying its row is drained -- re-simulate from
+      // the live queue at serve time, dropping the row when no queued creation remains, so a
+      // rejected push's branch stops being listed. (The eager loop above already verified the
+      // branch is absent remotely; a branch appearing mid-drain is the documented filter race.)
+      revalidateInjected: item => {
+        const head = this.#simulateBranchHead(item.name, null);
+        if (head === null) return null;
+        this.#servedSimulatedCommitIds.add(head);
+        return head === item.headCommit ? item : { ...item, headCommit: head };
+      },
       pageSize,
     });
   }
@@ -4566,9 +4624,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       return { details: await this.#getRemoteCommitDetails(ref), fromCache: false };
     } catch (error) {
       // A full commit id GitHub doesn't know yet may be queued for push; serve it from the
-      // workspace git cache so the caller sees the world as if the push had landed.
+      // workspace git cache so the caller sees the world as if the push had landed. GitHub
+      // reports an unknown full commit id as 422 ("No commit found for SHA: ..."), not 404 --
+      // but accept both, since the guard already requires a full id.
       if (gitCache !== undefined && isCommitOid(ref) &&
-          error instanceof GitHubApiError && error.status === 404) {
+          error instanceof GitHubApiError && (error.status === 404 || error.status === 422)) {
         const details = await this.#tryReadCachedCommitDetails(gitCache, ref);
         if (details !== null) return { details, fromCache: true };
       }
@@ -4626,9 +4686,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       return { id: await this.#resolveRemoteRef(ref), fromCache: false };
     } catch (error) {
       // A full commit id GitHub doesn't know yet may be queued for push; confirm it from the
-      // workspace git cache so the caller sees the world as if the push had landed.
+      // workspace git cache so the caller sees the world as if the push had landed. As in
+      // getCommit, GitHub's unknown-full-commit-id answer is 422, not 404; accept both.
       if (gitCache !== undefined && isCommitOid(ref) &&
-          error instanceof GitHubApiError && error.status === 404) {
+          error instanceof GitHubApiError && (error.status === 404 || error.status === 422)) {
         const object = await gitCache.get(ref);
         if (object !== null && object.type === "commit") return { id: ref, fromCache: true };
       }

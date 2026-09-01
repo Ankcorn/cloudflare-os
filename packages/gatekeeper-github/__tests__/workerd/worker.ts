@@ -81,6 +81,7 @@ type GatekeeperFacet = {
   revertAction(actionId: number): Promise<undefined | { message?: string; canRetry?: boolean }>;
   listBranches(filter: undefined, pageSize: number)
     : Promise<{ next(): Promise<GitHubBranchSummary[] | null> }>;
+  isSimulatedCommitId(commitId: string): Promise<boolean>;
   getCommit(ref: string | undefined, cache?: RpcStub<GitCache>)
     : Promise<{ details: GitHubCommitDetails, fromCache: boolean }>;
   resolveRef(ref: string | undefined, cache?: RpcStub<GitCache>)
@@ -225,6 +226,47 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       const cursor = await this.#gatekeeper(facetName, props).listBranches(undefined, pageSize);
       return await cursor.next();
     });
+  }
+
+  /**
+   * `listBranches` raced against a rejection: the cursor (and its injected-branch snapshot) is
+   * built first, `actionId` is rejected, and only then is the first page drained.
+   */
+  async listBranchesFirstPageAfterReject(
+    facetName: string, props: GatekeeperProps, pageSize: number, actionId: number,
+  ): Promise<Outcome<GitHubBranchSummary[] | null>> {
+    return await outcome(async () => {
+      const gatekeeper = this.#gatekeeper(facetName, props);
+      const cursor = await gatekeeper.listBranches(undefined, pageSize);
+      await gatekeeper.rejectAction(actionId);
+      return await cursor.next();
+    });
+  }
+
+  /**
+   * `listBranches` paged (page size 1) with a rejection *between* pages: the first page is
+   * drained, `actionId` is rejected, then the second page is drained -- catching rows that were
+   * already buffered ahead of the first page when the rejection landed.
+   */
+  async listBranchesPagedRejectBetween(
+    facetName: string, props: GatekeeperProps, actionId: number,
+  ): Promise<Outcome<{
+    first: GitHubBranchSummary[] | null, second: GitHubBranchSummary[] | null,
+  }>> {
+    return await outcome(async () => {
+      const gatekeeper = this.#gatekeeper(facetName, props);
+      const cursor = await gatekeeper.listBranches(undefined, 1);
+      const first = await cursor.next();
+      await gatekeeper.rejectAction(actionId);
+      const second = await cursor.next();
+      return { first, second };
+    });
+  }
+
+  async isSimulatedCommitId(
+    facetName: string, props: GatekeeperProps, commitId: string,
+  ): Promise<Outcome<boolean>> {
+    return await outcome(() => this.#gatekeeper(facetName, props).isSimulatedCommitId(commitId));
   }
 
   async getCommit(

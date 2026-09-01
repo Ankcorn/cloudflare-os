@@ -154,6 +154,11 @@ class FakeGitHub {
       const commit = this.restCommits.get(ref)
         ?? (fromBranch !== undefined ? { sha: fromBranch, message: `rest ${ref}` } : undefined);
       if (commit === undefined) {
+        // Like GitHub: an unknown full commit id answers 422 ("No commit found for SHA"); only
+        // an unknown branch/tag name answers 404.
+        if (/^[0-9a-f]{40}$/.test(ref)) {
+          return Response.json({ message: `No commit found for SHA: ${ref}` }, { status: 422 });
+        }
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
       // The `sha` media type answers with the bare commit id as text, like GitHub does.
@@ -243,6 +248,12 @@ async function repoGatekeeper() {
     revertAction: (actionId: number) => unwrap(hooks.revertAction(scenario, props, actionId)),
     listBranchesFirstPage: (pageSize: number) =>
       unwrap(hooks.listBranchesFirstPage(scenario, props, pageSize)),
+    listBranchesFirstPageAfterReject: (pageSize: number, actionId: number) =>
+      unwrap(hooks.listBranchesFirstPageAfterReject(scenario, props, pageSize, actionId)),
+    listBranchesPagedRejectBetween: (actionId: number) =>
+      unwrap(hooks.listBranchesPagedRejectBetween(scenario, props, actionId)),
+    isSimulatedCommitId: (commitId: string) =>
+      unwrap(hooks.isSimulatedCommitId(scenario, props, commitId)),
     getCommit: (ref: string | undefined, cache?: TestGitCache) =>
       unwrap(hooks.getCommit(scenario, props, ref, cache === undefined ? undefined : stubOf(cache))),
     resolveRef: (ref: string | undefined, cache?: TestGitCache) =>
@@ -392,6 +403,45 @@ describe("simulation", () => {
     expect(page?.filter(branch => branch.name === "feature")).toHaveLength(1);
   });
 
+  it("drops an injected branch whose push was rejected before the page was drained, still withholding its head", async () => {
+    const github = new FakeGitHub();
+    github.branches.set("main", BASE);
+    github.install();
+    const gk = await repoGatekeeper();
+    const cache = new TestGitCache().withCommit(HEAD1, commitPayload([BASE], "x"));
+    const action = (await queuePush(gk, cache, new TestApprovalQueue(), "feature", HEAD1))!;
+
+    // The cursor snapshots the injected branch at build time; the rejection lands before the
+    // page is drained, so serving the snapshot would list a branch that will never exist.
+    const page = await gk.listBranchesFirstPageAfterReject(50, action.approvalId);
+    expect(page?.some(branch => branch.name === "feature")).toBe(false);
+
+    // The head never reached GitHub, and it is no longer a pending push -- but advertising
+    // callbacks must keep withholding it, or the rejected push's commit would be durably
+    // recorded as pullable from this remote (misrouting pulls and shrinking later push packs).
+    expect(await gk.isSimulatedCommitId(HEAD1)).toBe(true);
+  });
+
+  it("revalidates injected branches when served, not when buffered behind a small page", async () => {
+    const github = new FakeGitHub();
+    github.branches.set("main", BASE);
+    github.install();
+    const gk = await repoGatekeeper();
+    const queue = new TestApprovalQueue();
+    const cache = new TestGitCache()
+      .withCommit(HEAD1, commitPayload([BASE], "x"))
+      .withCommit(HEAD2, commitPayload([BASE], "y"));
+    await queuePush(gk, cache, queue, "feat-a", HEAD1);
+    const second = (await queuePush(gk, cache, queue, "feat-b", HEAD2))!;
+
+    // Page size 1: the first page serves feat-a while feat-b sits buffered behind it; the
+    // rejection lands between the pages, so the second page must drop the already-buffered
+    // feat-b snapshot rather than serve a branch that will never exist.
+    const pages = await gk.listBranchesPagedRejectBetween(second.approvalId);
+    expect(pages.first).toEqual([{ name: "feat-a", headCommit: HEAD1, protected: false }]);
+    expect(pages.second).toEqual([{ name: "main", headCommit: BASE, protected: false }]);
+  });
+
   it("stops injecting a queued creation once the branch appears remotely", async () => {
     const github = new FakeGitHub();
     github.install();  // "feature" does not exist at queue time
@@ -449,8 +499,9 @@ describe("simulation", () => {
     await queuePush(gk, cache, new TestApprovalQueue(), "main", HEAD1);
 
     expect(await gk.resolveRef(HEAD1, cache)).toEqual({ id: HEAD1, fromCache: true });
-    // A commit neither GitHub nor the workspace git cache knows still fails.
-    await expect(gk.resolveRef(OTHER, cache)).rejects.toThrow(/Not Found/);
+    // A commit neither GitHub nor the workspace git cache knows still fails (GitHub's unknown-id
+    // answer is a 422, which must not be swallowed when the cache cannot serve the id either).
+    await expect(gk.resolveRef(OTHER, cache)).rejects.toThrow(/No commit found for SHA/);
   });
 });
 
@@ -505,9 +556,10 @@ describe("apply", () => {
       new RegExp(`^${BASE} ${HEAD1} refs/heads/main\0report-status agent=`));
     expect(pack).toEqual(PACK_BYTES);
 
-    // Applied means no longer pending: a second apply is refused by the record state...
-    await expect(gk.applyAction(action.approvalId, cache))
-      .rejects.toThrow(/no longer pending/);
+    // A re-delivered apply (the overseer crashed before persisting its completion record) is
+    // idempotent success: nothing is pushed again...
+    await gk.applyAction(action.approvalId, cache);
+    expect(github.receivePackExchanges).toHaveLength(1);
     // ...and the simulation overlay is gone (the branch reads at whatever GitHub reports).
     const page = await gk.listBranchesFirstPage(50);
     expect(page).toContainEqual({ name: "main", headCommit: BASE, protected: false });
@@ -569,8 +621,11 @@ describe("apply", () => {
     github.respondToPush("unpack ok", "ng refs/heads/main fetch first");
     await gk.applyAction(action.approvalId, cache);
 
-    await expect(gk.applyAction(action.approvalId, cache))
-      .rejects.toThrow(/no longer pending/);
+    // A re-delivered apply of the now-approved push succeeds without touching the remote, even
+    // if the branch has moved on since (the fake would throw on an unexpected receive-pack).
+    github.branches.set("main", OTHER);
+    await gk.applyAction(action.approvalId, cache);
+    expect(github.receivePackExchanges).toHaveLength(1);
   });
 });
 

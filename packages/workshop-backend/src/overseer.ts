@@ -3304,8 +3304,10 @@ class OverseerImpl implements AgentHooks {
   // Build the agent's executeCode env from the chat's binding map: each name resolves to a
   // gadget's RPC stub, a gatekeeper session stub, or an agent callback's stored arguments.
   // Entries whose targets no longer exist are silently skipped, mirroring the deleted-gadget
-  // behavior elsewhere.
-  getEnvForAgent(chatId: number, bindings: Record<string, ChatBindingEntry>): object {
+  // behavior elsewhere. `executionId` is the calling executeCodeMode run, minted into worktree
+  // loopbacks so they are usable only from within that execution.
+  getEnvForAgent(chatId: number, bindings: Record<string, ChatBindingEntry>,
+                 executionId: string): object {
     let caller: GatekeeperCaller = {from: "agent", chatId};
     // This must be a *plain* object: it becomes the loaded worker's `env`, and the loader's
     // serializer rejects anything else (including a null-prototype object) with DataCloneError.
@@ -3330,10 +3332,11 @@ class OverseerImpl implements AgentHooks {
             env[name] = this.makeBindingLoopback({type: "gadget", id: entry.id}, caller);
           } else if (record?.type === "worktree") {
             // The programmatic Worktree binding (see worktree-session.ts). Served through the
-            // loopback like every binding, resolving against the calling turn's registered
-            // worktree state -- so it is live exactly while that chat's executeCode runs (see
-            // startGatekeeperSession's "worktree" case).
-            env[name] = this.makeBindingLoopback({type: "worktree", id: entry.id}, caller);
+            // loopback like every binding, resolving against this execution's registered
+            // worktree state -- the executionId is what keeps it live for exactly this
+            // executeCode run (see startGatekeeperSession's "worktree" case).
+            env[name] = this.makeBindingLoopback(
+                {type: "worktree", id: entry.id, executionId}, caller);
           } else if (this.storage.gatekeepers.get(entry.id)) {
             env[name] = this.makeBindingLoopback({type: "gatekeeper", id: entry.id}, caller);
           }
@@ -5227,7 +5230,9 @@ class OverseerImpl implements AgentHooks {
         // content and buffered effects live in the agent turn, so the session resolves against
         // the turn state executeCodeMode registered for the calling chat -- reachable only from
         // the agent's own executeCode (never gadgets: worktrees can't be bound into them), and
-        // only while it runs (a stub stored past its execution fails closed here).
+        // only while the *minting* execution runs: the loopback's executionId must match the
+        // registered turn's, so a stub retained past its execution (e.g. stored in a gadget)
+        // fails closed here rather than reviving against a later execution's turn.
         if (caller.from !== "agent") {
           throw new Error("Worktree bindings are only available to the agent's executeCode.");
         }
@@ -5236,7 +5241,7 @@ class OverseerImpl implements AgentHooks {
           throw new Error(`No such worktree: ${target.id}`);
         }
         let turn = this.#activeWorktreeTurns.get(caller.chatId);
-        if (turn === undefined) {
+        if (turn === undefined || turn.executionId !== target.executionId) {
           throw new Error(
               "This worktree binding is no longer live; worktree bindings are usable only " +
               "while the executeCode call they were provided to is running.");
@@ -5246,15 +5251,17 @@ class OverseerImpl implements AgentHooks {
       }
 
       default:
-        target.type satisfies never;
+        target satisfies never;
         throw new TypeError("Unknown binding target type.");
     }
   }
 
   // The worktree turn state registered by a running executeCode, keyed by chat (one turn per
-  // chat, and executeCode calls within it are sequential). See executeCodeMode.
-  #activeWorktreeTurns =
-      new Map<number, {access: WorktreeTurnAccess, initiator: AiChatAuthorInfo}>();
+  // chat, and executeCode calls within it are sequential). `executionId` names the registering
+  // execution: worktree loopbacks are minted with it and verified against it, so only stubs from
+  // the currently-running execution resolve. See executeCodeMode.
+  #activeWorktreeTurns = new Map<number,
+      {access: WorktreeTurnAccess, initiator: AiChatAuthorInfo, executionId: string}>();
 
   // Maps chat ID to action numbers recently performed by that chat's agent. These are drained into
   // the chat log after the tool returns. `awaitDecision` is true if any captured action needs it.
@@ -8211,9 +8218,11 @@ class OverseerImpl implements AgentHooks {
     let executionId: string = bytes.toBase64();
 
     // Register the turn's worktree state for the worktree binding loopbacks (see
-    // startGatekeeperSession's "worktree" case), for exactly this execution's duration.
+    // startGatekeeperSession's "worktree" case), for exactly this execution's duration -- the
+    // executionId is minted into the loopbacks below, so stubs from other executions never
+    // resolve against this registration.
     if (worktreeTurn !== undefined) {
-      this.#activeWorktreeTurns.set(chatId, {access: worktreeTurn, initiator});
+      this.#activeWorktreeTurns.set(chatId, {access: worktreeTurn, initiator, executionId});
     }
 
     if (onOutputText) {
@@ -8246,7 +8255,7 @@ class OverseerImpl implements AgentHooks {
           "agent.js": code,
         },
         // The agent's env holds the chat's named bindings (see getEnvForAgent).
-        env: this.getEnvForAgent(chatId, bindings),
+        env: this.getEnvForAgent(chatId, bindings, executionId),
         tails: [this.ctx.exports.CodeModeTailLoopback({props: tailProps})],
         globalOutbound: null,
       };
@@ -8323,7 +8332,10 @@ class OverseerImpl implements AgentHooks {
 
       return log;
     } finally {
-      this.#activeWorktreeTurns.delete(chatId);
+      // Guarded by executionId so this cleanup can never clobber a newer registration.
+      if (this.#activeWorktreeTurns.get(chatId)?.executionId === executionId) {
+        this.#activeWorktreeTurns.delete(chatId);
+      }
       this.#codeModeOutputSubscribers.delete(executionId);
       this.#codeModeResolvers.delete(executionId);
       this.#forgedRestoreTargets.delete(chatId);
@@ -9721,8 +9733,17 @@ type GatekeeperLoopbackProps = {
 };
 
 type BindingLoopbackTarget = {
-  type: "gadget" | "gatekeeper" | "worktree";
+  type: "gadget" | "gatekeeper";
   id: WorkpieceId;
+} | {
+  type: "worktree";
+  id: WorkpieceId;
+
+  // The executeCodeMode execution this loopback was minted for. A worktree binding resolves
+  // against the turn state registered for exactly that execution (see #activeWorktreeTurns), so
+  // a stub retained past it -- say, stored in a gadget the agent called -- fails closed instead
+  // of coming back to life against a later execution's turn.
+  executionId: string;
 };
 
 /**
