@@ -31,10 +31,17 @@ import {
   type MarketoAction,
   type MarketoActionInput,
 } from "../src/actions";
-import type { DesignStudioAction, DesignStudioActionInput } from "../src/design-studio-actions";
+import {
+  executeDesignStudioAction,
+  isDesignStudioAction,
+  type DesignStudioAction,
+  type DesignStudioActionInput,
+} from "../src/design-studio-actions";
 import {
   designerCloneSnapshot,
   emailDesignerActionReferences,
+  executeEmailDesignerAction,
+  isEmailDesignerAction,
   resolveDesignerCloneSnapshot,
   type EmailDesignerAction,
   type EmailDesignerActionInput,
@@ -47,14 +54,21 @@ import {
 } from "../src/email-designer";
 import {
   executeCampaignAction,
+  isCampaignAction,
   type CampaignAction,
   type CampaignActionInput,
 } from "../src/campaign-actions";
 import {
   executeProgramAction,
+  isProgramAction,
   type ProgramAction,
   type ProgramActionInput,
 } from "../src/program-actions";
+import {
+  executeBusinessObjectAction,
+  isBusinessObjectAction,
+  type BusinessObjectAction,
+} from "../src/business-object-actions";
 import {
   MarketoDesignStudioImpl,
   MarketoEmailTemplateImpl,
@@ -101,7 +115,6 @@ import {
   type TokenCredentialState,
 } from "../src/token-cache";
 import { MarketoBusinessObjectImpl, type BusinessObjectContext } from "../src/business-objects";
-import type { BusinessObjectAction } from "../src/business-object-actions";
 import type { MarketoBusinessObjectQuery } from "../src/types";
 
 const TEST_ENV = env as unknown as Env;
@@ -6998,6 +7011,61 @@ async function emailDesignerActionGatekeeper(
   });
   return stub;
 }
+
+describe("persisted action type validation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    "designFuture",
+    "designerFuture",
+    "campaignFuture",
+    "programFuture",
+    "businessObjectFuture",
+    "personFuture",
+  ])("rejects unknown %s actions before any provider request", async type => {
+    let fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    let stub = await actionGatekeeper({ id: 1, type } as unknown as MarketoAction);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/Unknown persisted Marketo action type/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("uses exact family guards and fail-closed executor defaults", async () => {
+    expect(isDesignStudioAction({ type: "designFuture" })).toBe(false);
+    expect(isEmailDesignerAction({ type: "designerFuture" })).toBe(false);
+    expect(isCampaignAction({ type: "campaignFuture" })).toBe(false);
+    expect(isProgramAction({ type: "programFuture" })).toBe(false);
+    expect(isBusinessObjectAction({ type: "businessObjectFuture" })).toBe(false);
+
+    let clientAccesses = 0;
+    let client = new Proxy({}, { get: () => { clientAccesses++; } }) as MarketoClient;
+    let resolve = vi.fn(() => 1);
+    let malformed = { id: 1, type: "future" };
+    await expect(executeDesignStudioAction(
+      malformed as unknown as DesignStudioAction, client, resolve, () => {},
+    )).rejects.toThrow(/Unknown persisted Marketo Design Studio action type/);
+    await expect(executeEmailDesignerAction(
+      malformed as unknown as EmailDesignerAction, client, String, resolve, () => {},
+    )).rejects.toThrow(/Unknown persisted Marketo Email Designer action type/);
+    await expect(executeCampaignAction(
+      malformed as unknown as CampaignAction, client, resolve, () => {},
+    )).rejects.toThrow(/Unknown persisted Marketo campaign action type/);
+    await expect(executeProgramAction(
+      malformed as unknown as ProgramAction, client, resolve, () => {},
+    )).rejects.toThrow(/Unknown persisted Marketo program action type/);
+    await expect(executeBusinessObjectAction(
+      malformed as unknown as BusinessObjectAction, client,
+    )).rejects.toThrow(/Unknown persisted Marketo business-object action type/);
+    await expect(executeAction(malformed as unknown as Parameters<typeof executeAction>[0], client))
+      .rejects.toThrow(/Unknown persisted Marketo action type/);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(clientAccesses).toBe(0);
+  });
+});
 
 describe("post-dispatch creation response validation", () => {
   afterEach(() => vi.unstubAllGlobals());

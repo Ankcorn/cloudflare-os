@@ -107,7 +107,17 @@ export type DesignStudioActionInput = DesignStudioAction extends infer T
   : never;
 
 export function isDesignStudioAction(action: { type: string }): action is DesignStudioAction {
-  return action.type.startsWith("design") && !action.type.startsWith("designer");
+  switch (action.type) {
+    case "designCreate":
+    case "designClone":
+    case "designMetadata":
+    case "designContent":
+    case "designLifecycle":
+    case "designDeleteFolder":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function label(kind: DesignStudioAssetKind): string {
@@ -289,6 +299,17 @@ export async function executeDesignStudioAction(
   landingPageTemplateId?: number,
   recordCompletedWrite: () => void = () => {},
 ): Promise<void> {
+  switch (action.type) {
+    case "designCreate":
+    case "designClone":
+    case "designMetadata":
+    case "designContent":
+    case "designLifecycle":
+    case "designDeleteFolder":
+      break;
+    default:
+      throw new Error("Unknown persisted Marketo Design Studio action type.");
+  }
   if (action.type === "designCreate") {
     if ((action.asset === "emailTemplate" || action.asset === "file") && action.parent.type !== "Folder") {
       throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);

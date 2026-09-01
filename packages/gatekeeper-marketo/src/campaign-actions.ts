@@ -54,7 +54,15 @@ export type CampaignActionInput = CampaignAction extends infer T
 
 /** Whether an arbitrary Marketo action is a campaign-management action. */
 export function isCampaignAction(action: { type: string }): action is CampaignAction {
-  return action.type.startsWith("campaign") && action.type !== "campaignTrigger" && action.type !== "campaignSchedule";
+  switch (action.type) {
+    case "campaignCreate":
+    case "campaignClone":
+    case "campaignMetadata":
+    case "campaignLifecycle":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function descriptionDetail(value: string): string {
@@ -141,6 +149,15 @@ export async function executeCampaignAction(
   recordCreation: RecordCreation,
   recordCandidate: (realId: number) => void = () => {},
 ): Promise<void> {
+  switch (action.type) {
+    case "campaignCreate":
+    case "campaignClone":
+    case "campaignMetadata":
+    case "campaignLifecycle":
+      break;
+    default:
+      throw new Error("Unknown persisted Marketo campaign action type.");
+  }
   if (action.type === "campaignCreate") {
     let parent = folder(action.parent, resolve);
     let result = await client.createSmartCampaign({

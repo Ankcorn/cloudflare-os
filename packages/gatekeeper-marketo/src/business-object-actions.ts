@@ -80,9 +80,13 @@ export async function executeBusinessObjectAction(
   action: BusinessObjectAction,
   client: MarketoClient,
 ): Promise<RawSyncResult[]> {
-  if (action.type === "businessObjectDelete") {
-    return await client.deleteBusinessObject(action.kind, action.records, action.matchBy);
+  switch (action.type) {
+    case "businessObjectDelete":
+      return await client.deleteBusinessObject(action.kind, action.records, action.matchBy);
+    case "businessObjectUpsert":
+      if (!action.action) throw new Error("A persisted business-object upsert is missing its action.");
+      return await client.syncBusinessObject(action.kind, action.records, action.action, action.matchBy);
+    default:
+      throw new Error("Unknown persisted Marketo business-object action type.");
   }
-  if (!action.action) throw new Error("A persisted business-object upsert is missing its action.");
-  return await client.syncBusinessObject(action.kind, action.records, action.action, action.matchBy);
 }

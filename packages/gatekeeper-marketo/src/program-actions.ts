@@ -198,6 +198,15 @@ export async function executeProgramAction(
   recordCreation: (provisionalId: string, realId: number) => void,
   recordCandidate: (realId: number) => void = () => {},
 ): Promise<void> {
+  switch (action.type) {
+    case "programCreate":
+    case "programClone":
+    case "programUpdate":
+    case "programLifecycle":
+      break;
+    default:
+      throw new Error("Unknown persisted Marketo program action type.");
+  }
   if (action.type === "programCreate") {
     let parentId = resolve(action.parentId);
     let result = await client.createProgram({

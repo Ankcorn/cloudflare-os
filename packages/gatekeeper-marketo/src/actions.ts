@@ -327,6 +327,9 @@ export async function executeAction(
 
     case "customObjectDelete":
       return await client.deleteCustomObject(action.apiName, action.records, action.deleteBy ?? "dedupeFields");
+
+    default:
+      throw new Error("Unknown persisted Marketo action type.");
   }
 }
 
@@ -346,17 +349,35 @@ const MAX_SCHEDULE_DELAY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
 /** Revalidate approved inputs immediately before dispatch. */
 export function validateActionForDispatch(action: MarketoAction, now = Date.now()): void {
-  if ((action.type === "campaignTrigger" || action.type === "campaignSchedule") &&
-      (!Object.hasOwn(action, "programId") || action.programId !== null && typeof action.programId !== "string")) {
-    throw new Error("A persisted Marketo campaign action is missing its reviewed parent ownership.");
-  }
-  if (action.type === "upsertPeople") {
-    validatePeopleUpsertLookup(action.records, action.upsertAction, action.lookupField);
-  } else if (action.type === "campaignSchedule") {
-    let delay = new Date(action.runAt).getTime() - now;
-    if (!Number.isFinite(delay) || delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
-      throw new Error("The approved Marketo campaign run time is no longer between 5 minutes and 2 years from dispatch.");
+  if (isDesignStudioAction(action) || isCampaignAction(action) || isProgramAction(action) ||
+      isEmailDesignerAction(action) || isBusinessObjectAction(action)) return;
+  switch (action.type) {
+    case "upsertPeople":
+      validatePeopleUpsertLookup(action.records, action.upsertAction, action.lookupField);
+      return;
+    case "campaignTrigger":
+    case "campaignSchedule": {
+      if (!Object.hasOwn(action, "programId") || action.programId !== null && typeof action.programId !== "string") {
+        throw new Error("A persisted Marketo campaign action is missing its reviewed parent ownership.");
+      }
+      if (action.type === "campaignSchedule") {
+        let delay = new Date(action.runAt).getTime() - now;
+        if (!Number.isFinite(delay) || delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
+          throw new Error("The approved Marketo campaign run time is no longer between 5 minutes and 2 years from dispatch.");
+        }
+      }
+      return;
     }
+    case "updatePerson":
+    case "deletePerson":
+    case "listAdd":
+    case "listRemove":
+    case "programStatus":
+    case "customObjectUpsert":
+    case "customObjectDelete":
+      return;
+    default:
+      throw new Error("Unknown persisted Marketo action type.");
   }
 }
 

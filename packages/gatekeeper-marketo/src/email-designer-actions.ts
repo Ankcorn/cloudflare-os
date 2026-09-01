@@ -35,7 +35,16 @@ export type EmailDesignerActionInput = EmailDesignerAction extends infer T
   : never;
 
 export function isEmailDesignerAction(action: { type: string }): action is EmailDesignerAction {
-  return action.type.startsWith("designer");
+  switch (action.type) {
+    case "designerCreate":
+    case "designerClone":
+    case "designerUpdate":
+    case "designerLifecycle":
+    case "designerDelete":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /** A designer preflight failure proves that no mutating request was sent. */
@@ -349,6 +358,16 @@ export async function executeEmailDesignerAction(
   recordCreation: (provisionalId: string, realId: string, kind: EmailDesignerKind) => void,
   recordCandidate: (realId: string) => void = () => {},
 ): Promise<void> {
+  switch (action.type) {
+    case "designerCreate":
+    case "designerClone":
+    case "designerUpdate":
+    case "designerLifecycle":
+    case "designerDelete":
+      break;
+    default:
+      throw new Error("Unknown persisted Marketo Email Designer action type.");
+  }
   let kind = path(action.asset);
   if (action.type === "designerCreate") {
     let body = resolvedBody(action.body, resolveDesigner, resolveAsset);
