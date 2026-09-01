@@ -406,6 +406,7 @@ type ObserverCommitExpectation = {
 
 type StoredObserver = {
   admissionId: string;
+  observerId: string;
   accountId: string;
   ownerGeneration: number;
   collaboratorGeneration: number;
@@ -413,9 +414,23 @@ type StoredObserver = {
 
 type StoredObserverAuthority = {
   admissionId: string;
+  bindingId: string;
   observerId: string;
   ownerAccountId: string;
 };
+
+type StoredRevokedObserver = {
+  admissionId: string;
+  observerId: string;
+};
+
+type CollaboratorCommitResult =
+  | { committed: false }
+  | { committed: true; replaced?: { admissionId: string; accountId: string } };
+
+function observerStorageKey(prefix: string, bindingId: string, observerId: string): string {
+  return `${prefix}:${bindingId}:${encodeURIComponent(observerId)}`;
+}
 
 type AccountDispatchResult =
   | { ok: true; response: Response }
@@ -595,10 +610,12 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   /** Credential and membership generations used to prepare an observer admission. */
-  getObserverAdmissionState(observerId: string): ObserverAdmissionState {
+  getObserverAdmissionState(bindingId: string, observerId: string): ObserverAdmissionState {
     return {
       ...this.getCredentialState(),
-      observerEpoch: this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0,
+      observerEpoch: this.ctx.storage.kv.get<number>(
+        observerStorageKey("observerEpoch", bindingId, observerId),
+      ) ?? 0,
       reconnecting: Boolean(this.ctx.storage.kv.get<boolean>("reconnecting")),
     };
   }
@@ -627,13 +644,14 @@ export class UserAccount extends DurableObject<Env> {
   /** Validate the captured credential and initiate one Marketo request atomically with revoke. */
   async dispatch(
     expected: AccountCredentialState & { credentials: MarketoCredentials },
+    bindingId: string | undefined,
     urlText: string,
     request: MarketoDispatchRequest,
     forceRefresh: boolean,
     timeoutMs: number,
   ): Promise<AccountDispatchResult> {
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
-    if ((await this.getExcludedObservers()).length > 0) {
+    if (bindingId && (await this.getExcludedObservers(bindingId)).length > 0) {
       return { ok: false, observerRevoked: true };
     }
     let endpoint = new URL(expected.credentials.endpoint);
@@ -658,7 +676,7 @@ export class UserAccount extends DurableObject<Env> {
       disposeRpcResult(token);
     }
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
-    if ((await this.getExcludedObservers()).length > 0) {
+    if (bindingId && (await this.getExcludedObservers(bindingId)).length > 0) {
       return { ok: false, observerRevoked: true };
     }
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
@@ -751,43 +769,72 @@ export class UserAccount extends DurableObject<Env> {
 
   /** Persist collaborator authority if the owner generation and observer admission epoch are current. */
   commitCollaborator(
+    bindingId: string,
     observerId: string,
     expected: ObserverCommitExpectation,
     collaboratorAccountId: string,
     collaboratorGeneration: number,
     admissionId: string,
-  ): boolean {
-    let observerEpoch = this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0;
+  ): CollaboratorCommitResult {
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let observerEpoch = this.ctx.storage.kv.get<number>(epochKey) ?? 0;
     if (this.ctx.storage.kv.get<boolean>("reconnecting") ||
         !this.ctx.storage.kv.get<MarketoCredentials>("credentials") ||
         this.#credentialGeneration() !== expected.ownerGeneration ||
-        observerEpoch !== expected.observerEpoch) return false;
-    this.ctx.storage.kv.put<StoredObserver>(`observer:${observerId}`, {
+        observerEpoch !== expected.observerEpoch) return { committed: false };
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let previous = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    this.ctx.storage.kv.put<StoredObserver>(observerKey, {
       admissionId,
+      observerId,
       accountId: collaboratorAccountId,
       ownerGeneration: expected.ownerGeneration,
       collaboratorGeneration,
     });
-    this.ctx.storage.kv.delete(`revokedObserver:${observerId}`);
-    return true;
+    this.ctx.storage.kv.delete(observerStorageKey("revokedObserver", bindingId, observerId));
+    return {
+      committed: true,
+      ...(previous ? {
+        replaced: { admissionId: previous.admissionId, accountId: previous.accountId },
+      } : {}),
+    };
   }
 
   /** Forget an observer previously admitted for this account. */
-  removeCollaborator(observerId: string): void {
-    let epoch = (this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0) + 1;
-    this.ctx.storage.kv.put(`observerEpoch:${observerId}`, epoch);
-    this.ctx.storage.kv.delete(`observer:${observerId}`);
-    this.ctx.storage.kv.delete(`revokedObserver:${observerId}`);
+  async removeCollaborator(bindingId: string, observerId: string): Promise<void> {
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let epoch = (this.ctx.storage.kv.get<number>(epochKey) ?? 0) + 1;
+    this.ctx.storage.kv.put(epochKey, epoch);
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let observer = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    this.ctx.storage.kv.delete(observerKey);
+    this.ctx.storage.kv.delete(observerStorageKey("revokedObserver", bindingId, observerId));
+    if (observer) {
+      await userAccountStub(this.ctx.exports, observer.accountId)
+        .removeObserverAdmission(observer.admissionId);
+    }
   }
 
   /** Tombstone an admission whose collaborator authority was revoked. */
-  revokeCollaborator(observerId: string, admissionId: string): void {
-    let observer = this.ctx.storage.kv.get<StoredObserver>(`observer:${observerId}`);
+  revokeCollaborator(bindingId: string, observerId: string, admissionId: string): void {
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let observer = this.ctx.storage.kv.get<StoredObserver>(observerKey);
     if (!observer || observer.admissionId !== admissionId) return;
-    let epoch = (this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0) + 1;
-    this.ctx.storage.kv.put(`observerEpoch:${observerId}`, epoch);
-    this.ctx.storage.kv.delete(`observer:${observerId}`);
-    this.ctx.storage.kv.put(`revokedObserver:${observerId}`, admissionId);
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let epoch = (this.ctx.storage.kv.get<number>(epochKey) ?? 0) + 1;
+    this.ctx.storage.kv.put(epochKey, epoch);
+    this.ctx.storage.kv.delete(observerKey);
+    this.ctx.storage.kv.put<StoredRevokedObserver>(
+      observerStorageKey("revokedObserver", bindingId, observerId),
+      { admissionId, observerId },
+    );
+  }
+
+  /** Drop one admission after its owner binding no longer references it. */
+  async removeObserverAdmission(admissionId: string): Promise<void> {
+    await this.#withCredentialLifecycle(async () => {
+      this.ctx.storage.kv.delete(`observerAuthority:${admissionId}`);
+    });
   }
 
   /** Confirm that phase-one collaborator verification is still authoritative. */
@@ -801,6 +848,7 @@ export class UserAccount extends DurableObject<Env> {
   async commitObserverAdmission(
     expectedGeneration: number,
     ownerAccountId: string,
+    bindingId: string,
     observerId: string,
     expected: ObserverCommitExpectation,
   ): Promise<boolean> {
@@ -810,18 +858,31 @@ export class UserAccount extends DurableObject<Env> {
       let key = `observerAuthority:${admissionId}`;
       this.ctx.storage.kv.put<StoredObserverAuthority>(key, {
         admissionId,
+        bindingId,
         observerId,
         ownerAccountId,
       });
-      let committed = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
+      let result = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
+        bindingId,
         observerId,
         expected,
         this.ctx.id.toString(),
         expectedGeneration,
         admissionId,
       );
-      if (!committed) this.ctx.storage.kv.delete(key);
-      return committed;
+      if (!result.committed) {
+        this.ctx.storage.kv.delete(key);
+        return false;
+      }
+      if (result.replaced) {
+        if (result.replaced.accountId === this.ctx.id.toString()) {
+          this.ctx.storage.kv.delete(`observerAuthority:${result.replaced.admissionId}`);
+        } else {
+          await userAccountStub(this.ctx.exports, result.replaced.accountId)
+            .removeObserverAdmission(result.replaced.admissionId);
+        }
+      }
+      return true;
     });
   }
 
@@ -831,7 +892,7 @@ export class UserAccount extends DurableObject<Env> {
     for (let [key] of authorities) this.ctx.storage.kv.delete(key);
     await Promise.all(authorities.map(([, authority]) =>
       userAccountStub(this.ctx.exports, authority.ownerAccountId)
-        .revokeCollaborator(authority.observerId, authority.admissionId)
+        .revokeCollaborator(authority.bindingId, authority.observerId, authority.admissionId)
     ));
   }
 
@@ -843,8 +904,8 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   /** Observer IDs whose persisted owner or collaborator credential generation is no longer authoritative. */
-  async getExcludedObservers(): Promise<string[]> {
-    let prefix = "observer:";
+  async getExcludedObservers(bindingId: string): Promise<string[]> {
+    let prefix = `observer:${bindingId}:`;
     let observers = [...this.ctx.storage.kv.list<StoredObserver>({ prefix })];
     let ownerGeneration = this.#credentialGeneration();
     let current = await Promise.all(observers.map(([, observer]) =>
@@ -854,10 +915,10 @@ export class UserAccount extends DurableObject<Env> {
     ));
     let excluded = observers
       .filter((_, index) => !current[index])
-      .map(([key]) => key.slice(prefix.length));
-    let revokedPrefix = "revokedObserver:";
-    for (let [key] of this.ctx.storage.kv.list({ prefix: revokedPrefix })) {
-      excluded.push(key.slice(revokedPrefix.length));
+      .map(([, observer]) => observer.observerId);
+    let revokedPrefix = `revokedObserver:${bindingId}:`;
+    for (let [, observer] of this.ctx.storage.kv.list<StoredRevokedObserver>({ prefix: revokedPrefix })) {
+      excluded.push(observer.observerId);
     }
     return [...new Set(excluded)];
   }
@@ -865,9 +926,10 @@ export class UserAccount extends DurableObject<Env> {
   /** Validate a session credential generation and return its current observation exclusions. */
   async getObservationAuthority(
     expected: AccountCredentialState & { credentials: MarketoCredentials },
+    bindingId: string,
   ): Promise<ObservationAuthorityResult> {
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
-    let excludeObservers = await this.getExcludedObservers();
+    let excludeObservers = await this.getExcludedObservers(bindingId);
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
     return { ok: true, excludeObservers };
   }
@@ -898,7 +960,7 @@ export class UserAccount extends DurableObject<Env> {
       this.ctx.storage.kv.put("credentialGeneration", generation);
       await Promise.all(authorities.map(([, authority]) =>
         userAccountStub(this.ctx.exports, authority.ownerAccountId)
-          .revokeCollaborator(authority.observerId, authority.admissionId)
+          .revokeCollaborator(authority.bindingId, authority.observerId, authority.admissionId)
       ));
     });
   }
@@ -932,6 +994,7 @@ async function makeAccountClient(
   exports: Cloudflare.Exports,
   userObjectId: string,
   state?: AccountCredentialState,
+  bindingId?: string,
 ): Promise<MarketoClient> {
   let account = userAccountStub(exports, userObjectId);
   let captured = state ?? await readAccountCredentialState(account);
@@ -946,7 +1009,7 @@ async function makeAccountClient(
     expected,
     () => account.credentialsExpired(),
     async (url, init, forceRefresh, timeoutMs) => {
-      let result = await account.dispatch(expected, url, init, forceRefresh, timeoutMs);
+      let result = await account.dispatch(expected, bindingId, url, init, forceRefresh, timeoutMs);
       try {
         if (!result.ok) {
           if ("error" in result) return unwrapTokenCacheResult<never>(result);
@@ -982,6 +1045,7 @@ interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
   commitObserverAdmission(
     generation: number,
     ownerAccountId: string,
+    bindingId: string,
     observerId: string,
     expected: ObserverCommitExpectation,
   ): Promise<boolean>;
@@ -1041,11 +1105,12 @@ export class MarketoUserVerifier
   async commitObserverAdmission(
     generation: number,
     ownerAccountId: string,
+    bindingId: string,
     observerId: string,
     expected: ObserverCommitExpectation,
   ): Promise<boolean> {
     return await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
-      .commitObserverAdmission(generation, ownerAccountId, observerId, expected);
+      .commitObserverAdmission(generation, ownerAccountId, bindingId, observerId, expected);
   }
 }
 
@@ -1163,28 +1228,29 @@ export class MarketoUserImpl
     let origin = new URL(creds.endpoint).origin;
     let { kind, id } = parseResourceUrl(origin, url);
     let userObjectId = this.ctx.props.userObjectId;
+    let bindingId = crypto.randomUUID();
     let make = (props: MarketoGatekeeperImplProps) =>
       this.ctx.exports.MarketoGatekeeperImpl({ props });
 
     switch (kind) {
       case "instance":
         return {
-          class: make({ userObjectId, kind: "instance" }),
+          class: make({ userObjectId, bindingId, kind: "instance" }),
           resource: INSTANCE_RESOURCE,
         };
       case "design-studio":
         return {
-          class: make({ userObjectId, kind: "design-studio" }),
+          class: make({ userObjectId, bindingId, kind: "design-studio" }),
           resource: DESIGN_STUDIO_RESOURCE,
         };
       case "program":
         return {
-          class: make({ userObjectId, kind: "program", resourceId: id }),
+          class: make({ userObjectId, bindingId, kind: "program", resourceId: id }),
           resource: PROGRAM_RESOURCE,
         };
       case "list":
         return {
-          class: make({ userObjectId, kind: "list", resourceId: id }),
+          class: make({ userObjectId, bindingId, kind: "list", resourceId: id }),
           resource: STATIC_LIST_RESOURCE,
         };
     }
@@ -1322,6 +1388,7 @@ class ListConfiguratorUI extends RpcTarget {
 
 type MarketoGatekeeperImplProps = {
   userObjectId: string;
+  bindingId: string;
   kind: MarketoResourceKind;
   resourceId?: number;
 };
@@ -1432,7 +1499,12 @@ export class MarketoGatekeeperImpl
   }
 
   async #client(state?: AccountCredentialState): Promise<MarketoClient> {
-    return await makeAccountClient(this.ctx.exports, this.ctx.props.userObjectId, state);
+    return await makeAccountClient(
+      this.ctx.exports,
+      this.ctx.props.userObjectId,
+      state,
+      this.ctx.props.bindingId,
+    );
   }
 
   async describe(): Promise<ResourceDescription> {
@@ -1534,7 +1606,10 @@ export class MarketoGatekeeperImpl
         }
       },
       excludeObservers: async () => {
-        let authority = await account.getObservationAuthority(expectedCredentialState);
+        let authority = await account.getObservationAuthority(
+          expectedCredentialState,
+          this.ctx.props.bindingId,
+        );
         try {
           if (!authority.ok) {
             throw new Error("This Marketo session belongs to an older account credential generation.");
@@ -1667,7 +1742,7 @@ export class MarketoGatekeeperImpl
 
   async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
-    let ownerStateResult = await account.getObserverAdmissionState(id);
+    let ownerStateResult = await account.getObserverAdmissionState(this.ctx.props.bindingId, id);
     let ownerState: ObserverAdmissionState;
     try {
       ownerState = {
@@ -1708,6 +1783,7 @@ export class MarketoGatekeeperImpl
     if (!await verifier.commitObserverAdmission(
       collaboratorGeneration,
       this.ctx.props.userObjectId,
+      this.ctx.props.bindingId,
       id,
       { ownerGeneration: ownerState.generation, observerEpoch: ownerState.observerEpoch },
     )) {
@@ -1716,7 +1792,8 @@ export class MarketoGatekeeperImpl
   }
 
   async removeObserver(id: string): Promise<void> {
-    await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId).removeCollaborator(id);
+    await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .removeCollaborator(this.ctx.props.bindingId, id);
   }
 
   async applyAction(actionId: number): Promise<void> {

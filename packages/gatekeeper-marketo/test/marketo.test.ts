@@ -5740,6 +5740,7 @@ async function gatekeeperForAccount(
   userObjectId: string,
   kind: "instance" | "design-studio" | "program" | "list" = "instance",
   resourceId?: number,
+  bindingId = crypto.randomUUID(),
 ) {
   let namespace = (env as unknown as {
     MarketoGatekeeperImpl: DurableObjectNamespace<MarketoGatekeeperImpl>;
@@ -5750,14 +5751,22 @@ async function gatekeeperForAccount(
       ctx: {
         props: {
           userObjectId: string;
+          bindingId: string;
           kind: "instance" | "design-studio" | "program" | "list";
           resourceId?: number;
         };
       };
     }).ctx;
-    ctx.props = { userObjectId, kind, resourceId };
+    ctx.props = { userObjectId, bindingId, kind, resourceId };
   });
   return stub;
+}
+
+async function gatekeeperBindingId(
+  gatekeeper: DurableObjectStub<MarketoGatekeeperImpl>,
+): Promise<string> {
+  return await runInDurableObject(gatekeeper, instance =>
+    (instance as unknown as { ctx: { props: { bindingId: string } } }).ctx.props.bindingId);
 }
 
 class TestApprovalQueue extends RpcTarget {
@@ -6743,7 +6752,7 @@ describe("collaborator credentials", () => {
     await expect(addObserverFromAccount(gatekeeper, matchingId.toString())).resolves.toBeUndefined();
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeDefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(1),
     );
 
     for (let credentials of [
@@ -6756,6 +6765,43 @@ describe("collaborator credentials", () => {
         /not connected with the same Marketo LaunchPoint service/,
       );
     }
+  });
+
+  it("tracks sibling bindings with the same observer independently", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let collaboratorId = await accountWithCredentials(OWNER);
+    let first = await gatekeeperForAccount(ownerId.toString(), "instance", undefined, "binding-first");
+    let second = await gatekeeperForAccount(ownerId.toString(), "instance", undefined, "binding-second");
+
+    await addObserverFromAccount(first, collaboratorId.toString());
+    await addObserverFromAccount(second, collaboratorId.toString());
+
+    let owner = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+      .UserAccount.get(ownerId);
+    let collaborator = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+      .UserAccount.get(collaboratorId);
+    await runInDurableObject(owner, (_instance, state) => {
+      let admissions = [...state.storage.kv.list<{ admissionId: string }>({ prefix: "observer:" })];
+      expect(admissions).toHaveLength(2);
+      expect(new Set(admissions.map(([, admission]) => admission.admissionId)).size).toBe(2);
+    });
+    await runInDurableObject(collaborator, (_instance, state) => {
+      expect([...state.storage.kv.list({ prefix: "observerAuthority:" })]).toHaveLength(2);
+    });
+
+    await first.removeObserver("observer");
+    await runInDurableObject(owner, (_instance, state) => {
+      expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(1);
+    });
+    await runInDurableObject(collaborator, (_instance, state) => {
+      expect([...state.storage.kv.list({ prefix: "observerAuthority:" })]).toHaveLength(1);
+    });
+
+    await collaborator.revoke();
+    await runInDurableObject(owner, async instance => {
+      expect(await instance.getExcludedObservers("binding-first")).toEqual([]);
+      expect(await instance.getExcludedObservers("binding-second")).toEqual(["observer"]);
+    });
   });
 
   it("live-checks the shared service credential for every resource kind", async () => {
@@ -6857,7 +6903,7 @@ describe("collaborator credentials", () => {
     expect(fetches).toBe(1);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0),
     );
   });
 
@@ -6897,7 +6943,7 @@ describe("collaborator credentials", () => {
     });
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0),
     );
   });
 
@@ -6937,7 +6983,7 @@ describe("collaborator credentials", () => {
     });
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0),
     );
   });
 
@@ -6976,7 +7022,7 @@ describe("collaborator credentials", () => {
     });
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0),
     );
   });
 
@@ -7033,12 +7079,13 @@ describe("collaborator credentials", () => {
       queue[Symbol.dispose]();
     });
     expect(providerFetches).toBe(0);
+    let bindingId = await gatekeeperBindingId(gatekeeper);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
       async (instance, state) => {
-        expect(state.storage.kv.get("observer:observer")).toBeUndefined();
-        expect(state.storage.kv.get("revokedObserver:observer")).toBeDefined();
-        expect(await instance.getExcludedObservers()).toEqual(["observer"]);
+        expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0);
+        expect([...state.storage.kv.list({ prefix: "revokedObserver:" })]).toHaveLength(1);
+        expect(await instance.getExcludedObservers(bindingId)).toEqual(["observer"]);
       },
     );
   });
@@ -7135,6 +7182,7 @@ describe("collaborator credentials", () => {
     await addObserverFromAccount(gatekeeper, oldObserverId.toString());
     let replacement = { ...OWNER, clientSecret: "replacement-secret" };
     let nonce = crypto.randomUUID();
+    let bindingId = await gatekeeperBindingId(gatekeeper);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
       async (instance, state) => {
@@ -7165,7 +7213,7 @@ describe("collaborator credentials", () => {
     expect(providerFetches).toBe(0);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      async instance => expect(await instance.getExcludedObservers()).toEqual(["observer"]),
+      async instance => expect(await instance.getExcludedObservers(bindingId)).toEqual(["observer"]),
     );
 
     let freshObserverId = await accountWithCredentials(replacement);
@@ -7198,7 +7246,7 @@ describe("collaborator credentials", () => {
       .rejects.toThrow(/reconnecting/);
     await runInDurableObject(
       (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
-      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+      (_instance, state) => expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0),
     );
   });
 
@@ -7290,9 +7338,9 @@ async function actionGatekeeper(action: MarketoAction) {
   let stub = gatekeeperNamespace.get(gatekeeperNamespace.newUniqueId());
   await runInDurableObject(stub, (instance, state) => {
     let ctx = (instance as unknown as {
-      ctx: { props: { userObjectId: string; kind: "instance" } };
+      ctx: { props: { userObjectId: string; bindingId: string; kind: "instance" } };
     }).ctx;
-    ctx.props = { userObjectId: userId.toString(), kind: "instance" };
+    ctx.props = { userObjectId: userId.toString(), bindingId: crypto.randomUUID(), kind: "instance" };
     state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
   });
   return stub;
@@ -7315,9 +7363,11 @@ async function designActionGatekeeper(
   let stub = namespace.get(namespace.newUniqueId());
   await runInDurableObject(stub, (instance, state) => {
     let ctx = (instance as unknown as {
-      ctx: { props: { userObjectId: string; kind: "design-studio" } };
+      ctx: { props: { userObjectId: string; bindingId: string; kind: "design-studio" } };
     }).ctx;
-    ctx.props = { userObjectId: userId.toString(), kind: "design-studio" };
+    ctx.props = {
+      userObjectId: userId.toString(), bindingId: crypto.randomUUID(), kind: "design-studio",
+    };
     state.storage.kv.put("pending:index", actions.map(action => action.id));
     for (let action of actions) {
       state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
@@ -7352,9 +7402,9 @@ async function campaignActionGatekeeper(
   let stub = namespace.get(namespace.newUniqueId());
   await runInDurableObject(stub, (instance, state) => {
     let ctx = (instance as unknown as {
-      ctx: { props: { userObjectId: string; kind: "instance" } };
+      ctx: { props: { userObjectId: string; bindingId: string; kind: "instance" } };
     }).ctx;
-    ctx.props = { userObjectId: userId.toString(), kind: "instance" };
+    ctx.props = { userObjectId: userId.toString(), bindingId: crypto.randomUUID(), kind: "instance" };
     state.storage.kv.put("pending:index", actions.map(action => action.id));
     for (let action of actions) {
       state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
@@ -11317,6 +11367,7 @@ describe("Email Designer REST encoding", () => {
       let request = { redirect: "error" as const };
       await expect(instance.dispatch(
         expected,
+        undefined,
         `${ORIGIN}/userservice/management/v1/users/workspaces.json/extra`,
         request,
         false,
@@ -11324,6 +11375,7 @@ describe("Email Designer REST encoding", () => {
       )).rejects.toThrow(/outside the connected Marketo REST API/);
       await expect(instance.dispatch(
         expected,
+        undefined,
         `https://other.example/userservice/management/v1/users/workspaces.json`,
         request,
         false,
@@ -11331,6 +11383,7 @@ describe("Email Designer REST encoding", () => {
       )).rejects.toThrow(/outside the connected Marketo REST API/);
       let result = await instance.dispatch(
         expected,
+        undefined,
         `${ORIGIN}/userservice/management/v1/users/workspaces.json`,
         request,
         false,
