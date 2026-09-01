@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gatekeeper-marketo",
+  "main": ".wrangler/validate/src/marketo.ts",
+  "build": {
+    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "watch_dir": "src"
+  },
+  "compatibility_date": "2026-02-02",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  },
+  "compatibility_flags": ["allow_irrevocable_stub_storage"],
+  "rules": [
+    { "type": "Text", "globs": ["**/*.txt", "**/*.svg"], "fallthrough": false }
+  ],
+  "migrations": [
+    {
+      "tag": "v0",
+      "new_sqlite_classes": [
+        "UserAccount",
+        "MarketoGatekeeperImpl",
+        "MarketoTokenCache"
+      ]
+    }
+  ]
+
+  // Optional connect-form defaults: MARKETO_ENDPOINT, MARKETO_CLIENT_ID, and the
+  // MARKETO_CLIENT_SECRET secret. BASE_URL is set per environment.
+}

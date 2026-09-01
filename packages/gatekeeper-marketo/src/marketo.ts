@@ -1,0 +1,3173 @@
+// Marketo gatekeeper.
+
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
+import type {
+  AccountDescription,
+  ApprovalQueue,
+  Gatekeeper,
+  GatekeeperConnectCallback,
+  GatekeeperUser,
+  GatekeeperUserVerifier,
+  GatekeeperVendor as GatekeeperVendorIface,
+  ResourceConfiguratorFrame,
+  ResourceDescription,
+  SupportedResource,
+  VendorDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
+import {
+  checkMutation,
+  connectPageHtml,
+  expiredLinkHtml,
+  htmlResponse,
+  jsonResponse,
+} from "./connect-ui";
+import {
+  buildInstanceUrl,
+  buildListUrl,
+  buildProgramUrl,
+  buildDesignStudioUrl,
+  getBasePath,
+  getBaseUrl,
+  getDefaults,
+  parseCredentials,
+  DESIGN_STUDIO_RESOURCE,
+  INSTANCE_RESOURCE,
+  MARKETO_HOME_URL,
+  MARKETO_ICON,
+  parseResourceUrl,
+  PROGRAM_RESOURCE,
+  STATIC_LIST_RESOURCE,
+  SUPPORTED_RESOURCES,
+  type Env,
+  type MarketoResourceKind,
+} from "./config";
+import {
+  makeClient,
+  serializeTokenError,
+  tokenCacheStub,
+  unwrapTokenCacheResult,
+  type IdentityToken,
+  type MarketoDispatchRequest,
+  type TokenCacheError,
+  type TokenCacheResult,
+} from "./token-cache";
+import { logger } from "./logger";
+import {
+  assertActionResults,
+  assertActionResultIdentity,
+  assertApplied,
+  assertCampaignRequestResults,
+  describeActionForSubmission,
+  expectedActionResults,
+  executeAction,
+  MarketoActionResultError,
+  validateActionForDispatch,
+  type MarketoAction,
+  type MarketoActionInput,
+} from "./actions";
+import {
+  executeDesignStudioAction,
+  isDesignStudioAction,
+  type DesignStudioAction,
+  type DesignStudioAssetKind,
+} from "./design-studio-actions";
+import {
+  executeCampaignAction,
+  isCampaignAction,
+  type CampaignAction,
+} from "./campaign-actions";
+import {
+  executeProgramAction,
+  isProgramAction,
+  matchesProgramApprovalDates,
+  type ProgramAction,
+} from "./program-actions";
+import {
+  emailSections,
+  MarketoDesignStudioImpl,
+  readDesignStudioLifecycleSnapshot,
+} from "./design-studio";
+import type { EmailDesignerContext } from "./email-designer";
+import {
+  DesignerPreDispatchError,
+  designerCloneSnapshotRecord,
+  executeEmailDesignerAction,
+  isEmailDesignerAction,
+  matchesDesignerCloneConfiguration,
+  matchesDesignerCloneSnapshot,
+  matchesDesignerDeleteSnapshot,
+  resolveDesignerCloneSnapshot,
+  resolveDesignerDeleteSnapshot,
+  validDesignerCloneSnapshot,
+  type EmailDesignerAction,
+  type EmailDesignerKind,
+} from "./email-designer-actions";
+import {
+  executeBusinessObjectAction,
+  isBusinessObjectAction,
+  type BusinessObjectAction,
+} from "./business-object-actions";
+import {
+  BUSINESS_OBJECTS,
+  businessObjectPermissionDenied,
+  businessObjectSchemaAccess,
+  type BusinessObjectContext,
+} from "./business-objects";
+import type {
+  MarketoBusinessObjectAccess,
+  MarketoBusinessObjectKind,
+  MarketoDesignerUsedBy,
+} from "./types";
+import {
+  makeSessionContext,
+  type CampaignContext,
+  MarketoProgramImpl,
+  MarketoSessionImpl,
+  MarketoStaticListImpl,
+} from "./session";
+import {
+  fetchAccessToken,
+  MarketoDispatchAbortedError,
+  MarketoError,
+  MarketoResponseValidationError,
+  type MarketoClient,
+  type MarketoCredentials,
+  type DesignerAssetKind,
+  type RawDesignerAsset,
+  type RawFolder,
+  type RawList,
+} from "./marketo-api";
+import type { MarketoConfiguratorOption } from "./configurator/configurator-types";
+import { CONFIGURATOR_LIMIT, resolveProgramOptions } from "./program-options";
+import INSTANCE_CONFIGURATOR_HTML from "./generated/instance-configurator-ui.txt";
+import PROGRAM_CONFIGURATOR_HTML from "./generated/program-configurator-ui.txt";
+import LIST_CONFIGURATOR_HTML from "./generated/list-configurator-ui.txt";
+import DESIGN_STUDIO_CONFIGURATOR_HTML from "./generated/design-studio-configurator-ui.txt";
+import TYPES_CODE from "./types.txt";
+
+export { MarketoTokenCache } from "./token-cache";
+
+const NONCE_BYTES = 32;
+/**
+ * How long a connect link stays usable.
+ *
+ * The link is a bearer capability — whoever holds it within this window can bind credentials to
+ * the account — so the window is only as long as filling in three fields plausibly takes.
+ */
+const NONCE_LIFETIME_MS = 5 * 60 * 1000;
+/** Discard an unfinished connection after an hour. */
+const ABANDONED_CONNECT_MS = 60 * 60 * 1000;
+
+function generateNonce(): string {
+  return [...crypto.getRandomValues(new Uint8Array(NONCE_BYTES))]
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  let encoder = new TextEncoder();
+  let bufA = encoder.encode(a);
+  let bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
+/** Length of a Durable Object id in hex. */
+const DO_ID_LENGTH = 64;
+
+const EXPIRED_LINK_MESSAGE =
+  "This connection link is invalid or has expired. Return to the Workshop and try again.";
+const MAX_CONNECT_BODY_BYTES = 16 * 1024;
+const CONNECT_BODY_TIMEOUT_MS = 10_000;
+
+/** Read a small connect payload without allowing a stalled client to hold the Worker open. */
+export async function readConnectBody(req: Request): Promise<string> {
+  let declared = req.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > MAX_CONNECT_BODY_BYTES) {
+    throw new Error("Connection details are too large.");
+  }
+  if (!req.body) return "";
+  let reader = req.body.getReader();
+  let decoder = new TextDecoder();
+  let text = "";
+  let size = 0;
+  let deadline = AbortSignal.timeout(CONNECT_BODY_TIMEOUT_MS);
+  try {
+    while (true) {
+      let chunk = await readUntilAbort(reader, deadline);
+      if (chunk.done) return text + decoder.decode();
+      size += chunk.value.byteLength;
+      if (size > MAX_CONNECT_BODY_BYTES) {
+        throw new Error("Connection details are too large.");
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function readUntilAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) return Promise.reject(new Error("Connection body read timed out."));
+  return new Promise((resolve, reject) => {
+    let abort = () => reject(new Error("Connection body read timed out."));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    reader.read().then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+/**
+ * The one answer given to any request that does not present a live nonce.
+ *
+ * Deliberately identical for an unparseable id, an unknown account, and an expired nonce, so it
+ * reveals nothing about which accounts exist. Rendered as a page for the browser that followed the
+ * link and as JSON for the form's own `fetch`.
+ */
+function expiredLink(req: Request): Response {
+  return req.method === "GET"
+    ? htmlResponse(expiredLinkHtml(EXPIRED_LINK_MESSAGE), 400)
+    : jsonResponse({ error: EXPIRED_LINK_MESSAGE }, 400);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP surface: the connect form.
+//
+// GET  /<userObjectId>/<nonce>  -> the credential form
+// POST /<userObjectId>/<nonce>  -> verify the credentials, then finish the connection
+
+export default {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    let url = new URL(req.url);
+    let basePath = getBasePath(env);
+    if (url.pathname !== basePath && !url.pathname.startsWith(`${basePath}/`)) {
+      return new Response("Not Found", { status: 404 });
+    }
+    let relPath = url.pathname.slice(basePath.length);
+
+    let segments = relPath.slice(1).split("/");
+    let isConnectUrl =
+      segments.length === 2 &&
+      segments[0].length === DO_ID_LENGTH &&
+      segments[1].length === NONCE_BYTES * 2;
+    if (!isConnectUrl) return new Response("Not Found", { status: 404 });
+
+    if (req.method !== "GET" && req.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+
+    // The path only proves segments[0] is 64 hex-ish characters; idFromString rejects anything
+    // that isn't a real id for this namespace, and must not surface as a 500.
+    let stub: DurableObjectStub<UserAccount>;
+    try {
+      stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(segments[0]));
+    } catch (error) {
+      logger.debug("invalid account id rejected", {
+        event: "invalid_connect_account_id",
+        error: error instanceof Error ? error.name : typeof error,
+      });
+      return expiredLink(req);
+    }
+
+    // The nonce is a bearer token, not proof of identity: holding this URL within its short window
+    // is the whole authority to bind credentials to this account. It is therefore checked before
+    // anything else happens — in particular before any credential reaches Marketo, so the route
+    // cannot be used as an oracle for testing stolen Client IDs and Secrets. Checking it without
+    // consuming it lets a mistyped secret be corrected on the same page; it is spent only once a
+    // connection actually succeeds.
+    if (!(await stub.verifyNonceWithoutConsuming(segments[1]))) {
+      return expiredLink(req);
+    }
+    let existingCredentials = await stub.getCredentials();
+
+    if (req.method === "GET") {
+      return htmlResponse(connectPageHtml({ defaults: getDefaults(env, existingCredentials) }));
+    }
+
+    let mutationRejection = checkMutation(req);
+    if (mutationRejection) return mutationRejection;
+
+    let creds: MarketoCredentials;
+    try {
+      let text = await readConnectBody(req);
+      let body: unknown = JSON.parse(text);
+      creds = parseCredentials(body, env, existingCredentials);
+    } catch {
+      return jsonResponse({ error: "Invalid connection details." }, 400);
+    }
+
+    // Prove the credentials work before storing them, so a typo surfaces here rather than as a
+    // broken account the user has to debug from inside a gadget.
+    let scope: string | undefined;
+    try {
+      let validation = await stub.validateConnectionCredentials(segments[1], creds);
+      try {
+        if ("invalidNonce" in validation || "credentialChanged" in validation) {
+          return jsonResponse({ error: EXPIRED_LINK_MESSAGE }, 400);
+        }
+        scope = unwrapTokenCacheResult(validation).scope;
+      } finally {
+        disposeRpcResult(validation);
+      }
+    } catch (e) {
+      return jsonResponse({ error: describeCredentialFailure(e) }, 400);
+    }
+
+    let result = await stub.completeConnection(segments[1], creds);
+    if (result.kind === "invalid_nonce") return jsonResponse({ error: EXPIRED_LINK_MESSAGE }, 400);
+    if (result.kind === "error") return jsonResponse({ error: result.message }, 500);
+    return jsonResponse({ ok: true, scope });
+  },
+};
+
+/**
+ * Turn a failed token fetch into something the person filling in the form can act on.
+ *
+ * A `status` means Marketo answered and refused, which is a credentials problem. Provider and
+ * transport messages are deliberately omitted because they can echo submitted credentials.
+ */
+function describeCredentialFailure(e: unknown): string {
+  if (e instanceof MarketoError && e.status !== undefined) {
+    return (
+      "Marketo rejected these credentials. Check the Client ID and Client Secret, " +
+      "and that they belong to the instance endpoint above."
+    );
+  }
+  return "Could not reach the Marketo Identity endpoint. Check the instance endpoint and retry.";
+}
+
+// ---------------------------------------------------------------------------
+// Vendor
+
+@validateRpc()
+export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
+  async describe(): Promise<VendorDescription> {
+    return {
+      displayName: "Marketo",
+      url: MARKETO_HOME_URL,
+      logo: MARKETO_ICON,
+      color: "#f2f0f7",
+      tagline: "Read and update people, lists, programs, and campaigns",
+      description:
+        "Connect your Marketo instance so Gadgets can look up people, read their activity " +
+        "history, manage static lists and program membership, and run smart campaigns. You supply " +
+        "the credentials of a LaunchPoint custom service you control, and all writes are " +
+        "approval-gated.",
+    };
+  }
+
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
+    let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
+    let nonce = generateNonce();
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}` };
+  }
+
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return SUPPORTED_RESOURCES;
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UserAccount
+//
+// Owns the account's Marketo credentials. Everything downstream — the token cache, the resource
+// URLs, the REST client — is derived from what is stored here, so disconnecting really does end
+// the account's access.
+
+type StoredNonce = { value: string; expiresAt: number };
+
+type StoredReconnect = StoredNonce & {
+  generation: number;
+  phase?: "awaiting-credentials" | "awaiting-notification";
+};
+
+const RECONNECT_NOTIFICATION_RETRY_MS = 5_000;
+
+type CompleteConnectionResult =
+  | { kind: "ok" }
+  | { kind: "invalid_nonce" }
+  | { kind: "error"; message: string };
+
+type AccountCredentialState = {
+  credentials?: MarketoCredentials;
+  generation: number;
+};
+
+type ObserverAdmissionState = AccountCredentialState & {
+  observerEpoch: number;
+  reconnecting: boolean;
+};
+
+type ObserverCommitExpectation = {
+  ownerGeneration: number;
+  observerEpoch: number;
+};
+
+type StoredObserver = {
+  admissionId: string;
+  observerId: string;
+  accountId: string;
+  ownerGeneration: number;
+  collaboratorGeneration: number;
+};
+
+type StoredObserverAuthority = {
+  admissionId: string;
+  bindingId: string;
+  observerId: string;
+  ownerAccountId: string;
+};
+
+type StoredRevokedObserver = {
+  admissionId: string;
+  observerId: string;
+};
+
+type CollaboratorCommitResult =
+  | { committed: false }
+  | { committed: true; replaced?: { admissionId: string; accountId: string } };
+
+function observerStorageKey(prefix: string, bindingId: string, observerId: string): string {
+  return `${prefix}:${bindingId}:${encodeURIComponent(observerId)}`;
+}
+
+type AccountDispatchResult =
+  | { ok: true; response: Response }
+  | { ok: false; error: TokenCacheError }
+  | { ok: false; networkFailure: true }
+  | { ok: false; observerRevoked: true }
+  | { ok: false; credentialChanged: true };
+
+type AccountTokenResult<T> = TokenCacheResult<T> | { ok: false; credentialChanged: true };
+type ObservationAuthorityResult =
+  | { ok: true; excludeObservers: string[] }
+  | { ok: false; credentialChanged: true };
+
+function disposeRpcResult(value: unknown): void {
+  if (typeof value !== "object" || value === null) return;
+  let dispose = (value as { [Symbol.dispose]?: () => void })[Symbol.dispose];
+  dispose?.call(value);
+}
+
+function copyCredentialState(state: AccountCredentialState): AccountCredentialState {
+  return {
+    generation: state.generation,
+    ...(state.credentials ? { credentials: { ...state.credentials } } : {}),
+  };
+}
+
+export class UserAccount extends DurableObject<Env> {
+  #credentialLifecycle = Promise.resolve();
+
+  async #withCredentialLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    let previous = this.#credentialLifecycle;
+    let release!: () => void;
+    this.#credentialLifecycle = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  #credentialGeneration(): number {
+    return this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0;
+  }
+
+  #advanceCredentialGeneration(): number {
+    let generation = this.#credentialGeneration() + 1;
+    this.ctx.storage.kv.put("credentialGeneration", generation);
+    return generation;
+  }
+
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string): Promise<void> {
+    if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials")) {
+      await this.ctx.storage.setAlarm(Date.now() + ABANDONED_CONNECT_MS);
+    }
+    this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+      value: nonce,
+      expiresAt: Date.now() + NONCE_LIFETIME_MS,
+    });
+  }
+
+  /** Whether `nonce` is the live one for this account, in constant time. */
+  #nonceIsValid(nonce: string): boolean {
+    let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (!stored) return false;
+    return Date.now() < stored.expiresAt && constantTimeEqual(stored.value, nonce);
+  }
+
+  /**
+   * Check a nonce while leaving it usable, so the connect page can refuse a dead link up front and
+   * still let a user who mistyped their secret submit the form again.
+   */
+  async verifyNonceWithoutConsuming(nonce: string): Promise<boolean> {
+    return this.#nonceIsValid(nonce);
+  }
+
+  async completeConnection(
+    nonce: string,
+    credentials: MarketoCredentials,
+  ): Promise<CompleteConnectionResult> {
+    // Re-checked here rather than trusted from the fetch handler: this is the call that stores the
+    // credentials, so it is the one that must be safe on its own.
+    if (!this.#nonceIsValid(nonce)) return { kind: "invalid_nonce" };
+    let generation = this.#credentialGeneration();
+    let storedNonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (generation !== this.#credentialGeneration()) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
+    this.ctx.storage.kv.delete("nonce");
+
+    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) {
+      if (generation === this.#credentialGeneration() && storedNonce && storedNonce.expiresAt > Date.now()) {
+        this.ctx.storage.kv.put("nonce", storedNonce);
+      }
+      return { kind: "error", message: "Connection callback expired. Please retry." };
+    }
+
+    if (generation !== this.#credentialGeneration()) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
+    let reconnecting = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+    let previousCredentials = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+    if (generation !== this.#credentialGeneration()) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
+    let installed = await this.#withCredentialLifecycle(async () => {
+      let currentReconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+      if (generation !== this.#credentialGeneration() || !storedNonce ||
+          Date.now() >= storedNonce.expiresAt ||
+          reconnecting && currentReconnect?.value !== reconnecting.value) return false;
+      generation = this.#advanceCredentialGeneration();
+      this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
+      if (reconnecting && currentReconnect) {
+        this.ctx.storage.kv.put<StoredReconnect>("reconnecting", {
+          ...currentReconnect,
+          generation,
+          phase: "awaiting-notification",
+        });
+        await this.ctx.storage.setAlarm(Date.now() + RECONNECT_NOTIFICATION_RETRY_MS);
+      }
+      return true;
+    });
+    if (!installed) return { kind: "error", message: "Connection state changed. Please retry." };
+
+    try {
+      if (reconnecting) {
+        if (!await this.#notifyReconnectCompleted(reconnecting.value, generation, callback)) {
+          return { kind: "error", message: "Connection state changed. Please retry." };
+        }
+      } else {
+        let props: MarketoUserImplProps = { userObjectId: this.ctx.id.toString() };
+        await callback.complete(this.ctx.exports.MarketoUserImpl({ props }));
+      }
+    } catch {
+      if (generation === this.#credentialGeneration()) {
+        if (!reconnecting) {
+          // Initial connection failed before the Workshop received the account capability.
+          if (previousCredentials) this.ctx.storage.kv.put("credentials", previousCredentials);
+          else this.ctx.storage.kv.delete("credentials");
+          if (storedNonce && storedNonce.expiresAt > Date.now()) {
+            this.ctx.storage.kv.put("nonce", storedNonce);
+          }
+        } else {
+          // The Workshop may have committed restoration before its response was lost. Keep the
+          // replacement credentials and retry the idempotent callback.
+          let currentReconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+          if (currentReconnect?.value === reconnecting.value &&
+              currentReconnect.phase === "awaiting-notification") {
+            await this.ctx.storage.setAlarm(Date.now() + RECONNECT_NOTIFICATION_RETRY_MS);
+          }
+        }
+      }
+      return {
+        kind: "error",
+        message: "Failed to notify the Workshop. Please retry.",
+      };
+    }
+
+    if (generation !== this.#credentialGeneration()) {
+      return { kind: "error", message: "Connection state changed. Please retry." };
+    }
+    await this.ctx.storage.deleteAlarm();
+    return { kind: "ok" };
+  }
+
+  async prepareReconnect(nonce: string): Promise<void> {
+    await this.#withCredentialLifecycle(async () => {
+      let generation = this.#advanceCredentialGeneration();
+      let reconnect = {
+        value: nonce,
+        expiresAt: Date.now() + NONCE_LIFETIME_MS,
+        generation,
+        phase: "awaiting-credentials" as const,
+      };
+      this.ctx.storage.kv.put<StoredReconnect>("reconnecting", reconnect);
+      this.ctx.storage.kv.put<StoredNonce>("nonce", reconnect);
+      await this.ctx.storage.setAlarm(reconnect.expiresAt);
+      await this.#revokeObserverAuthorities();
+    });
+  }
+
+  async #expireReconnectIfDue(): Promise<void> {
+    let reconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+    if (!reconnect) return;
+    if (Date.now() < reconnect.expiresAt) {
+      await this.ctx.storage.setAlarm(reconnect.expiresAt);
+      return;
+    }
+    if (reconnect.generation !== this.#credentialGeneration()) return;
+
+    let nonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    this.ctx.storage.kv.delete("reconnecting");
+    if (nonce?.value === reconnect.value) this.ctx.storage.kv.delete("nonce");
+  }
+
+  async #notifyReconnectCompleted(
+    value: string,
+    generation: number,
+    callback: Fetcher<GatekeeperConnectCallback>,
+  ): Promise<boolean> {
+    await callback.credentialsRestored();
+    return await this.#withCredentialLifecycle(async () => {
+      let current = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+      if (current?.value !== value || current.generation !== generation ||
+          current.phase !== "awaiting-notification") return false;
+      let nonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
+      this.ctx.storage.kv.delete("reconnecting");
+      if (nonce?.value === value) this.ctx.storage.kv.delete("nonce");
+      await this.ctx.storage.deleteAlarm();
+      return true;
+    });
+  }
+
+  /** This account's Marketo credentials, or undefined if it was never completed or was revoked. */
+  getCredentials(): MarketoCredentials | undefined {
+    return this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+  }
+
+  /** Credentials and lifecycle generation used to reject work prepared across a disconnect. */
+  getCredentialState(): AccountCredentialState {
+    return {
+      credentials: this.ctx.storage.kv.get<MarketoCredentials>("credentials"),
+      generation: this.#credentialGeneration(),
+    };
+  }
+
+  /** Credential and membership generations used to prepare an observer admission. */
+  getObserverAdmissionState(bindingId: string, observerId: string): ObserverAdmissionState {
+    return {
+      ...this.getCredentialState(),
+      observerEpoch: this.ctx.storage.kv.get<number>(
+        observerStorageKey("observerEpoch", bindingId, observerId),
+      ) ?? 0,
+      reconnecting: Boolean(this.ctx.storage.kv.get<boolean>("reconnecting")),
+    };
+  }
+
+  /** Validate submitted credentials while the connect nonce and account generation remain live. */
+  async validateConnectionCredentials(
+    nonce: string,
+    credentials: MarketoCredentials,
+  ): Promise<
+    TokenCacheResult<IdentityToken> |
+    { ok: false; invalidNonce: true } |
+    { ok: false; credentialChanged: true }
+  > {
+    if (!this.#nonceIsValid(nonce)) return { ok: false, invalidNonce: true };
+    let generation = this.#credentialGeneration();
+    try {
+      let value = await fetchAccessToken(credentials);
+      if (generation !== this.#credentialGeneration()) return { ok: false, credentialChanged: true };
+      if (!this.#nonceIsValid(nonce)) return { ok: false, invalidNonce: true };
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error: serializeTokenError(error) };
+    }
+  }
+
+  /** Validate the captured credential and initiate one Marketo request atomically with revoke. */
+  async dispatch(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+    bindingId: string | undefined,
+    urlText: string,
+    request: MarketoDispatchRequest,
+    forceRefresh: boolean,
+    timeoutMs: number,
+  ): Promise<AccountDispatchResult> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    if (bindingId && (await this.getExcludedObservers(bindingId)).length > 0) {
+      return { ok: false, observerRevoked: true };
+    }
+    let endpoint = new URL(expected.credentials.endpoint);
+    let url = new URL(urlText);
+    let workspacePath = "/userservice/management/v1/users/workspaces.json";
+    if (url.origin !== endpoint.origin ||
+        !url.pathname.startsWith("/rest/") && url.pathname !== workspacePath) {
+      throw new Error("Refusing to dispatch a request outside the connected Marketo REST API.");
+    }
+
+    let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
+    let token = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
+      .getToken(expected.credentials, forceRefresh, authority, expected);
+    let tokenValue: string;
+    try {
+      if (!token.ok) {
+        if ("credentialChanged" in token) return { ok: false, credentialChanged: true };
+        return { ok: false, error: { ...token.error } };
+      }
+      tokenValue = token.value;
+    } finally {
+      disposeRpcResult(token);
+    }
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    if (bindingId && (await this.getExcludedObservers(bindingId)).length > 0) {
+      return { ok: false, observerRevoked: true };
+    }
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+
+    let headers = new Headers(request.headers);
+    headers.set("Authorization", `Bearer ${tokenValue}`);
+    let body: BodyInit | undefined;
+    if (typeof request.body === "string") {
+      body = request.body;
+    } else if (request.body) {
+      let form = new FormData();
+      for (let entry of request.body.formData) {
+        if ("text" in entry) form.append(entry.name, entry.text);
+        else form.append(
+          entry.name,
+          new Blob([entry.bytes], { type: entry.type }),
+          entry.fileName,
+        );
+      }
+      body = form;
+    }
+    let init: RequestInit = {
+      ...request,
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+      body,
+    };
+    // fetch() is invoked before this turn yields, so revoke cannot complete between validation and
+    // network initiation.
+    try {
+      return { ok: true, response: await fetch(urlText, init) };
+    } catch {
+      return { ok: false, networkFailure: true };
+    }
+  }
+
+  /** Initiate an Identity request only while the captured credential generation is authoritative. */
+  async fetchIdentityToken(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): Promise<AccountTokenResult<IdentityToken>> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    try {
+      // fetchAccessToken() invokes fetch() before yielding, so revoke cannot complete between the
+      // generation check and network initiation.
+      let value = await fetchAccessToken(expected.credentials);
+      if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error: serializeTokenError(error) };
+    }
+  }
+
+  /** Read the cached API-user scope under the captured credential generation. */
+  async getScope(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): Promise<AccountTokenResult<string | undefined>> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
+    let result = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
+      .getScope(expected.credentials, authority, expected);
+    try {
+      if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+      if ("credentialChanged" in result) return { ok: false, credentialChanged: true };
+      return result.ok
+        ? { ok: true, value: result.value }
+        : { ok: false, error: { ...result.error } };
+    } finally {
+      disposeRpcResult(result);
+    }
+  }
+
+  /** Verify credentials under the captured credential generation. */
+  async verifyCredentials(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): Promise<AccountTokenResult<boolean>> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
+    let result = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
+      .verifyCredentials(expected.credentials, authority, expected);
+    try {
+      if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+      if ("credentialChanged" in result) return { ok: false, credentialChanged: true };
+      return result.ok
+        ? { ok: true, value: result.value }
+        : { ok: false, error: { ...result.error } };
+    } finally {
+      disposeRpcResult(result);
+    }
+  }
+
+  /** Persist collaborator authority if the owner generation and observer admission epoch are current. */
+  commitCollaborator(
+    bindingId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+    collaboratorAccountId: string,
+    collaboratorGeneration: number,
+    admissionId: string,
+  ): CollaboratorCommitResult {
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let observerEpoch = this.ctx.storage.kv.get<number>(epochKey) ?? 0;
+    if (this.ctx.storage.kv.get<boolean>("reconnecting") ||
+        !this.ctx.storage.kv.get<MarketoCredentials>("credentials") ||
+        this.#credentialGeneration() !== expected.ownerGeneration ||
+        observerEpoch !== expected.observerEpoch) return { committed: false };
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let previous = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    this.ctx.storage.kv.put<StoredObserver>(observerKey, {
+      admissionId,
+      observerId,
+      accountId: collaboratorAccountId,
+      ownerGeneration: expected.ownerGeneration,
+      collaboratorGeneration,
+    });
+    this.ctx.storage.kv.delete(observerStorageKey("revokedObserver", bindingId, observerId));
+    return {
+      committed: true,
+      ...(previous ? {
+        replaced: { admissionId: previous.admissionId, accountId: previous.accountId },
+      } : {}),
+    };
+  }
+
+  /** Forget an observer previously admitted for this account. */
+  async removeCollaborator(bindingId: string, observerId: string): Promise<void> {
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let epoch = (this.ctx.storage.kv.get<number>(epochKey) ?? 0) + 1;
+    this.ctx.storage.kv.put(epochKey, epoch);
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let observer = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    this.ctx.storage.kv.delete(observerKey);
+    this.ctx.storage.kv.delete(observerStorageKey("revokedObserver", bindingId, observerId));
+    if (observer) {
+      await userAccountStub(this.ctx.exports, observer.accountId)
+        .removeObserverAdmission(observer.admissionId);
+    }
+  }
+
+  /** Tombstone an admission whose collaborator authority was revoked. */
+  revokeCollaborator(bindingId: string, observerId: string, admissionId: string): void {
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let observer = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    if (!observer || observer.admissionId !== admissionId) return;
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let epoch = (this.ctx.storage.kv.get<number>(epochKey) ?? 0) + 1;
+    this.ctx.storage.kv.put(epochKey, epoch);
+    this.ctx.storage.kv.delete(observerKey);
+    this.ctx.storage.kv.put<StoredRevokedObserver>(
+      observerStorageKey("revokedObserver", bindingId, observerId),
+      { admissionId, observerId },
+    );
+  }
+
+  /** Drop one admission after its owner binding no longer references it. */
+  async removeObserverAdmission(admissionId: string): Promise<void> {
+    await this.#withCredentialLifecycle(async () => {
+      this.ctx.storage.kv.delete(`observerAuthority:${admissionId}`);
+    });
+  }
+
+  /** Confirm that phase-one collaborator verification is still authoritative. */
+  commitCollaboratorGeneration(expectedGeneration: number): boolean {
+    return !this.ctx.storage.kv.get<boolean>("reconnecting") &&
+      Boolean(this.ctx.storage.kv.get<MarketoCredentials>("credentials")) &&
+      this.#credentialGeneration() === expectedGeneration;
+  }
+
+  /** Commit one admission while its collaborator credential generation is serialization-locked. */
+  async commitObserverAdmission(
+    expectedGeneration: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean> {
+    return await this.#withCredentialLifecycle(async () => {
+      if (!this.commitCollaboratorGeneration(expectedGeneration)) return false;
+      let admissionId = crypto.randomUUID();
+      let key = `observerAuthority:${admissionId}`;
+      this.ctx.storage.kv.put<StoredObserverAuthority>(key, {
+        admissionId,
+        bindingId,
+        observerId,
+        ownerAccountId,
+      });
+      let rpcResult = await userAccountStub(this.ctx.exports, ownerAccountId).commitCollaborator(
+        bindingId,
+        observerId,
+        expected,
+        this.ctx.id.toString(),
+        expectedGeneration,
+        admissionId,
+      );
+      let result: CollaboratorCommitResult;
+      try {
+        result = rpcResult.committed
+          ? {
+              committed: true,
+              ...(rpcResult.replaced ? { replaced: { ...rpcResult.replaced } } : {}),
+            }
+          : { committed: false };
+      } finally {
+        disposeRpcResult(rpcResult);
+      }
+      if (!result.committed) {
+        this.ctx.storage.kv.delete(key);
+        return false;
+      }
+      if (result.replaced) {
+        if (result.replaced.accountId === this.ctx.id.toString()) {
+          this.ctx.storage.kv.delete(`observerAuthority:${result.replaced.admissionId}`);
+        } else {
+          await userAccountStub(this.ctx.exports, result.replaced.accountId)
+            .removeObserverAdmission(result.replaced.admissionId);
+        }
+      }
+      return true;
+    });
+  }
+
+  async #revokeObserverAuthorities(): Promise<void> {
+    let prefix = "observerAuthority:";
+    let authorities = [...this.ctx.storage.kv.list<StoredObserverAuthority>({ prefix })];
+    for (let [key] of authorities) this.ctx.storage.kv.delete(key);
+    await Promise.all(authorities.map(([, authority]) =>
+      userAccountStub(this.ctx.exports, authority.ownerAccountId)
+        .revokeCollaborator(authority.bindingId, authority.observerId, authority.admissionId)
+    ));
+  }
+
+  /** Whether a captured credential set remains active outside a reconnect transition. */
+  isCredentialStateCurrent(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): boolean {
+    return this.#matchesCredentialState(expected);
+  }
+
+  /** Observer IDs whose persisted owner or collaborator credential generation is no longer authoritative. */
+  async getExcludedObservers(bindingId: string): Promise<string[]> {
+    let prefix = `observer:${bindingId}:`;
+    let observers = [...this.ctx.storage.kv.list<StoredObserver>({ prefix })];
+    let ownerGeneration = this.#credentialGeneration();
+    let current = await Promise.all(observers.map(([, observer]) =>
+      observer.ownerGeneration === ownerGeneration &&
+        userAccountStub(this.ctx.exports, observer.accountId)
+          .commitCollaboratorGeneration(observer.collaboratorGeneration)
+    ));
+    let excluded = observers
+      .filter((_, index) => !current[index])
+      .map(([, observer]) => observer.observerId);
+    let revokedPrefix = `revokedObserver:${bindingId}:`;
+    for (let [, observer] of this.ctx.storage.kv.list<StoredRevokedObserver>({ prefix: revokedPrefix })) {
+      excluded.push(observer.observerId);
+    }
+    return [...new Set(excluded)];
+  }
+
+  /** Validate a session credential generation and return its current observation exclusions. */
+  async getObservationAuthority(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+    bindingId: string,
+  ): Promise<ObservationAuthorityResult> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    let excludeObservers = await this.getExcludedObservers(bindingId);
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    return { ok: true, excludeObservers };
+  }
+
+  #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
+    let current = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+    return !this.ctx.storage.kv.get<boolean>("reconnecting") &&
+      this.#credentialGeneration() === expected.generation && current !== undefined &&
+      current.endpoint === expected.credentials.endpoint &&
+      current.clientId === expected.credentials.clientId &&
+      current.clientSecret === expected.credentials.clientSecret;
+  }
+
+  async credentialsExpired(): Promise<void> {
+    await this.ctx.storage.kv
+      .get<Fetcher<GatekeeperConnectCallback>>("callback")
+      ?.credentialsExpired();
+  }
+
+  async revoke(): Promise<void> {
+    await this.#withCredentialLifecycle(async () => {
+      let generation = this.#advanceCredentialGeneration();
+      let authorities = [...this.ctx.storage.kv.list<StoredObserverAuthority>({
+        prefix: "observerAuthority:",
+      })];
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.ctx.storage.kv.put("credentialGeneration", generation);
+      await Promise.all(authorities.map(([, authority]) =>
+        userAccountStub(this.ctx.exports, authority.ownerAccountId)
+          .revokeCollaborator(authority.bindingId, authority.observerId, authority.admissionId)
+      ));
+    });
+  }
+
+  async alarm(): Promise<void> {
+    let reconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+    if (reconnect?.phase === "awaiting-notification") {
+      let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+      try {
+        if (callback && await this.#notifyReconnectCompleted(
+          reconnect.value,
+          reconnect.generation,
+          callback,
+        )) return;
+      } catch {
+        // Keep the account blocked and retry the durable Workshop notification.
+      }
+      let current = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+      if (current?.value === reconnect.value && current.generation === reconnect.generation &&
+          current.phase === "awaiting-notification") {
+        await this.ctx.storage.setAlarm(Date.now() + RECONNECT_NOTIFICATION_RETRY_MS);
+      }
+    } else if (reconnect) {
+      await this.#withCredentialLifecycle(() => this.#expireReconnectIfDue());
+    } else if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials") &&
+               this.ctx.storage.kv.get<StoredNonce>("nonce")) {
+      await this.ctx.storage.deleteAll();
+    }
+  }
+}
+
+function userAccountStub(
+  exports: Cloudflare.Exports,
+  userObjectId: string,
+): DurableObjectStub<UserAccount> {
+  return exports.UserAccount.get(exports.UserAccount.idFromString(userObjectId));
+}
+
+async function readAccountCredentialState(
+  account: DurableObjectStub<UserAccount>,
+): Promise<AccountCredentialState> {
+  let result = await account.getCredentialState();
+  try {
+    return copyCredentialState(result);
+  } finally {
+    disposeRpcResult(result);
+  }
+}
+
+async function makeAccountClient(
+  exports: Cloudflare.Exports,
+  userObjectId: string,
+  state?: AccountCredentialState,
+  bindingId?: string,
+): Promise<MarketoClient> {
+  let account = userAccountStub(exports, userObjectId);
+  let captured = state ?? await readAccountCredentialState(account);
+  if (!captured.credentials) {
+    throw new Error("This Marketo account is no longer connected.");
+  }
+  let expected = { ...captured, credentials: captured.credentials };
+  return await makeClient(
+    exports,
+    captured.credentials,
+    account,
+    expected,
+    () => account.credentialsExpired(),
+    async (url, init, forceRefresh, timeoutMs) => {
+      let result = await account.dispatch(expected, bindingId, url, init, forceRefresh, timeoutMs);
+      try {
+        if (!result.ok) {
+          if ("error" in result) return unwrapTokenCacheResult<never>(result);
+          if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
+          if ("observerRevoked" in result) {
+            throw new MarketoDispatchAbortedError(
+              "A Marketo observer's credentials were revoked; remove their access before retrying.",
+            );
+          }
+          throw new MarketoDispatchAbortedError(
+            "The Marketo account changed before the request was dispatched.",
+          );
+        }
+        return result.response;
+      } finally {
+        disposeRpcResult(result);
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Verifier
+
+type MarketoUserVerifierProps = { userObjectId: string };
+
+interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
+  hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<
+    { valid: false } |
+    { valid: true; generation: number } |
+    { error: TokenCacheError }
+  >;
+  commitObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean>;
+}
+
+async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
+  let bytes = new TextEncoder().encode(
+    `${credentials.endpoint}\u0000${credentials.clientId}\u0000${credentials.clientSecret}`,
+  );
+  let digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function accountIdentityFingerprint(endpoint: string, clientId: string): Promise<string> {
+  let bytes = new TextEncoder().encode(`${new URL(endpoint).origin}\u0000${clientId}`);
+  let digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+@validateRpc()
+export class MarketoUserVerifier
+  extends WorkerEntrypoint<Env, MarketoUserVerifierProps>
+  implements MarketoUserVerifierApi
+{
+  async hasLiveCredential(
+    endpoint: string,
+    clientId: string,
+    fingerprint: string,
+  ): Promise<
+    { valid: false } |
+    { valid: true; generation: number } |
+    { error: TokenCacheError }
+  > {
+    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let state = await readAccountCredentialState(account);
+    let credentials = state.credentials;
+    if (
+      !credentials || credentials.endpoint !== endpoint || credentials.clientId !== clientId ||
+      await credentialFingerprint(credentials) !== fingerprint
+    ) return { valid: false };
+
+    let result = await account.verifyCredentials({ ...state, credentials });
+    let valid: boolean;
+    try {
+      if ("credentialChanged" in result) return { valid: false };
+      if (!result.ok) return { error: { ...result.error } };
+      valid = result.value;
+    } finally {
+      disposeRpcResult(result);
+    }
+    if (!valid) await account.credentialsExpired();
+    return valid
+      ? { valid: true, generation: state.generation }
+      : { valid: false };
+  }
+
+  async commitObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    expected: ObserverCommitExpectation,
+  ): Promise<boolean> {
+    return await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .commitObserverAdmission(generation, ownerAccountId, bindingId, observerId, expected);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User
+
+type MarketoUserImplProps = { userObjectId: string };
+
+@validateRpc()
+export class MarketoUserImpl
+  extends WorkerEntrypoint<Env, MarketoUserImplProps>
+  implements GatekeeperUser
+{
+  #account() {
+    return userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+  }
+
+  /** The account's credentials, or a clear error if it has been disconnected. */
+  async #credentials(): Promise<MarketoCredentials> {
+    let creds = await this.#account().getCredentials();
+    if (!creds) {
+      throw new Error("This Marketo account is no longer connected. Reconnect to continue.");
+    }
+    return creds;
+  }
+
+  async describe(): Promise<AccountDescription> {
+    let account = this.#account();
+    let state = await readAccountCredentialState(account);
+    let creds = state.credentials;
+    if (!creds) {
+      let identity = await accountIdentityFingerprint("https://disconnected.invalid", this.ctx.props.userObjectId);
+      return { displayName: "Marketo", uniqueName: `disconnected @ ${identity}`, avatar: MARKETO_ICON };
+    }
+
+    let host = new URL(creds.endpoint).host;
+    let identity = await accountIdentityFingerprint(creds.endpoint, creds.clientId);
+    // Label the connection with the API-only user owning the custom service, since that is the
+    // identity Marketo will attribute every action to.
+    let scope: string | undefined;
+    try {
+      let result = await account.getScope({ ...state, credentials: creds });
+      try {
+        if (!("credentialChanged" in result)) scope = unwrapTokenCacheResult(result);
+      } finally {
+        disposeRpcResult(result);
+      }
+    } catch (error) {
+      // Credentials may have been revoked in Marketo; fall back to a generic label.
+      if (error instanceof MarketoError && error.isAuthError) {
+        await this.#account().credentialsExpired();
+      } else {
+        logger.warn("scope lookup failed", {
+          event: "marketo_scope_lookup_failed",
+          error: error instanceof Error ? error.name : typeof error,
+          ...(error instanceof MarketoError && error.status !== undefined
+            ? { status: error.status }
+            : {}),
+        });
+      }
+    }
+    return {
+      displayName: scope ? `Marketo (${scope})` : "Marketo",
+      uniqueName: `${host} @ ${identity}`,
+      avatar: MARKETO_ICON,
+    };
+  }
+
+  /** Marketo cannot authenticate a user, so this vendor never provides sign-in. */
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return null;
+  }
+
+  async getSupportedResources(): Promise<SupportedResource[]> {
+    return SUPPORTED_RESOURCES;
+  }
+
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    let creds = await this.#credentials();
+    let origin = new URL(creds.endpoint).origin;
+    let exports = this.ctx.exports;
+    let userObjectId = this.ctx.props.userObjectId;
+
+    switch (resourceUrlPattern) {
+      case INSTANCE_RESOURCE.urlPattern:
+        return {
+          iframeHtml: INSTANCE_CONFIGURATOR_HTML,
+          ui: new RpcStub(new InstanceConfiguratorUI(origin)),
+        };
+      case DESIGN_STUDIO_RESOURCE.urlPattern:
+        return {
+          iframeHtml: DESIGN_STUDIO_CONFIGURATOR_HTML,
+          ui: new RpcStub(new DesignStudioConfiguratorUI(origin)),
+        };
+      case PROGRAM_RESOURCE.urlPattern:
+        return {
+          iframeHtml: PROGRAM_CONFIGURATOR_HTML,
+          ui: new RpcStub(new ProgramConfiguratorUI(origin, exports, userObjectId)),
+        };
+      case STATIC_LIST_RESOURCE.urlPattern:
+        return {
+          iframeHtml: LIST_CONFIGURATOR_HTML,
+          ui: new RpcStub(new ListConfiguratorUI(origin, exports, userObjectId)),
+        };
+      default:
+        throw new Error(`Unsupported Marketo resource configurator: ${resourceUrlPattern}`);
+    }
+  }
+
+  async getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }> {
+    let creds = await this.#credentials();
+    let origin = new URL(creds.endpoint).origin;
+    let { kind, id } = parseResourceUrl(origin, url);
+    let userObjectId = this.ctx.props.userObjectId;
+    let bindingId = crypto.randomUUID();
+    let make = (props: MarketoGatekeeperImplProps) =>
+      this.ctx.exports.MarketoGatekeeperImpl({ props });
+
+    switch (kind) {
+      case "instance":
+        return {
+          class: make({ userObjectId, bindingId, kind: "instance" }),
+          resource: INSTANCE_RESOURCE,
+        };
+      case "design-studio":
+        return {
+          class: make({ userObjectId, bindingId, kind: "design-studio" }),
+          resource: DESIGN_STUDIO_RESOURCE,
+        };
+      case "program":
+        return {
+          class: make({ userObjectId, bindingId, kind: "program", resourceId: id }),
+          resource: PROGRAM_RESOURCE,
+        };
+      case "list":
+        return {
+          class: make({ userObjectId, bindingId, kind: "list", resourceId: id }),
+          resource: STATIC_LIST_RESOURCE,
+        };
+    }
+  }
+
+  async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
+    let props: MarketoUserVerifierProps = { userObjectId: this.ctx.props.userObjectId };
+    return this.ctx.exports.MarketoUserVerifier({ props });
+  }
+
+  async revoke(): Promise<void> {
+    await this.#account().revoke();
+  }
+
+  async reconnect(): Promise<{ url: string }> {
+    let nonce = generateNonce();
+    await this.#account().prepareReconnect(nonce);
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${nonce}` };
+  }
+
+  /** All granularities are served by the account's one credential, so nothing extra is needed. */
+  async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Configurators
+//
+// These run in a sandboxed iframe and are treated as untrusted, so each exposes only the narrow
+// read-only listing it needs to let the user pick a resource.
+
+@validateRpc()
+class InstanceConfiguratorUI extends RpcTarget {
+  #origin: string;
+  constructor(origin: string) {
+    super();
+    this.#origin = origin;
+  }
+
+  async resourceUrl(): Promise<string> {
+    return buildInstanceUrl(this.#origin);
+  }
+
+}
+
+@validateRpc()
+class DesignStudioConfiguratorUI extends RpcTarget {
+  #origin: string;
+  constructor(origin: string) {
+    super();
+    this.#origin = origin;
+  }
+
+  async resourceUrl(): Promise<string> {
+    return buildDesignStudioUrl(this.#origin);
+  }
+}
+
+@validateRpc()
+class ProgramConfiguratorUI extends RpcTarget {
+  #origin: string;
+  #exports: Cloudflare.Exports;
+  #userObjectId: string;
+  constructor(origin: string, exports: Cloudflare.Exports, userObjectId: string) {
+    super();
+    this.#origin = origin;
+    this.#exports = exports;
+    this.#userObjectId = userObjectId;
+  }
+
+  async listPrograms(query: string): Promise<MarketoConfiguratorOption[]> {
+    return await resolveProgramOptions(
+      await makeAccountClient(this.#exports, this.#userObjectId),
+      query,
+    );
+  }
+
+  async resourceUrl(programId: string | null | undefined): Promise<string> {
+    if (!programId) throw new Error("No program selected.");
+    return buildProgramUrl(this.#origin, programId);
+  }
+}
+
+@validateRpc()
+class ListConfiguratorUI extends RpcTarget {
+  #origin: string;
+  #exports: Cloudflare.Exports;
+  #userObjectId: string;
+  constructor(origin: string, exports: Cloudflare.Exports, userObjectId: string) {
+    super();
+    this.#origin = origin;
+    this.#exports = exports;
+    this.#userObjectId = userObjectId;
+  }
+
+  async listStaticLists(query: string): Promise<MarketoConfiguratorOption[]> {
+    let client = await makeAccountClient(this.#exports, this.#userObjectId);
+    let search = query.trim();
+    let lists: RawList[];
+    if (!search) {
+      lists = (await client.getLists()).result;
+    } else if (/^\d+$/.test(search)) {
+      let list = await client.getList(Number(search));
+      lists = list ? [list] : [];
+    } else {
+      let [exact, partial] = await Promise.all([
+        client.getLists({ name: search }),
+        client.getLists({ nameContains: search }),
+      ]);
+      lists = [...exact.result, ...partial.result];
+    }
+    return [...new Map(
+      lists
+        .filter((list): list is RawList & { id: number } => typeof list.id === "number")
+        .map(list => [list.id, list]),
+    ).values()]
+      .slice(0, CONFIGURATOR_LIMIT)
+      .map(l => ({
+        value: String(l.id),
+        title: l.name ?? String(l.id),
+        subtitle: l.programName,
+        meta: l.workspaceName,
+      }));
+  }
+
+  async resourceUrl(listId: string | null | undefined): Promise<string> {
+    if (!listId) throw new Error("No list selected.");
+    return buildListUrl(this.#origin, listId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gatekeeper (per-binding)
+
+type MarketoGatekeeperImplProps = {
+  userObjectId: string;
+  bindingId: string;
+  kind: MarketoResourceKind;
+  resourceId?: number;
+};
+
+type ActionLifecycle =
+  | "prepared"
+  | "submitting"
+  | "submission-uncertain"
+  | "registered"
+  | "preflight"
+  | "dispatching"
+  | "blocked"
+  | "staged";
+type PendingRow = {
+  action: MarketoAction;
+  ownerGeneration: number;
+  state?: ActionLifecycle;
+  blockedBy?: number;
+  blockedReason?: string;
+};
+type StagedRow = PendingRow & { state: ActionLifecycle; expiresAt?: number };
+type ApplyingState =
+  "preparing" | "dispatching" | "uncertain" | "uncertain-discarded" |
+  "partial" | "nothing-changed" | "applied" | "rejected";
+type AuditTombstone = PendingRow & {
+  outcome: "uncertain-discarded";
+  creationCandidate?: { providerId: string | number; authority: "unverified" };
+};
+const MAX_PENDING_ACTIONS = 200;
+const ABANDONED_STAGED_ACTION_TTL_MS = 10 * 60 * 1000;
+/** How long a provider-derived business-object restriction suppresses another safe access probe. */
+export const BUSINESS_OBJECT_RESTRICTION_TTL_MS = 5 * 60 * 1000;
+type BusinessObjectRestriction = { version: 1; expiresAt: number };
+type LogicalKind = DesignStudioAssetKind | "campaign" | "program" | EmailDesignerKind;
+type LogicalReference = { id: string; kind: LogicalKind };
+type ListMemberCursor = { providerToken: string; scope: string; expiresAt: number };
+const LIST_MEMBER_CURSOR_PREFIX = "listMemberCursor:";
+const LIST_MEMBER_CURSOR_TTL_MS = 10 * 60 * 1000;
+const MAX_LIST_MEMBER_CURSORS = 256;
+
+function designerAssetKind(kind: EmailDesignerKind): DesignerAssetKind {
+  return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
+}
+
+function canonicalizeApprovalValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonicalizeApprovalValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalizeApprovalValue(child)]));
+  }
+  return value;
+}
+
+function canonicalApprovalValue(value: unknown): string {
+  return JSON.stringify(canonicalizeApprovalValue(value));
+}
+
+function canonicalDesignerDependents(dependents: MarketoDesignerUsedBy[]): string {
+  return canonicalApprovalValue(dependents.toSorted((left, right) =>
+    left.id.localeCompare(right.id) ||
+    canonicalApprovalValue(left).localeCompare(canonicalApprovalValue(right))));
+}
+
+@validateRpc()
+export class MarketoGatekeeperImpl
+  extends DurableObject<Env, MarketoGatekeeperImplProps>
+  implements Gatekeeper<
+    MarketoSessionImpl | MarketoDesignStudioImpl | MarketoProgramImpl | MarketoStaticListImpl
+  >
+{
+  #preparingActions = new Set<number>();
+  #dispatchingActions = new Set<number>();
+  #submittingActions = new Set<number>();
+
+  #issueListMemberCursor(providerToken: string, scope: string): string {
+    if (!providerToken || providerToken.length > 16_384) {
+      throw new MarketoError("Marketo returned an invalid static-list member page token.");
+    }
+    let now = Date.now();
+    let stored = [...this.ctx.storage.kv.list<ListMemberCursor>({ prefix: LIST_MEMBER_CURSOR_PREFIX })];
+    for (let [key, cursor] of stored) {
+      if (cursor.expiresAt <= now) this.ctx.storage.kv.delete(key);
+    }
+    if (stored.filter(([, cursor]) => cursor.expiresAt > now).length >= MAX_LIST_MEMBER_CURSORS) {
+      throw new Error("Too many active Marketo static-list member page tokens.");
+    }
+    let token = crypto.randomUUID();
+    this.ctx.storage.kv.put<ListMemberCursor>(LIST_MEMBER_CURSOR_PREFIX + token, {
+      providerToken,
+      scope,
+      expiresAt: now + LIST_MEMBER_CURSOR_TTL_MS,
+    });
+    return token;
+  }
+
+  #consumeListMemberCursor(pageToken: string, scope: string): string {
+    if (typeof pageToken !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(pageToken)) {
+      throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+    }
+    let key = LIST_MEMBER_CURSOR_PREFIX + pageToken;
+    let cursor = this.ctx.storage.kv.get<ListMemberCursor>(key);
+    this.ctx.storage.kv.delete(key);
+    if (!cursor || cursor.expiresAt <= Date.now() || cursor.scope !== scope) {
+      throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+    }
+    return cursor.providerToken;
+  }
+
+  async #credentialState(): Promise<AccountCredentialState> {
+    return await readAccountCredentialState(userAccountStub(
+      this.ctx.exports,
+      this.ctx.props.userObjectId,
+    ));
+  }
+
+  async #client(state?: AccountCredentialState): Promise<MarketoClient> {
+    return await makeAccountClient(
+      this.ctx.exports,
+      this.ctx.props.userObjectId,
+      state,
+      this.ctx.props.bindingId,
+    );
+  }
+
+  async describe(): Promise<ResourceDescription> {
+    let { kind, resourceId } = this.ctx.props;
+    let credentialState = await this.#credentialState();
+    let credentials = credentialState.credentials;
+    if (!credentials) {
+      throw new Error("The Marketo account behind this binding has been disconnected.");
+    }
+    let origin = new URL(credentials.endpoint).origin;
+    let client = await this.#client(credentialState);
+
+    switch (kind) {
+      case "instance": {
+        let host = new URL(origin).host;
+        return {
+          url: buildInstanceUrl(origin),
+          title: "Marketo",
+          snippet: `Full access to people, programs, campaigns, business objects, and Design Studio at ${host}.`,
+          suggestedBindingName: "MARKETO",
+          tsType: "MarketoSession",
+        };
+      }
+      case "design-studio": {
+        let host = new URL(origin).host;
+        return {
+          url: buildDesignStudioUrl(origin),
+          title: "Marketo Design Studio",
+          snippet: `Design Studio assets in the Marketo instance at ${host}.`,
+          suggestedBindingName: "MARKETO_DESIGN_STUDIO",
+          tsType: "MarketoDesignStudio",
+        };
+      }
+      case "program": {
+        let id = requireResourceId("program", resourceId);
+        let program = await client.getProgram(id).catch(() => undefined);
+        let name = program?.name ?? `Program ${id}`;
+        return {
+          url: buildProgramUrl(origin, id),
+          title: `Program: ${name}`,
+          snippet: `Marketo program "${name}" — members, tokens, statuses, metadata, tags, dates, approval, and deletion.`,
+          suggestedBindingName: "MARKETO_PROGRAM",
+          tsType: "MarketoProgram",
+        };
+      }
+      case "list": {
+        let id = requireResourceId("list", resourceId);
+        let list = await client.getList(id).catch(() => undefined);
+        let name = list?.name ?? `List ${id}`;
+        return {
+          url: buildListUrl(origin, id),
+          title: `List: ${name}`,
+          snippet: `Marketo static list "${name}" — read, add, and remove members.`,
+          suggestedBindingName: "MARKETO_LIST",
+          tsType: "MarketoStaticList",
+        };
+      }
+    }
+  }
+
+  async getTypeScriptTypes(): Promise<string> {
+    return TYPES_CODE;
+  }
+
+  /** Nothing is auto-approvable: every write here touches marketing data or sends messages. */
+  async getAutoApprovableActions() {
+    return [];
+  }
+
+  async startSession(
+    approvalQueue: RpcStub<ApprovalQueue>,
+  ): Promise<
+    MarketoSessionImpl | MarketoDesignStudioImpl | MarketoProgramImpl | MarketoStaticListImpl
+  > {
+    let credentialState = await this.#credentialState();
+    let credentials = credentialState.credentials;
+    if (!credentials || !await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .isCredentialStateCurrent({ ...credentialState, credentials })) {
+      throw new Error("The Marketo account behind this binding is disconnected or reconnecting.");
+    }
+    this.#cleanupAbandonedStagedActions();
+    this.#recoverStagedActions();
+    // Stubs passed as RPC arguments are disposed when the call returns, so keep our own handle.
+    let queue = approvalQueue.dup();
+    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let expectedCredentialState = { ...credentialState, credentials };
+    let pendingActions = () => this.#pendingIndex()
+      .map(id => this.ctx.storage.kv.get<PendingRow>(`pending:${id}`))
+      .filter((row): row is PendingRow => row?.ownerGeneration === credentialState.generation)
+      .map(row => row.action);
+    let sessionCtx = makeSessionContext({
+      client: () => this.#client(credentialState),
+      approvalQueue: queue,
+      issueListMemberCursor: async (providerToken, scope) =>
+        this.#issueListMemberCursor(providerToken, scope),
+      consumeListMemberCursor: async (pageToken, scope) =>
+        this.#consumeListMemberCursor(pageToken, scope),
+      assertCurrent: async () => {
+        if (!await account.isCredentialStateCurrent({ ...credentialState, credentials })) {
+          throw new Error("This Marketo session belongs to an older account credential generation.");
+        }
+      },
+      excludeObservers: async () => {
+        let authority = await account.getObservationAuthority(
+          expectedCredentialState,
+          this.ctx.props.bindingId,
+        );
+        try {
+          if (!authority.ok) {
+            throw new Error("This Marketo session belongs to an older account credential generation.");
+          }
+          return [...authority.excludeObservers];
+        } finally {
+          disposeRpcResult(authority);
+        }
+      },
+      submit: async (body: MarketoActionInput) => {
+        if (!await account.isCredentialStateCurrent(expectedCredentialState)) {
+          throw new Error("This Marketo session belongs to an older account credential generation.");
+        }
+        if ((body.type === "businessObjectUpsert" || body.type === "businessObjectDelete") &&
+            this.#businessObjectAccess(body.kind) !== "read-write") {
+          throw new Error("This Marketo business object is read-only or unavailable; no approval was submitted.");
+        }
+        this.#cleanupAbandonedStagedActions();
+        let index = this.#pendingIndexIncludingBlocked();
+        if (index.length + this.#activeStagedCount() >= MAX_PENDING_ACTIONS) {
+          throw new Error(`A Marketo binding cannot have more than ${MAX_PENDING_ACTIONS} pending actions.`);
+        }
+        let id = this.#nextActionId();
+        let action = { ...body, id } as MarketoAction;
+        this.#validateActionReferences(action, false, credentialState.generation);
+        let description = describeActionForSubmission(action);
+        // These synchronous writes happen before the RPC await, so reentrant queue callbacks can
+        // find the action without making it visible through the pending index.
+        this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
+          action,
+          ownerGeneration: credentialState.generation,
+          state: "prepared",
+          expiresAt: Date.now() + ABANDONED_STAGED_ACTION_TTL_MS,
+        });
+        this.ctx.storage.kv.put("staged:index", [...this.#stagedIndex(), id]);
+        this.#submittingActions.add(id);
+        try {
+          this.#setStagedPhase(id, "submitting");
+          await queue.submitAction(id, description);
+          this.#setStagedPhase(id, "registered");
+        } catch (error) {
+          let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
+          if (staged?.state === "submitting" || staged?.state === "staged") {
+            this.#setStagedPhase(id, "submission-uncertain");
+          } else if (!staged) {
+            let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`);
+            if (pending?.state === "registered") {
+              this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+                ...pending,
+                state: "blocked",
+                blockedReason: "Approval registration failed before this Marketo action could be applied.",
+              });
+            }
+          }
+          throw error;
+        } finally {
+          this.#submittingActions.delete(id);
+        }
+
+        let pending = this.#promoteStagedAction(id, "registration");
+        if (!pending) {
+          let outcome = this.ctx.storage.kv.get<ApplyingState>(`applying:${id}`);
+          if (outcome === "applied" || outcome === "nothing-changed") return;
+          if (outcome === "rejected") {
+            throw new Error("This Marketo action was rejected while its approval was being submitted.");
+          }
+          throw new Error("This Marketo approval callback consumed its staged action without a terminal outcome.");
+        }
+      },
+    });
+    let ctx: CampaignContext & EmailDesignerContext & BusinessObjectContext = {
+      ...sessionCtx,
+      allocateProvisional: () => {
+        let next = (this.ctx.storage.kv.get<number>("counter:nextProvisionalId") ?? 0) + 1;
+        this.ctx.storage.kv.put("counter:nextProvisionalId", next);
+        return `~${next}`;
+      },
+      pending: () => pendingActions()
+        .filter((action): action is DesignStudioAction => Boolean(action && isDesignStudioAction(action))),
+      resolveId: id => this.#resolveLogicalId(id),
+      logicalKind: id => this.#logicalKind(id, credentialState.generation),
+      submitDesign: async body => await sessionCtx.submit(body),
+      pendingCampaign: () => pendingActions()
+        .filter((action): action is CampaignAction => Boolean(action && isCampaignAction(action))),
+      submitCampaign: async body => await sessionCtx.submit(body),
+      pendingProgram: () => pendingActions()
+        .filter((action): action is ProgramAction => Boolean(action && isProgramAction(action))),
+      submitProgram: async body => await sessionCtx.submit(body),
+      pendingDesigner: () => pendingActions()
+        .filter((action): action is EmailDesignerAction => Boolean(action && isEmailDesignerAction(action))),
+      resolveAssetId: id => this.#resolveLogicalId(id),
+      resolveDesignerId: id => this.#resolveDesignerId(id),
+      submitDesigner: async body => await sessionCtx.submit(body),
+      submitBusinessObject: async body => await sessionCtx.submit(body),
+      getBusinessObjectAccess: kind => this.#businessObjectAccess(kind),
+      setBusinessObjectAccess: (kind, access) => this.#setBusinessObjectAccess(kind, access),
+    };
+
+    let { kind, resourceId } = this.ctx.props;
+    try {
+      switch (kind) {
+        case "instance":
+          return new MarketoSessionImpl(ctx);
+        case "design-studio":
+          return new MarketoDesignStudioImpl(ctx, true);
+        case "program":
+          return new MarketoProgramImpl(ctx, requireResourceId("program", resourceId), true);
+        case "list":
+          return new MarketoStaticListImpl(ctx, requireResourceId("list", resourceId), true);
+      }
+    } catch (error) {
+      sessionCtx.dispose();
+      throw error;
+    }
+  }
+
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
+    let ownerStateResult = await account.getObserverAdmissionState(this.ctx.props.bindingId, id);
+    let ownerState: ObserverAdmissionState;
+    try {
+      ownerState = {
+        ...copyCredentialState(ownerStateResult),
+        observerEpoch: ownerStateResult.observerEpoch,
+        reconnecting: ownerStateResult.reconnecting,
+      };
+    } finally {
+      disposeRpcResult(ownerStateResult);
+    }
+    let credentials = ownerState.credentials;
+    if (ownerState.reconnecting) {
+      throw new Error("The Marketo account behind this binding is reconnecting.");
+    }
+    if (!credentials) {
+      throw new Error("The Marketo account behind this binding has been disconnected.");
+    }
+    let verifier = user as unknown as Fetcher<MarketoUserVerifierApi>;
+    let verification = await verifier.hasLiveCredential(
+      credentials.endpoint,
+      credentials.clientId,
+      await credentialFingerprint(credentials),
+    );
+    let collaboratorGeneration: number;
+    try {
+      if ("error" in verification) {
+        throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
+      }
+      if (!verification.valid) {
+        throw new Error(
+          "This collaborator is not connected with the same Marketo LaunchPoint service.",
+        );
+      }
+      collaboratorGeneration = verification.generation;
+    } finally {
+      disposeRpcResult(verification);
+    }
+    if (!await verifier.commitObserverAdmission(
+      collaboratorGeneration,
+      this.ctx.props.userObjectId,
+      this.ctx.props.bindingId,
+      id,
+      { ownerGeneration: ownerState.generation, observerEpoch: ownerState.observerEpoch },
+    )) {
+      throw new Error("The Marketo account changed while collaborator access was being verified.");
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .removeCollaborator(this.ctx.props.bindingId, id);
+  }
+
+  async applyAction(actionId: number): Promise<void> {
+    if (this.#preparingActions.has(actionId)) {
+      throw new Error("This Marketo action is already being prepared for dispatch.");
+    }
+    if (this.#dispatchingActions.has(actionId)) {
+      throw new Error("This Marketo action is already being dispatched.");
+    }
+    let state = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
+    if (state === "preparing") {
+      // A worker restart loses the in-memory owner. Preflight has made no external change.
+      this.ctx.storage.kv.delete(`applying:${actionId}`);
+      state = undefined;
+    }
+    if (state === "dispatching") {
+      // A worker restart can happen after the request left but before its result was recorded.
+      this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
+      state = "uncertain";
+    }
+    if (state === "applied") return;
+    if (state === "nothing-changed") {
+      throw new Error("Marketo's native CRM sync made this action read-only; nothing was changed.");
+    }
+    if (state === "rejected") throw new Error("This Marketo action was rejected.");
+    if (state === "uncertain-discarded") {
+      throw new Error("This uncertain Marketo approval was discarded and cannot be retried.");
+    }
+    if (state) {
+      throw new Error(
+        "This Marketo action was already dispatched and cannot be repeated. Inspect Marketo to " +
+          "confirm its outcome.",
+      );
+    }
+    // An approval callback proves queue registration completed. Promote first so even a callback
+    // arriving after a worker restart cannot dispatch outside simulation and dependency tracking.
+    let pending = this.#promoteStagedAction(actionId, "callback");
+    if (!pending) {
+      throw new Error(`No queued Marketo action with id ${actionId}.`);
+    }
+    if (!this.#pendingIndexIncludingBlocked().includes(actionId)) {
+      throw new Error("This Marketo action is not durably registered for simulation and cannot be dispatched.");
+    }
+    let lifecycle = pending.state ?? "registered";
+    if (lifecycle === "blocked") {
+      throw new Error(pending.blockedReason ?? "This Marketo action is blocked and cannot be dispatched; reject it to resolve the approval.");
+    }
+    if (lifecycle === "dispatching") {
+      this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
+      throw new Error("This Marketo action may already have been dispatched; inspect Marketo to confirm its outcome.");
+    }
+    if (this.ctx.storage.kv.get(`dependencyBlocked:${actionId}`)) {
+      throw new Error("This Marketo action depends on an earlier rejected action and cannot be dispatched; reject it to resolve the approval.");
+    }
+
+    this.#setActionLifecycle(actionId, "preflight");
+    this.ctx.storage.kv.put(`applying:${actionId}`, "preparing");
+    this.#preparingActions.add(actionId);
+    let client: MarketoClient;
+    let credentialState: AccountCredentialState;
+    let landingPageTemplateId: number | undefined;
+    try {
+      validateActionForDispatch(pending.action);
+      this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
+      this.#validateMutationOrder(pending.action, pending.ownerGeneration);
+      if (isBusinessObjectAction(pending.action) && this.#businessObjectAccess(pending.action.kind) !== "read-write") {
+        this.#removeAction(actionId);
+        this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
+        throw new Error("This Marketo business object became read-only before dispatch; nothing changed.");
+      }
+      credentialState = await this.#credentialState();
+      if (!credentialState.credentials) {
+        throw new Error("The Marketo account behind this binding has been disconnected.");
+      }
+      if (pending.ownerGeneration !== credentialState.generation) {
+        throw new Error("This Marketo action belongs to an older account credential generation.");
+      }
+      client = await this.#client(credentialState);
+      if (isBusinessObjectAction(pending.action)) {
+        let access = await this.#probeBusinessObjectAccess(pending.action.kind, client);
+        if (access !== "read-write") {
+          this.#removeAction(actionId);
+          this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
+          throw new Error("This Marketo business object is read-only or unavailable; nothing was dispatched.");
+        }
+      }
+      landingPageTemplateId = await this.#preflightClassicAsset(pending.action, client);
+      await this.#preflightCampaignOwnership(pending.action, client);
+      await this.#preflightDesignerReferences(pending.action, client);
+      await client.prepare();
+      let current = this.#actionRow(actionId);
+      if (!current) {
+        throw new Error("This Marketo action was rejected while dispatch was being prepared.");
+      }
+      if (current.state === "blocked") {
+        throw new Error(current.blockedReason ?? "This Marketo action was blocked while dispatch was being prepared.");
+      }
+      validateActionForDispatch(pending.action);
+      this.#validateActionReferences(pending.action, true, pending.ownerGeneration);
+      let currentCredentialState = await this.#credentialState();
+      if (
+        currentCredentialState.generation !== credentialState.generation ||
+        !currentCredentialState.credentials ||
+        currentCredentialState.credentials.endpoint !== credentialState.credentials.endpoint ||
+        currentCredentialState.credentials.clientId !== credentialState.credentials.clientId ||
+        currentCredentialState.credentials.clientSecret !== credentialState.credentials.clientSecret
+      ) {
+        throw new Error("The Marketo account changed while dispatch was being prepared.");
+      }
+    } catch (error) {
+      this.#preparingActions.delete(actionId);
+      if (this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`) === "preparing") {
+        this.ctx.storage.kv.delete(`applying:${actionId}`);
+      }
+      this.#restoreActionAfterDefiniteFailure(actionId);
+      throw error;
+    }
+    // Mark before the side-effecting request. A timeout can happen after Marketo accepted it, so
+    // an automatic retry could duplicate writes or campaign sends.
+    this.#setActionLifecycle(actionId, "dispatching");
+    this.ctx.storage.kv.put(`applying:${actionId}`, "dispatching");
+    this.#preparingActions.delete(actionId);
+    this.#dispatchingActions.add(actionId);
+
+    let results;
+    let designWriteOccurred = false;
+    try {
+      if (isDesignStudioAction(pending.action)) {
+        let asset = pending.action.type === "designDeleteFolder" ? "folder" : pending.action.asset;
+        await executeDesignStudioAction(
+          pending.action,
+          client,
+          id => this.#requireLogicalId(id),
+          (provisionalId, realId) => {
+            this.ctx.storage.kv.put(`provisional:${provisionalId}`, realId);
+            this.ctx.storage.kv.put(
+              `provisionalKind:${provisionalId}`,
+              asset,
+            );
+          },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
+          landingPageTemplateId,
+          () => { designWriteOccurred = true; },
+        );
+        results = undefined;
+      } else if (isCampaignAction(pending.action)) {
+        await executeCampaignAction(
+          pending.action,
+          client,
+          id => this.#requireLogicalId(id),
+          (provisionalId, realId) => {
+            this.ctx.storage.kv.put(`provisional:${provisionalId}`, realId);
+            this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, "campaign");
+          },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
+        );
+        results = undefined;
+      } else if (isProgramAction(pending.action)) {
+        await executeProgramAction(
+          pending.action,
+          client,
+          id => this.#requireLogicalId(id),
+          (provisionalId, realId) => {
+            this.ctx.storage.kv.put(`provisional:${provisionalId}`, realId);
+            this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, "program");
+          },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
+        );
+        results = undefined;
+      } else if (isEmailDesignerAction(pending.action)) {
+        await executeEmailDesignerAction(
+          pending.action,
+          client,
+          id => this.#requireDesignerId(id),
+          id => this.#requireLogicalId(id),
+          (provisionalId, realId, kind) => {
+            this.ctx.storage.kv.put(`designerProvisional:${provisionalId}`, realId);
+            this.ctx.storage.kv.put(`provisionalKind:${provisionalId}`, kind);
+          },
+          realId => this.ctx.storage.kv.put(`creationCandidate:${actionId}`, realId),
+        );
+        results = undefined;
+      } else if (isBusinessObjectAction(pending.action)) {
+        results = await executeBusinessObjectAction(pending.action, client);
+      } else {
+        results = await executeAction(pending.action, client);
+      }
+    } catch (e) {
+      this.#dispatchingActions.delete(actionId);
+      if (isBusinessObjectAction(pending.action) && pending.action.kind !== "namedAccount" &&
+          e instanceof MarketoError && e.code === "1018") {
+        this.#setBusinessObjectAccess(pending.action.kind, "read-only");
+        this.#removeAction(actionId);
+        this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
+        throw new Error(
+          "Marketo's native CRM sync rejected this write; nothing was changed and it cannot be retried.",
+          { cause: e },
+        );
+      }
+      // A parsed Marketo rejection is definitive. Transport and server failures are ambiguous:
+      // Marketo may have accepted the write before the response was lost.
+      let definitive =
+        e instanceof DesignerPreDispatchError ||
+        e instanceof MarketoError &&
+        (e.operation === undefined ||
+          (e.status === undefined || e.status < 400) &&
+            (e.isProviderRejection || e.code !== undefined) ||
+          (e.status !== undefined && e.status >= 400 && e.status < 500 && e.status !== 408));
+      if (e instanceof MarketoResponseValidationError && e.disposition === "uncertain") {
+        definitive = false;
+      }
+      if (isDesignStudioAction(pending.action) && (
+        pending.action.type === "designCreate" && this.#resolveLogicalId(pending.action.provisionalId) !== undefined ||
+        designWriteOccurred
+      )) definitive = false;
+      if (isCampaignAction(pending.action) &&
+          (pending.action.type === "campaignCreate" || pending.action.type === "campaignClone") &&
+           this.#resolveLogicalId(pending.action.provisionalId) !== undefined) definitive = false;
+      if (isProgramAction(pending.action) &&
+          (pending.action.type === "programCreate" || pending.action.type === "programClone") &&
+           this.#resolveLogicalId(pending.action.provisionalId) !== undefined) definitive = false;
+      if (isEmailDesignerAction(pending.action) &&
+          (pending.action.type === "designerCreate" || pending.action.type === "designerClone") &&
+           this.#resolveDesignerId(pending.action.provisionalId) !== undefined) definitive = false;
+      if (this.ctx.storage.kv.get(`creationCandidate:${actionId}`) !== undefined) definitive = false;
+      if (definitive) {
+        this.ctx.storage.kv.delete(`applying:${actionId}`);
+        this.#restoreActionAfterDefiniteFailure(actionId);
+      } else {
+        this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
+      }
+      throw e;
+    }
+    this.#dispatchingActions.delete(actionId);
+    try {
+      if (results) {
+        if (pending.action.type === "campaignTrigger" || pending.action.type === "campaignSchedule") {
+          assertCampaignRequestResults(pending.action, results);
+        } else {
+          assertActionResults(pending.action, results);
+          assertActionResultIdentity(pending.action, results);
+        }
+      }
+      if (results && isBusinessObjectAction(pending.action) && pending.action.kind !== "namedAccount" &&
+          results.some(result => result.status?.toLowerCase() === "skipped" && result.reasons?.some(reason => reason.code === "1018"))) {
+        this.#setBusinessObjectAccess(pending.action.kind, "read-only");
+        if (results.length === expectedActionResults(pending.action) && results.length > 0 &&
+            results.every(result => result.status?.toLowerCase() === "skipped")) {
+          this.#removeAction(actionId);
+          this.ctx.storage.kv.put(`applying:${actionId}`, "nothing-changed");
+          throw new Error("Marketo's native CRM sync rejected this write; nothing was changed and it cannot be retried.");
+        }
+      }
+      if (results && pending.action.type !== "campaignTrigger" && pending.action.type !== "campaignSchedule") {
+        assertApplied(results, expectedActionResults(pending.action));
+      }
+    } catch (e) {
+      if (e instanceof MarketoActionResultError) {
+        if (e.disposition === "uncertain") {
+          this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
+        } else {
+          this.ctx.storage.kv.delete(`applying:${actionId}`);
+          if (e.disposition === "partial") {
+            this.#removeAction(actionId);
+            this.ctx.storage.kv.put(`applying:${actionId}`, "partial");
+          } else {
+            this.#restoreActionAfterDefiniteFailure(actionId);
+          }
+        }
+      }
+      throw e;
+    }
+
+    this.#removeAction(actionId);
+    this.ctx.storage.kv.put(`applying:${actionId}`, "applied");
+  }
+
+  async rejectAction(actionId: number): Promise<void | { restart: true }> {
+    if (this.#preparingActions.has(actionId)) {
+      throw new Error("This Marketo action is still in preflight and cannot yet be rejected.");
+    }
+    if (this.#dispatchingActions.has(actionId)) {
+      throw new Error("This Marketo action is currently being dispatched and cannot yet be rejected.");
+    }
+    let applying = this.ctx.storage.kv.get<ApplyingState>(`applying:${actionId}`);
+    if (applying === "preparing") {
+      this.ctx.storage.kv.delete(`applying:${actionId}`);
+      applying = undefined;
+    }
+    if (applying === "dispatching") {
+      this.ctx.storage.kv.put(`applying:${actionId}`, "uncertain");
+      applying = "uncertain";
+    }
+    if (applying === "rejected" || applying === "uncertain-discarded") return;
+    let discardUncertain = applying === "uncertain";
+    if (applying !== undefined && applying !== "nothing-changed" && !discardUncertain) {
+      throw new Error("This Marketo action was already dispatched and can no longer be rejected.");
+    }
+    let stagedRow = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    let pendingRow = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    let sourceRow = pendingRow ?? stagedRow;
+    let pending = sourceRow?.action;
+    if (pending && (
+      isDesignStudioAction(pending) && (
+        pending.type === "designCreate" || pending.type === "designClone" ||
+        pending.type === "designMetadata" || pending.type === "designContent"
+      ) ||
+      isCampaignAction(pending) ||
+      isProgramAction(pending) ||
+      isEmailDesignerAction(pending)
+    )) {
+      let identity = this.#actionIdentity(pending);
+      let purge = identity ? [identity] : [];
+      let crossFamilyPurge = "provisionalId" in pending && identity ? [identity] : [];
+      let provisionalIds: { id: string; designer: boolean }[] = [];
+      let blockedDependents = false;
+      let recordProvisional = (action: MarketoAction) => {
+        if ("provisionalId" in action) {
+          provisionalIds.push({ id: action.provisionalId, designer: isEmailDesignerAction(action) });
+        }
+      };
+      recordProvisional(pending);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let id of [...this.#pendingIndexIncludingBlocked(), ...this.#stagedIndex()]) {
+          let stagedDependent = this.ctx.storage.kv.get<StagedRow>(`staged:${id}`);
+          let dependent = this.ctx.storage.kv.get<PendingRow>(`pending:${id}`) ?? stagedDependent;
+          if (!dependent || dependent.ownerGeneration !== sourceRow?.ownerGeneration) continue;
+          let row = dependent.action;
+          if (row.id <= pending.id ||
+              !isDesignStudioAction(row) && !isCampaignAction(row) && !isProgramAction(row) && !isEmailDesignerAction(row) &&
+              row.type !== "campaignTrigger" && row.type !== "campaignSchedule") continue;
+          let sameFamily = this.#sameActionFamily(pending, row);
+          let depends = this.#actionReferences(row).some(reference =>
+            purge.some(rejected => this.#sameReference(reference, rejected) && (
+              sameFamily || crossFamilyPurge.some(crossFamily => this.#sameReference(crossFamily, rejected))
+            )));
+          if (depends) {
+            let created = this.#actionIdentity(row);
+            if (created && "provisionalId" in row &&
+                !purge.some(reference => this.#sameReference(reference, created))) {
+              purge.push(created);
+              crossFamilyPurge.push(created);
+              changed = true;
+            }
+            recordProvisional(row);
+            if (stagedDependent) {
+              this.ctx.storage.kv.put<StagedRow>(`staged:${id}`, {
+                ...stagedDependent,
+                state: "blocked",
+                blockedBy: actionId,
+                blockedReason: "This Marketo action depends on an earlier rejected action.",
+              });
+            } else {
+              this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+                ...dependent,
+                state: "blocked",
+                blockedBy: actionId,
+                blockedReason: "This Marketo action depends on an earlier rejected action.",
+              });
+              this.ctx.storage.kv.put(`dependencyBlocked:${id}`, actionId);
+            }
+            blockedDependents = true;
+          }
+        }
+      }
+      this.#finishRejection(actionId, sourceRow, discardUncertain);
+      for (let provisional of provisionalIds) {
+        this.ctx.storage.kv.delete(`${provisional.designer ? "designerProvisional" : "provisional"}:${provisional.id}`);
+        this.ctx.storage.kv.delete(`provisionalKind:${provisional.id}`);
+      }
+      if (blockedDependents || "provisionalId" in pending || !isDesignStudioAction(pending)) return { restart: true };
+      return;
+    }
+    this.#finishRejection(actionId, sourceRow, discardUncertain);
+  }
+
+  async revertAction(_actionId: number): Promise<{ message: string; canRetry: false }> {
+    return { message: "Marketo actions are not automatically reversible.", canRetry: false };
+  }
+
+  #nextActionId(): number {
+    let next = (this.ctx.storage.kv.get<number>("counter:nextActionId") ?? 0) + 1;
+    this.ctx.storage.kv.put("counter:nextActionId", next);
+    return next;
+  }
+
+  #businessObjectAccess(kind: MarketoBusinessObjectKind): MarketoBusinessObjectAccess {
+    if (kind === "opportunityRole" &&
+        this.#businessObjectRestrictionActive("businessObjects:opportunityRoleUnavailable")) {
+      return "unavailable";
+    }
+    if (kind !== "namedAccount" &&
+        this.#businessObjectRestrictionActive("businessObjects:nativeCrmReadOnly")) {
+      return "read-only";
+    }
+    return "read-write";
+  }
+
+  #setBusinessObjectAccess(kind: MarketoBusinessObjectKind, access: MarketoBusinessObjectAccess): void {
+    let restriction: BusinessObjectRestriction = {
+      version: 1,
+      expiresAt: Date.now() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+    };
+    if (access === "unavailable" && kind === "opportunityRole") {
+      this.ctx.storage.kv.put("businessObjects:opportunityRoleUnavailable", restriction);
+    } else if (access === "read-only" && kind !== "namedAccount") {
+      this.ctx.storage.kv.put("businessObjects:nativeCrmReadOnly", restriction);
+    } else if (access === "read-write") {
+      if (kind === "opportunityRole") {
+        this.ctx.storage.kv.delete("businessObjects:opportunityRoleUnavailable");
+      }
+      if (kind !== "namedAccount") {
+        this.ctx.storage.kv.delete("businessObjects:nativeCrmReadOnly");
+      }
+    }
+  }
+
+  #businessObjectRestrictionActive(key: string): boolean {
+    let stored = this.ctx.storage.kv.get<BusinessObjectRestriction | true>(key);
+    if (stored === true) {
+      // Bound restrictions written by older workers from the first read after deployment.
+      this.ctx.storage.kv.put<BusinessObjectRestriction>(key, {
+        version: 1,
+        expiresAt: Date.now() + BUSINESS_OBJECT_RESTRICTION_TTL_MS,
+      });
+      return true;
+    }
+    if (stored?.version === 1 && Number.isFinite(stored.expiresAt) && stored.expiresAt > Date.now()) {
+      return true;
+    }
+    if (stored !== undefined) this.ctx.storage.kv.delete(key);
+    return false;
+  }
+
+  async #probeBusinessObjectAccess(
+    kind: MarketoBusinessObjectKind,
+    client: MarketoClient,
+  ): Promise<MarketoBusinessObjectAccess> {
+    try {
+      let access = businessObjectSchemaAccess(kind, await client.describeBusinessObject(kind));
+      this.#setBusinessObjectAccess(kind, access);
+      return access;
+    } catch (error) {
+      if (kind !== "opportunityRole" || !businessObjectPermissionDenied(error)) throw error;
+      this.#setBusinessObjectAccess(kind, "unavailable");
+      return "unavailable";
+    }
+  }
+
+  #pendingIndex(): number[] {
+    return this.#pendingIndexIncludingBlocked().filter(id => !this.ctx.storage.kv.get(`dependencyBlocked:${id}`));
+  }
+
+  #pendingIndexIncludingBlocked(): number[] {
+    return this.ctx.storage.kv.get<number[]>("pending:index") ?? [];
+  }
+
+  #stagedIndex(): number[] {
+    return this.ctx.storage.kv.get<number[]>("staged:index") ?? [];
+  }
+
+  #activeStagedCount(): number {
+    return this.#stagedIndex().filter(actionId => {
+      if (this.#submittingActions.has(actionId)) return true;
+      let state = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`)?.state;
+      return state === "registered" || state === "blocked" ||
+        state === "preflight" || state === "dispatching";
+    }).length;
+  }
+
+  #removeStaged(actionId: number): void {
+    this.ctx.storage.kv.delete(`staged:${actionId}`);
+    let index = this.#stagedIndex();
+    if (!index.includes(actionId)) return;
+    let remaining = index.filter(id => id !== actionId);
+    if (remaining.length === 0) this.ctx.storage.kv.delete("staged:index");
+    else this.ctx.storage.kv.put("staged:index", remaining);
+  }
+
+  #setStagedPhase(actionId: number, state: StagedRow["state"]): void {
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged) this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...staged, state });
+  }
+
+  #promoteStagedAction(
+    actionId: number,
+    evidence: "registration" | "callback",
+  ): PendingRow | undefined {
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    if (pending) {
+      let index = this.#pendingIndexIncludingBlocked();
+      if (!index.includes(actionId)) this.ctx.storage.kv.put("pending:index", [...index, actionId]);
+      this.#removeStaged(actionId);
+      return pending;
+    }
+
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (!staged) return undefined;
+    if (this.#abandonedStageExpired(staged) && !this.#submittingActions.has(actionId)) {
+      this.#removeStaged(actionId);
+      return undefined;
+    }
+    if (staged.state === "blocked") {
+      throw new Error(staged.blockedReason ?? "This Marketo action is blocked and cannot be promoted.");
+    }
+    let promotable = staged.state === "registered" || evidence === "callback" && (
+      staged.state === "submitting" || staged.state === "submission-uncertain" ||
+      staged.state === "staged"
+    );
+    if (!promotable) {
+      if (staged.state === "prepared") {
+        throw new Error("This Marketo action was never submitted for approval and cannot be dispatched.");
+      }
+      throw new Error("This Marketo action is still controlled by an interrupted approval callback.");
+    }
+    try {
+      validateActionForDispatch(staged.action);
+      this.#validateActionReferences(staged.action, false, staged.ownerGeneration);
+    } catch (error) {
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, {
+        ...staged,
+        state: "blocked",
+        blockedReason: "A referenced Marketo resource changed while approval was being registered.",
+      });
+      throw new Error("This Marketo action became blocked while approval was being registered.", { cause: error });
+    }
+
+    pending = {
+      action: staged.action,
+      ownerGeneration: staged.ownerGeneration,
+      state: "registered",
+    };
+    this.ctx.storage.kv.put<PendingRow>(`pending:${actionId}`, pending);
+    let index = this.#pendingIndexIncludingBlocked();
+    if (!index.includes(actionId)) this.ctx.storage.kv.put("pending:index", [...index, actionId]);
+    this.#removeStaged(actionId);
+    return pending;
+  }
+
+  #abandonedStageExpired(staged: StagedRow): boolean {
+    return staged.expiresAt !== undefined && staged.expiresAt <= Date.now() && (
+      staged.state === "prepared" || staged.state === "submitting" ||
+      staged.state === "submission-uncertain" || staged.state === "staged"
+    );
+  }
+
+  #cleanupAbandonedStagedActions(): void {
+    for (let actionId of this.#stagedIndex()) {
+      if (this.#submittingActions.has(actionId)) continue;
+      let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+      if (staged && this.#abandonedStageExpired(staged)) this.#removeStaged(actionId);
+    }
+  }
+
+  #recoverStagedActions(): void {
+    for (let actionId of this.#stagedIndex()) {
+      if (this.#submittingActions.has(actionId)) continue;
+      let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+      if (staged?.state !== "registered") continue;
+      try {
+        this.#promoteStagedAction(actionId, "registration");
+      } catch {
+        // Validation durably blocks an invalid recovered action; rejection remains available.
+      }
+    }
+  }
+
+  #actionRow(actionId: number): PendingRow | undefined {
+    return this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`) ??
+      this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+  }
+
+  #setActionLifecycle(actionId: number, state: ActionLifecycle): void {
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    if (pending) {
+      this.ctx.storage.kv.put<PendingRow>(`pending:${actionId}`, { ...pending, state });
+      return;
+    }
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged && state !== "registered") {
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, { ...staged, state });
+    }
+  }
+
+  #restoreActionAfterDefiniteFailure(actionId: number): void {
+    let staged = this.ctx.storage.kv.get<StagedRow>(`staged:${actionId}`);
+    if (staged) {
+      if (staged.state === "blocked") return;
+      this.ctx.storage.kv.put<StagedRow>(`staged:${actionId}`, {
+        ...staged,
+        state: "blocked",
+        blockedReason: "The approval callback failed before this Marketo action could be applied.",
+      });
+      return;
+    }
+    let pending = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+    if (pending && pending.state !== "blocked") {
+      this.ctx.storage.kv.put<PendingRow>(`pending:${actionId}`, { ...pending, state: "registered" });
+    }
+  }
+
+  #finishRejection(actionId: number, row: PendingRow | undefined, uncertain: boolean): void {
+    if (!row) return;
+    if (uncertain) {
+      let providerId = this.ctx.storage.kv.get<string | number>(`creationCandidate:${actionId}`);
+      this.ctx.storage.kv.put<AuditTombstone>(`audit:${actionId}`, {
+        ...row,
+        outcome: "uncertain-discarded",
+        ...(providerId === undefined ? {} : {
+          creationCandidate: { providerId, authority: "unverified" },
+        }),
+      });
+    }
+    this.#removeAction(actionId);
+    this.ctx.storage.kv.put<ApplyingState>(
+      `applying:${actionId}`,
+      uncertain ? "uncertain-discarded" : "rejected",
+    );
+  }
+
+  #removeAction(actionId: number): void {
+    this.#removePending(actionId);
+    this.#removeStaged(actionId);
+  }
+
+  #removePending(actionId: number): void {
+    this.ctx.storage.kv.delete(`pending:${actionId}`);
+    this.ctx.storage.kv.delete(`dependencyBlocked:${actionId}`);
+    this.ctx.storage.kv.delete(`creationCandidate:${actionId}`);
+    let index = this.#pendingIndexIncludingBlocked();
+    if (index.includes(actionId)) this.ctx.storage.kv.put("pending:index", index.filter(id => id !== actionId));
+  }
+
+  #resolveLogicalId(id: string): number | undefined {
+    if (/^[1-9]\d*$/.test(id)) {
+      let parsed = Number(id);
+      return Number.isSafeInteger(parsed) ? parsed : undefined;
+    }
+    return this.ctx.storage.kv.get<number>(`provisional:${id}`);
+  }
+
+  #logicalKind(id: string, ownerGeneration?: number): LogicalKind | undefined {
+    let stored = this.ctx.storage.kv.get<LogicalKind>(`provisionalKind:${id}`);
+    if (stored) return stored;
+    for (let actionId of this.#pendingIndex()) {
+      let row = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`);
+      if (ownerGeneration !== undefined && row?.ownerGeneration !== ownerGeneration) continue;
+      let action = row?.action;
+      if (action && isDesignStudioAction(action) &&
+          (action.type === "designCreate" || action.type === "designClone") &&
+          action.provisionalId === id) {
+        return action.asset;
+      }
+      if (action && isCampaignAction(action) &&
+          (action.type === "campaignCreate" || action.type === "campaignClone") &&
+          action.provisionalId === id) return "campaign";
+      if (action && isProgramAction(action) &&
+          (action.type === "programCreate" || action.type === "programClone") &&
+           action.provisionalId === id) return "program";
+      if (action && isEmailDesignerAction(action) &&
+          (action.type === "designerCreate" || action.type === "designerClone") &&
+          action.provisionalId === id) return action.asset;
+    }
+    return undefined;
+  }
+
+  #resolveDesignerId(id: string): string | undefined {
+    return id.startsWith("~") ? this.ctx.storage.kv.get<string>(`designerProvisional:${id}`) : id;
+  }
+
+  #requireDesignerId(id: string): string {
+    let resolved = this.#resolveDesignerId(id);
+    if (resolved === undefined) throw new Error(`Marketo designer asset ${id} is still pending creation.`);
+    return resolved;
+  }
+
+  #requireLogicalId(id: string): number {
+    if (id.startsWith("~") && this.#pendingIndex().some(actionId => {
+      let action = this.ctx.storage.kv.get<PendingRow>(`pending:${actionId}`)?.action;
+      return action && (
+        isDesignStudioAction(action) && (action.type === "designCreate" || action.type === "designClone") ||
+        isCampaignAction(action) && (action.type === "campaignCreate" || action.type === "campaignClone") ||
+        isProgramAction(action) && (action.type === "programCreate" || action.type === "programClone")
+      ) &&
+        action.provisionalId === id;
+    })) {
+      throw new Error(`Marketo asset ${id} is still pending creation.`);
+    }
+    let resolved = this.#resolveLogicalId(id);
+    if (resolved === undefined) throw new Error(`Marketo asset ${id} is still pending creation.`);
+    return resolved;
+  }
+
+  #validateActionReferences(action: MarketoAction, ready: boolean, ownerGeneration: number): void {
+    if (isDesignStudioAction(action)) this.#validateDesignReferences(action, ready, ownerGeneration);
+    if (isCampaignAction(action)) this.#validateCampaignReferences(action, ready, ownerGeneration);
+    if (isProgramAction(action)) this.#validateProgramReferences(action, ready, ownerGeneration);
+    if (isEmailDesignerAction(action)) this.#validateDesignerReferences(action, ready, ownerGeneration);
+  }
+
+  #validateLogicalReference(id: string, kind: LogicalKind, ready: boolean, ownerGeneration: number): void {
+    if (id.startsWith("~") && this.#logicalKind(id, ownerGeneration) !== kind) {
+      throw new Error(`Provisional Marketo asset ${id} is not a ${kind}.`);
+    }
+    if (ready) this.#requireLogicalId(id);
+  }
+
+  #validateDesignReferences(action: DesignStudioAction, ready: boolean, ownerGeneration: number): void {
+    if (action.type === "designLifecycle" &&
+        (!action.snapshot || typeof action.snapshot !== "object" ||
+          !action.snapshot.metadata || typeof action.snapshot.metadata !== "object" ||
+          Array.isArray(action.snapshot.metadata) || action.snapshot.content === undefined ||
+          action.snapshot.affectedDependents !== null && !Array.isArray(action.snapshot.affectedDependents))) {
+      throw new Error("A persisted Marketo classic lifecycle action is missing its complete review snapshot.");
+    }
+    if ((action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
+        action.type === "designClone" && action.asset === "emailTemplate") && action.parent.type !== "Folder") {
+      throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
+    }
+    if ("targetId" in action) {
+      this.#validateLogicalReference(action.targetId, action.type === "designDeleteFolder" ? "folder" : action.asset, ready, ownerGeneration);
+    }
+    if (action.type === "designClone") {
+      this.#validateLogicalReference(action.sourceId, action.asset, ready, ownerGeneration);
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
+    }
+    if (action.type === "designCreate") {
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
+      if (action.input.templateId) {
+        let templateKind: LogicalKind = action.asset === "email" ? "emailTemplate" : "landingPageTemplate";
+        this.#validateLogicalReference(action.input.templateId, templateKind, ready, ownerGeneration);
+      }
+    }
+  }
+
+  #validateCampaignReferences(action: CampaignAction, ready: boolean, ownerGeneration: number): void {
+    if (action.type === "campaignLifecycle" &&
+        (!Object.hasOwn(action, "programId") || action.programId !== null && typeof action.programId !== "string")) {
+      throw new Error("A persisted Marketo campaign lifecycle action is missing its reviewed parent ownership.");
+    }
+    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "campaign", ready, ownerGeneration);
+    if ("programId" in action && typeof action.programId === "string") {
+      this.#validateLogicalReference(action.programId, "program", ready, ownerGeneration);
+    }
+    if (action.type === "campaignClone") this.#validateLogicalReference(action.sourceId, "campaign", ready, ownerGeneration);
+    if (action.type === "campaignCreate" || action.type === "campaignClone") {
+      this.#validateLogicalReference(action.parent.id, action.parent.type === "Program" ? "program" : "folder", ready, ownerGeneration);
+    }
+  }
+
+  #validateProgramReferences(action: ProgramAction, ready: boolean, ownerGeneration: number): void {
+    if ("targetId" in action) this.#validateLogicalReference(action.targetId, "program", ready, ownerGeneration);
+    if (action.type === "programClone") this.#validateLogicalReference(action.sourceId, "program", ready, ownerGeneration);
+    if (action.type === "programCreate" || action.type === "programClone") {
+      this.#validateLogicalReference(action.parentId, "folder", ready, ownerGeneration);
+    }
+  }
+
+  #validateDesignerReferences(action: EmailDesignerAction, ready: boolean, ownerGeneration: number): void {
+    if (action.type === "designerClone" && !validDesignerCloneSnapshot(action.sourceSnapshot)) {
+      throw new Error("A persisted Marketo designer clone is missing its complete source snapshot.");
+    }
+    if (action.type === "designerLifecycle" &&
+        (!validDesignerCloneSnapshot(action.sourceSnapshot) ||
+          !Array.isArray(action.affectedDependents) || action.affectedDependents.some(dependent =>
+            !dependent || typeof dependent !== "object" || typeof dependent.id !== "string" ||
+            typeof dependent.name !== "string" ||
+            [dependent.channel, dependent.contentType, dependent.workspaceId, dependent.folderId]
+              .some(value => value !== undefined && typeof value !== "string")))) {
+      throw new Error("A persisted Marketo designer lifecycle action is missing its complete review state.");
+    }
+    let references: { id: string; kind: EmailDesignerKind }[] = [];
+    if ("targetId" in action) references.push({ id: action.targetId, kind: action.asset });
+    if (action.type === "designerClone") references.push({ id: action.sourceId, kind: action.asset });
+    let cloneSource = action.type === "designerClone" ? designerCloneSnapshotRecord(action.sourceSnapshot) : undefined;
+    let templateId = action.type === "designerCreate" ? action.body.templateId
+      : action.type === "designerUpdate" ? action.patch.templateId
+        : cloneSource?.templateId;
+    if (typeof templateId === "string") references.push({ id: templateId, kind: "designerTemplate" });
+    let body = action.type === "designerCreate" ? action.body
+      : action.type === "designerUpdate" ? action.patch
+        : cloneSource
+          ? { appData: cloneSource.appData }
+          : undefined;
+    let appData = body?.appData && typeof body.appData === "object" && !Array.isArray(body.appData)
+      ? Object.fromEntries(Object.entries(body.appData))
+      : undefined;
+    if (typeof appData?.folderId === "string") this.#validateLogicalReference(appData.folderId, "folder", ready, ownerGeneration);
+    if (typeof appData?.programId === "string") this.#validateLogicalReference(appData.programId, "program", ready, ownerGeneration);
+    for (let reference of references) {
+      if (reference.id.startsWith("~") && this.#logicalKind(reference.id, ownerGeneration) !== reference.kind) {
+        throw new Error(`Provisional Marketo asset ${reference.id} is not a ${reference.kind}.`);
+      }
+      if (ready) this.#requireDesignerId(reference.id);
+    }
+  }
+
+  async #preflightDesignerReferences(action: MarketoAction, client: MarketoClient): Promise<void> {
+    if (!isEmailDesignerAction(action)) return;
+    let reads = new Map<string, Promise<RawDesignerAsset | undefined>>();
+    let requireDesigner = async (kind: EmailDesignerKind, id: string): Promise<RawDesignerAsset> => {
+      let physical = this.#requireDesignerId(id);
+      let key = `${kind}:${physical}`;
+      let pending = reads.get(key) ?? client.getDesignerAsset(designerAssetKind(kind), physical);
+      reads.set(key, pending);
+      let asset = await pending;
+      if (!asset || String(asset.id) !== physical) {
+        throw new DesignerPreDispatchError(`Marketo designer ${kind} ${id} was not found; nothing was dispatched.`);
+      }
+      return asset;
+    };
+
+    if (action.type === "designerClone") {
+      let source = await requireDesigner(action.asset, action.sourceId);
+      let snapshot = resolveDesignerCloneSnapshot(
+        action.sourceSnapshot,
+        id => this.#requireDesignerId(id),
+        id => this.#requireLogicalId(id),
+      );
+      let matches = action.sourceId.startsWith("~")
+        ? matchesDesignerCloneConfiguration(source as Record<string, unknown>, snapshot)
+        : matchesDesignerCloneSnapshot(source as Record<string, unknown>, snapshot);
+      if (!matches) {
+        throw new DesignerPreDispatchError("The Marketo designer clone source changed after approval; nothing was dispatched.");
+      }
+    }
+    if (action.type === "designerLifecycle" || action.type === "designerDelete") {
+      let current = await requireDesigner(action.asset, action.targetId);
+      if (action.type === "designerLifecycle") {
+        let state = current.associatedStates?.find(item => item.state?.toLowerCase() === action.sourceState);
+        if (state?.contentId !== action.contentId) {
+          throw new DesignerPreDispatchError(`Marketo designer ${action.sourceState} content changed after approval; nothing was dispatched.`);
+        }
+        if (!matchesDesignerCloneSnapshot(
+          current as Record<string, unknown>,
+          resolveDesignerCloneSnapshot(
+            action.sourceSnapshot,
+            id => this.#requireDesignerId(id),
+            id => this.#requireLogicalId(id),
+          ),
+        )) {
+          throw new DesignerPreDispatchError(
+            "The Marketo designer publishable state changed after approval; nothing was dispatched.",
+          );
+        }
+      } else if (!matchesDesignerDeleteSnapshot(
+        current as Record<string, unknown>,
+        resolveDesignerDeleteSnapshot(
+          action.targetSnapshot,
+          id => this.#requireDesignerId(id),
+          id => this.#requireLogicalId(id),
+        ),
+      )) {
+        throw new DesignerPreDispatchError(
+          "The Marketo designer delete target changed after approval; nothing was dispatched.",
+        );
+      }
+      {
+        let dependents: MarketoDesignerUsedBy[] = [];
+        let ids = new Set<string>();
+        let expectedTotal: number | undefined;
+        for (let pageIndex = 0; dependents.length <= 1_000; pageIndex++) {
+          let page = await client.getDesignerAssetUsedBy(designerAssetKind(action.asset), {
+            assetId: this.#requireDesignerId(action.targetId), pageIndex, pageSize: 50, type: "all",
+          });
+          if (page.pageDetails?.currentPage !== pageIndex + 1 || page.pageDetails.pageSize !== 50 ||
+              pageIndex > 0 && page.pageDetails.totalItems !== expectedTotal) {
+            throw new DesignerPreDispatchError(
+              "Marketo returned inconsistent designer dependency paging; nothing was dispatched.",
+            );
+          }
+          expectedTotal ??= page.pageDetails.totalItems;
+          for (let item of page.result) {
+            let id = item.id === undefined ? undefined : String(item.id);
+            if (!id || ids.has(id)) {
+              throw new DesignerPreDispatchError(
+                "Marketo returned invalid designer dependencies; nothing was dispatched.",
+              );
+            }
+            ids.add(id);
+            dependents.push({
+              id,
+              name: item.name ?? "",
+              channel: item.channel,
+              contentType: item.contentType,
+              workspaceId: item.appData?.workspaceId === undefined
+                ? undefined : String(item.appData.workspaceId),
+              folderId: item.appData?.folderId === undefined
+                ? undefined : String(item.appData.folderId),
+            });
+          }
+          if (dependents.length > 1_000 ||
+              expectedTotal !== undefined && dependents.length > expectedTotal ||
+              page.result.length < 50 && expectedTotal !== undefined && dependents.length < expectedTotal) {
+            throw new DesignerPreDispatchError(
+              "Marketo returned inconsistent designer dependency paging; nothing was dispatched.",
+            );
+          }
+          if (expectedTotal === undefined ? page.result.length < 50 : dependents.length === expectedTotal) break;
+        }
+        if (canonicalDesignerDependents(dependents) !==
+            canonicalDesignerDependents(action.affectedDependents)) {
+          throw new DesignerPreDispatchError(
+            "The Marketo designer affected dependencies changed after approval; nothing was dispatched.",
+          );
+        }
+      }
+    }
+
+    let cloneSource = action.type === "designerClone" ? designerCloneSnapshotRecord(action.sourceSnapshot) : undefined;
+    let templateId = action.type === "designerCreate" ? action.body.templateId
+      : action.type === "designerUpdate" ? action.patch.templateId
+        : cloneSource?.templateId;
+    if (typeof templateId === "string") await requireDesigner("designerTemplate", templateId);
+
+    let body = action.type === "designerCreate" ? action.body
+      : action.type === "designerUpdate" ? action.patch
+        : cloneSource
+          ? { appData: cloneSource.appData }
+          : undefined;
+    let appData = body?.appData && typeof body.appData === "object" && !Array.isArray(body.appData)
+      ? body.appData : undefined;
+    let folderId = appData && Reflect.get(appData, "folderId");
+    if (typeof folderId === "string") {
+      let physical = this.#requireLogicalId(folderId);
+      let folder = await client.getFolder(physical, "Folder");
+      if (!folder || folder.id !== physical) {
+        throw new DesignerPreDispatchError(`Marketo folder ${folderId} was not found; nothing was dispatched.`);
+      }
+    }
+    let programId = appData && Reflect.get(appData, "programId");
+    if (typeof programId === "string") {
+      let physical = this.#requireLogicalId(programId);
+      let program = await client.getProgram(physical);
+      if (!program || program.id !== physical) {
+        throw new DesignerPreDispatchError(`Marketo program ${programId} was not found; nothing was dispatched.`);
+      }
+    }
+  }
+
+  async #preflightCampaignOwnership(action: MarketoAction, client: MarketoClient): Promise<void> {
+    if (!(action.type === "campaignTrigger" || action.type === "campaignSchedule" ||
+        action.type === "campaignLifecycle")) return;
+    let campaignId = action.type === "campaignLifecycle"
+      ? this.#requireLogicalId(action.targetId)
+      : action.campaignId;
+    let campaign = await client.getSmartCampaign(campaignId);
+    if (!campaign || campaign.id !== campaignId) {
+      throw new DesignerPreDispatchError(`Marketo smart campaign ${campaignId} was not found; nothing was dispatched.`);
+    }
+    let folderId = campaign.folder?.id ?? campaign.folder?.value;
+    if (campaign.folder?.type?.toLowerCase() === "program" &&
+        (!Number.isSafeInteger(folderId) || Number(folderId) <= 0)) {
+      throw new DesignerPreDispatchError(
+        "Marketo returned invalid owning Program identity for the smart campaign; nothing was dispatched.",
+      );
+    }
+    let actualProgramId = campaign.folder?.type?.toLowerCase() === "program" &&
+        Number.isSafeInteger(folderId) && Number(folderId) > 0
+      ? String(folderId)
+      : null;
+    let expectedProgramId = action.programId === null
+      ? null
+      : String(this.#requireLogicalId(action.programId));
+    if (actualProgramId !== expectedProgramId) {
+      throw new DesignerPreDispatchError(
+        "The Marketo smart campaign's owning Program changed after approval; nothing was dispatched.",
+      );
+    }
+  }
+
+  async #preflightClassicAsset(action: MarketoAction, client: MarketoClient): Promise<number | undefined> {
+    if (isDesignStudioAction(action) && action.type === "designContent" && action.asset === "email") {
+      let id = this.#requireLogicalId(action.targetId);
+      let sectionId = action.sectionId;
+      if (!sectionId || !emailSections(await client.getEmailContent(id)).some(section => section.id === sectionId)) {
+        throw new DesignerPreDispatchError(
+          `Marketo email section ${sectionId ?? "(missing)"} is not editable static Text content; nothing was dispatched.`,
+        );
+      }
+    }
+    if (isDesignStudioAction(action) && action.type === "designLifecycle") {
+      let id = this.#requireLogicalId(action.targetId);
+      let current;
+      try {
+        current = await readDesignStudioLifecycleSnapshot(client, action.asset, id, action.operation);
+      } catch (error) {
+        throw new DesignerPreDispatchError(
+          `The Marketo ${action.asset} publishable state could not be verified; nothing was dispatched.`,
+          { cause: error },
+        );
+      }
+      if (canonicalApprovalValue(current) !== canonicalApprovalValue(action.snapshot)) {
+        throw new DesignerPreDispatchError(
+          `The Marketo ${action.asset} publishable state changed after approval; nothing was dispatched.`,
+        );
+      }
+    }
+    if (isDesignStudioAction(action) &&
+        (action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
+          action.type === "designClone" && action.asset === "emailTemplate")) {
+      await this.#preflightOrdinaryFolder(action.parent.id, client);
+    }
+    if (isCampaignAction(action) && action.type === "campaignClone") {
+      let id = this.#requireLogicalId(action.sourceId);
+      let source = await client.getSmartCampaign(id);
+      if (!source || source.id !== id) {
+        throw new DesignerPreDispatchError(`Marketo smart campaign ${action.sourceId} was not found; nothing was dispatched.`);
+      }
+      return;
+    }
+    if (isProgramAction(action) && action.type === "programLifecycle" && action.operation === "approve") {
+      let id = this.#requireLogicalId(action.targetId);
+      let program = await client.getProgram(id);
+      if (!matchesProgramApprovalDates(action, program, id)) {
+        throw new DesignerPreDispatchError(
+          "The Marketo Email Program start or end date changed after approval; nothing was dispatched.",
+        );
+      }
+      return;
+    }
+    if (isProgramAction(action) && action.type === "programClone") {
+      let id = this.#requireLogicalId(action.sourceId);
+      let source = await client.getProgram(id);
+      if (!source || source.id !== id) {
+        throw new DesignerPreDispatchError(`Marketo program ${action.sourceId} was not found; nothing was dispatched.`);
+      }
+      let destination = await this.#preflightOrdinaryFolder(action.parentId, client);
+      if (!source.workspace || !destination.workspace || source.workspace !== destination.workspace) {
+        throw new DesignerPreDispatchError(
+          "The Marketo program clone destination workspace does not match the source program workspace; nothing was dispatched.",
+        );
+      }
+      return;
+    }
+    if (!isDesignStudioAction(action) || action.type !== "designClone") return;
+
+    let id = this.#requireLogicalId(action.sourceId);
+    let source = action.asset === "email" ? await client.getEmail(id)
+      : action.asset === "emailTemplate" ? await client.getEmailTemplate(id)
+        : action.asset === "landingPage" ? await client.getLandingPage(id)
+          : action.asset === "landingPageTemplate" ? await client.getLandingPageTemplate(id)
+            : action.asset === "form" ? await client.getForm(id)
+              : await client.getSnippet(id);
+    if (!source || source.id !== id) {
+      throw new DesignerPreDispatchError(`Marketo ${action.asset} ${action.sourceId} was not found; nothing was dispatched.`);
+    }
+    if (action.asset !== "landingPage") return;
+    let template = Reflect.get(source, "template");
+    if (!Number.isSafeInteger(template) || Number(template) <= 0) {
+      throw new DesignerPreDispatchError(`Marketo landing page ${action.sourceId} has no valid source template; nothing was dispatched.`);
+    }
+    return Number(template);
+  }
+
+  async #preflightOrdinaryFolder(id: string, client: MarketoClient): Promise<RawFolder> {
+    let physical = this.#requireLogicalId(id);
+    let folder = await client.getFolder(physical, "Folder");
+    let type = folder?.folderId?.type ?? folder?.folderType;
+    if (!folder || folder.id !== physical || type?.toLowerCase() !== "folder") {
+      throw new DesignerPreDispatchError(`Marketo ordinary folder ${id} was not found; nothing was dispatched.`);
+    }
+    return folder;
+  }
+
+  #validateMutationOrder(action: MarketoAction, ownerGeneration: number): void {
+    let resources = this.#actionResources(action);
+    for (let actionId of [...this.#pendingIndex(), ...this.#stagedIndex()]) {
+      let row = this.#actionRow(actionId);
+      if (!row || row.ownerGeneration !== ownerGeneration) continue;
+      let pending = row.action;
+      if (pending.id >= action.id) continue;
+      let earlier = this.#actionResources(pending);
+      if (resources.some(resource => earlier.some(candidate =>
+        candidate.key === resource.key && (candidate.write || resource.write)))) {
+        let conflict = resources.find(resource => earlier.some(candidate =>
+          candidate.key === resource.key && (candidate.write || resource.write)))!;
+        throw new Error(`Marketo ${conflict.key.replace(":", " ")} has an earlier pending mutation.`);
+      }
+    }
+  }
+
+  #actionResources(action: MarketoAction): { key: string; write: boolean }[] {
+    let resources: { key: string; write: boolean }[] = [];
+    let add = (key: string, write: boolean) => {
+      let existing = resources.find(resource => resource.key === key);
+      if (existing) existing.write ||= write;
+      else resources.push({ key, write });
+    };
+    if (isDesignStudioAction(action) || isCampaignAction(action) || isProgramAction(action) || isEmailDesignerAction(action)) {
+      let identity = this.#actionIdentity(action);
+      if (identity) add(this.#referenceKey(identity), true);
+      for (let reference of this.#actionReferences(action)) {
+        add(this.#referenceKey(reference), identity !== undefined && this.#sameReference(reference, identity));
+      }
+      if (isEmailDesignerAction(action) &&
+          (action.type === "designerLifecycle" || action.type === "designerDelete")) {
+        for (let dependent of action.affectedDependents) {
+          if (dependent.contentType === undefined || dependent.contentType.toLowerCase() === "email") {
+            add(this.#referenceKey({ id: dependent.id, kind: "designerEmail" }), true);
+          }
+        }
+      }
+      return resources;
+    }
+    if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
+      add(`campaign:${action.campaignId}`, true);
+      add("campaignRecipientEffects", true);
+      if (action.programId !== null) add(`program:${this.#requireLogicalId(action.programId)}`, false);
+      if (action.type === "campaignTrigger") {
+        for (let personId of action.personIds) add(`person:${personId}`, true);
+      }
+    } else if (action.type === "programStatus") {
+      add(`program:${action.programId}`, false);
+      add("campaignRecipientEffects", true);
+      for (let personId of action.personIds) {
+        add(`person:${personId}`, false);
+        add(`programStatus:${action.programId}:${personId}`, true);
+      }
+    } else if (action.type === "listAdd" || action.type === "listRemove") {
+      add("campaignRecipientEffects", true);
+      for (let personId of action.personIds) {
+        add(`person:${personId}`, false);
+        add(`list:${action.listId}:${personId}`, true);
+      }
+    } else if (isBusinessObjectAction(action)) {
+      for (let key of this.#businessObjectKeys(action)) add(key, true);
+    } else if (action.type === "updatePerson" || action.type === "deletePerson") {
+      add("campaignRecipientEffects", true);
+      add("person:unresolved lookup alias", false);
+      add(`person:${action.personId}`, true);
+    } else if (action.type === "upsertPeople") {
+      add("campaignRecipientEffects", true);
+      // An alias may resolve to any numeric id, so it conflicts with every person write.
+      add("person:unresolved lookup alias", action.lookupField !== "id");
+      for (let record of action.records) {
+        if (Number.isSafeInteger(record.id) && Number(record.id) > 0) add(`person:${record.id}`, true);
+        let lookup = record[action.lookupField];
+        if (this.#reliableIdentity(lookup)) {
+          add(`personLookup:${action.lookupField}:${JSON.stringify(lookup)}`, true);
+        }
+      }
+    } else if (action.type === "customObjectUpsert" || action.type === "customObjectDelete") {
+      add(`customObject:${action.apiName}`, true);
+    }
+    return resources;
+  }
+
+  #referenceKey(reference: LogicalReference): string {
+    let resolved = reference.kind.startsWith("designer")
+      ? this.#resolveDesignerId(reference.id)
+      : this.#resolveLogicalId(reference.id)?.toString();
+    return `${reference.kind}:${resolved ?? reference.id}`;
+  }
+
+  #businessObjectKeys(action: BusinessObjectAction): string[] {
+    let identities = [[BUSINESS_OBJECTS[action.kind].idField], BUSINESS_OBJECTS[action.kind].dedupeFields];
+    return action.records.flatMap(record => identities.flatMap(fields => {
+      let values = fields.map(field => record[field]);
+      if (values.some(value => value === undefined || value === null || value === "")) return [];
+      return [`businessObject:${action.kind}:${fields.join("+")}:${JSON.stringify(values)}`];
+    }));
+  }
+
+  #reliableIdentity(value: unknown): value is string | number | boolean {
+    return typeof value === "string" ? value.length > 0
+      : typeof value === "number" ? Number.isFinite(value)
+        : typeof value === "boolean";
+  }
+
+  #sameDesignerIdentity(first: string, second: string): boolean {
+    if (first === second) return true;
+    let firstId = this.#resolveDesignerId(first);
+    return firstId !== undefined && firstId === this.#resolveDesignerId(second);
+  }
+
+  #sameLogicalIdentity(first: string, second: string): boolean {
+    if (first === second) return true;
+    let firstId = this.#resolveLogicalId(first);
+    return firstId !== undefined && firstId === this.#resolveLogicalId(second);
+  }
+
+  #actionIdentity(action: MarketoAction): LogicalReference | undefined {
+    if (action.type === "designCreate" || action.type === "designClone" ||
+        action.type === "designerCreate" || action.type === "designerClone") {
+      return { id: action.provisionalId, kind: action.asset };
+    }
+    if (action.type === "campaignCreate" || action.type === "campaignClone") {
+      return { id: action.provisionalId, kind: "campaign" };
+    }
+    if (action.type === "programCreate" || action.type === "programClone") {
+      return { id: action.provisionalId, kind: "program" };
+    }
+    if ("targetId" in action) {
+      let kind: LogicalKind = isCampaignAction(action) ? "campaign"
+        : isProgramAction(action) ? "program"
+          : action.type === "designDeleteFolder" ? "folder" : action.asset;
+      return { id: action.targetId, kind };
+    }
+    return undefined;
+  }
+
+  #actionReferences(action: MarketoAction): LogicalReference[] {
+    let references: LogicalReference[] = [];
+    let identity = this.#actionIdentity(action);
+    if (identity) references.push(identity);
+    if ("targetId" in action) {
+      references.push({ id: action.targetId, kind: isCampaignAction(action) ? "campaign"
+        : isProgramAction(action) ? "program"
+          : action.type === "designDeleteFolder" ? "folder" : action.asset });
+    }
+    if (action.type === "designClone") references.push({ id: action.sourceId, kind: action.asset });
+    if (action.type === "designCreate" || action.type === "designClone") {
+      references.push({ id: action.parent.id, kind: action.parent.type === "Program" ? "program" : "folder" });
+    }
+    if (action.type === "designCreate" && action.input.templateId) {
+      references.push({
+        id: action.input.templateId,
+        kind: action.asset === "email" ? "emailTemplate" : "landingPageTemplate",
+      });
+    }
+    if (action.type === "campaignClone") references.push({ id: action.sourceId, kind: "campaign" });
+    if (action.type === "campaignTrigger" || action.type === "campaignSchedule") {
+      references.push({ id: String(action.campaignId), kind: "campaign" });
+    }
+    if (action.type === "campaignLifecycle" && action.programId !== null) {
+      references.push({ id: action.programId, kind: "program" });
+    }
+    if (action.type === "campaignCreate" || action.type === "campaignClone") {
+      references.push({ id: action.parent.id, kind: action.parent.type === "Program" ? "program" : "folder" });
+    }
+    if (action.type === "programClone") references.push({ id: action.sourceId, kind: "program" });
+    if (action.type === "programCreate" || action.type === "programClone") {
+      references.push({ id: action.parentId, kind: "folder" });
+    }
+    if (action.type === "designerClone") references.push({ id: action.sourceId, kind: action.asset });
+    if (action.type === "designerClone") {
+      let source = designerCloneSnapshotRecord(action.sourceSnapshot);
+      let templateId = source.templateId;
+      if (typeof templateId === "string") references.push({ id: templateId, kind: "designerTemplate" });
+      let appData = source.appData;
+      if (appData && typeof appData === "object" && !Array.isArray(appData)) {
+        let folderId = Reflect.get(appData, "folderId");
+        let programId = Reflect.get(appData, "programId");
+        if (typeof folderId === "string") references.push({ id: folderId, kind: "folder" });
+        if (typeof programId === "string") references.push({ id: programId, kind: "program" });
+      }
+    }
+    if (action.type === "designerCreate" || action.type === "designerUpdate") {
+      let body = action.type === "designerCreate" ? action.body : action.patch;
+      if (typeof body.templateId === "string") references.push({ id: body.templateId, kind: "designerTemplate" });
+      let appData = body.appData;
+      if (appData && typeof appData === "object" && !Array.isArray(appData)) {
+        let folderId = Reflect.get(appData, "folderId");
+        let programId = Reflect.get(appData, "programId");
+        if (typeof folderId === "string") references.push({ id: folderId, kind: "folder" });
+        if (typeof programId === "string") references.push({ id: programId, kind: "program" });
+      }
+    }
+    return references;
+  }
+
+  #sameReference(first: LogicalReference, second: LogicalReference): boolean {
+    if (first.kind !== second.kind) return false;
+    return first.kind.startsWith("designer")
+      ? this.#sameDesignerIdentity(first.id, second.id)
+      : this.#sameLogicalIdentity(first.id, second.id);
+  }
+
+  #sameActionFamily(
+    first: MarketoAction,
+    second: MarketoAction,
+  ): boolean {
+    return isDesignStudioAction(first) && isDesignStudioAction(second) ||
+      (isCampaignAction(first) || first.type === "campaignTrigger" || first.type === "campaignSchedule") &&
+        (isCampaignAction(second) || second.type === "campaignTrigger" || second.type === "campaignSchedule") ||
+      isProgramAction(first) && isProgramAction(second) ||
+      isEmailDesignerAction(first) && isEmailDesignerAction(second);
+  }
+}
+
+function requireResourceId(kind: "program" | "list", id: number | undefined): number {
+  if (id === undefined) throw new Error(`Marketo ${kind} binding is missing its resource id.`);
+  return id;
+}
