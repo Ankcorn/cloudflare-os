@@ -51,11 +51,34 @@ export function isEmailDesignerAction(action: { type: string }): action is Email
 export class DesignerPreDispatchError extends Error {}
 
 function path(kind: EmailDesignerKind): DesignerAssetKind {
-  return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
+  switch (kind) {
+    case "designerEmail": return "email";
+    case "designerTemplate": return "emailtemplate";
+    case "designerFragment": return "fragment";
+    default: throw new Error("Unknown persisted Marketo Email Designer asset type.");
+  }
 }
 
 function label(kind: EmailDesignerKind): string {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "email template" : "fragment";
+}
+
+/** Validate persisted Email Designer discriminants before dispatch preparation. */
+export function validateEmailDesignerActionForDispatch(action: EmailDesignerAction): void {
+  path(action.asset);
+  if (action.type !== "designerLifecycle") return;
+  if (action.sourceState !== "draft" && action.sourceState !== "approved") {
+    throw new Error("Unknown persisted Marketo Email Designer source state.");
+  }
+  switch (action.operation) {
+    case "createDraft":
+    case "approve":
+    case "unapprove":
+    case "discard":
+      return;
+    default:
+      throw new Error("Unknown persisted Marketo Email Designer lifecycle operation.");
+  }
 }
 
 function jsonValue(value: unknown): unknown {
@@ -368,6 +391,7 @@ export async function executeEmailDesignerAction(
     default:
       throw new Error("Unknown persisted Marketo Email Designer action type.");
   }
+  validateEmailDesignerActionForDispatch(action);
   let kind = path(action.asset);
   if (action.type === "designerCreate") {
     let body = resolvedBody(action.body, resolveDesigner, resolveAsset);
@@ -407,9 +431,15 @@ export async function executeEmailDesignerAction(
     if (result.length > 0) assertTargetResult(result, id, "delete");
     return;
   }
-  let operation: "approve" | "unapprove" | "discard" | "create_draft" =
-    action.operation === "createDraft" ? "create_draft" : action.operation;
-  let expectedStatus = action.operation === "approve" || action.operation === "discard" ? "approved" : "draft";
+  let operation: "approve" | "unapprove" | "discard" | "create_draft";
+  let expectedStatus: "approved" | "draft";
+  switch (action.operation) {
+    case "createDraft": operation = "create_draft"; expectedStatus = "draft"; break;
+    case "approve": operation = "approve"; expectedStatus = "approved"; break;
+    case "unapprove": operation = "unapprove"; expectedStatus = "draft"; break;
+    case "discard": operation = "discard"; expectedStatus = "approved"; break;
+    default: throw new Error("Unknown persisted Marketo Email Designer lifecycle operation.");
+  }
   assertTargetResult(
     await client.transitionDesignerAsset(kind, { contentId: action.contentId, action: operation }),
     action.contentId,

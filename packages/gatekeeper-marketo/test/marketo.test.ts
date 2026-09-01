@@ -7034,6 +7034,61 @@ describe("persisted action type validation", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      id: 1, type: "designLifecycle", asset: "email", targetId: "31",
+      operation: "future", snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT,
+    },
+    {
+      id: 1, type: "campaignLifecycle", targetId: "31", campaignName: "Campaign",
+      programId: null, operation: "future",
+    },
+    {
+      id: 1, type: "programLifecycle", targetId: "31", programName: "Program",
+      operation: "future",
+    },
+    {
+      id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-31",
+      operation: "future", contentId: "content-31", sourceState: "draft",
+      sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [],
+    },
+  ])("rejects malformed recognized $type operations before any provider request", async malformed => {
+    let fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    let stub = await actionGatekeeper(malformed as unknown as MarketoAction);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/Unknown persisted Marketo .* lifecycle operation/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { id: 1, type: "designCreate", asset: "future", provisionalId: "~1", parent: { id: "10", type: "Folder" }, input: { name: "Asset" } },
+    { id: 1, type: "designLifecycle", asset: "file", targetId: "31", operation: "delete", snapshot: EMPTY_CLASSIC_LIFECYCLE_SNAPSHOT },
+    { id: 1, type: "designContent", asset: "folder", targetId: "31" },
+    { id: 1, type: "designCreate", asset: "landingPageTemplate", provisionalId: "~1", parent: { id: "10", type: "Folder" }, input: { name: "Template", templateType: "future" } },
+    { id: 1, type: "campaignCreate", provisionalId: "~1", parent: { id: "10", type: "Future" }, name: "Campaign" },
+    { id: 1, type: "designerCreate", asset: "future", provisionalId: "~1", body: { name: "Email" } },
+    { id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-31", operation: "approve", contentId: "content-31", sourceState: "future", sourceSnapshot: EMPTY_DESIGNER_LIFECYCLE_SNAPSHOT, affectedDependents: [] },
+    { id: 1, type: "upsertPeople", records: [{ email: "person@example.com" }], upsertAction: "future", lookupField: "email" },
+    { id: 1, type: "customObjectDelete", apiName: "items", records: [{ key: "one" }], deleteBy: "future" },
+    { id: 1, type: "businessObjectUpsert", kind: "company", records: [{ externalCompanyId: "one" }], matchBy: "dedupeFields", action: "future", changedFields: [] },
+    { id: 1, type: "businessObjectDelete", kind: "company", records: [{ externalCompanyId: "one" }], matchBy: "future", changedFields: [] },
+    { id: 1, type: "businessObjectDelete", kind: "future", records: [{ id: 1 }], matchBy: "idField", changedFields: [] },
+  ])("rejects malformed nested discriminants in $type before any provider request", async malformed => {
+    let fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    let stub = await actionGatekeeper(malformed as unknown as MarketoAction);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/(?:Unknown|Invalid) persisted Marketo/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("uses exact family guards and fail-closed executor defaults", async () => {
     expect(isDesignStudioAction({ type: "designFuture" })).toBe(false);
     expect(isEmailDesignerAction({ type: "designerFuture" })).toBe(false);

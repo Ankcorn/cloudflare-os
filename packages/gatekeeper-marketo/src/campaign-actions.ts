@@ -65,6 +65,24 @@ export function isCampaignAction(action: { type: string }): action is CampaignAc
   }
 }
 
+/** Validate persisted campaign discriminants before dispatch preparation. */
+export function validateCampaignActionForDispatch(action: CampaignAction): void {
+  if ((action.type === "campaignCreate" || action.type === "campaignClone") &&
+      action.parent.type !== "Folder" && action.parent.type !== "Program") {
+    throw new Error("Unknown persisted Marketo campaign parent type.");
+  }
+  if (action.type === "campaignLifecycle") {
+    switch (action.operation) {
+      case "activate":
+      case "deactivate":
+      case "delete":
+        return;
+      default:
+        throw new Error("Unknown persisted Marketo campaign lifecycle operation.");
+    }
+  }
+}
+
 function descriptionDetail(value: string): string {
   return value === "" ? "clear the existing description" : markdownText(value);
 }
@@ -158,6 +176,7 @@ export async function executeCampaignAction(
     default:
       throw new Error("Unknown persisted Marketo campaign action type.");
   }
+  validateCampaignActionForDispatch(action);
   if (action.type === "campaignCreate") {
     let parent = folder(action.parent, resolve);
     let result = await client.createSmartCampaign({
@@ -186,13 +205,17 @@ export async function executeCampaignAction(
   }
 
   let id = resolve(action.targetId);
-  let result = action.type === "campaignMetadata"
-    ? await client.updateSmartCampaign(id, action.patch)
-    : action.operation === "activate"
-      ? await client.activateSmartCampaign(id)
-      : action.operation === "deactivate"
-        ? await client.deactivateSmartCampaign(id)
-        : await client.deleteSmartCampaign(id);
+  let result: (RawCampaignAsset | RawAssetId)[];
+  if (action.type === "campaignMetadata") {
+    result = await client.updateSmartCampaign(id, action.patch);
+  } else {
+    switch (action.operation) {
+      case "activate": result = await client.activateSmartCampaign(id); break;
+      case "deactivate": result = await client.deactivateSmartCampaign(id); break;
+      case "delete": result = await client.deleteSmartCampaign(id); break;
+      default: throw new Error("Unknown persisted Marketo campaign lifecycle operation.");
+    }
+  }
   if (resultId(result, `smart campaign ${action.type === "campaignMetadata" ? "update" : action.operation}`) !== id) {
     throw new Error(`Marketo returned the wrong smart campaign id for action on ${id}.`);
   }

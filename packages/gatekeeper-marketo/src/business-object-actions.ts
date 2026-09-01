@@ -22,6 +22,21 @@ export function isBusinessObjectAction(action: { type: string }): action is Busi
   return action.type === "businessObjectUpsert" || action.type === "businessObjectDelete";
 }
 
+/** Validate persisted business-object discriminants before dispatch preparation. */
+export function validateBusinessObjectActionForDispatch(action: BusinessObjectAction): void {
+  if (action.kind !== "company" && action.kind !== "opportunity" && action.kind !== "opportunityRole" &&
+      action.kind !== "salesPerson" && action.kind !== "namedAccount") {
+    throw new Error("Unknown persisted Marketo business-object kind.");
+  }
+  if (action.matchBy !== "dedupeFields" && action.matchBy !== "idField") {
+    throw new Error("Unknown persisted Marketo business-object matching mode.");
+  }
+  if (action.type === "businessObjectUpsert" && action.action !== "createOnly" &&
+      action.action !== "updateOnly" && action.action !== "createOrUpdate") {
+    throw new Error("Unknown persisted Marketo business-object upsert action.");
+  }
+}
+
 function label(kind: MarketoBusinessObjectKind): string {
   return ({
     company: "company",
@@ -82,8 +97,10 @@ export async function executeBusinessObjectAction(
 ): Promise<RawSyncResult[]> {
   switch (action.type) {
     case "businessObjectDelete":
+      validateBusinessObjectActionForDispatch(action);
       return await client.deleteBusinessObject(action.kind, action.records, action.matchBy);
     case "businessObjectUpsert":
+      validateBusinessObjectActionForDispatch(action);
       if (!action.action) throw new Error("A persisted business-object upsert is missing its action.");
       return await client.syncBusinessObject(action.kind, action.records, action.action, action.matchBy);
     default:

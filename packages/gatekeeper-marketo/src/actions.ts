@@ -9,26 +9,31 @@ import type { MarketoClient, RawSyncResult } from "./marketo-api";
 import {
   describeDesignStudioAction,
   isDesignStudioAction,
+  validateDesignStudioActionForDispatch,
   type DesignStudioAction,
 } from "./design-studio-actions";
 import {
   describeCampaignAction,
   isCampaignAction,
+  validateCampaignActionForDispatch,
   type CampaignAction,
 } from "./campaign-actions";
 import {
   describeProgramAction,
   isProgramAction,
+  validateProgramActionForDispatch,
   type ProgramAction,
 } from "./program-actions";
 import {
   describeEmailDesignerAction,
   isEmailDesignerAction,
+  validateEmailDesignerActionForDispatch,
   type EmailDesignerAction,
 } from "./email-designer-actions";
 import {
   describeBusinessObjectAction,
   isBusinessObjectAction,
+  validateBusinessObjectActionForDispatch,
   type BusinessObjectAction,
 } from "./business-object-actions";
 import type { MarketoUpsertAction } from "./types";
@@ -285,6 +290,7 @@ export async function executeAction(
   action: ExistingMarketoAction,
   client: MarketoClient,
 ): Promise<RawSyncResult[]> {
+  validateActionForDispatch(action);
   switch (action.type) {
     case "upsertPeople":
       return await client.syncLeads(action.records, action.upsertAction, action.lookupField);
@@ -349,10 +355,17 @@ const MAX_SCHEDULE_DELAY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
 /** Revalidate approved inputs immediately before dispatch. */
 export function validateActionForDispatch(action: MarketoAction, now = Date.now()): void {
-  if (isDesignStudioAction(action) || isCampaignAction(action) || isProgramAction(action) ||
-      isEmailDesignerAction(action) || isBusinessObjectAction(action)) return;
+  if (isDesignStudioAction(action)) return validateDesignStudioActionForDispatch(action);
+  if (isCampaignAction(action)) return validateCampaignActionForDispatch(action);
+  if (isProgramAction(action)) return validateProgramActionForDispatch(action);
+  if (isEmailDesignerAction(action)) return validateEmailDesignerActionForDispatch(action);
+  if (isBusinessObjectAction(action)) return validateBusinessObjectActionForDispatch(action);
   switch (action.type) {
     case "upsertPeople":
+      if (action.upsertAction !== "createOnly" && action.upsertAction !== "updateOnly" &&
+          action.upsertAction !== "createOrUpdate") {
+        throw new Error("Unknown persisted Marketo person upsert action.");
+      }
       validatePeopleUpsertLookup(action.records, action.upsertAction, action.lookupField);
       return;
     case "campaignTrigger":
@@ -374,7 +387,11 @@ export function validateActionForDispatch(action: MarketoAction, now = Date.now(
     case "listRemove":
     case "programStatus":
     case "customObjectUpsert":
+      return;
     case "customObjectDelete":
+      if (action.deleteBy !== undefined && action.deleteBy !== "dedupeFields" && action.deleteBy !== "idField") {
+        throw new Error("Unknown persisted Marketo custom-object deletion mode.");
+      }
       return;
     default:
       throw new Error("Unknown persisted Marketo action type.");

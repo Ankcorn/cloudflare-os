@@ -120,6 +120,45 @@ export function isDesignStudioAction(action: { type: string }): action is Design
   }
 }
 
+function isDesignStudioAssetKind(value: unknown): value is DesignStudioAssetKind {
+  return value === "folder" || value === "email" || value === "emailTemplate" ||
+    value === "landingPage" || value === "landingPageTemplate" || value === "form" ||
+    value === "snippet" || value === "file";
+}
+
+/** Validate persisted Design Studio discriminants before dispatch preparation. */
+export function validateDesignStudioActionForDispatch(action: DesignStudioAction): void {
+  let asset = action.type === "designDeleteFolder" ? undefined : (action as { asset?: unknown }).asset;
+  if (action.type !== "designDeleteFolder" && !isDesignStudioAssetKind(asset)) {
+    throw new Error("Unknown persisted Marketo Design Studio asset type.");
+  }
+  if (((action.type === "designClone" || action.type === "designLifecycle") &&
+       (asset === "folder" || asset === "file")) ||
+      (action.type === "designContent" && asset !== "email" && asset !== "emailTemplate" &&
+       asset !== "landingPageTemplate" && asset !== "snippet" && asset !== "file")) {
+    throw new Error(`Invalid persisted Marketo Design Studio asset type for ${action.type}.`);
+  }
+  if ((action.type === "designCreate" || action.type === "designClone") &&
+      action.parent.type !== "Folder" && action.parent.type !== "Program") {
+    throw new Error("Unknown persisted Marketo Design Studio parent type.");
+  }
+  if (action.type === "designCreate" && action.input.templateType !== undefined &&
+      action.input.templateType !== "guided" && action.input.templateType !== "freeForm") {
+    throw new Error("Unknown persisted Marketo landing-page template type.");
+  }
+  if (action.type === "designLifecycle") {
+    switch (action.operation) {
+      case "approve":
+      case "unapprove":
+      case "discardDraft":
+      case "delete":
+        return;
+      default:
+        throw new Error("Unknown persisted Marketo Design Studio lifecycle operation.");
+    }
+  }
+}
+
 function label(kind: DesignStudioAssetKind): string {
   return kind.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`);
 }
@@ -310,6 +349,7 @@ export async function executeDesignStudioAction(
     default:
       throw new Error("Unknown persisted Marketo Design Studio action type.");
   }
+  validateDesignStudioActionForDispatch(action);
   if (action.type === "designCreate") {
     if ((action.asset === "emailTemplate" || action.asset === "file") && action.parent.type !== "Folder") {
       throw new Error(`Marketo ${action.asset === "file" ? "file" : "email-template"} destination must be an ordinary folder.`);
@@ -486,7 +526,14 @@ export async function executeDesignStudioAction(
   }
   let operation = action.operation;
   let run = async (approve: (id: number) => Promise<RawAssetId[]>, unapprove: (id: number) => Promise<RawAssetId[]>, discard: (id: number) => Promise<RawAssetId[]>, remove: (id: number) => Promise<RawAssetId[]>) => {
-    let result = await (operation === "approve" ? approve(id) : operation === "unapprove" ? unapprove(id) : operation === "discardDraft" ? discard(id) : remove(id));
+    let result: RawAssetId[];
+    switch (operation) {
+      case "approve": result = await approve(id); break;
+      case "unapprove": result = await unapprove(id); break;
+      case "discardDraft": result = await discard(id); break;
+      case "delete": result = await remove(id); break;
+      default: throw new Error("Unknown persisted Marketo Design Studio lifecycle operation.");
+    }
     assertTargetResult(result, id, `${action.asset} ${operation}`);
   };
   switch (action.asset) {
@@ -495,9 +542,13 @@ export async function executeDesignStudioAction(
     case "landingPage": await run(client.approveLandingPage.bind(client), client.unapproveLandingPage.bind(client), client.discardLandingPageDraft.bind(client), client.deleteLandingPage.bind(client)); return;
     case "landingPageTemplate": await run(client.approveLandingPageTemplate.bind(client), client.unapproveLandingPageTemplate.bind(client), client.discardLandingPageTemplateDraft.bind(client), client.deleteLandingPageTemplate.bind(client)); return;
     case "form":
-      if (operation === "unapprove") throw new Error("Marketo forms do not support unapprove.");
-      assertTargetResult(await (operation === "approve" ? client.approveForm(id) : operation === "discardDraft" ? client.discardFormDraft(id) : client.deleteForm(id)), id, `form ${operation}`);
-      return;
+      switch (operation) {
+        case "approve": assertTargetResult(await client.approveForm(id), id, `form ${operation}`); return;
+        case "unapprove": throw new Error("Marketo forms do not support unapprove.");
+        case "discardDraft": assertTargetResult(await client.discardFormDraft(id), id, `form ${operation}`); return;
+        case "delete": assertTargetResult(await client.deleteForm(id), id, `form ${operation}`); return;
+        default: throw new Error("Unknown persisted Marketo Design Studio lifecycle operation.");
+      }
     case "snippet": await run(client.approveSnippet.bind(client), client.unapproveSnippet.bind(client), client.discardSnippetDraft.bind(client), client.deleteSnippet.bind(client)); return;
   }
 }

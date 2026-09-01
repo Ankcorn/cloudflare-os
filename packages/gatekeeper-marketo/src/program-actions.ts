@@ -74,6 +74,19 @@ export function isProgramAction(action: { type: string }): action is ProgramActi
     action.type === "programUpdate" || action.type === "programLifecycle";
 }
 
+/** Validate persisted program discriminants before dispatch preparation. */
+export function validateProgramActionForDispatch(action: ProgramAction): void {
+  if (action.type !== "programLifecycle") return;
+  switch (action.operation) {
+    case "approve":
+    case "unapprove":
+    case "delete":
+      return;
+    default:
+      throw new Error("Unknown persisted Marketo program lifecycle operation.");
+  }
+}
+
 function descriptionDetail(value: string): string {
   return value === "" ? "clear the existing description" : markdownText(value);
 }
@@ -207,6 +220,7 @@ export async function executeProgramAction(
     default:
       throw new Error("Unknown persisted Marketo program action type.");
   }
+  validateProgramActionForDispatch(action);
   if (action.type === "programCreate") {
     let parentId = resolve(action.parentId);
     let result = await client.createProgram({
@@ -233,13 +247,17 @@ export async function executeProgramAction(
     return;
   }
   let id = resolve(action.targetId);
-  let result = action.type === "programUpdate"
-    ? await client.updateProgram(id, action.patch)
-    : action.operation === "approve"
-      ? await client.approveProgram(id)
-      : action.operation === "unapprove"
-        ? await client.unapproveProgram(id)
-        : await client.deleteProgram(id);
+  let result: (RawProgram | RawAssetId)[];
+  if (action.type === "programUpdate") {
+    result = await client.updateProgram(id, action.patch);
+  } else {
+    switch (action.operation) {
+      case "approve": result = await client.approveProgram(id); break;
+      case "unapprove": result = await client.unapproveProgram(id); break;
+      case "delete": result = await client.deleteProgram(id); break;
+      default: throw new Error("Unknown persisted Marketo program lifecycle operation.");
+    }
+  }
   if (resultId(result, `program ${action.type === "programUpdate" ? "update" : action.operation}`) !== id) {
     throw new Error(`Marketo returned the wrong program id for action on ${id}.`);
   }
