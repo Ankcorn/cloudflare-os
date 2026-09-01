@@ -367,6 +367,11 @@ type CompleteConnectionResult =
   | { kind: "invalid_nonce" }
   | { kind: "error"; message: string };
 
+type AccountCredentialState = {
+  credentials?: MarketoCredentials;
+  generation: number;
+};
+
 export class UserAccount extends DurableObject<Env> {
   #credentialGeneration = 0;
 
@@ -478,6 +483,14 @@ export class UserAccount extends DurableObject<Env> {
   /** This account's Marketo credentials, or undefined if it was never completed or was revoked. */
   getCredentials(): MarketoCredentials | undefined {
     return this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+  }
+
+  /** Credentials and lifecycle generation used to reject work prepared across a disconnect. */
+  getCredentialState(): AccountCredentialState {
+    return {
+      credentials: this.ctx.storage.kv.get<MarketoCredentials>("credentials"),
+      generation: this.#credentialGeneration,
+    };
   }
 
   async credentialsExpired(): Promise<void> {
@@ -869,14 +882,18 @@ export class MarketoGatekeeperImpl
    * disconnecting the account immediately stops existing bindings from working.
    */
   async #credentials(): Promise<MarketoCredentials> {
-    let creds = await userAccountStub(
-      this.ctx.exports,
-      this.ctx.props.userObjectId,
-    ).getCredentials();
+    let creds = (await this.#credentialState()).credentials;
     if (!creds) {
       throw new Error("The Marketo account behind this binding has been disconnected.");
     }
     return creds;
+  }
+
+  async #credentialState(): Promise<AccountCredentialState> {
+    return await userAccountStub(
+      this.ctx.exports,
+      this.ctx.props.userObjectId,
+    ).getCredentialState();
   }
 
   async #client(credentials?: MarketoCredentials): Promise<MarketoClient> {
@@ -1101,9 +1118,14 @@ export class MarketoGatekeeperImpl
     // applied the action and remain safe to retry.
     this.#preparingActions.add(actionId);
     let client: MarketoClient;
+    let credentialState: AccountCredentialState;
     let landingPageTemplateId: number | undefined;
     try {
-      client = await this.#client();
+      credentialState = await this.#credentialState();
+      if (!credentialState.credentials) {
+        throw new Error("The Marketo account behind this binding has been disconnected.");
+      }
+      client = await this.#client(credentialState.credentials);
       if (isBusinessObjectAction(pending.action)) {
         let access = await this.#probeBusinessObjectAccess(pending.action.kind, client);
         if (access !== "read-write") {
@@ -1119,6 +1141,16 @@ export class MarketoGatekeeperImpl
         throw new Error("This Marketo action was rejected while dispatch was being prepared.");
       }
       validateActionForDispatch(pending.action);
+      let currentCredentialState = await this.#credentialState();
+      if (
+        currentCredentialState.generation !== credentialState.generation ||
+        !currentCredentialState.credentials ||
+        currentCredentialState.credentials.endpoint !== credentialState.credentials.endpoint ||
+        currentCredentialState.credentials.clientId !== credentialState.credentials.clientId ||
+        currentCredentialState.credentials.clientSecret !== credentialState.credentials.clientSecret
+      ) {
+        throw new Error("The Marketo account changed while dispatch was being prepared.");
+      }
     } catch (error) {
       this.#preparingActions.delete(actionId);
       throw error;

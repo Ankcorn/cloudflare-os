@@ -4787,7 +4787,7 @@ describe("token cache RPC protocol", () => {
     expect(JSON.stringify(network)).not.toContain(marker);
   });
 
-  it("backs off when Identity repeats the same nearly-expired token and never serves it expired", async () => {
+  it("serves a repeated nearly-expired token until expiry and then refreshes", async () => {
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
     let calls = 0;
@@ -4807,6 +4807,27 @@ describe("token cache RPC protocol", () => {
     expect(calls).toBe(2);
 
     now += 61_000;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("replacement-token");
+    expect(calls).toBe(3);
+  });
+
+  it("accepts a repeated token with a fractional positive lifetime without caching an outage", async () => {
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    vi.stubGlobal("fetch", async () => Response.json({
+      access_token: ++calls < 3 ? "expiring-token" : "replacement-token",
+      expires_in: calls === 2 ? 0.25 : 60,
+    }));
+    let stub = cache();
+    let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
+
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("expiring-token");
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("expiring-token");
+    now += 249;
+    expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("expiring-token");
+    expect(calls).toBe(2);
+    now++;
     expect(unwrapTokenCacheResult(await stub.getToken(creds))).toBe("replacement-token");
     expect(calls).toBe(3);
   });
@@ -4874,7 +4895,7 @@ describe("token cache RPC protocol", () => {
     expect(calls).toBe(2);
   });
 
-  it.each([0, -1, 0.5])("rejects an access token with an unusable %s-second lifetime", async expiresIn => {
+  it.each([0, -1])("rejects an access token with an unusable %s-second lifetime", async expiresIn => {
     vi.stubGlobal("fetch", async () => Response.json({
       access_token: "already-expired-token",
       expires_in: expiresIn,
@@ -7844,6 +7865,41 @@ describe("action dispatch lifecycle", () => {
       await instance.applyAction(ACTION.id);
     });
     expect(calls).toBe(1);
+  });
+
+  it("does not dispatch when the account is revoked during token preparation", async () => {
+    let identityStarted!: () => void;
+    let started = new Promise<void>(resolve => { identityStarted = resolve; });
+    let releaseIdentity!: () => void;
+    let released = new Promise<void>(resolve => { releaseIdentity = resolve; });
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        identityStarted();
+        await released;
+        return Response.json({ access_token: "prepared-token", expires_in: 3600 });
+      }
+      writes++;
+      return Response.json({ success: true, result: [{ id: 7, status: "added" }] });
+    });
+    let stub = await actionGatekeeper(ACTION);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      let applying = instance.applyAction(ACTION.id);
+      await started;
+      let ctx = (instance as unknown as {
+        ctx: { exports: Cloudflare.Exports; props: { userObjectId: string } };
+      }).ctx;
+      await ctx.exports.UserAccount.get(
+        ctx.exports.UserAccount.idFromString(ctx.props.userObjectId),
+      ).revoke();
+      releaseIdentity();
+
+      await expect(applying).rejects.toThrow(/account changed/);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeDefined();
+    });
+    expect(writes).toBe(0);
   });
 
   it("allows pre-dispatch rejection but rejects every state that may have applied", async () => {

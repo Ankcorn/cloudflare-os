@@ -17,8 +17,6 @@ import type { Env } from "./config";
 
 /** Refresh this far ahead of expiry so a token never lapses mid-request. */
 const REFRESH_MARGIN_MS = 120_000;
-/** Retry a refresh near expiry without asking Identity on every intervening API request. */
-const REFRESH_RETRY_MAX_MS = 30_000;
 /** Back off repeated Identity failures, including unusable token lifetimes. */
 const REFRESH_FAILURE_BACKOFF_MS = 30_000;
 
@@ -38,7 +36,7 @@ type CachedToken = {
   accessToken: string;
   /** Epoch millis at which Marketo says the token stops working. */
   expiresAt: number;
-  /** Earliest time to retry when Identity returned the same nearly-expired token. */
+  /** Do not retry before expiry when Identity returned the same nearly-expired token. */
   refreshAfter?: number;
   /** Owning API-only user of the custom service, as reported by Marketo. */
   scope?: string;
@@ -129,7 +127,7 @@ export class MarketoTokenCache extends DurableObject<Env> {
       accessToken,
       expiresAt,
       ...(sameNearlyExpiredToken && expiresAt > now ? {
-        refreshAfter: now + Math.min(REFRESH_RETRY_MAX_MS, Math.max(1_000, (expiresAt - now) / 2)),
+        refreshAfter: expiresAt,
       } : {}),
       scope,
     };

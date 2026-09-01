@@ -387,7 +387,7 @@ export async function fetchAccessToken(
 
   let expiresInSeconds = body?.expires_in === undefined ? 3600 : body.expires_in;
   if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) ||
-      expiresInSeconds < 5) {
+      expiresInSeconds <= 0) {
     throw new MarketoError("Marketo returned an access token with an unusable lifetime.", {
       status: response.status,
       providerRejection: true,
