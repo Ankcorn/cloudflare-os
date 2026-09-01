@@ -3340,7 +3340,8 @@ describe("person field normalization", () => {
     await expect(list.getMembers(["email"], projectionToken))
       .rejects.toThrow(/for this list and field projection/);
     let tamperToken = (await list.getMembers(["email", "firstName"])).nextPageToken!;
-    await expect(list.getMembers(["email", "firstName"], tamperToken.slice(0, -1) + "0"))
+    let tampered = tamperToken.slice(0, -1) + (tamperToken.endsWith("0") ? "1" : "0");
+    await expect(list.getMembers(["email", "firstName"], tampered))
       .rejects.toThrow(/for this list and field projection/);
     await expect(list.getMembers(["email", "firstName"], tamperToken))
       .resolves.toMatchObject({ moreResult: false });
