@@ -1338,7 +1338,10 @@ type StagedRow = PendingRow & { state: Exclude<ActionLifecycle, "registered"> };
 type ApplyingState =
   "preparing" | "dispatching" | "uncertain" | "uncertain-discarded" |
   "partial" | "nothing-changed" | "applied" | "rejected";
-type AuditTombstone = PendingRow & { outcome: "uncertain-discarded" };
+type AuditTombstone = PendingRow & {
+  outcome: "uncertain-discarded";
+  creationCandidate?: { providerId: string | number; authority: "unverified" };
+};
 const MAX_PENDING_ACTIONS = 200;
 /** How long a provider-derived business-object restriction suppresses another safe access probe. */
 export const BUSINESS_OBJECT_RESTRICTION_TTL_MS = 5 * 60 * 1000;
@@ -2175,9 +2178,13 @@ export class MarketoGatekeeperImpl
   #finishRejection(actionId: number, row: PendingRow | undefined, uncertain: boolean): void {
     if (!row) return;
     if (uncertain) {
+      let providerId = this.ctx.storage.kv.get<string | number>(`creationCandidate:${actionId}`);
       this.ctx.storage.kv.put<AuditTombstone>(`audit:${actionId}`, {
         ...row,
         outcome: "uncertain-discarded",
+        ...(providerId === undefined ? {} : {
+          creationCandidate: { providerId, authority: "unverified" },
+        }),
       });
     }
     this.#removeAction(actionId);

@@ -10145,7 +10145,7 @@ describe("action dispatch lifecycle", () => {
       .toThrow(/declined all 1 record/);
   });
 
-  it("does not map a provisional create when its exact follow-up read contradicts approval", async () => {
+  it("retains an unverified creation candidate only in the audit after uncertain discard", async () => {
     let action: CampaignAction = {
       id: 1, type: "campaignCreate", provisionalId: "~1",
       parent: { id: "10", type: "Folder" }, name: "Approved name",
@@ -10164,6 +10164,16 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
       expect(state.storage.kv.get("applying:1")).toBe("uncertain");
       expect(state.storage.kv.get("creationCandidate:1")).toBe(31);
+      await expect(instance.rejectAction(1)).resolves.toEqual({ restart: true });
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      expect(state.storage.kv.get("creationCandidate:1")).toBeUndefined();
+      expect(state.storage.kv.get("provisional:~1")).toBeUndefined();
+      expect(state.storage.kv.get("applying:1")).toBe("uncertain-discarded");
+      expect(state.storage.kv.get("audit:1")).toMatchObject({
+        outcome: "uncertain-discarded",
+        action,
+        creationCandidate: { providerId: 31, authority: "unverified" },
+      });
     });
   });
 
