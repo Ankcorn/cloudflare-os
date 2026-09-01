@@ -1539,6 +1539,7 @@ describe("smart campaign management", () => {
         isActive: true,
         folder: { id: 20, type: "Program" },
         smartListId: 8,
+        flowId: 9,
       }),
       getCampaignSmartList: async () => ({
         id: 8,
@@ -1649,6 +1650,21 @@ describe("smart campaign management", () => {
 
     await expect(campaign.activate()).rejects.toThrow(/has no trigger/);
     await expect(campaign.deactivate()).rejects.toThrow(/already inactive/);
+  });
+
+  it("refuses to activate a trigger-only campaign before approval", async () => {
+    let { ctx, actions } = campaignContext({
+      getSmartCampaign: async () => ({
+        id: 7, name: "Trigger only", type: "trigger", isActive: false, smartListId: 8,
+      }),
+      getCampaignSmartList: async () => ({
+        id: 8, rules: { triggers: [{ id: 1, name: "Person is Created" }], filters: [] },
+      }),
+    });
+
+    await expect(new MarketoSessionImpl(ctx).getSmartCampaign(7).activate())
+      .rejects.toThrow(/no flow step/);
+    expect(actions).toEqual([]);
   });
 
   it("does not accept a provisional campaign id as a Design Studio folder", async () => {
@@ -5055,7 +5071,8 @@ describe("program token names", () => {
         id: 7,
         name: "Campaign",
         type: "batch",
-        isTriggerable: true,
+        isRequestable: true,
+        flowId: 8,
         folder: { id: 44, type: "Program" },
       }),
     });
@@ -5860,6 +5877,8 @@ describe("campaign kind pre-validation", () => {
             name: "Quarterly Batch",
             type,
             folder: { id: 42, type: "Program" },
+            flowId: 7801,
+            isRequestable: type === "trigger",
           }),
           getCampaign: async () => ({
             id: 7800,
@@ -5902,7 +5921,7 @@ describe("campaign kind pre-validation", () => {
     let notRequestable = new MarketoSmartCampaignImpl(
       {
         client: async () => ({
-          getSmartCampaign: async () => ({ id: 7800, name: "Trigger", type: "trigger" }),
+          getSmartCampaign: async () => ({ id: 7800, name: "Trigger", type: "trigger", flowId: 7801 }),
           getCampaign: async () => ({ id: 7800, name: "Trigger", type: "trigger" }),
         }) as never,
         observe: async () => {},
@@ -5916,6 +5935,33 @@ describe("campaign kind pre-validation", () => {
     );
     await expect(notRequestable.requestCampaign([1])).rejects.toThrow(/Web Service API trigger/);
     expect(submitted).toEqual([]);
+  });
+
+  it("refuses to request a trigger-only campaign and accepts one with a flow", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let flowId: number | undefined;
+    let requestable = new MarketoSmartCampaignImpl(
+      {
+        client: async () => ({
+          getSmartCampaign: async () => ({
+            id: 7800, name: "Requestable", type: "trigger", isRequestable: true, flowId,
+          }),
+        }) as never,
+        observe: async () => {},
+        submit: async action => void submitted.push(action),
+        pendingCampaign: () => [],
+        resolveId: (id: string) => Number(id),
+        retain: () => {},
+        dispose: () => {},
+      },
+      7800,
+    );
+
+    await expect(requestable.requestCampaign([1])).rejects.toThrow(/no flow step/);
+    expect(submitted).toEqual([]);
+    flowId = 7801;
+    await expect(requestable.requestCampaign([1])).resolves.toBeUndefined();
+    expect(submitted.map(action => action.type)).toEqual(["campaignTrigger"]);
   });
 
   it("enforces campaign input and schedule limits before approval", async () => {
@@ -10657,7 +10703,10 @@ describe("action dispatch lifecycle", () => {
       let path = new URL(url).pathname;
       if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       if (path === "/rest/asset/v1/smartCampaign/41.json") {
-        return Response.json({ success: true, result: [{ id: 41, folder: { id: 31, type: "Program" } }] });
+        return Response.json({
+          success: true,
+          result: [{ id: 41, folder: { id: 31, type: "Program" }, flowId: 42, isRequestable: true }],
+        });
       }
       campaignWrites++;
       return Response.json({ success: true, result: [{ id: 41 }] });
@@ -10682,7 +10731,10 @@ describe("action dispatch lifecycle", () => {
       let path = new URL(url).pathname;
       if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
       if (path === "/rest/asset/v1/smartCampaign/41.json") {
-        return Response.json({ success: true, result: [{ id: 41, folder: { id: 32, type: "Program" } }] });
+        return Response.json({
+          success: true,
+          result: [{ id: 41, folder: { id: 32, type: "Program" }, flowId: 42, isRequestable: true }],
+        });
       }
       campaignWrites++;
       return Response.json({ success: true, result: [{ id: 41 }] });
@@ -10694,6 +10746,63 @@ describe("action dispatch lifecycle", () => {
       expect(state.storage.kv.get("applying:1")).toBeUndefined();
     });
     expect(campaignWrites).toBe(0);
+  });
+
+  it("revalidates a requestable campaign's flow before dispatch", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "campaignTrigger", campaignId: 41, campaignName: "Campaign",
+      programId: null, personIds: [7],
+    };
+    let campaignWrites = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      let path = new URL(url).pathname;
+      if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      if (path === "/rest/asset/v1/smartCampaign/41.json") {
+        return Response.json({ success: true, result: [{ id: 41, isRequestable: true }] });
+      }
+      campaignWrites++;
+      return Response.json({ success: true, result: [{ id: 41 }] });
+    });
+    let stub = await campaignActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/no valid flow step.*nothing was dispatched/);
+      expect(state.storage.kv.get("applying:1")).toBeUndefined();
+    });
+    expect(campaignWrites).toBe(0);
+  });
+
+  it("revalidates trigger and flow metadata before campaign activation", async () => {
+    let action: MarketoAction = {
+      id: 1, type: "campaignLifecycle", targetId: "41", campaignName: "Campaign",
+      campaignType: "trigger", programId: null, operation: "activate",
+    };
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      let path = new URL(url).pathname;
+      if (path.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      paths.push(path);
+      if (path === "/rest/asset/v1/smartCampaign/41.json") {
+        return Response.json({ success: true, result: [{ id: 41, flowId: 42, smartListId: 43 }] });
+      }
+      if (path.endsWith("/smartList.json")) {
+        return Response.json({
+          success: true,
+          result: [{ id: 43, rules: { triggers: [{ id: 44, name: "Person is Created" }] } }],
+        });
+      }
+      return Response.json({ success: true, result: [{ id: 41 }] });
+    });
+    let stub = await campaignActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(1)).resolves.toBeUndefined();
+    });
+    expect(paths).toEqual([
+      "/rest/asset/v1/smartCampaign/41.json",
+      "/rest/asset/v1/smartCampaign/41/smartList.json",
+      "/rest/asset/v1/smartCampaign/41/activate.json",
+    ]);
   });
 
   it("fails closed when persisted actions lack mandatory review state", async () => {
@@ -11253,9 +11362,17 @@ describe("action dispatch lifecycle", () => {
     let action: MarketoAction = {
       id: 1, type: "campaignTrigger", campaignId: 3, campaignName: "C", programId: null, personIds: [7],
     };
-    vi.stubGlobal("fetch", async (url: string) => url.includes("/identity/")
-      ? Response.json({ access_token: "token", expires_in: 3600 })
-      : Response.json({ success: true, result: [{ id: 3 }] }));
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      return Response.json({
+        success: true,
+        result: [url.includes("/asset/v1/smartCampaign/")
+          ? { id: 3, flowId: 4, isRequestable: true }
+          : { id: 3 }],
+      });
+    });
     let stub = await actionGatekeeper(action);
 
     await runInDurableObject(stub, async (instance, state) => {
@@ -12058,13 +12175,26 @@ describe("smart campaign Asset API encoding", () => {
     await expect(new MarketoSessionImpl(wrongList.ctx).getSmartCampaign(77).readSmartListRules())
       .rejects.toThrow(/wrong smart list/i);
 
+    let campaignReads = 0;
     let requestCampaign = campaignContext({
-      getSmartCampaign: async () => ({ id: 77, name: "Campaign", type: "trigger" }),
-      getCampaign: async () => ({ id: 78, name: "Wrong", type: "trigger", isTriggerable: true }),
+      getSmartCampaign: async () => ++campaignReads === 1
+        ? { id: 77, name: "Campaign", type: "trigger" }
+        : { id: 78, name: "Wrong", type: "trigger", isRequestable: true, flowId: 9 },
     });
     requestCampaign.ctx.observe = async title => { notes.push(title); };
     await expect(new MarketoSessionImpl(requestCampaign.ctx).getSmartCampaign(77).requestCampaign([1]))
-      .rejects.toThrow(/wrong campaign/i);
+      .rejects.toThrow(/wrong smart campaign/i);
+
+    for (let flowId of [0, -1, 1.5]) {
+      let invalidFlow = campaignContext({
+        getSmartCampaign: async () => ({
+          id: 77, name: "Campaign", type: "trigger", isRequestable: true, flowId,
+        }),
+      });
+      invalidFlow.ctx.observe = async title => { notes.push(title); };
+      await expect(new MarketoSessionImpl(invalidFlow.ctx).getSmartCampaign(77).requestCampaign([1]))
+        .rejects.toThrow(/invalid flow identity/i);
+    }
 
     for (let smartListId of [0, -1]) {
       let nonPositive = campaignContext({

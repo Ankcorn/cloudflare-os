@@ -2779,6 +2779,32 @@ export class MarketoGatekeeperImpl
     if (!campaign || campaign.id !== campaignId) {
       throw new DesignerPreDispatchError(`Marketo smart campaign ${campaignId} was not found; nothing was dispatched.`);
     }
+    if ((action.type === "campaignTrigger" ||
+         action.type === "campaignLifecycle" && action.operation === "activate") &&
+        (!Number.isSafeInteger(campaign.flowId) || campaign.flowId! <= 0)) {
+      throw new DesignerPreDispatchError(
+        "The Marketo smart campaign has no valid flow step; nothing was dispatched.",
+      );
+    }
+    if (action.type === "campaignTrigger" && campaign.isRequestable !== true) {
+      throw new DesignerPreDispatchError(
+        "The Marketo smart campaign is no longer requestable; nothing was dispatched.",
+      );
+    }
+    if (action.type === "campaignLifecycle" && action.operation === "activate") {
+      if (!Number.isSafeInteger(campaign.smartListId) || campaign.smartListId! <= 0) {
+        throw new DesignerPreDispatchError(
+          "The Marketo smart campaign has no valid smart-list identity; nothing was dispatched.",
+        );
+      }
+      let smartList = await client.getCampaignSmartList(campaignId, campaign.smartListId);
+      if (!smartList || smartList.id !== campaign.smartListId ||
+          !Array.isArray(smartList.rules?.triggers) || smartList.rules.triggers.length === 0) {
+        throw new DesignerPreDispatchError(
+          "The Marketo smart campaign has no valid trigger; nothing was dispatched.",
+        );
+      }
+    }
     let folderId = campaign.folder?.id ?? campaign.folder?.value;
     if (campaign.folder?.type?.toLowerCase() === "program" &&
         (!Number.isSafeInteger(folderId) || Number(folderId) <= 0)) {

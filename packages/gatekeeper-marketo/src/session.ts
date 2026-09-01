@@ -1392,6 +1392,47 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     };
   }
 
+  async #flowId(
+    id = this.#campaignId,
+    seen = new Set<string>(),
+    beforeId = Number.POSITIVE_INFINITY,
+  ): Promise<number | undefined> {
+    if (seen.has(id)) throw new Error(`Smart campaign ${id} has a circular clone dependency.`);
+    seen.add(id);
+    let creation = this.#ctx.pendingCampaign().find(action =>
+      action.id < beforeId &&
+      (action.type === "campaignCreate" || action.type === "campaignClone") &&
+      action.provisionalId === id
+    );
+    if (creation?.type === "campaignCreate") return undefined;
+    if (creation?.type === "campaignClone") {
+      return await this.#flowId(creation.sourceId, seen, creation.id);
+    }
+    let physicalId = this.#ctx.resolveId(id);
+    if (physicalId === undefined) throw new Error(`Smart campaign ${id} is still pending creation.`);
+    let campaign = await (await this.#ctx.client()).getSmartCampaign(physicalId);
+    if (!campaign) throw notFound("smart campaign", id);
+    if (campaign.id !== physicalId) {
+      throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${physicalId}.`);
+    }
+    if (campaign.flowId !== undefined &&
+        (!Number.isSafeInteger(campaign.flowId) || campaign.flowId <= 0)) {
+      throw new MarketoError(`Marketo returned invalid flow identity for campaign ${physicalId}.`);
+    }
+    return campaign.flowId;
+  }
+
+  async #requireFlow(): Promise<void> {
+    let flowId = await this.#flowId();
+    await this.#ctx.observe(
+      "Read a Marketo smart campaign's flow",
+      `Checked whether smart campaign \`${this.#campaignId}\` has a flow step.`,
+    );
+    if (flowId === undefined) {
+      throw new Error(`Smart campaign ${this.#campaignId} has no flow step, so it cannot run.`);
+    }
+  }
+
   async updateMetadata(patch: { name?: string; description?: string }): Promise<void> {
     if (!patch || typeof patch !== "object") throw new Error("A metadata patch is required.");
     let name = patch.name === undefined ? undefined : requireText(patch.name, "Campaign name", 255);
@@ -1417,6 +1458,7 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     if ((await this.readSmartListRules()).triggers.length === 0) {
       throw new Error(`Smart campaign "${summary.name}" has no trigger, so it cannot be activated.`);
     }
+    await this.#requireFlow();
     await this.#ctx.submitCampaign({
       type: "campaignLifecycle",
       targetId: this.#campaignId,
@@ -1468,12 +1510,28 @@ export class MarketoSmartCampaignImpl extends RpcTarget {
     let beforeId = this.#ctx.pendingCampaign().reduce((next, action) => Math.max(next, action.id + 1), 0);
     let summary = await this.#summary(this.#campaignId, new Set(), beforeId);
     this.#rejectPendingDeletion();
-    let campaign = await this.#campaign();
-    if (campaign.isTriggerable !== true) {
+    let physicalId = requireResolvedCampaignId(this.#ctx, this.#campaignId);
+    let campaign = await (await this.#ctx.client()).getSmartCampaign(physicalId);
+    if (!campaign) throw notFound("smart campaign", this.#campaignId);
+    if (campaign.id !== physicalId) {
+      throw new MarketoError(`Marketo returned the wrong smart campaign for exact read ${this.#campaignId}.`);
+    }
+    if (campaign.flowId !== undefined &&
+        (!Number.isSafeInteger(campaign.flowId) || campaign.flowId <= 0)) {
+      throw new MarketoError(`Marketo returned invalid flow identity for campaign ${this.#campaignId}.`);
+    }
+    await this.#ctx.observe(
+      "Read a Marketo smart campaign",
+      `Read requestability and flow metadata for smart campaign \`${this.#campaignId}\`.`,
+    );
+    if (campaign.isRequestable !== true) {
       throw new Error(
         `Smart campaign "${summary.name}" (${summary.id}) is not configured with a ` +
           `"Campaign is Requested" Web Service API trigger.`,
       );
+    }
+    if (campaign.flowId === undefined) {
+      throw new Error(`Smart campaign "${summary.name}" (${summary.id}) has no flow step, so it cannot be requested.`);
     }
     this.#rejectPendingDeletion();
     await this.#ctx.submit({
