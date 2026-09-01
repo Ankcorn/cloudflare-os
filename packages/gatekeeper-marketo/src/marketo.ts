@@ -83,7 +83,11 @@ import {
   matchesProgramApprovalDates,
   type ProgramAction,
 } from "./program-actions";
-import { emailSections, MarketoDesignStudioImpl } from "./design-studio";
+import {
+  emailSections,
+  MarketoDesignStudioImpl,
+  readDesignStudioLifecycleSnapshot,
+} from "./design-studio";
 import type { EmailDesignerContext } from "./email-designer";
 import {
   DesignerPreDispatchError,
@@ -106,7 +110,11 @@ import {
   businessObjectSchemaAccess,
   type BusinessObjectContext,
 } from "./business-objects";
-import type { MarketoBusinessObjectAccess, MarketoBusinessObjectKind } from "./types";
+import type {
+  MarketoBusinessObjectAccess,
+  MarketoBusinessObjectKind,
+  MarketoDesignerUsedBy,
+} from "./types";
 import {
   makeSessionContext,
   type CampaignContext,
@@ -1331,6 +1339,28 @@ function designerAssetKind(kind: EmailDesignerKind): DesignerAssetKind {
   return kind === "designerEmail" ? "email" : kind === "designerTemplate" ? "emailtemplate" : "fragment";
 }
 
+function canonicalizeApprovalValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonicalizeApprovalValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalizeApprovalValue(child)]));
+  }
+  return value;
+}
+
+function canonicalApprovalValue(value: unknown): string {
+  return JSON.stringify(canonicalizeApprovalValue(value));
+}
+
+function canonicalDesignerDependents(dependents: MarketoDesignerUsedBy[]): string {
+  return canonicalApprovalValue(dependents.toSorted((left, right) =>
+    left.id.localeCompare(right.id) ||
+    canonicalApprovalValue(left).localeCompare(canonicalApprovalValue(right))));
+}
+
 @validateRpc()
 export class MarketoGatekeeperImpl
   extends DurableObject<Env, MarketoGatekeeperImplProps>
@@ -2178,6 +2208,56 @@ export class MarketoGatekeeperImpl
           "The Marketo designer publishable state changed after approval; nothing was dispatched.",
         );
       }
+      if (action.affectedDependents !== undefined) {
+        let dependents: MarketoDesignerUsedBy[] = [];
+        let ids = new Set<string>();
+        let expectedTotal: number | undefined;
+        for (let pageIndex = 0; dependents.length <= 1_000; pageIndex++) {
+          let page = await client.getDesignerAssetUsedBy(designerAssetKind(action.asset), {
+            assetId: this.#requireDesignerId(action.targetId), pageIndex, pageSize: 50, type: "all",
+          });
+          if (page.pageDetails?.currentPage !== pageIndex + 1 || page.pageDetails.pageSize !== 50 ||
+              pageIndex > 0 && page.pageDetails.totalItems !== expectedTotal) {
+            throw new DesignerPreDispatchError(
+              "Marketo returned inconsistent lifecycle dependency paging; nothing was dispatched.",
+            );
+          }
+          expectedTotal ??= page.pageDetails.totalItems;
+          for (let item of page.result) {
+            let id = item.id === undefined ? undefined : String(item.id);
+            if (!id || ids.has(id)) {
+              throw new DesignerPreDispatchError(
+                "Marketo returned invalid lifecycle dependencies; nothing was dispatched.",
+              );
+            }
+            ids.add(id);
+            dependents.push({
+              id,
+              name: item.name ?? "",
+              channel: item.channel,
+              contentType: item.contentType,
+              workspaceId: item.appData?.workspaceId === undefined
+                ? undefined : String(item.appData.workspaceId),
+              folderId: item.appData?.folderId === undefined
+                ? undefined : String(item.appData.folderId),
+            });
+          }
+          if (dependents.length > 1_000 ||
+              expectedTotal !== undefined && dependents.length > expectedTotal ||
+              page.result.length < 50 && expectedTotal !== undefined && dependents.length < expectedTotal) {
+            throw new DesignerPreDispatchError(
+              "Marketo returned inconsistent lifecycle dependency paging; nothing was dispatched.",
+            );
+          }
+          if (expectedTotal === undefined ? page.result.length < 50 : dependents.length === expectedTotal) break;
+        }
+        if (canonicalDesignerDependents(dependents) !==
+            canonicalDesignerDependents(action.affectedDependents)) {
+          throw new DesignerPreDispatchError(
+            "The Marketo designer affected dependencies changed after approval; nothing was dispatched.",
+          );
+        }
+      }
     }
 
     let templateId = action.type === "designerCreate" ? action.body.templateId
@@ -2248,6 +2328,23 @@ export class MarketoGatekeeperImpl
       if (!sectionId || !emailSections(await client.getEmailContent(id)).some(section => section.id === sectionId)) {
         throw new DesignerPreDispatchError(
           `Marketo email section ${sectionId ?? "(missing)"} is not editable static Text content; nothing was dispatched.`,
+        );
+      }
+    }
+    if (isDesignStudioAction(action) && action.type === "designLifecycle" && action.snapshot) {
+      let id = this.#requireLogicalId(action.targetId);
+      let current;
+      try {
+        current = await readDesignStudioLifecycleSnapshot(client, action.asset, id);
+      } catch (error) {
+        throw new DesignerPreDispatchError(
+          `The Marketo ${action.asset} publishable state could not be verified; nothing was dispatched.`,
+          { cause: error },
+        );
+      }
+      if (canonicalApprovalValue(current) !== canonicalApprovalValue(action.snapshot)) {
+        throw new DesignerPreDispatchError(
+          `The Marketo ${action.asset} publishable state changed after approval; nothing was dispatched.`,
         );
       }
     }

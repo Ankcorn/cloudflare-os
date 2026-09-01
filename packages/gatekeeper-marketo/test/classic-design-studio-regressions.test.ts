@@ -576,7 +576,7 @@ describe("classic Design Studio regressions", () => {
       .toEqual(["approve", "unapprove"]);
     expect(actions[0]).toMatchObject({
       snapshot: {
-        metadata: { id: "31", name: "Template", status: "draft" },
+        metadata: { name: "Template" },
         content: "<p>Draft</p>",
         affectedDependents: [],
       },

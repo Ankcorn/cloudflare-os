@@ -352,6 +352,19 @@ function normalize(kind: DesignStudioAssetKind, raw: unknown): Summary {
   return summary;
 }
 
+function lifecycleMetadata(summary: Summary): Record<string, unknown> {
+  let {
+    id: _id,
+    status: _status,
+    workspaceName: _workspaceName,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    url: _url,
+    ...publishable
+  } = summary;
+  return publishable;
+}
+
 function normalizeFolder(raw: unknown): Summary {
   let value = recordValue(raw);
   let parent = recordValue(value.parent);
@@ -1212,7 +1225,7 @@ abstract class AssetImpl extends RpcTarget {
       throw new Error(`Marketo ${this.kind} ${this.id} is not approved.`);
     }
     let snapshot: DesignStudioLifecycleSnapshot = {
-      metadata,
+      metadata: lifecycleMetadata(metadata),
       content: await this.publishableContent(),
       // Unlike Email Designer, the classic Asset API has no used-by endpoint.
       affectedDependents: [],
@@ -1299,6 +1312,50 @@ async function readAsset(client: MarketoClient, kind: DesignStudioAssetKind, id:
     case "snippet": return await client.getSnippet(id);
     case "file": return await client.getFile(id);
   }
+}
+
+/** Read the publishable classic asset state stored with a lifecycle approval. */
+export async function readDesignStudioLifecycleSnapshot(
+  client: MarketoClient,
+  kind: Exclude<DesignStudioAssetKind, "folder" | "file">,
+  id: number,
+): Promise<DesignStudioLifecycleSnapshot> {
+  let raw = await readAsset(client, kind, id);
+  if (!raw || readId(raw) !== id) throw new Error(`Marketo ${kind} ${id} was not found.`);
+  let content: unknown;
+  if (kind === "email") {
+    content = emailSections(await client.getEmailContent(id));
+  } else if (kind === "emailTemplate" || kind === "landingPageTemplate") {
+    let response = kind === "emailTemplate"
+      ? await client.getEmailTemplateContent(id)
+      : await client.getLandingPageTemplateContent(id);
+    if (!response || readId(response) !== id || typeof response.content !== "string") {
+      throw new Error(`Marketo returned invalid ${kind} content for ${id}.`);
+    }
+    content = response.content;
+  } else if (kind === "landingPage") {
+    content = (await client.getLandingPageContent(id)).map(item => ({
+      id: String(item.id ?? ""),
+      type: textValue(item.type) ?? "",
+      content: textualContent(item.content),
+    })).filter(item => item.id);
+  } else if (kind === "form") {
+    content = (await client.getFormFields(id)).map(field => ({
+      id: textValue(field.id) ?? "",
+      label: textValue(field.label),
+      dataType: textValue(field.dataType),
+      required: typeof field.required === "boolean" ? field.required : undefined,
+      hintText: textValue(field.hintText),
+    })).filter(field => field.id);
+  } else {
+    let result: MarketoSnippetContent = {};
+    for (let item of await client.getSnippetContent(id)) {
+      if (item.type?.toLowerCase() === "html") result.html = textValue(item.content);
+      if (item.type?.toLowerCase() === "text") result.text = textValue(item.content);
+    }
+    content = result;
+  }
+  return { metadata: lifecycleMetadata(normalize(kind, raw)), content, affectedDependents: [] };
 }
 
 function handle(

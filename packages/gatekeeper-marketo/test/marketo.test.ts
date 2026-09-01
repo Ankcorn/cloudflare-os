@@ -6291,8 +6291,14 @@ describe("Design Studio scoped binding", () => {
           assetId: "email-1", pageIndex: 0, pageSize: 50, type: "all",
         } },
         { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/usedby", body: {
+          assetId: "email-1", pageIndex: 0, pageSize: 50, type: "all",
+        } },
         { path: "/rest/asset/v2/email/state/transition", body: { contentId: "content-1", action: "approve" } },
         { path: "/rest/asset/v2/email/email-1" },
+        { path: "/rest/asset/v2/email/usedby", body: {
+          assetId: "email-1", pageIndex: 0, pageSize: 50, type: "all",
+        } },
         { path: "/rest/asset/v2/email/state/transition", body: { contentId: "content-1", action: "unapprove" } },
       ]);
       created[Symbol.dispose]();
@@ -7115,6 +7121,69 @@ describe("post-dispatch creation response validation", () => {
 
 describe("Email Designer action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("rejects added or removed Designer lifecycle dependents before dispatch", async () => {
+    let source = {
+      id: "email-1", name: "Launch",
+      data: { html: { body: "<h1>Approved</h1>" } },
+      headers: { subject: "Approved" },
+      settings: { isOperational: false },
+      associatedStates: [{ contentId: "draft-1", state: "draft" }],
+    };
+    let approvedDependent = {
+      id: "campaign-1", name: "Campaign", channel: "Email", contentType: "Smart Campaign",
+      workspaceId: "1", folderId: "2",
+    };
+    let otherApprovedDependent = { id: "campaign-2", name: "Other campaign" };
+    for (let change of ["added", "removed", "unchanged"] as const) {
+      let action: EmailDesignerAction = {
+        id: 1, type: "designerLifecycle", asset: "designerEmail", targetId: "email-1",
+        operation: "approve", contentId: "draft-1", sourceState: "draft",
+        sourceSnapshot: designerCloneSnapshot(source),
+        affectedDependents: [approvedDependent, otherApprovedDependent],
+      };
+      let transitions = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        if (url.includes("/identity/")) {
+          return Response.json({ access_token: "token", expires_in: 3600 });
+        }
+        let path = new URL(url).pathname;
+        if (path.endsWith("/email/email-1")) {
+          return Response.json({ success: true, result: [source] });
+        }
+        if (path.endsWith("/email/usedby")) {
+          let result = [
+            ...(change === "removed" ? [] : [otherApprovedDependent]),
+            { ...approvedDependent, appData: { workspaceId: 1, folderId: 2 } },
+            ...(change === "added" ? [{ id: "campaign-3", name: "New campaign" }] : []),
+          ];
+          return Response.json({
+            success: true,
+            result,
+            pageDetails: { currentPage: 1, pageSize: 50, totalItems: result.length },
+          });
+        }
+        transitions++;
+        return Response.json({
+          success: true, result: [{ contentId: "draft-1", status: "approved" }],
+        });
+      });
+      let stub = await emailDesignerActionGatekeeper([action]);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        if (change === "unchanged") {
+          await expect(instance.applyAction(1)).resolves.toBeUndefined();
+          expect(state.storage.kv.get("pending:1")).toBeUndefined();
+        } else {
+          await expect(instance.applyAction(1)).rejects.toThrow(/affected dependencies changed/);
+          expect(state.storage.kv.get("applying:1")).toBeUndefined();
+          expect(state.storage.kv.get("pending:1")).toBeDefined();
+        }
+      });
+      expect(transitions).toBe(change === "unchanged" ? 1 : 0);
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("purges every asset family that depends on a rejected provisional program", async () => {
     let actions: MarketoAction[] = [
@@ -8032,6 +8101,66 @@ describe("provisional id kind safety", () => {
 
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("rejects changed classic lifecycle content, headers, or settings before dispatch", async () => {
+    let snapshot = {
+      metadata: {
+        name: "Launch", subject: "Approved subject", fromName: "Marketing",
+        fromEmail: "marketing@example.com", replyEmail: "reply@example.com",
+        settings: { operational: true },
+      },
+      content: [{ id: "main", html: "<h1>Approved</h1>", text: "Approved" }],
+      affectedDependents: [],
+    };
+    for (let changed of ["content", "header", "settings", undefined] as const) {
+      let action: DesignStudioAction = {
+        id: 1, type: "designLifecycle", asset: "email", targetId: "21",
+        operation: "approve", snapshot,
+      };
+      let lifecycleWrites = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        if (url.includes("/identity/")) {
+          return Response.json({ access_token: "token", expires_in: 3600 });
+        }
+        let path = new URL(url).pathname;
+        if (path.endsWith("/email/21.json")) {
+          return Response.json({ success: true, result: [{
+            id: 21, name: "Launch", status: "draft",
+            subject: { type: "Text", value: changed === "header" ? "Externally changed" : "Approved subject" },
+            fromName: { type: "Text", value: "Marketing" },
+            fromEmail: { type: "Text", value: "marketing@example.com" },
+            replyEmail: { type: "Text", value: "reply@example.com" },
+            operational: changed !== "settings",
+          }] });
+        }
+        if (path.endsWith("/email/21/content.json")) {
+          return Response.json({ success: true, result: [{
+            htmlId: "main",
+            value: [
+              { type: "HTML", value: changed === "content" ? "<h1>Externally changed</h1>" : "<h1>Approved</h1>" },
+              { type: "Text", value: "Approved" },
+            ],
+          }] });
+        }
+        lifecycleWrites++;
+        return Response.json({ success: true, result: [{ id: 21 }] });
+      });
+      let stub = await designActionGatekeeper([action]);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        if (changed === undefined) {
+          await expect(instance.applyAction(1)).resolves.toBeUndefined();
+          expect(state.storage.kv.get("pending:1")).toBeUndefined();
+        } else {
+          await expect(instance.applyAction(1)).rejects.toThrow(/publishable state changed/);
+          expect(state.storage.kv.get("applying:1")).toBeUndefined();
+          expect(state.storage.kv.get("pending:1")).toBeDefined();
+        }
+      });
+      expect(lifecycleWrites).toBe(changed === undefined ? 1 : 0);
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("maps a created classic template and applies it to a dependent email", async () => {
     let actions: DesignStudioAction[] = [
