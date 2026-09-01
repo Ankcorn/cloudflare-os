@@ -122,6 +122,12 @@ function content(value: unknown): Record<string, unknown> | undefined {
   };
 }
 
+function rejectTemplateWithContent(templateId: unknown, data: Record<string, unknown> | undefined): void {
+  if (templateId !== undefined && data !== undefined) {
+    throw new Error("templateId and content cannot be specified together because applying a template overwrites email content.");
+  }
+}
+
 function headers(value: unknown, partial = false): Record<string, unknown> {
   let input = only(value, "Email headers", ["subject", "fromName", "fromEmail", "replyEmail", "preheader", "ccEmails"]);
   let result: Record<string, unknown> = {};
@@ -547,10 +553,12 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
 
   async createEmail(input: MarketoCreateDesignerEmailInput) {
     let value = only(input, "Designer email create input", ["location", "name", "description", "headers", "content", "templateId", "settings"]);
+    let data = content(value.content);
+    rejectTemplateWithContent(value.templateId, data);
     return await this.#create("designerEmail", {
       name: text(value.name, "Email name"), description: optionalText(value.description, "description"),
       appData: { ...location(value.location, true, this.#ctx), editorType: "email" }, headers: headers(value.headers),
-      data: content(value.content), settings: settings(value.settings),
+      data, settings: settings(value.settings),
       templateId: value.templateId === undefined ? undefined : id(value.templateId, "templateId", this.#ctx, "designerTemplate"),
     }) as MarketoDesignerEmailImpl;
   }
@@ -819,12 +827,11 @@ export class MarketoDesignerEmailImpl extends DesignerAssetImpl {
   async describe(): Promise<MarketoDesignerEmailDetail> { return await this.detail() as MarketoDesignerEmailDetail; }
   async update(value: MarketoDesignerEmailPatch) {
     let input = only(value, "Designer email patch", ["name", "description", "headers", "content", "settings", "templateId"]);
-    if (input.templateId !== undefined && input.content !== undefined) {
-      throw new Error("templateId and content cannot be updated together because applying a template overwrites email content.");
-    }
+    let data = content(input.content);
+    rejectTemplateWithContent(input.templateId, data);
     await this.submitUpdate({ name: input.name === undefined ? undefined : text(input.name, "Email name"),
       description: optionalText(input.description, "description"), headers: input.headers === undefined ? undefined : headers(input.headers, true),
-      data: content(input.content), settings: settings(input.settings),
+      data, settings: settings(input.settings),
       templateId: input.templateId === undefined ? undefined : id(input.templateId, "templateId", this.ctx, "designerTemplate") });
   }
   async clone(name: string, description?: string) { return await this.cloneAsset(name, description) as MarketoDesignerEmailImpl; }

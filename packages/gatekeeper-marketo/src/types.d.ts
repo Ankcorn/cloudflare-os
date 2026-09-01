@@ -839,8 +839,7 @@ export type MarketoDesignerPage<T> = {
   pageSize?: number;
 };
 
-/** HTML and plain-text representations used by designer assets. */
-export type MarketoDesignerContent = {
+type MarketoDesignerContentFields = {
   /** Complete HTML body. */
   html?: string;
   /** Complete plain-text body. */
@@ -848,6 +847,12 @@ export type MarketoDesignerContent = {
   /** Whether Marketo should regenerate plain text from HTML. */
   syncTextFromHtml?: boolean;
 };
+
+/** HTML and plain-text representations used by designer assets. At least one field is required. */
+export type MarketoDesignerContent = {
+  [Field in keyof MarketoDesignerContentFields]-?: Required<Pick<MarketoDesignerContentFields, Field>> &
+    Partial<Omit<MarketoDesignerContentFields, Field>>;
+}[keyof MarketoDesignerContentFields];
 
 /** Delivery headers on a designer email. */
 export type MarketoDesignerEmailHeaders = {

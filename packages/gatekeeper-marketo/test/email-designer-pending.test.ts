@@ -730,7 +730,42 @@ describe("Email Designer pending-state simulation", () => {
     await expect(email.update({
       templateId: "template-1",
       content: { html: "<p>Overwritten</p>" },
-    })).rejects.toThrow(/templateId and content cannot be updated together.*overwrites email content/);
+    })).rejects.toThrow(/templateId and content cannot be specified together.*overwrites email content/);
+    expect(actions).toEqual([]);
+  });
+
+  it("rejects a template and content in the same email create without a pending row or action", async () => {
+    let { actions, ctx } = context({
+      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 50 }),
+    });
+    let designer = new MarketoEmailDesignerImpl(ctx);
+
+    await expect(designer.createEmail({
+      location: { workspaceId: "1", folderId: "10" },
+      name: "Invalid email",
+      headers: { subject: "Subject" },
+      templateId: "template-1",
+      content: { html: "<p>Overwritten</p>" },
+    })).rejects.toThrow(/templateId and content cannot be specified together.*overwrites email content/);
+    expect(actions).toEqual([]);
+    expect((await designer.listEmails("1")).items).toEqual([]);
+  });
+
+  it("rejects empty content by its content contract before template conflict validation", async () => {
+    let { actions, ctx } = context({});
+    let emptyContent = {} as never;
+
+    expect(() => new MarketoEmailDesignerImpl(ctx).createEmail({
+      location: { workspaceId: "1", folderId: "10" },
+      name: "Invalid email",
+      headers: { subject: "Subject" },
+      templateId: "template-1",
+      content: emptyContent,
+    })).toThrow(/expected union/);
+    expect(() => new MarketoDesignerEmailImpl(ctx, "email-1").update({
+      templateId: "template-1",
+      content: emptyContent,
+    })).toThrow(/expected union/);
     expect(actions).toEqual([]);
   });
 

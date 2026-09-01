@@ -1109,7 +1109,6 @@ describe("new Email Designer", () => {
         replyEmail: "reply@example.com",
       },
       content: { html: "<p>Hello</p>", text: "Hello" },
-      templateId: "template-A",
       settings: { isOperational: true, enableUrlTracking: true },
     });
     await email.update({ description: "Updated", headers: { subject: "New subject" } });
@@ -1124,7 +1123,6 @@ describe("new Email Designer", () => {
         appData: { workspaceId: "1001", programId: "55", editorType: "email" },
         headers: { subject: "Hello", fromEmail: "team@example.com" },
         data: { html: { body: "<p>Hello</p>" }, text: { body: "Hello" } },
-        templateId: "template-A",
         settings: { isOperational: true, enableUrlTracking: true },
       },
     });
