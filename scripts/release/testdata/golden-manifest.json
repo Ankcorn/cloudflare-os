@@ -521,6 +521,47 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/linear"
       }
     },
+    "gatekeeper-marketo": {
+      "bindings": [],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage"
+      ],
+      "inputs": [],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "marketo.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "UserAccount",
+            "MarketoGatekeeperImpl",
+            "MarketoTokenCache"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "marketo.js",
+          "r2Key": "blobs/modules/6334ad7fcd4771d7a14ed40fbacf47881c8e9f7f2b77c5bff8b331fdb019c7a8",
+          "sha256": "6334ad7fcd4771d7a14ed40fbacf47881c8e9f7f2b77c5bff8b331fdb019c7a8",
+          "size": 60,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "marketo",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/marketo"
+      }
+    },
     "gatekeeper-mcp": {
       "bindings": [],
       "compatibilityDate": "2026-02-02",
