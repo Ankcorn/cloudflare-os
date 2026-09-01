@@ -513,6 +513,7 @@ describe("optional deployment defaults", () => {
 
   it("never renders the secret into the form, but does pre-fill the other two", () => {
     let html = connectPageHtml({ defaults: getDefaults(FULL) });
+    expect(html).toContain('<form id="form" method="post">');
     expect(html).toContain(ORIGIN);
     expect(html).toContain("default-id");
     expect(html).not.toContain("default-secret");
@@ -2947,6 +2948,27 @@ describe("custom object normalization", () => {
       .rejects.toThrow(/entirely by marketoGUID/);
     await expect(object.delete([{ marketoGUID: "" }])).rejects.toThrow(/non-empty string/);
     expect(submitted).toHaveLength(1);
+  });
+
+  it("requires every schema dedupe field before submitting a custom-object delete", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let object = new MarketoCustomObjectImpl(makeSessionContext({
+      client: async () => ({ describeCustomObject: async () => SCHEMA }) as unknown as MarketoClient,
+      approvalQueue: {} as never,
+      submit: async action => void submitted.push(action),
+    }), "orderStatus");
+
+    await expect(object.delete([{ sourceID: "source-1" }])).rejects.toThrow(/leadID/);
+    await expect(object.delete([{ sourceID: "source-1", leadID: null }])).rejects.toThrow(/leadID/);
+    expect(submitted).toEqual([]);
+
+    await object.delete([{ sourceID: "source-1", leadID: 7, ignored: "preserved" }]);
+    expect(submitted).toEqual([{
+      type: "customObjectDelete",
+      apiName: "orderStatus",
+      deleteBy: "dedupeFields",
+      records: [{ sourceID: "source-1", leadID: 7, ignored: "preserved" }],
+    }]);
   });
 
   it("sends GUID deletion using Marketo's idField mode", async () => {
@@ -5482,6 +5504,7 @@ describe("actions report no outcome at submission time", () => {
       getProgram: async () => ({ id: 3300, name: "prog" }),
       getChannels: async () => [],
       getLeads: async () => ({ result: [{ id: 7 }], moreResult: false }) as never,
+      describeCustomObject: async () => ({ dedupeFields: ["sourceID"] }) as never,
     });
 
     expect(await new MarketoStaticListImpl(ctx, 5500).addMembers([7])).toBeUndefined();

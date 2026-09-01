@@ -144,7 +144,7 @@ export function connectPageHtml(params: { defaults: MarketoConnectDefaults }): s
   here are stored for your account only.</div>
 
   <section>
-    <form id="form">
+    <form id="form" method="post">
       <label for="endpoint">Instance endpoint</label>
       <input id="endpoint" name="endpoint" value="${escapeHtml(endpoint)}"${locked}
              placeholder="https://123-ABC-456.mktorest.com" autocomplete="off" spellcheck="false">

@@ -1705,6 +1705,21 @@ export class MarketoCustomObjectImpl extends RpcTarget {
         }
         return { marketoGUID: record.marketoGUID };
       });
+    } else {
+      let schema = await (await this.#ctx.client()).describeCustomObject(this.#apiName);
+      if (!schema) throw notFound("custom object", `"${this.#apiName}"`);
+      let dedupeFields = schema.dedupeFields ?? [];
+      if (dedupeFields.length === 0) {
+        throw new Error("This custom object does not expose dedupe fields.");
+      }
+      records.forEach((record, index) => {
+        for (let field of dedupeFields) {
+          let value = record[field];
+          if (value === undefined || value === null || value === "") {
+            throw new Error(`Delete record ${index + 1} requires non-null dedupe field \`${field}\`.`);
+          }
+        }
+      });
     }
     await this.#ctx.submit({ type: "customObjectDelete", apiName: this.#apiName, records, deleteBy });
   }
