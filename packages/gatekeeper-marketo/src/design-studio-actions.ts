@@ -26,7 +26,8 @@ export type DesignStudioMetadata = Record<string, string | undefined>;
 export type DesignStudioLifecycleSnapshot = {
   metadata: Record<string, unknown>;
   content: unknown;
-  affectedDependents: Record<string, unknown>[];
+  /** Complete known dependencies, or null when this asset/operation has no documented endpoint. */
+  affectedDependents: Record<string, unknown>[] | null;
 };
 
 export type DesignStudioCreateInput = {
@@ -242,7 +243,7 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
           `Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}\n\n` +
           `Publishable metadata, headers, and settings:\n\n${codeBlock(action.snapshot.metadata)}\n\n` +
           `Publishable content:\n\n${codeBlock(action.snapshot.content)}\n\n` +
-          `Affected dependents:\n\n${codeBlock(action.snapshot.affectedDependents)}`,
+          `Affected dependents (null means unsupported/unknown):\n\n${codeBlock(action.snapshot.affectedDependents)}`,
       };
     case "designDeleteFolder":
       return {

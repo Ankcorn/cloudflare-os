@@ -567,6 +567,7 @@ describe("classic Design Studio regressions", () => {
     let { actions, ctx } = context({
       getEmailTemplate: async () => ({ id: 31, name: "Template", status: "draft" }),
       getEmailTemplateContent: async () => ({ id: 31, content: "<p>Draft</p>" }),
+      getEmailTemplateUsedBy: async () => [],
     });
     let template = new MarketoDesignStudioImpl(ctx).getEmailTemplate("31");
 
@@ -642,7 +643,7 @@ describe("classic Design Studio regressions", () => {
             { type: "Text", value: "Exact draft" },
           ],
         }],
-        affectedDependents: [],
+        affectedDependents: null,
       },
     });
     expect(JSON.stringify(actions[0])).not.toContain("secretProviderExtension");
@@ -666,6 +667,7 @@ describe("classic Design Studio regressions", () => {
       getLandingPageContent: async () => landingContent,
       getForm: async () => ({ id: 51, name: "Form", status: "draft" }),
       getFormFields: async () => fields,
+      getFormUsedBy: async () => [],
     });
 
     await new MarketoDesignStudioImpl(ctx).getLandingPage("41").approve();
@@ -673,5 +675,62 @@ describe("classic Design Studio regressions", () => {
 
     expect(actions[0]).toMatchObject({ snapshot: { content: landingContent } });
     expect(actions[1]).toMatchObject({ snapshot: { content: fields } });
+  });
+
+  it("captures every supported classic dependency page and deduplicates page overlap", async () => {
+    let firstPage = Array.from({ length: 200 }, (_, index) => ({
+      id: index + 1,
+      name: `Email ${index + 1}`,
+      type: "Email",
+      status: "approved",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }));
+    let getEmailTemplateUsedBy = vi.fn(async (_id: number, options: { offset?: number }) =>
+      options.offset === 0 ? firstPage : [firstPage[199]!, {
+        id: 201, name: "Email 201", type: "Email", status: "draft", updatedAt: "2026-01-02T00:00:00Z",
+      }]);
+    let { actions, ctx } = context({
+      getEmailTemplate: async () => ({ id: 31, name: "Template", status: "draft" }),
+      getEmailTemplateContent: async () => ({ id: 31, content: "<p>Draft</p>" }),
+      getEmailTemplateUsedBy,
+    });
+
+    await new MarketoDesignStudioImpl(ctx).getEmailTemplate("31").approve();
+
+    let snapshot = (actions[0] as Extract<DesignStudioAction, { type: "designLifecycle" }>).snapshot;
+    expect(snapshot.affectedDependents).toHaveLength(201);
+    expect(getEmailTemplateUsedBy.mock.calls).toEqual([
+      [31, { offset: 0, maxReturn: 200 }],
+      [31, { offset: 200, maxReturn: 200 }],
+    ]);
+  });
+
+  it("refuses to submit a truncated classic dependency snapshot", async () => {
+    let { actions, ctx } = context({
+      getForm: async () => ({ id: 51, name: "Form", status: "draft" }),
+      getFormFields: async () => [],
+      getFormUsedBy: async (_id, { offset = 0 } = {}) => Array.from({ length: 200 }, (_, index) => ({
+        id: offset + index + 1,
+        name: `Asset ${offset + index + 1}`,
+        type: "Landing Page",
+        status: "approved",
+        updatedAt: "2026-01-01T00:00:00Z",
+      })),
+    });
+
+    await expect(new MarketoDesignStudioImpl(ctx).getForm("51").approve())
+      .rejects.toThrow(/cannot exceed 1000/);
+    expect(actions).toEqual([]);
+  });
+
+  it("marks dependencies unknown when a classic asset has no documented used-by endpoint", async () => {
+    let { actions, ctx } = context({
+      getEmail: async () => ({ id: 21, name: "Email", status: "draft" }),
+      getEmailContent: async () => [],
+    });
+
+    await new MarketoDesignStudioImpl(ctx).getEmail("21").approve();
+
+    expect(actions[0]).toMatchObject({ snapshot: { affectedDependents: null } });
   });
 });

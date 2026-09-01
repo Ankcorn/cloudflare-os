@@ -3918,6 +3918,50 @@ describe("provider result identities", () => {
   });
 });
 
+describe("classic used-by pages", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("uses the documented asset paths and correlates offset pages", async () => {
+    let dependency = {
+      id: 9, name: "Dependent", type: "Email", status: "approved", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    let { client, calls } = clientReturning(
+      { success: true, result: [dependency] },
+      { success: true, result: [{ ...dependency, type: "Landing Page" }] },
+    );
+
+    await client.getEmailTemplateUsedBy(31, { offset: 200, maxReturn: 200 });
+    await client.getFormUsedBy(51, { offset: 400, maxReturn: 200 });
+
+    expect(calls.map(call => {
+      let url = new URL(call);
+      return [url.pathname, url.searchParams.get("offset"), url.searchParams.get("maxReturn")];
+    })).toEqual([
+      ["/rest/asset/v1/emailTemplates/31/usedBy.json", "200", "200"],
+      ["/rest/asset/v1/form/51/usedBy.json", "400", "200"],
+    ]);
+  });
+
+  it("strictly validates dependency records and page size", async () => {
+    let valid = {
+      id: 9, name: "Dependent", type: "Email", status: "approved", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    for (let item of [
+      { ...valid, id: "9" },
+      { ...valid, name: undefined },
+      { ...valid, type: "" },
+      { ...valid, status: null },
+      { ...valid, updatedAt: 7 },
+      { ...valid, updatedAt: "not-a-date" },
+    ]) {
+      await expect(clientReturning({ success: true, result: [item] }).client.getFormUsedBy(51))
+        .rejects.toBeInstanceOf(MarketoResponseValidationError);
+    }
+    await expect(clientReturning({ success: true, result: [valid, valid] }).client
+      .getFormUsedBy(51, { maxReturn: 1 })).rejects.toBeInstanceOf(MarketoResponseValidationError);
+  });
+});
+
 function businessContext(client: Partial<MarketoClient>, submitted: MarketoActionInput[] = [], notes: string[] = []) {
   let access = new Map<string, "read-write" | "read-only" | "unavailable">();
   let ctx: BusinessObjectContext = {
@@ -8715,6 +8759,55 @@ describe("provisional id kind safety", () => {
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("rejects changed classic dependencies before publishing or deleting", async () => {
+    let reviewed = {
+      id: 91, name: "Dependent email", type: "Email", status: "approved", updatedAt: "2026-01-01T00:00:00Z",
+    };
+    for (let operation of ["approve", "delete"] as const) for (let drifted of [false, true]) {
+      let action: DesignStudioAction = {
+        id: 1,
+        type: "designLifecycle",
+        asset: "emailTemplate",
+        targetId: "31",
+        operation,
+        snapshot: { metadata: { name: "Template" }, content: "<p>Draft</p>", affectedDependents: [reviewed] },
+      };
+      let lifecycleWrites = 0;
+      vi.stubGlobal("fetch", async (url: string) => {
+        if (url.includes("/identity/")) {
+          return Response.json({ access_token: "token", expires_in: 3600 });
+        }
+        let path = new URL(url).pathname;
+        if (path.endsWith("/emailTemplate/31.json")) {
+          return Response.json({ success: true, result: [{ id: 31, name: "Template", status: "draft" }] });
+        }
+        if (path.endsWith("/emailTemplate/31/content.json")) {
+          return Response.json({ success: true, result: [{ id: 31, content: "<p>Draft</p>" }] });
+        }
+        if (path.endsWith("/emailTemplates/31/usedBy.json")) {
+          return Response.json({
+            success: true,
+            result: [{ ...reviewed, updatedAt: drifted ? "2026-01-02T00:00:00Z" : reviewed.updatedAt }],
+          });
+        }
+        lifecycleWrites++;
+        return Response.json({ success: true, result: [{ id: 31 }] });
+      });
+      let stub = await designActionGatekeeper([action]);
+
+      await runInDurableObject(stub, async (instance, state) => {
+        if (drifted) {
+          await expect(instance.applyAction(1)).rejects.toThrow(/publishable state changed/);
+          expect(state.storage.kv.get("pending:1")).toBeDefined();
+        } else {
+          await expect(instance.applyAction(1)).resolves.toBeUndefined();
+        }
+      });
+      expect(lifecycleWrites).toBe(drifted ? 0 : 1);
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("rejects changed classic lifecycle content, headers, or settings before dispatch", async () => {
     let snapshot = {
       metadata: {
@@ -8733,7 +8826,7 @@ describe("Design Studio action lifecycle", () => {
           { type: "Text", value: "Approved" },
         ],
       }],
-      affectedDependents: [],
+      affectedDependents: null,
     };
     for (let changed of ["content", "dynamic", "header", "settings", undefined] as const) {
       let action: DesignStudioAction = {
@@ -9076,6 +9169,9 @@ describe("Design Studio action lifecycle", () => {
       if (path.endsWith("/emailTemplate/31.json")) {
         return Response.json({ success: true, result: [{ id: 31, name: "First" }] });
       }
+      if (path.endsWith("/emailTemplates/31/usedBy.json")) {
+        return Response.json({ success: true, result: [] });
+      }
       return Response.json({ success: true, result: [{ id: path.includes("folder/40") ? 40 : 31 }] });
     });
     let stub = await designActionGatekeeper(actions);
@@ -9093,6 +9189,7 @@ describe("Design Studio action lifecycle", () => {
       "/rest/asset/v1/emailTemplate/31/content.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/content.json",
+      "/rest/asset/v1/emailTemplates/31/usedBy.json",
       "/rest/asset/v1/emailTemplate/31/approveDraft.json",
       "/rest/asset/v1/folder/40.json",
       "/rest/asset/v1/folder/40/delete.json",
@@ -9124,6 +9221,9 @@ describe("Design Studio action lifecycle", () => {
       if (path.endsWith("/emailTemplate/31/content.json")) {
         return Response.json({ success: true, result: [{ id: 31, content: "source" }] });
       }
+      if (path.endsWith("/emailTemplates/31/usedBy.json")) {
+        return Response.json({ success: true, result: [] });
+      }
       return Response.json({ success: true, result: [{
         id: path.includes("clone") || path.includes("emailTemplate/32.json") ? 32 : 31,
         ...(path.includes("emailTemplate/32.json")
@@ -9147,6 +9247,7 @@ describe("Design Studio action lifecycle", () => {
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31.json",
       "/rest/asset/v1/emailTemplate/31/content.json",
+      "/rest/asset/v1/emailTemplates/31/usedBy.json",
       "/rest/asset/v1/emailTemplate/31/delete.json",
     ]);
   });

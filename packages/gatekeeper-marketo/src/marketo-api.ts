@@ -826,6 +826,23 @@ export class MarketoClient {
     throw new MarketoError("Marketo returned too much asset metadata.", { operation: path });
   }
 
+  async #classicUsedBy(path: string, options: MarketoAssetPageOptions): Promise<RawClassicUsedBy[]> {
+    let maxReturn = options.maxReturn ?? ASSET_PAGE_MAX;
+    let offset = options.offset ?? 0;
+    if (!Number.isSafeInteger(maxReturn) || maxReturn <= 0 || maxReturn > ASSET_PAGE_MAX ||
+        !Number.isSafeInteger(offset) || offset < 0) {
+      throw new MarketoError("Invalid classic used-by page request.", { operation: path });
+    }
+    let envelope = await this.#request<unknown>(path, { query: { maxReturn, offset } });
+    if (!Array.isArray(envelope.result) || envelope.result.length > maxReturn) {
+      throw new MarketoResponseValidationError(
+        "Marketo returned a classic used-by page with an unexpected shape.",
+        { operation: path },
+      );
+    }
+    return envelope.result.map((item, index) => parseClassicUsedBy(item, `used-by result ${index + 1}`, path));
+  }
+
   // -------------------------------------------------------------------------
   // Design Studio folders
 
@@ -1097,6 +1114,14 @@ export class MarketoClient {
       query: { status },
     });
     return result[0];
+  }
+
+  /** Read one bounded page of assets that use an email template. */
+  async getEmailTemplateUsedBy(
+    id: number,
+    options: MarketoAssetPageOptions = {},
+  ): Promise<RawClassicUsedBy[]> {
+    return await this.#classicUsedBy(`/asset/v1/emailTemplates/${id}/usedBy.json`, options);
   }
 
   async createEmailTemplate(input: MarketoCreateEmailTemplate): Promise<RawEmailTemplate[]> {
@@ -1409,6 +1434,11 @@ export class MarketoClient {
     return await this.#result<RawFormField>(`/asset/v1/form/${id}/fields.json`, {
       query: { status },
     });
+  }
+
+  /** Read one bounded page of assets that use a form. */
+  async getFormUsedBy(id: number, options: MarketoAssetPageOptions = {}): Promise<RawClassicUsedBy[]> {
+    return await this.#classicUsedBy(`/asset/v1/form/${id}/usedBy.json`, options);
   }
 
   async getFormThankYouPage(
@@ -2383,6 +2413,9 @@ export type MarketoAssetBrowseOptions = MarketoVersionedBrowseOptions & {
   folder?: MarketoFolderRef;
 };
 
+/** Offset page accepted by classic Asset API used-by endpoints. */
+export type MarketoAssetPageOptions = { offset?: number; maxReturn?: number };
+
 /** Common exact-name lookup options. */
 export type MarketoAssetLookupOptions = {
   status?: MarketoAssetStatus;
@@ -2802,7 +2835,33 @@ export type RawFormField = {
 
 export type RawFormThankYouPage = { id?: number; thankYouList?: RawFormThankYouRule[] };
 
+/** Validated dependency returned by a classic Asset API used-by endpoint. */
+export type RawClassicUsedBy = {
+  id: number;
+  name: string;
+  type: string;
+  status: string;
+  updatedAt: string;
+};
+
 export type RawSnippet = RawDesignStudioAsset;
+
+function parseClassicUsedBy(value: unknown, label: string, operation: string): RawClassicUsedBy {
+  if (!isRecord(value) || !Number.isSafeInteger(value.id) || Number(value.id) <= 0 ||
+      typeof value.name !== "string" || value.name.length === 0 ||
+      typeof value.type !== "string" || value.type.length === 0 ||
+      typeof value.status !== "string" || value.status.length === 0 ||
+      typeof value.updatedAt !== "string" || parseMarketoDate(value.updatedAt) === undefined) {
+    throw new MarketoResponseValidationError(`Marketo returned ${label} with an unexpected shape.`, { operation });
+  }
+  return {
+    id: Number(value.id),
+    name: value.name,
+    type: value.type,
+    status: value.status,
+    updatedAt: value.updatedAt,
+  };
+}
 
 /** Path segment used by the official Email Designer Asset API v2 endpoints. */
 export type DesignerAssetKind = "email" | "emailtemplate" | "fragment";

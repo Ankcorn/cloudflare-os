@@ -2407,7 +2407,7 @@ export class MarketoGatekeeperImpl
         (!action.snapshot || typeof action.snapshot !== "object" ||
           !action.snapshot.metadata || typeof action.snapshot.metadata !== "object" ||
           Array.isArray(action.snapshot.metadata) || action.snapshot.content === undefined ||
-          !Array.isArray(action.snapshot.affectedDependents))) {
+          action.snapshot.affectedDependents !== null && !Array.isArray(action.snapshot.affectedDependents))) {
       throw new Error("A persisted Marketo classic lifecycle action is missing its complete review snapshot.");
     }
     if ((action.type === "designCreate" && (action.asset === "emailTemplate" || action.asset === "file") ||
@@ -2665,7 +2665,7 @@ export class MarketoGatekeeperImpl
       let id = this.#requireLogicalId(action.targetId);
       let current;
       try {
-        current = await readDesignStudioLifecycleSnapshot(client, action.asset, id);
+        current = await readDesignStudioLifecycleSnapshot(client, action.asset, id, action.operation);
       } catch (error) {
         throw new DesignerPreDispatchError(
           `The Marketo ${action.asset} publishable state could not be verified; nothing was dispatched.`,

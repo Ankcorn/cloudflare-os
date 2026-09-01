@@ -77,6 +77,7 @@ const MAX_DURABLE_PAYLOAD_BYTES = 1280 * 1024;
 const MAX_FOLDER_DEPTH = 20;
 const DEFAULT_FOLDER_DEPTH = 2;
 const MAX_WORKSPACE_LENGTH = 100;
+const MAX_CLASSIC_DEPENDENTS = 1_000;
 
 export type DesignStudioContext = SessionContext & {
   allocateProvisional(): string;
@@ -1292,8 +1293,9 @@ abstract class AssetImpl extends RpcTarget {
     let snapshot: DesignStudioLifecycleSnapshot = {
       metadata: lifecycleMetadata(metadata),
       content: await this.lifecycleSnapshotContent(),
-      // Unlike Email Designer, the classic Asset API has no used-by endpoint.
-      affectedDependents: [],
+      affectedDependents: await readClassicDependents(
+        await this.ctx.client(), this.kind, physicalId(this.ctx, this.id), operation,
+      ),
     };
     await submitDesign(this.ctx, {
       type: "designLifecycle", asset: this.kind, targetId: this.id, operation, snapshot,
@@ -1385,6 +1387,7 @@ export async function readDesignStudioLifecycleSnapshot(
   client: MarketoClient,
   kind: Exclude<DesignStudioAssetKind, "folder" | "file">,
   id: number,
+  operation: "approve" | "unapprove" | "discardDraft" | "delete",
 ): Promise<DesignStudioLifecycleSnapshot> {
   let raw = await readAsset(client, kind, id);
   if (!raw || readId(raw) !== id) throw new Error(`Marketo ${kind} ${id} was not found.`);
@@ -1412,7 +1415,56 @@ export async function readDesignStudioLifecycleSnapshot(
     }
     content = result;
   }
-  return { metadata: lifecycleMetadata(normalize(kind, raw)), content, affectedDependents: [] };
+  return {
+    metadata: lifecycleMetadata(normalize(kind, raw)),
+    content,
+    affectedDependents: await readClassicDependents(client, kind, id, operation),
+  };
+}
+
+async function readClassicDependents(
+  client: MarketoClient,
+  kind: Exclude<DesignStudioAssetKind, "folder" | "file">,
+  id: number,
+  operation: "approve" | "unapprove" | "discardDraft" | "delete",
+): Promise<Record<string, unknown>[] | null> {
+  if (operation !== "approve" && operation !== "delete") return null;
+  if (kind !== "emailTemplate" && kind !== "form") return null;
+
+  let dependents: Record<string, unknown>[] = [];
+  let identities = new Map<string, string>();
+  let pageSignatures = new Set<string>();
+  for (let offset = 0; ; offset += ASSET_PAGE_MAX) {
+    let page = kind === "emailTemplate"
+      ? await client.getEmailTemplateUsedBy(id, { offset, maxReturn: ASSET_PAGE_MAX })
+      : await client.getFormUsedBy(id, { offset, maxReturn: ASSET_PAGE_MAX });
+    let signature = JSON.stringify(page);
+    if (page.length > 0 && pageSignatures.has(signature)) {
+      throw new Error("Marketo repeated a classic used-by page.");
+    }
+    pageSignatures.add(signature);
+    for (let dependent of page) {
+      let identity = `${dependent.type.toLocaleLowerCase()}\0${dependent.id}`;
+      let previous = identities.get(identity);
+      let current = JSON.stringify(dependent);
+      if (previous !== undefined) {
+        if (previous !== current) throw new Error("Marketo changed a dependency across classic used-by pages.");
+        continue;
+      }
+      if (dependents.length === MAX_CLASSIC_DEPENDENTS) {
+        throw new Error(`Classic lifecycle dependencies cannot exceed ${MAX_CLASSIC_DEPENDENTS} records.`);
+      }
+      identities.set(identity, current);
+      dependents.push(dependent);
+    }
+    if (page.length < ASSET_PAGE_MAX) {
+      return dependents.toSorted((left, right) =>
+        String(left.type).localeCompare(String(right.type)) || Number(left.id) - Number(right.id));
+    }
+    if (offset >= MAX_CLASSIC_DEPENDENTS) {
+      throw new Error("Marketo classic used-by paging did not terminate within the dependency limit.");
+    }
+  }
 }
 
 function handle(
