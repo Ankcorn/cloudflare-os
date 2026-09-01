@@ -124,6 +124,38 @@ describe("GitHubApi git reads", () => {
     expect(url().pathname).toBe("/repos/cloudflare/workerd/commits/feature%2Fthing");
   });
 
+  it("requests the bare sha media type from the commit sha lookup", async () => {
+    let accept: string | null = null;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      accept = new Headers(init?.headers).get("Accept");
+      expect(new URL(String(input)).pathname).toBe("/repos/cloudflare/workerd/commits/feature%2Fthing");
+      return new Response("a".repeat(40), {
+        headers: { "content-type": "application/vnd.github.sha" },
+      });
+    }));
+
+    const api = new GitHubApi(async () => "test-token");
+    const result = await api.getCommitShaConditional("cloudflare", "workerd", "feature/thing");
+    expect(accept).toBe("application/vnd.github.sha");
+    expect(result).toMatchObject({ status: 200, data: "a".repeat(40) });
+  });
+
+  it("pages a metadata-only compare past the files-bearing first page", async () => {
+    const url = captureRequests({
+      base_commit: { sha: "a".repeat(40) },
+      merge_base_commit: { sha: "b".repeat(40) },
+      total_commits: 0,
+    });
+    const api = new GitHubApi(async () => "test-token");
+    await api.compareBranches("cloudflare", "workerd", "main", "feature", { perPage: 1, page: 2 });
+    expect(url().pathname).toBe("/repos/cloudflare/workerd/compare/main...feature");
+    expect(Object.fromEntries(url().searchParams)).toEqual({ per_page: "1", page: "2" });
+
+    // An unpaged compare adds no query parameters (paging would drop its files array).
+    await api.compareBranches("cloudflare", "workerd", "main", "feature");
+    expect([...url().searchParams]).toEqual([]);
+  });
+
   it("passes history filters to the commit list endpoint", async () => {
     const url = captureRequests();
     const api = new GitHubApi(async () => "test-token");

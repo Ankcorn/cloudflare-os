@@ -261,6 +261,29 @@ describe("GitHubRepoSessionImpl advertising", () => {
     expect(details.id).toBe(oid(1));
     expect(queue.cache.advertised).toEqual([]);
   });
+
+  it("advertises the commit id resolved by resolveRef", async () => {
+    const queue = new TestApprovalQueue();
+    const session = repoSession(queue, {
+      resolveRef: async () => ({ id: oid(1), fromCache: false }),
+    });
+
+    expect(await session.resolveRef("main")).toBe(oid(1));
+    expect(queue.cache.advertised).toEqual([oid(1)]);
+    expect(queue.observations).toEqual(["Resolve main to a commit id"]);
+  });
+
+  it("does not advertise a cache-served resolveRef result", async () => {
+    const queue = new TestApprovalQueue();
+    // Cache-served = a queued push's simulated head or an unpushed commit id: not on GitHub yet.
+    const session = repoSession(queue, {
+      resolveRef: async () => ({ id: oid(1), fromCache: true }),
+    });
+
+    expect(await session.resolveRef()).toBe(oid(1));
+    expect(queue.cache.advertised).toEqual([]);
+    expect(queue.observations).toEqual(["Resolve the default branch to a commit id"]);
+  });
 });
 
 describe("GitHubRepoSessionImpl push", () => {
@@ -341,7 +364,20 @@ describe("GitHubPullRequestImpl advertising", () => {
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2)]);
   });
 
-  it("advertises the revision shas returned by readDiff", async () => {
+  it("advertises the revision shas returned by readDiff, including the merge base", async () => {
+    const queue = new TestApprovalQueue();
+    const session = pullSession(queue, "1", {
+      pullDiff: async () => ({
+        revision: { baseSha: oid(1), headSha: oid(2), mergeBaseSha: oid(3) },
+        files: pagesCursor([]),
+      }),
+    });
+
+    await session.readDiff();
+    expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2), oid(3)]);
+  });
+
+  it("advertises a revision with no merge base", async () => {
     const queue = new TestApprovalQueue();
     const session = pullSession(queue, "1", {
       pullDiff: async () => ({
@@ -352,6 +388,17 @@ describe("GitHubPullRequestImpl advertising", () => {
 
     await session.readDiff();
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2)]);
+  });
+
+  it("advertises the merge base returned by getMergeBase", async () => {
+    const queue = new TestApprovalQueue();
+    const session = pullSession(queue, "1", {
+      pullMergeBase: async () => oid(5),
+    });
+
+    expect(await session.getMergeBase()).toBe(oid(5));
+    expect(queue.cache.advertised).toEqual([oid(5)]);
+    expect(queue.observations).toEqual(["Read merge base for #1"]);
   });
 
   it("advertises commit ids and parents per fetched page of listCommits", async () => {

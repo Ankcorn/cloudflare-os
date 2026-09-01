@@ -24,6 +24,7 @@ export type GitHubRepoResponse = {
   description?: string | null;
   visibility?: "public" | "private" | "internal";
   private?: boolean;
+  default_branch: string;
   owner: GitHubSimpleUser;
 };
 
@@ -177,7 +178,11 @@ export type GitHubCompareResponse = {
   base_commit: {
     sha: string;
   };
-  /** The merge base of the two compared commits (what a three-dot compare diffs from). */
+  /**
+   * The merge base of the two compared commits (what a three-dot compare diffs from). GitHub
+   * documents it as always present; it is optional here so a malformed response is handled
+   * explicitly (see `mergeBaseOfCompare` in github.ts) rather than crashing on a blind read.
+   */
   merge_base_commit?: {
     sha: string;
   };
@@ -448,10 +453,14 @@ export class GitHubApi {
     path: string,
     query: Record<string, string | number | boolean | undefined> | undefined,
     options: ConditionalRequestOptions = {},
+    accept?: string,
   ): Promise<ConditionalRequestResult<T>> {
     const result = await this.#request<T>("GET", path, {
       query,
-      headers: options.ifNoneMatch ? { "If-None-Match": options.ifNoneMatch } : undefined,
+      headers: {
+        ...(options.ifNoneMatch ? { "If-None-Match": options.ifNoneMatch } : undefined),
+        ...(accept ? { Accept: accept } : undefined),
+      },
       okStatuses: [304],
     });
     if (result.status === 304) {
@@ -1129,13 +1138,20 @@ export class GitHubApi {
     )).data;
   }
 
+  /**
+   * `paging` pages the compare's commit listing. Callers that only want the comparison's
+   * metadata (e.g. its `merge_base_commit`) should pass `{ perPage: 1, page: 2 }`: GitHub puts
+   * the full changed-files array -- up to 300 entries, patches included -- on the *first* page
+   * of a compare regardless of `per_page`, while every page carries the static metadata.
+   */
   async compareBranches(
     owner: string,
     repo: string,
     base: string,
     head: string,
+    paging?: { perPage: number; page: number },
   ): Promise<GitHubCompareResponse> {
-    const result = await this.compareBranchesConditional(owner, repo, base, head);
+    const result = await this.compareBranchesConditional(owner, repo, base, head, {}, paging);
     if (result.status === 304) {
       throw new Error("GitHub unexpectedly returned 304 for an unconditional branch compare request.");
     }
@@ -1148,10 +1164,11 @@ export class GitHubApi {
     base: string,
     head: string,
     options: ConditionalRequestOptions = {},
+    paging?: { perPage: number; page: number },
   ): Promise<ConditionalRequestResult<GitHubCompareResponse>> {
     return await this.#conditionalGet<GitHubCompareResponse>(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(`${base}...${head}`)}`,
-      undefined,
+      paging === undefined ? undefined : { per_page: paging.perPage, page: paging.page },
       options,
     );
   }
@@ -1224,6 +1241,26 @@ export class GitHubApi {
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
       undefined,
       options,
+    );
+  }
+
+  /**
+   * Resolve a ref to its commit sha only, via the same endpoint as `getCommitConditional` but
+   * with GitHub's `sha` media type, so the response is the bare sha instead of the full commit
+   * with its whole diff. Same ref grammar: full or truncated commit SHA, branch name, or tag
+   * name (404 if unknown or ambiguous).
+   */
+  async getCommitShaConditional(
+    owner: string,
+    repo: string,
+    ref: string,
+    options: ConditionalRequestOptions = {},
+  ): Promise<ConditionalRequestResult<string>> {
+    return await this.#conditionalGet<string>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+      undefined,
+      options,
+      "application/vnd.github.sha",
     );
   }
 

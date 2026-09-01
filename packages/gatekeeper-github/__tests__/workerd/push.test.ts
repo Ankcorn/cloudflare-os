@@ -102,6 +102,7 @@ class FakeGitHub {
   readonly restCommits = new Map<string, { sha: string, message: string }>();  // ref → commit
   readonly receivePackExchanges: ReceivePackExchange[] = [];
   readonly receivePackResponses: Uint8Array[] = [];
+  defaultBranch = "main";
 
   install(): void {
     vi.stubGlobal("fetch", this.#handle.bind(this));
@@ -155,12 +156,30 @@ class FakeGitHub {
       if (commit === undefined) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
+      // The `sha` media type answers with the bare commit id as text, like GitHub does.
+      if (new Headers(init?.headers).get("Accept") === "application/vnd.github.sha") {
+        return new Response(commit.sha, {
+          headers: { "Content-Type": "application/vnd.github.sha" },
+        });
+      }
       return Response.json({
         sha: commit.sha,
         html_url: `https://github.com/${OWNER}/${REPO}/commit/${commit.sha}`,
         commit: { message: commit.message, author: null, committer: null },
         author: null,
         parents: [],
+      });
+    }
+
+    if (path === API_BASE) {
+      return Response.json({
+        name: REPO,
+        full_name: `${OWNER}/${REPO}`,
+        html_url: `https://github.com/${OWNER}/${REPO}`,
+        description: null,
+        visibility: "public",
+        default_branch: this.defaultBranch,
+        owner: { login: OWNER, html_url: `https://github.com/${OWNER}` },
       });
     }
 
@@ -224,8 +243,11 @@ async function repoGatekeeper() {
     revertAction: (actionId: number) => unwrap(hooks.revertAction(scenario, props, actionId)),
     listBranchesFirstPage: (pageSize: number) =>
       unwrap(hooks.listBranchesFirstPage(scenario, props, pageSize)),
-    getCommit: (ref: string, cache?: TestGitCache) =>
+    getCommit: (ref: string | undefined, cache?: TestGitCache) =>
       unwrap(hooks.getCommit(scenario, props, ref, cache === undefined ? undefined : stubOf(cache))),
+    resolveRef: (ref: string | undefined, cache?: TestGitCache) =>
+      unwrap(hooks.resolveRef(scenario, props, ref, cache === undefined ? undefined : stubOf(cache))),
+    repoMetadata: () => unwrap(hooks.repoMetadata(scenario, props)),
   };
 }
 
@@ -399,6 +421,68 @@ describe("simulation", () => {
     expect(fromCache).toBe(true);
     expect(details.id).toBe(HEAD1);
     expect(details.message).toBe("pending");
+  });
+
+  it("resolveRef maps a branch with a queued push to its simulated head", async () => {
+    const github = new FakeGitHub();
+    github.branches.set("main", BASE);
+    github.branches.set("other", OTHER);
+    github.install();
+    const gk = await repoGatekeeper();
+    const cache = new TestGitCache().withAncestry(BASE, HEAD1)
+      .withCommit(HEAD1, commitPayload([BASE], "feat: simulate me"));
+    await queuePush(gk, cache, new TestApprovalQueue(), "main", HEAD1);
+
+    // Cache-served, so the session withholds advertisement (the commit is not on GitHub yet).
+    expect(await gk.resolveRef("main", cache)).toEqual({ id: HEAD1, fromCache: true });
+    // A real remote resolution is not cache-served.
+    expect(await gk.resolveRef("other", cache)).toEqual({ id: OTHER, fromCache: false });
+  });
+
+  it("resolveRef confirms a queued commit id GitHub does not know yet", async () => {
+    const github = new FakeGitHub();
+    github.branches.set("main", BASE);
+    github.install();
+    const gk = await repoGatekeeper();
+    const cache = new TestGitCache().withAncestry(BASE, HEAD1)
+      .withCommit(HEAD1, commitPayload([BASE], "pending"));
+    await queuePush(gk, cache, new TestApprovalQueue(), "main", HEAD1);
+
+    expect(await gk.resolveRef(HEAD1, cache)).toEqual({ id: HEAD1, fromCache: true });
+    // A commit neither GitHub nor the workspace git cache knows still fails.
+    await expect(gk.resolveRef(OTHER, cache)).rejects.toThrow(/Not Found/);
+  });
+});
+
+describe("default branch", () => {
+  it("reports the default branch in repo metadata and defaults getCommit/resolveRef to it", async () => {
+    const github = new FakeGitHub();
+    github.defaultBranch = "trunk";
+    github.branches.set("trunk", BASE);
+    github.restCommits.set("trunk", { sha: BASE, message: "tip of trunk" });
+    github.install();
+    const gk = await repoGatekeeper();
+
+    expect((await gk.repoMetadata()).defaultBranch).toBe("trunk");
+    expect(await gk.resolveRef(undefined)).toEqual({ id: BASE, fromCache: false });
+    const { details } = await gk.getCommit(undefined);
+    expect(details.id).toBe(BASE);
+    expect(details.message).toBe("tip of trunk");
+  });
+
+  it("simulates a queued push to the default branch through an omitted ref", async () => {
+    const github = new FakeGitHub();
+    github.branches.set("main", BASE);
+    github.install();
+    const gk = await repoGatekeeper();
+    const cache = new TestGitCache().withAncestry(BASE, HEAD1)
+      .withCommit(HEAD1, commitPayload([BASE], "feat: simulate me"));
+    await queuePush(gk, cache, new TestApprovalQueue(), "main", HEAD1);
+
+    expect(await gk.resolveRef(undefined, cache)).toEqual({ id: HEAD1, fromCache: true });
+    const { details, fromCache } = await gk.getCommit(undefined, cache);
+    expect(fromCache).toBe(true);
+    expect(details.id).toBe(HEAD1);
   });
 });
 

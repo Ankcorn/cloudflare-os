@@ -21,6 +21,7 @@ import type {
   GitHubPullRequestDetails,
   GitHubPullRequestDiffFile,
   GitHubPullRequestRevision,
+  GitHubRepoMetadata,
 } from "../../src/types.js";
 
 export { default } from "../../src/github.js";
@@ -80,9 +81,13 @@ type GatekeeperFacet = {
   revertAction(actionId: number): Promise<undefined | { message?: string; canRetry?: boolean }>;
   listBranches(filter: undefined, pageSize: number)
     : Promise<{ next(): Promise<GitHubBranchSummary[] | null> }>;
-  getCommit(ref: string, cache?: RpcStub<GitCache>)
+  getCommit(ref: string | undefined, cache?: RpcStub<GitCache>)
     : Promise<{ details: GitHubCommitDetails, fromCache: boolean }>;
+  resolveRef(ref: string | undefined, cache?: RpcStub<GitCache>)
+    : Promise<{ id: string, fromCache: boolean }>;
+  repoMetadata(): Promise<GitHubRepoMetadata>;
   openPullRequest(id: string, cache?: RpcStub<GitCache>): Promise<GitHubPullRequestDetails>;
+  pullMergeBase(id: string, cache?: RpcStub<GitCache>): Promise<string>;
   pullDiff(id: string, pageSize: number, cache?: RpcStub<GitCache>): Promise<{
     revision: GitHubPullRequestRevision,
     files: { next(): Promise<GitHubPullRequestDiffFile[] | null> },
@@ -223,8 +228,26 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   async getCommit(
-    facetName: string, props: GatekeeperProps, ref: string, cache?: RpcStub<GitCache>,
+    facetName: string, props: GatekeeperProps, ref: string | undefined, cache?: RpcStub<GitCache>,
   ): Promise<Outcome<{ details: GitHubCommitDetails, fromCache: boolean }>> {
     return await outcome(() => this.#gatekeeper(facetName, props).getCommit(ref, cache));
+  }
+
+  async resolveRef(
+    facetName: string, props: GatekeeperProps, ref: string | undefined, cache?: RpcStub<GitCache>,
+  ): Promise<Outcome<{ id: string, fromCache: boolean }>> {
+    return await outcome(() => this.#gatekeeper(facetName, props).resolveRef(ref, cache));
+  }
+
+  async repoMetadata(
+    facetName: string, props: GatekeeperProps,
+  ): Promise<Outcome<GitHubRepoMetadata>> {
+    return await outcome(() => this.#gatekeeper(facetName, props).repoMetadata());
+  }
+
+  async pullMergeBase(
+    facetName: string, props: GatekeeperProps, id: string, cache?: RpcStub<GitCache>,
+  ): Promise<Outcome<string>> {
+    return await outcome(() => this.#gatekeeper(facetName, props).pullMergeBase(id, cache));
   }
 }

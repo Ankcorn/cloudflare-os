@@ -126,7 +126,8 @@ function scenarioCache(): TestGitCache {
 type FakeCommit = { sha: string, message: string, parents?: string[], tree?: string };
 type FakeCompare = {
   base_commit: { sha: string },
-  merge_base_commit: { sha: string },
+  /** Omittable to fake a malformed response: GitHub documents it as always present. */
+  merge_base_commit?: { sha: string },
   commits: FakeCommit[],
   total_commits: number,
   files: unknown[],
@@ -270,8 +271,13 @@ class FakeGitHub {
     }
 
     if (path.startsWith(`${API_BASE}/pulls/`)) {
-      const number = Number(path.slice(`${API_BASE}/pulls/`.length));
-      const pull = this.pulls.get(number);
+      const rest = path.slice(`${API_BASE}/pulls/`.length);
+      if (rest.endsWith("/files")) {
+        return this.pulls.has(Number(rest.slice(0, -"/files".length)))
+          ? Response.json([])
+          : Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const pull = this.pulls.get(Number(rest));
       if (pull === undefined) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
@@ -346,6 +352,8 @@ async function repoGatekeeper() {
     listCommitsFirstPage: (filter: GitHubCommitFilter | undefined, cache?: TestGitCache) =>
       unwrap(hooks.listCommitsFirstPage(
         scenario, props, filter, 50, cache === undefined ? undefined : stubOf(cache))),
+    pullMergeBase: (id: string, cache?: TestGitCache) =>
+      unwrap(hooks.pullMergeBase(scenario, props, id, cache === undefined ? undefined : stubOf(cache))),
   };
 }
 
@@ -406,7 +414,7 @@ describe("provisional pull request over a queued branch-creation push", () => {
     expect(details.changedFiles).toBe(2);
 
     const diff = await gk.pullDiffAll(pr.provisionalId, cache);
-    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD1 });
+    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD1, mergeBaseSha: BASE });
     expect(diff.files.map(file => [file.path, file.status, file.diffOmitted]))
       .toEqual([["hello.txt", "modified", false], ["new.txt", "added", false]]);
     expect(diff.files[0].hunks[0].lines)
@@ -417,6 +425,9 @@ describe("provisional pull request over a queued branch-creation push", () => {
     expect(commits.map(commit => commit.id)).toEqual([HEAD1]);
     expect(commits[0].message).toBe("feat: add new.txt");
     expect(commits[0].parents).toEqual([BASE]);
+
+    // The merge base comes from the simulated comparison, without fetching any diff.
+    expect(await gk.pullMergeBase(pr.provisionalId, cache)).toBe(BASE);
   });
 
   it("walks stacked queued pushes down to the GitHub-known anchor", async () => {
@@ -450,7 +461,7 @@ describe("provisional pull request over a queued branch-creation push", () => {
     expect(commits.map(commit => commit.id)).toEqual([HEAD1, HEAD2]);
 
     const diff = await gk.pullDiffAll(pr.provisionalId, cache);
-    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD2 });
+    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD2, mergeBaseSha: BASE });
     expect(diff.files.map(file => [file.path, file.status]))
       .toEqual([["extra.txt", "added"], ["hello.txt", "modified"], ["new.txt", "added"]]);
   });
@@ -583,11 +594,70 @@ describe("existing pull request with queued head pushes", () => {
     expect(details.mergeable).toBeUndefined();
 
     const diff = await gk.pullDiffAll("7", cache);
-    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD1 });
+    expect(diff.revision).toEqual({ baseSha: BASE, headSha: HEAD1, mergeBaseSha: BASE });
     expect(diff.files.map(file => file.path)).toEqual(["hello.txt", "new.txt"]);
 
     const commits = await gk.pullCommitsAll("7", cache);
     expect(commits.map(commit => commit.id)).toEqual([OLD, HEAD1]);
+
+    // The merge base too reads at the simulated head's comparison.
+    expect(await gk.pullMergeBase("7", cache)).toBe(BASE);
+  });
+});
+
+describe("pull request merge base without queued pushes", () => {
+  const MERGE_BASE = "e".repeat(40);
+
+  /** A real PR (head `topic` at OLD, base `main` at BASE) whose sha compare names MERGE_BASE. */
+  function realPullScenario(): FakeGitHub {
+    const github = scenarioGitHub();
+    github.branches.set("topic", OLD);
+    github.pulls.set(8, pullResponse(8, { ref: "topic", sha: OLD }, { ref: "main", sha: BASE }));
+    github.compares.set(`${BASE}...${OLD}`, {
+      base_commit: { sha: BASE },
+      merge_base_commit: { sha: MERGE_BASE },
+      commits: [],
+      total_commits: 0,
+      files: [],
+    });
+    return github;
+  }
+
+  it("answers from one sha compare, then from the immutable pair cache", async () => {
+    const github = realPullScenario();
+    const gk = await repoGatekeeper();
+
+    expect(await gk.pullMergeBase("8")).toBe(MERGE_BASE);
+
+    // A merge base of two fixed commits is immutable: the recorded answer outlives the compare.
+    github.compares.delete(`${BASE}...${OLD}`);
+    expect(await gk.pullMergeBase("8")).toBe(MERGE_BASE);
+  });
+
+  it("names the merge base in readDiff's revision", async () => {
+    realPullScenario();
+    const gk = await repoGatekeeper();
+
+    const diff = await gk.pullDiffAll("8");
+    expect(diff.revision).toEqual({ baseSha: BASE, headSha: OLD, mergeBaseSha: MERGE_BASE });
+  });
+
+  it("fails rather than approximating when GitHub omits the merge base", async () => {
+    // The base tip is not the merge base; a compare response without `merge_base_commit`
+    // (documented as always present) must not be answered from `base_commit`.
+    const github = realPullScenario();
+    github.compares.set(`${BASE}...${OLD}`, {
+      base_commit: { sha: BASE },
+      commits: [],
+      total_commits: 0,
+      files: [],
+    });
+    const gk = await repoGatekeeper();
+
+    await expect(gk.pullMergeBase("8")).rejects.toThrow(/did not include a merge base/);
+    // readDiff degrades to an absent mergeBaseSha instead of failing the whole diff read.
+    const diff = await gk.pullDiffAll("8");
+    expect(diff.revision).toEqual({ baseSha: BASE, headSha: OLD });
   });
 });
 

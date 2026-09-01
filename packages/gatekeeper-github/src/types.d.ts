@@ -4,9 +4,9 @@
  * A GitHub repo is a Git repo *plus* issues, pull requests, etc.
  *
  * Git-level access works in terms of commit ids: use `listBranches()`, `listTags()`,
- * `listCommits()`, or `getCommit()` to discover commit ids, then mount a commit as a worktree
- * (see the `createWorktree` tool) to read or edit the files it contains. The repository's file
- * *content* is not readable through this interface directly.
+ * `listCommits()`, `resolveRef()`, or `getCommit()` to discover commit ids, then mount a commit
+ * as a worktree (see the `createWorktree` tool) to read or edit the files it contains. The
+ * repository's file *content* is not readable through this interface directly.
  */
 export interface GitHubRepo {
   /** Returns basic metadata about the repository. */
@@ -29,13 +29,24 @@ export interface GitHubRepo {
   listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>>;
 
   /**
+   * Resolves a ref to a full commit id, without fetching the commit's details.
+   *
+   * `ref` may be a full commit id, an unambiguously truncated commit id, a branch name, or a tag
+   * name; it defaults to the default branch, so `resolveRef()` with no argument answers "what
+   * commit is the repository currently at?". This is much cheaper than `getCommit()` -- prefer
+   * it when all you need is the commit id, e.g. to mount a worktree or to resolve a truncated
+   * id mentioned in a code comment, a commit message, or a CI log.
+   */
+  resolveRef(ref?: string): Promise<string>;
+
+  /**
    * Looks up a single commit.
    *
    * `ref` may be a full commit id, an unambiguously truncated commit id, a branch name, or a tag
-   * name. Use this to resolve a truncated commit id -- e.g. one mentioned in a code comment, a
-   * commit message, or a CI log -- to the full id, which the rest of the system requires.
+   * name; it defaults to the default branch, whose latest commit is then returned. If you only
+   * need the commit id, use `resolveRef()` instead, which is much cheaper.
    */
-  getCommit(ref: string): Promise<GitHubCommitDetails>;
+  getCommit(ref?: string): Promise<GitHubCommitDetails>;
 
   /**
    * Lists this repository's commit history, newest first, starting from `options.ref` (the
@@ -222,6 +233,13 @@ export interface GitHubPullRequest extends GitHubIssue {
    */
   listCommits(options?: GitHubPageOptions): Promise<Cursor<GitHubCommitSummary>>;
 
+  /**
+   * Returns the commit id of the pull request's merge base: the common ancestor of its head and
+   * base branches that its diff is computed against. To review the changes in a worktree, mount
+   * the pull request's head commit and diff it against this commit.
+   */
+  getMergeBase(): Promise<string>;
+
   /** Merges the pull request. */
   merge(options?: GitHubPullRequestMergeOptions): Promise<void>;
 }
@@ -246,6 +264,8 @@ export type GitHubRepoRef = {
 export type GitHubRepoMetadata = GitHubRepoRef & {
   description?: string;
   visibility: "public" | "private" | "internal";
+  /** Name of the repository's default branch (e.g. `"main"`). */
+  defaultBranch: string;
 }
 
 /** A GitHub label attached to an issue or pull request. */
@@ -367,6 +387,7 @@ export type GitHubCommitSummary = {
   authorAccount: GitHubActor | null;
   /** Commit ids of this commit's parents: empty for a root commit, two or more for a merge. */
   parents: string[];
+  /** The github.com web page where this commit can be viewed in a browser. */
   url: string;
 }
 
@@ -507,8 +528,15 @@ export type GitHubPullRequestDiffFile = {
 
 /** Identifies the specific revision of a pull request diff. */
 export type GitHubPullRequestRevision = {
+  /** Commit id of the base branch's head. Note that the diff is *not* computed against this
+   *  commit -- see `mergeBaseSha`. */
   baseSha: string;
+  /** Commit id of the pull request's head: the last commit in the pull request. */
   headSha: string;
+  /** Commit id of the merge base -- the common ancestor of `headSha` and `baseSha` that the
+   *  diff is computed against. To review the changes in a worktree, mount `headSha` and diff it
+   *  against this commit. Omitted only when the merge base could not be determined. */
+  mergeBaseSha?: string;
 }
 
 /** A pull request diff pinned to a specific revision. */

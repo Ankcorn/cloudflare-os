@@ -26,6 +26,7 @@ import {
   exchangeAuthCode,
   revokeOAuthGrant,
   type ConditionalRequestResult,
+  type GitHubCompareResponse,
   type GitHubIssueCommentResponse,
   type GitHubIssueResponse,
   type GitHubLabelResponse,
@@ -339,6 +340,9 @@ const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;
 const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;
 const ENTITY_CACHE_TTL_MS = 30 * 1000;
 const LIST_CACHE_TTL_MS = 15 * 1000;
+// For values that are pure functions of immutable inputs (e.g. the merge base of two commits,
+// keyed by both shas): never stale, so only a generation bump (`#clearCaches`) evicts them.
+const IMMUTABLE_CACHE_TTL_MS = Infinity;
 const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
@@ -478,6 +482,20 @@ function repoRef(owner: string, repo: string): GitHubRepoRef {
     fullName: `${owner}/${repo}`,
     url: canonicalRepoUrl(owner, repo),
   };
+}
+
+/**
+ * The compare response's merge base. GitHub documents `merge_base_commit` as always present; a
+ * response without one is treated as malformed rather than approximated -- the base tip
+ * (`base_commit`) is *not* the merge base, and reads that need one (tree diffs, merge-base
+ * lookups) would silently return wrong data if it stood in.
+ */
+function mergeBaseOfCompare(compare: GitHubCompareResponse): GitOid {
+  const sha = compare.merge_base_commit?.sha;
+  if (sha === undefined) {
+    throw new Error("GitHub's compare response did not include a merge base.");
+  }
+  return sha;
 }
 
 function actorsFromUsers(
@@ -2333,7 +2351,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
 
   async #getRepoMetadata(): Promise<GitHubRepoMetadata> {
-    const key = this.#cacheKey("repo", this.ctx.props.owner, this.ctx.props.repo);
+    // "repo-v2": the stored shape gained `defaultBranch`, and etag revalidation can keep an
+    // old-shaped entry alive past the TTL indefinitely, so a shape change needs a new key.
+    const key = this.#cacheKey("repo-v2", this.ctx.props.owner, this.ctx.props.repo);
     return await this.#loadCachedWithEtag<GitHubRepoMetadata>(key, ENTITY_CACHE_TTL_MS, async etag => {
       const result = await this.#withApi(api =>
         api.getRepoConditional(this.ctx.props.owner, this.ctx.props.repo, { ifNoneMatch: etag })
@@ -2349,6 +2369,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           ...repoRef(this.ctx.props.owner, this.ctx.props.repo),
           description: result.data.description ?? undefined,
           visibility: result.data.visibility ?? (result.data.private ? "private" : "public"),
+          defaultBranch: result.data.default_branch,
         },
       };
     });
@@ -2619,6 +2640,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           action.options.base,
           action.options.head,
         ));
+        this.#recordCompareMergeBase(comparison);
         baseSha = comparison.base_commit.sha;
         headSha = comparison.commits?.at(-1)?.sha ?? comparison.base_commit.sha;
         commits = comparison.total_commits;
@@ -3269,7 +3291,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       }
 
       const cached = await this.#compareForProvisionalPull(
-        this.#cacheKey("compare-provisional", logicalId), action);
+        this.#cacheKey("compare-provisional-v2", logicalId), action);
       return { revision: cached.revision, files: new ArrayCursor(cached.files, pageSize) };
     }
 
@@ -3285,16 +3307,21 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return { revision: simulated.revision, files: new ArrayCursor(simulated.files, pageSize) };
       }
     }
-    const revision = {
-      baseSha: details.base.sha,
-      headSha: details.head.sha,
-    };
-    const cacheKey = this.#cacheKey("diff", realId, revision.baseSha || "pending", revision.headSha || "pending");
+    // "diff-v2": the stored revision gained `mergeBaseSha`, and old-shaped entries under the
+    // previous key may outlive the TTL via etag revalidation.
+    const cacheKey = this.#cacheKey("diff-v2", realId, details.base.sha || "pending", details.head.sha || "pending");
     const cached = this.#loadCached<{ revision: GitHubPullRequestRevision; files: GitHubPullRequestDiffFile[] }>(cacheKey, ENTITY_CACHE_TTL_MS);
     if (cached) {
       return { revision: cached.revision, files: new ArrayCursor(cached.files, pageSize) };
     }
 
+    const revision: GitHubPullRequestRevision = {
+      baseSha: details.base.sha,
+      headSha: details.head.sha,
+      // The PR-files pages below diff against the merge base but never name it; one compare
+      // (cached immutably per sha pair) recovers it.
+      mergeBaseSha: await this.#mergeBaseOrWarn(details.base.sha, details.head.sha),
+    };
     const allFiles: GitHubPullRequestDiffFile[] = [];
 
     return {
@@ -3961,6 +3988,42 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#getDiff(id, pageSize, gitCache);
   }
 
+  /**
+   * The merge base of a pull request's head and base, resolved like `pullDiff`'s revision (same
+   * provisional and queued-push simulation paths) but without fetching any diff. Always a commit
+   * GitHub itself knows -- even a simulated head's merge base comes from a live compare against
+   * the pending chain's anchor -- so sessions may advertise it.
+   */
+  async pullMergeBase(id: string, gitCache?: RpcStub<GitCache>): Promise<GitOid> {
+    if (id.startsWith("~") && !this.#resolveProvisionalId(id)) {
+      const action = this.#findCreateAction(id, "pull") as CreatePullRequestAction | undefined;
+      if (!action) {
+        throw new Error(`Provisional pull request ${id} is no longer available.`);
+      }
+      const simulated = await this.#simulatedPullComparisonOrWarn(
+        gitCache, action.options.base, action.options.head);
+      if (simulated?.revision.mergeBaseSha !== undefined) return simulated.revision.mergeBaseSha;
+      const cached = await this.#compareForProvisionalPull(
+        this.#cacheKey("compare-provisional-v2", id), action);
+      if (cached.revision.mergeBaseSha === undefined) {
+        throw new Error(`GitHub did not report a merge base for pull request ${id}.`);
+      }
+      return cached.revision.mergeBaseSha;
+    }
+
+    const realId = id.startsWith("~") ? this.#resolveProvisionalId(id)! : id;
+    const details = await this.#getRemotePullRequestDetails(realId);
+    // A head branch with queued pushes reads at its simulated head, like every other read of
+    // that branch; its comparison already knows the merge base it diffs from.
+    if (gitCache !== undefined && details.head.repo.fullName === this.#repoFullName() &&
+        this.#pendingPushActions(details.head.ref).length > 0) {
+      const simulated = await this.#simulatedPullComparisonOrWarn(
+        gitCache, details.base.ref, details.head.ref);
+      if (simulated?.revision.mergeBaseSha !== undefined) return simulated.revision.mergeBaseSha;
+    }
+    return await this.#getMergeBaseCached(details.base.sha, details.head.sha);
+  }
+
   async pullThreads(id: string, pageSize: number): Promise<Cursor<GitHubDiffThread>> {
     return this.#getDiffThreads(id, pageSize);
   }
@@ -4034,6 +4097,57 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       api.getBranchHead(this.ctx.props.owner, this.ctx.props.repo, branch));
     this.#storeCached(key, { head });
     return head;
+  }
+
+  /**
+   * Record a compare response's merge base in the pair-keyed immutable cache: the merge base of
+   * two fixed commits never changes, so any compare that names one -- whatever read wanted the
+   * compare -- makes later merge-base lookups of that pair free. `headSha` is the compare's head
+   * commit when the caller knows it by sha; a compare made by ref otherwise names its own head
+   * only as the last listed commit (absent when the compared range is empty or truncated by
+   * paging, in which case nothing is recorded).
+   */
+  #recordCompareMergeBase(compare: GitHubCompareResponse, headSha?: string): void {
+    const mergeBase = compare.merge_base_commit?.sha;
+    const head = headSha ?? compare.commits?.at(-1)?.sha;
+    if (mergeBase === undefined || head === undefined || !isCommitOid(head)) return;
+    this.#storeCached(this.#cacheKey("merge-base", compare.base_commit.sha, head), mergeBase);
+  }
+
+  /**
+   * The merge base of two commits: answered from the pair-keyed cache when a previous compare
+   * already named it, else by one metadata-only compare call -- page 2 of the paged form, since
+   * GitHub puts the changed-files array (up to 300 entries, patches included) only on a
+   * compare's first page, while every page carries the metadata this read wants.
+   */
+  async #getMergeBaseCached(baseSha: string, headSha: string): Promise<GitOid> {
+    const key = this.#cacheKey("merge-base", baseSha, headSha);
+    const cached = this.#loadCached<GitOid>(key, IMMUTABLE_CACHE_TTL_MS);
+    if (cached !== undefined) return cached;
+    const compare = await this.#withApi(api =>
+      api.compareBranches(this.ctx.props.owner, this.ctx.props.repo, baseSha, headSha,
+        { perPage: 1, page: 2 }));
+    const mergeBase = mergeBaseOfCompare(compare);
+    this.#storeCached(key, mergeBase);
+    return mergeBase;
+  }
+
+  /**
+   * `#getMergeBaseCached`, degrading a failure (or a sha that is not a full commit id, e.g. a
+   * provisional pull request's empty one) to undefined with a warning: the diff read this
+   * decorates works without a merge base -- for instance a head commit from a deleted fork that
+   * GitHub can no longer compare -- so it must not fail outright.
+   */
+  async #mergeBaseOrWarn(baseSha: string, headSha: string): Promise<GitOid | undefined> {
+    if (!isCommitOid(baseSha) || !isCommitOid(headSha)) return undefined;
+    try {
+      return await this.#getMergeBaseCached(baseSha, headSha);
+    } catch (error) {
+      logger.warn("failed to determine a pull request's merge base", {
+        event: "pull.request.merge.base.failed", error,
+      });
+      return undefined;
+    }
   }
 
   /** Whether GitHub knows this commit (the anchor test for pending-chain walks). */
@@ -4182,7 +4296,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const chain = await this.#collectPendingChain(gitCache, simulatedHead);
     const compare = await this.#withApi(api =>
       api.compareBranches(this.ctx.props.owner, this.ctx.props.repo, baseRef, chain.anchor));
-    const mergeBase = compare.merge_base_commit?.sha ?? compare.base_commit.sha;
+    this.#recordCompareMergeBase(compare, chain.anchor);
+    // Malformed (merge-base-less) responses throw here, degrading via
+    // #simulatedPullComparisonOrWarn: the tree diff below would be wrong against any other base.
+    const mergeBase = mergeBaseOfCompare(compare);
 
     const newTree = chain.commits.length > 0
       ? chain.commits[0].tree
@@ -4191,7 +4308,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       this.#treeDiffSource(gitCache), await this.#treeOidOfCommit(gitCache, mergeBase), newTree);
 
     const result: SimulatedPullComparison = {
-      revision: { baseSha: compare.base_commit.sha, headSha: simulatedHead },
+      // The pending chain descends from the anchor without touching the base branch, so the
+      // diff's merge base is the compare's (base, anchor) one.
+      revision: { baseSha: compare.base_commit.sha, headSha: simulatedHead, mergeBaseSha: mergeBase },
       files,
       additions: files.reduce((sum, file) => sum + file.additions, 0),
       deletions: files.reduce((sum, file) => sum + file.deletions, 0),
@@ -4230,7 +4349,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   /**
    * GitHub's live `base...head` compare for a provisional pull request with no queued-push
    * overlay, cached and normalized. A 404 -- either branch missing from the remote -- becomes an
-   * agent-actionable error instead of a raw API failure.
+   * agent-actionable error instead of a raw API failure. Callers key this under
+   * `compare-provisional-v2`: the stored revision gained `mergeBaseSha`, and etag revalidation
+   * can keep an old-shaped entry alive past the TTL.
    */
   async #compareForProvisionalPull(cacheKey: string, action: CreatePullRequestAction): Promise<{
     revision: GitHubPullRequestRevision;
@@ -4252,9 +4373,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           return comparison;
         }
 
+        this.#recordCompareMergeBase(comparison.data);
         const revision = {
           baseSha: comparison.data.base_commit.sha,
           headSha: comparison.data.commits?.at(-1)?.sha ?? comparison.data.base_commit.sha,
+          mergeBaseSha: comparison.data.merge_base_commit?.sha,
         };
         return {
           status: 200,
@@ -4413,8 +4536,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
    * permanently wrong pull-routing hint that also makes future push marking walks skip the
    * object as remote-known).
    */
-  async getCommit(ref: string, gitCache?: RpcStub<GitCache>)
+  async getCommit(refOrDefault: string | undefined, gitCache?: RpcStub<GitCache>)
       : Promise<{ details: GitHubCommitDetails, fromCache: boolean }> {
+    // An omitted ref means the default branch, resolved here rather than passed through to
+    // GitHub so a queued push to the default branch still simulates.
+    const ref = refOrDefault ?? (await this.#getRepoMetadata()).defaultBranch;
     // Simulation: a branch name with queued pushes resolves to its simulated head, read from the
     // workspace git cache (a queued commit reads exactly as it will once pushed).
     if (gitCache !== undefined && this.#pendingPushActions(ref).length > 0) {
@@ -4466,6 +4592,67 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         headers: result.headers,
         data: normalizeCommitDetails(result.data),
       };
+    });
+  }
+
+  /**
+   * Resolve a ref to a full commit id for the session, without `getCommit`'s full-commit REST
+   * read (whose response carries the commit's whole diff). Same simulation semantics: a branch
+   * with queued pushes resolves to its simulated head, and a queued-push commit id GitHub does
+   * not know yet is confirmed from the workspace git cache -- both reported as `fromCache`,
+   * which the session must not advertise (see `getCommit`).
+   */
+  async resolveRef(refOrDefault: string | undefined, gitCache?: RpcStub<GitCache>)
+      : Promise<{ id: GitOid; fromCache: boolean }> {
+    const ref = refOrDefault ?? (await this.#getRepoMetadata()).defaultBranch;
+    if (gitCache !== undefined && this.#pendingPushActions(ref).length > 0) {
+      const realHead = await this.#getBranchHeadCached(ref);
+      const simulated = this.#simulateBranchHead(ref, realHead);
+      if (simulated !== null && simulated !== realHead) {
+        // Confirm the commit is actually served by the cache's scoped view (as getCommit does)
+        // before answering with an id GitHub does not know.
+        const object = await gitCache.get(simulated);
+        if (object !== null && object.type === "commit") {
+          return { id: simulated, fromCache: true };
+        }
+      }
+      if (realHead === null) {
+        throw new Error(`No commit found for ref "${ref}".`);
+      }
+      // The overlay was a no-op; fall through to the real read.
+    }
+
+    try {
+      return { id: await this.#resolveRemoteRef(ref), fromCache: false };
+    } catch (error) {
+      // A full commit id GitHub doesn't know yet may be queued for push; confirm it from the
+      // workspace git cache so the caller sees the world as if the push had landed.
+      if (gitCache !== undefined && isCommitOid(ref) &&
+          error instanceof GitHubApiError && error.status === 404) {
+        const object = await gitCache.get(ref);
+        if (object !== null && object.type === "commit") return { id: ref, fromCache: true };
+      }
+      throw error;
+    }
+  }
+
+  async #resolveRemoteRef(ref: string): Promise<GitOid> {
+    // Like #getRemoteCommitDetails: the resolution of a branch or tag name is mutable, hence the
+    // short TTL.
+    const cacheKey = this.#cacheKey("resolve-ref", stableKey(ref));
+    return await this.#loadCachedWithEtag<GitOid>(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
+      const result = await this.#withApi(api =>
+        api.getCommitShaConditional(this.ctx.props.owner, this.ctx.props.repo, ref, { ifNoneMatch: etag })
+      );
+      if (result.status === 304) {
+        return result;
+      }
+
+      const sha = result.data.trim();
+      if (!isCommitOid(sha)) {
+        throw new Error(`GitHub returned an unexpected response for ref "${ref}".`);
+      }
+      return { status: 200, headers: result.headers, data: sha };
     });
   }
 
@@ -4599,7 +4786,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       }
 
       const cached = await this.#compareForProvisionalPull(
-        this.#cacheKey("compare-provisional", logicalId), action);
+        this.#cacheKey("compare-provisional-v2", logicalId), action);
       return new ArrayCursor(cached.commits, pageSize);
     }
 
@@ -5033,13 +5220,29 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     return await this.#gitCache.wrap(cursor, tag => [tag.commit]);
   }
 
-  async getCommit(ref: string): Promise<GitHubCommitDetails> {
+  async resolveRef(ref?: string): Promise<string> {
+    const { id, fromCache } =
+      await this.#gatekeeper.resolveRef(ref, await this.#gitCache.stub());
+    await this.#approvalQueue.authorizeObservation({
+      title: `Resolve ${ref ?? "the default branch"} to a commit id`,
+      description: `Resolve ${ref === undefined ? "the default branch" : `"${ref}"`}`
+        + ` to commit ${id} in the GitHub repository.`,
+    });
+    // A cache-served resolution is never advertised, for the same reasons as getCommit.
+    if (!fromCache) {
+      await this.#gitCache.advertise([id]);
+    }
+    return id;
+  }
+
+  async getCommit(ref?: string): Promise<GitHubCommitDetails> {
     const { details, fromCache } =
       await this.#gatekeeper.getCommit(ref, await this.#gitCache.stub());
     await this.#approvalQueue.authorizeObservation({
       title: `Read commit ${details.id.slice(0, 12)}`,
       description: `Read commit ${details.id}`
-        + `${ref === details.id ? "" : ` (resolved from "${ref}")`} in the GitHub repository.`,
+        + `${ref === undefined ? " (head of the default branch)"
+          : ref === details.id ? "" : ` (resolved from "${ref}")`} in the GitHub repository.`,
     });
     // A cache-served read is never advertised: either the commit was populated from this remote
     // in the first place (provenance already recorded; re-advertising is a no-op) or it is part
@@ -5055,7 +5258,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     if (!isCommitOid(commitId)) {
       throw new Error(
         `push() requires a full 40-character commit id; got ${JSON.stringify(commitId)}. ` +
-        `Use getCommit() to resolve a truncated id.`);
+        `Use resolveRef() to resolve a truncated id.`);
     }
     // Binding the push's expected old head reads the branch's current state.
     await this.#approvalQueue.authorizeObservation({
@@ -5248,9 +5451,23 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
     const diff = await this.gatekeeper.pullDiff(
       this.logicalId, options?.resultsPerPage ?? 20, await this.#gitCache.stub());
     // A simulated head revision (a queued push's commit) is withheld from advertising.
-    await this.#gitCache.advertise([diff.revision.baseSha, diff.revision.headSha]
-      .filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
+    await this.#gitCache.advertise(
+      [diff.revision.baseSha, diff.revision.headSha, diff.revision.mergeBaseSha ?? ""]
+        .filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
     return diff;
+  }
+
+  async getMergeBase(): Promise<string> {
+    await this.approvalQueue.authorizeObservation({
+      title: `Read merge base for #${this.logicalId}`,
+      description: `Read the merge base commit of pull request #${this.logicalId}.`,
+    });
+    const mergeBase = await this.gatekeeper.pullMergeBase(
+      this.logicalId, await this.#gitCache.stub());
+    // A merge base is always a commit GitHub itself knows (see pullMergeBase), so it advertises
+    // unconditionally.
+    await this.#gitCache.advertise([mergeBase]);
+    return mergeBase;
   }
 
   async listCommits(options?: GitHubPageOptions): Promise<Cursor<GitHubCommitSummary>> {
