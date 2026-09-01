@@ -13,6 +13,7 @@ export type EmailDesignerKind = "designerEmail" | "designerTemplate" | "designer
 const INHERITED_CLONE_FIELDS = [
   "templateId", "appType", "appData", "data", "headers", "settings",
 ] as const;
+const REQUEST_ONLY_SETTINGS = new Set(["brandedDomain", "dedicatedIp"]);
 const SOURCE_COMPARISON_FIELDS = [
   "templateId", "appType", "appData", "data", "headers", "settings",
   "contentId", "associatedStates", "state", "status",
@@ -194,7 +195,25 @@ export function matchesDesignerCloneConfiguration(
 ): boolean {
   let createdSnapshot = designerCloneSnapshot(asset);
   return INHERITED_CLONE_FIELDS.every(field =>
-    JSON.stringify(createdSnapshot[field]) === JSON.stringify(sourceSnapshot[field]));
+    JSON.stringify(postflightSnapshotValue(field, createdSnapshot[field])) ===
+      JSON.stringify(postflightSnapshotValue(field, sourceSnapshot[field])));
+}
+
+function postflightSnapshotValue(field: string, snapshot: DesignerSnapshotValue): DesignerSnapshotValue {
+  if (field !== "settings" || !snapshot.present || !snapshot.value ||
+      typeof snapshot.value !== "object" || Array.isArray(snapshot.value)) return snapshot;
+  let settings = Object.fromEntries(Object.entries(snapshot.value).filter(([key]) => !REQUEST_ONLY_SETTINGS.has(key)));
+  return Object.keys(settings).length === 0 ? { present: false } : { present: true, value: settings };
+}
+
+function postflightApproved(approved: Record<string, unknown>): Record<string, unknown> {
+  let settings = approved.settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return approved;
+  let result = { ...approved };
+  let observable = Object.fromEntries(Object.entries(settings).filter(([key]) => !REQUEST_ONLY_SETTINGS.has(key)));
+  if (Object.keys(observable).length === 0) delete result.settings;
+  else result.settings = observable;
+  return result;
 }
 
 function createDescription(action: Extract<EmailDesignerAction, { type: "designerCreate" }>, name: string): string {
@@ -367,7 +386,7 @@ async function verifyCreation(
       programId: created.appData.programId === undefined ? undefined : String(created.appData.programId),
     },
   };
-  if (!created || String(created.id) !== id || !containsApproved(comparable, approved) ||
+  if (!created || String(created.id) !== id || !containsApproved(comparable, postflightApproved(approved)) ||
       inherited && !matchesDesignerCloneConfiguration(created as Record<string, unknown>, inherited)) {
     throw new Error(`Marketo could not verify the created designer asset ${id} against the approved request.`);
   }

@@ -1169,6 +1169,40 @@ function emailDesignerContext(client: Partial<MarketoClient>, initial: EmailDesi
 }
 
 describe("new Email Designer", () => {
+  it("ignores request-only settings during postflight verification but keeps them in approval", async () => {
+    let action: EmailDesignerAction = {
+      id: 1,
+      type: "designerCreate",
+      asset: "designerEmail",
+      provisionalId: "~1",
+      body: {
+        name: "Email",
+        settings: {
+          brandedDomain: "click.example.com",
+          dedicatedIp: "192.0.2.1",
+        },
+      },
+    };
+    let sent: Record<string, unknown> | undefined;
+    let recorded: string | undefined;
+
+    await executeEmailDesignerAction(action, {
+      createDesignerAsset: async (_kind: unknown, body: Record<string, unknown>) => {
+        sent = body;
+        return [{ id: "email-1" }];
+      },
+      getDesignerAsset: async () => ({
+        id: "email-1",
+        name: "Email",
+      }),
+    } as unknown as MarketoClient, String, Number, (_provisionalId, realId) => { recorded = realId; });
+
+    expect(sent).toEqual(action.body);
+    expect(describeAction(action).description).toContain("click.example.com");
+    expect(describeAction(action).description).toContain("192.0.2.1");
+    expect(recorded).toBe("email-1");
+  });
+
   it("snapshots the operation-specific associated content id for lifecycle approvals", async () => {
     for (let [operation, contentId, sourceState] of [
       ["approve", "draft-1", "draft"],

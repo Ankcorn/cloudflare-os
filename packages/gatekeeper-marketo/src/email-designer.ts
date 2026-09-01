@@ -307,6 +307,7 @@ function overlay(base: Record<string, unknown>, pending: EmailDesignerAction[]):
 }
 
 function matchesList(
+  ctx: EmailDesignerContext,
   item: Record<string, unknown>,
   workspaceId: string,
   options: MarketoDesignerListOptions & { templateId?: string; fragmentType?: string },
@@ -319,7 +320,8 @@ function matchesList(
   if (options.name !== undefined && item.name !== options.name) return false;
   if (options.status !== undefined && !options.status.includes(String(item.status))) return false;
   if (!options.includeArchived && String(item.status).toLowerCase() === "archived") return false;
-  if (options.templateId !== undefined && item.templateId !== options.templateId) return false;
+  if (options.templateId !== undefined &&
+      (item.templateId === undefined || !same(ctx, String(item.templateId), options.templateId))) return false;
   if (options.fragmentType !== undefined && item.fragmentType !== options.fragmentType) return false;
   return true;
 }
@@ -410,12 +412,18 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     if (!Number.isSafeInteger(pageIndex) || pageIndex < 0) throw new Error("pageIndex must be a non-negative integer.");
     if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) throw new Error("pageSize must be between 1 and 50.");
     let status = stringArray(options.status, "status");
+    let templateId = options.templateId === undefined
+      ? undefined : id(options.templateId, "templateId", this.#ctx, "designerTemplate");
+    let providerTemplateId = templateId === undefined ? undefined : this.#ctx.resolveDesignerId(templateId);
+    if (templateId !== undefined && providerTemplateId === undefined) {
+      throw new Error(`Designer template ${templateId} is still pending creation.`);
+    }
     let client = await this.#ctx.client();
     let query = {
       workspaceId: workspace, folderId: options.folderId, folderType: options.folderType, name: options.name,
       status, sortKey: options.sortKey, sortOrder: options.sortOrder,
       includeArchived: options.includeArchived, isCreatedByMe: options.isCreatedByMe,
-      isModifiedByMe: options.isModifiedByMe, templateId: options.templateId, fragmentType: options.fragmentType,
+      isModifiedByMe: options.isModifiedByMe, templateId: providerTemplateId, fragmentType: options.fragmentType,
     };
     let pending = this.#ctx.pendingDesigner().filter(action => action.asset === kind);
     if (pending.length === 0) {
@@ -424,7 +432,14 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
       if (raw.currentPage !== pageIndex) {
         throw new Error(`Marketo returned designer page ${String(raw.currentPage)} when page ${pageIndex} was requested.`);
       }
-      if (items.some(item => !matchesList(item, workspace, { ...options, status }))) {
+      if (items.length > pageSize || raw.pageSize !== undefined &&
+          (raw.pageSize > pageSize || items.length > raw.pageSize)) {
+        throw new Error("Marketo returned inconsistent designer page size metadata.");
+      }
+      if (raw.totalItems !== undefined && raw.totalItems < items.length) {
+        throw new Error("Marketo returned inconsistent designer paging totals.");
+      }
+      if (items.some(item => !matchesList(this.#ctx, item, workspace, { ...options, status, templateId }))) {
         throw new Error("Marketo returned a designer asset outside the requested list filters.");
       }
       await this.#ctx.observe(`List Marketo designer ${kind}`, `Read ${items.length} asset(s) in workspace ${workspace}.`);
@@ -454,7 +469,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         (action.type === "designerCreate" || action.type === "designerClone") && same(this.#ctx, action.provisionalId, candidateId));
       let first = actions(this.#ctx, kind, candidateId)[0];
       let original = isCreation || !first ? undefined : await summary(this.#ctx, kind, candidateId, first.id);
-      let originalMatches = original === undefined ? false : matchesList(original, workspace, { ...options, status });
+      let originalMatches = original === undefined ? false : matchesList(this.#ctx, original, workspace, { ...options, status, templateId });
       if (actions(this.#ctx, kind, candidateId).some(action => action.type === "designerDelete")) {
         candidates.set(key, { logicalId: candidateId, item: null, isCreation, originalMatches });
       } else {
@@ -468,7 +483,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     }
 
     let matchingCandidates = [...candidates.entries()].filter(([, candidate]) =>
-      candidate.item && matchesList(candidate.item, workspace, { ...options, status }));
+      candidate.item && matchesList(this.#ctx, candidate.item, workspace, { ...options, status, templateId }));
     let seen = new Set<string>();
     let encounteredCandidates = new Set<string>();
     let merged: Record<string, unknown>[] = [];
@@ -484,16 +499,26 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
       if (raw.currentPage !== requestedPage) {
         throw new Error(`Marketo returned designer page ${String(raw.currentPage)} when page ${requestedPage} was requested.`);
       }
+      let page = raw.items ?? [];
+      if (page.length > DESIGNER_PAGE_SIZE || raw.pageSize !== undefined &&
+          (raw.pageSize > DESIGNER_PAGE_SIZE || page.length > raw.pageSize)) {
+        throw new Error("Marketo returned inconsistent designer page size metadata.");
+      }
+      if (upstreamPage > 1 && raw.totalItems !== upstreamTotal) {
+        throw new Error("Marketo returned inconsistent designer paging totals.");
+      }
       upstreamTotal ??= raw.totalItems;
+      if (raw.totalItems !== undefined && raw.totalItems < page.length) {
+        throw new Error("Marketo returned inconsistent designer paging totals.");
+      }
       if (options.sortKey !== undefined && raw.totalItems !== undefined &&
           raw.totalItems > MAX_SORTED_DESIGNER_ITEMS) {
         throw new Error(`Sorted pending Designer lists cannot exceed ${MAX_SORTED_DESIGNER_ITEMS} assets.`);
       }
-      let page = raw.items ?? [];
       let seenBefore = seen.size;
       for (let item of page) {
         let normalized = normalize(item);
-        if (!matchesList(normalized, workspace, { ...options, status })) {
+        if (!matchesList(this.#ctx, normalized, workspace, { ...options, status, templateId })) {
           throw new Error("Marketo returned a designer asset outside the requested list filters.");
         }
         let assetId = item.id === undefined ? undefined : String(item.id);
@@ -505,7 +530,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
         if (candidate) {
           encounteredCandidates.add(key);
           if (options.sortKey === undefined && candidate.item &&
-              matchesList(candidate.item, workspace, { ...options, status })) merged.push(candidate.item);
+              matchesList(this.#ctx, candidate.item, workspace, { ...options, status, templateId })) merged.push(candidate.item);
         } else {
           merged.push(normalized);
         }
@@ -538,7 +563,7 @@ export class MarketoEmailDesignerImpl extends RpcTarget {
     if (totalItems !== undefined) {
       for (let [key, candidate] of candidates) {
         let resolvedCreation = candidate.isCreation && key !== candidate.logicalId;
-        let finalMatches = Boolean(candidate.item && matchesList(candidate.item, workspace, { ...options, status }));
+        let finalMatches = Boolean(candidate.item && matchesList(this.#ctx, candidate.item, workspace, { ...options, status, templateId }));
         if (!resolvedCreation) totalItems += Number(finalMatches) - Number(candidate.originalMatches);
       }
     }

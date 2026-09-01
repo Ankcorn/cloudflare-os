@@ -27,7 +27,9 @@ function context(
     dispose: () => {},
     retain: () => {},
     allocateProvisional: () => "~1",
-    logicalKind: () => undefined,
+    logicalKind: id => actions.find(action =>
+      (action.type === "designerCreate" || action.type === "designerClone") &&
+      action.provisionalId === id)?.asset,
     pendingDesigner: () => actions,
     resolveDesignerId,
     submitDesigner: async (action: EmailDesignerActionInput) => {
@@ -82,6 +84,70 @@ describe("Email Designer pending-state simulation", () => {
     await expect(designer.listEmails("1", { pageIndex: 0 }))
       .rejects.toThrow(/page 1 when page 0 was requested/);
     expect(observations).toBe(0);
+  });
+
+  it("rejects oversized and inconsistent provider list pages before observation", async () => {
+    let observations = 0;
+    let response = {
+      items: [
+        { id: "email-1", appData: { workspaceId: "1" } },
+        { id: "email-2", appData: { workspaceId: "1" } },
+      ],
+      totalItems: 2,
+      currentPage: 0,
+      pageSize: 1,
+    };
+    let { ctx } = context({ filterDesignerAssets: async () => response });
+    ctx.observe = async () => { observations++; };
+    let designer = new MarketoEmailDesignerImpl(ctx);
+
+    await expect(designer.listEmails("1", { pageSize: 1 }))
+      .rejects.toThrow(/page size metadata/);
+    expect(observations).toBe(0);
+
+    let page = 0;
+    ctx.client = async () => ({
+      getDesignerAsset: async () => ({ id: "pending", appData: { workspaceId: "1" } }),
+      filterDesignerAssets: async () => ({
+        items: Array.from({ length: page++ === 0 ? 50 : 10 }, (_, index) => ({
+          id: `email-${page}-${index}`,
+          appData: { workspaceId: "1" },
+        })),
+        totalItems: page === 1 ? 100 : 99,
+        currentPage: page - 1,
+        pageSize: 50,
+      }),
+    }) as unknown as MarketoClient;
+    ctx.pendingDesigner = () => [{
+      id: 1, type: "designerDelete", asset: "designerEmail", targetId: "pending",
+    }];
+    await expect(designer.listEmails("1", { pageIndex: 2, pageSize: 20 }))
+      .rejects.toThrow(/inconsistent designer paging totals/);
+    expect(observations).toBe(0);
+  });
+
+  it("resolves a retained template handle for provider filtering and logical comparison", async () => {
+    let requestedTemplate: string | undefined;
+    let { ctx } = context({
+      filterDesignerAssets: async (_kind, options) => {
+        requestedTemplate = options.templateId;
+        return {
+          items: [{
+            id: "email-1", name: "Email", templateId: "template-42",
+            appData: { workspaceId: "1" },
+          }],
+          totalItems: 1, currentPage: 0, pageSize: 20,
+        };
+      },
+    }, [{
+      id: 1, type: "designerCreate", asset: "designerTemplate", provisionalId: "~template",
+      body: { name: "Template" },
+    }], id => id === "~template" ? "template-42" : id);
+
+    let result = await new MarketoEmailDesignerImpl(ctx).listEmails("1", { templateId: "~template" });
+
+    expect(requestedTemplate).toBe("template-42");
+    expect(result.items.map(item => item.id)).toEqual(["email-1"]);
   });
 
   it("validates every upstream row against list filters when pending actions exist", async () => {
@@ -736,7 +802,7 @@ describe("Email Designer pending-state simulation", () => {
 
   it("rejects a template and content in the same email create without a pending row or action", async () => {
     let { actions, ctx } = context({
-      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 50 }),
+      filterDesignerAssets: async () => ({ items: [], totalItems: 0, currentPage: 0, pageSize: 20 }),
     });
     let designer = new MarketoEmailDesignerImpl(ctx);
 
