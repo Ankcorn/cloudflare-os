@@ -386,7 +386,10 @@ type AccountCredentialState = {
   generation: number;
 };
 
-type ObserverAdmissionState = AccountCredentialState & { observerEpoch: number };
+type ObserverAdmissionState = AccountCredentialState & {
+  observerEpoch: number;
+  reconnecting: boolean;
+};
 
 type StoredObserver = {
   accountId: string;
@@ -483,6 +486,7 @@ export class UserAccount extends DurableObject<Env> {
     if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
+    generation = this.#advanceCredentialGeneration();
     this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
 
     try {
@@ -550,6 +554,7 @@ export class UserAccount extends DurableObject<Env> {
     return {
       ...this.getCredentialState(),
       observerEpoch: this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0,
+      reconnecting: Boolean(this.ctx.storage.kv.get<boolean>("reconnecting")),
     };
   }
 
@@ -723,8 +728,16 @@ export class UserAccount extends DurableObject<Env> {
 
   /** Confirm that phase-one collaborator verification is still authoritative. */
   commitCollaboratorGeneration(expectedGeneration: number): boolean {
-    return Boolean(this.ctx.storage.kv.get<MarketoCredentials>("credentials")) &&
+    return !this.ctx.storage.kv.get<boolean>("reconnecting") &&
+      Boolean(this.ctx.storage.kv.get<MarketoCredentials>("credentials")) &&
       this.#credentialGeneration() === expectedGeneration;
+  }
+
+  /** Whether a captured credential set remains active outside a reconnect transition. */
+  isCredentialStateCurrent(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+  ): boolean {
+    return this.#matchesCredentialState(expected);
   }
 
   /** Observer IDs whose persisted owner or collaborator credential generation is no longer authoritative. */
@@ -744,7 +757,8 @@ export class UserAccount extends DurableObject<Env> {
 
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
     let current = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
-    return this.#credentialGeneration() === expected.generation && current !== undefined &&
+    return !this.ctx.storage.kv.get<boolean>("reconnecting") &&
+      this.#credentialGeneration() === expected.generation && current !== undefined &&
       current.endpoint === expected.credentials.endpoint &&
       current.clientId === expected.credentials.clientId &&
       current.clientSecret === expected.credentials.clientSecret;
@@ -1176,7 +1190,7 @@ type MarketoGatekeeperImplProps = {
   resourceId?: number;
 };
 
-type PendingRow = { action: MarketoAction };
+type PendingRow = { action: MarketoAction; ownerGeneration: number };
 type ApplyingState = "preparing" | "dispatching" | "uncertain" | "partial" | "nothing-changed" | "applied";
 const MAX_PENDING_ACTIONS = 200;
 /** How long a provider-derived business-object restriction suppresses another safe access probe. */
@@ -1281,11 +1295,17 @@ export class MarketoGatekeeperImpl
   ): Promise<
     MarketoSessionImpl | MarketoDesignStudioImpl | MarketoProgramImpl | MarketoStaticListImpl
   > {
+    let credentialState = await this.#credentialState();
+    let credentials = credentialState.credentials;
+    if (!credentials || !await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .isCredentialStateCurrent({ ...credentialState, credentials })) {
+      throw new Error("The Marketo account behind this binding is disconnected or reconnecting.");
+    }
     // Stubs passed as RPC arguments are disposed when the call returns, so keep our own handle.
     let queue = approvalQueue.dup();
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
     let sessionCtx = makeSessionContext({
-      client: () => this.#client(),
+      client: () => this.#client(credentialState),
       approvalQueue: queue,
       excludeObservers: async () => {
         let excluded = await account.getExcludedObservers();
@@ -1296,6 +1316,9 @@ export class MarketoGatekeeperImpl
         }
       },
       submit: async (body: MarketoActionInput) => {
+        if (!await account.isCredentialStateCurrent({ ...credentialState, credentials })) {
+          throw new Error("This Marketo session belongs to an older account credential generation.");
+        }
         if ((body.type === "businessObjectUpsert" || body.type === "businessObjectDelete") &&
             this.#businessObjectAccess(body.kind) !== "read-write") {
           throw new Error("This Marketo business object is read-only or unavailable; no approval was submitted.");
@@ -1308,7 +1331,10 @@ export class MarketoGatekeeperImpl
         let action = { ...body, id } as MarketoAction;
         this.#validateActionReferences(action, false);
         let description = describeActionForSubmission(action);
-        this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, { action });
+        this.ctx.storage.kv.put<PendingRow>(`pending:${id}`, {
+          action,
+          ownerGeneration: credentialState.generation,
+        });
         this.ctx.storage.kv.put("pending:index", [...index, id]);
         try {
           await queue.submitAction(id, description).catch(error => { throw error; });
@@ -1376,11 +1402,15 @@ export class MarketoGatekeeperImpl
       ownerState = {
         ...copyCredentialState(ownerStateResult),
         observerEpoch: ownerStateResult.observerEpoch,
+        reconnecting: ownerStateResult.reconnecting,
       };
     } finally {
       disposeRpcResult(ownerStateResult);
     }
     let credentials = ownerState.credentials;
+    if (ownerState.reconnecting) {
+      throw new Error("The Marketo account behind this binding is reconnecting.");
+    }
     if (!credentials) {
       throw new Error("The Marketo account behind this binding has been disconnected.");
     }
@@ -1476,6 +1506,9 @@ export class MarketoGatekeeperImpl
       credentialState = await this.#credentialState();
       if (!credentialState.credentials) {
         throw new Error("The Marketo account behind this binding has been disconnected.");
+      }
+      if (pending.ownerGeneration !== credentialState.generation) {
+        throw new Error("This Marketo action belongs to an older account credential generation.");
       }
       client = await this.#client(credentialState);
       if (isBusinessObjectAction(pending.action)) {

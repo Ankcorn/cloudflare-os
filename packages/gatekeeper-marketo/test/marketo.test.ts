@@ -5831,7 +5831,7 @@ describe("Design Studio scoped binding", () => {
         parent: { id: "10", type: "Folder" }, input: { name: "Template", content: "x" },
       };
       state.storage.kv.put("pending:index", [1]);
-      state.storage.kv.put("pending:1", { action: creation });
+      state.storage.kv.put("pending:1", { action: creation, ownerGeneration: 0 });
       let approvals = 0;
       let queue = new RpcStub(new TestApprovalQueue(async () => void approvals++)) as unknown as RpcStub<ApprovalQueue>;
       let studio = await instance.startSession(queue) as MarketoDesignStudioImpl;
@@ -6386,6 +6386,59 @@ describe("collaborator credentials", () => {
     expect(observations[0].excludeObservers).toBeUndefined();
   });
 
+  it("rejects observer admission while the owner reconnect is pending", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+      .UserAccount.get(ownerId).prepareReconnect(crypto.randomUUID());
+
+    await expect(addObserverFromAccount(gatekeeper, observerId.toString()))
+      .rejects.toThrow(/reconnecting/);
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      (_instance, state) => expect(state.storage.kv.get("observer:observer")).toBeUndefined(),
+    );
+  });
+
+  it("does not transfer an existing session or action across credential replacement", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString(), "design-studio");
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      providerFetches++;
+      return Response.json({ success: true, result: [] });
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoDesignStudioImpl;
+      let nonce = crypto.randomUUID();
+      await runInDurableObject(
+        (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+        async (account, accountState) => {
+          await account.prepareReconnect(nonce);
+          let get = accountState.storage.kv.get.bind(accountState.storage.kv);
+          vi.spyOn(accountState.storage.kv, "get").mockImplementation((key: string) =>
+            key === "callback" ? { credentialsRestored: async () => {} } : get(key));
+          await expect(account.completeConnection(nonce, {
+            ...OWNER,
+            clientSecret: "replacement-secret",
+          })).resolves.toEqual({ kind: "ok" });
+        },
+      );
+
+      let email = session.getEmail("20");
+      await expect(email.approve()).rejects.toThrow(/older account credential/);
+      expect(state.storage.kv.get("pending:1")).toBeUndefined();
+      await expect(email.describe()).rejects.toThrow(/account changed/);
+      email[Symbol.dispose]();
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+    expect(providerFetches).toBe(0);
+  });
+
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
@@ -6439,7 +6492,7 @@ async function actionGatekeeper(action: MarketoAction) {
       ctx: { props: { userObjectId: string; kind: "instance" } };
     }).ctx;
     ctx.props = { userObjectId: userId.toString(), kind: "instance" };
-    state.storage.kv.put(`pending:${action.id}`, { action });
+    state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
   });
   return stub;
 }
@@ -6465,7 +6518,9 @@ async function designActionGatekeeper(
     }).ctx;
     ctx.props = { userObjectId: userId.toString(), kind: "design-studio" };
     state.storage.kv.put("pending:index", actions.map(action => action.id));
-    for (let action of actions) state.storage.kv.put(`pending:${action.id}`, { action });
+    for (let action of actions) {
+      state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
+    }
     for (let [id, realId] of Object.entries(resolutions)) {
       state.storage.kv.put(`provisional:${id}`, realId);
       let reference = actions.find(action =>
@@ -6500,7 +6555,9 @@ async function campaignActionGatekeeper(
     }).ctx;
     ctx.props = { userObjectId: userId.toString(), kind: "instance" };
     state.storage.kv.put("pending:index", actions.map(action => action.id));
-    for (let action of actions) state.storage.kv.put(`pending:${action.id}`, { action });
+    for (let action of actions) {
+      state.storage.kv.put(`pending:${action.id}`, { action, ownerGeneration: 0 });
+    }
     for (let [id, realId] of Object.entries(resolutions)) {
       state.storage.kv.put(`provisional:${id}`, realId);
       state.storage.kv.put(`provisionalKind:${id}`, "campaign");
