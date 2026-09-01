@@ -384,6 +384,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
 type StoredNonce = { value: string; expiresAt: number };
 
+type StoredReconnect = StoredNonce & { generation: number };
+
 type CompleteConnectionResult =
   | { kind: "ok" }
   | { kind: "invalid_nonce" }
@@ -533,13 +535,16 @@ export class UserAccount extends DurableObject<Env> {
     if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
-    let reconnecting = Boolean(this.ctx.storage.kv.get<boolean>("reconnecting"));
+    let reconnecting = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
     let previousCredentials = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
     if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
     let installed = await this.#withCredentialLifecycle(async () => {
-      if (generation !== this.#credentialGeneration()) return false;
+      let currentReconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+      if (generation !== this.#credentialGeneration() || !storedNonce ||
+          Date.now() >= storedNonce.expiresAt ||
+          reconnecting && currentReconnect?.value !== reconnecting.value) return false;
       generation = this.#advanceCredentialGeneration();
       this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
       return true;
@@ -552,7 +557,10 @@ export class UserAccount extends DurableObject<Env> {
         if (generation !== this.#credentialGeneration()) {
           return { kind: "error", message: "Connection state changed. Please retry." };
         }
-        this.ctx.storage.kv.delete("reconnecting");
+        let currentReconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+        if (currentReconnect?.value === reconnecting.value) {
+          this.ctx.storage.kv.delete("reconnecting");
+        }
       } else {
         let props: MarketoUserImplProps = { userObjectId: this.ctx.id.toString() };
         await callback.complete(this.ctx.exports.MarketoUserImpl({ props }));
@@ -570,6 +578,12 @@ export class UserAccount extends DurableObject<Env> {
         if (storedNonce && storedNonce.expiresAt > Date.now()) {
           this.ctx.storage.kv.put("nonce", storedNonce);
         }
+        let currentReconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+        if (reconnecting && currentReconnect?.value === reconnecting.value) {
+          currentReconnect.generation = generation;
+          this.ctx.storage.kv.put("reconnecting", currentReconnect);
+          await this.#expireReconnectIfDue();
+        }
       }
       return {
         kind: "error",
@@ -586,14 +600,31 @@ export class UserAccount extends DurableObject<Env> {
 
   async prepareReconnect(nonce: string): Promise<void> {
     await this.#withCredentialLifecycle(async () => {
-      this.#advanceCredentialGeneration();
-      this.ctx.storage.kv.put("reconnecting", true);
-      this.ctx.storage.kv.put<StoredNonce>("nonce", {
+      let generation = this.#advanceCredentialGeneration();
+      let reconnect = {
         value: nonce,
         expiresAt: Date.now() + NONCE_LIFETIME_MS,
-      });
+        generation,
+      };
+      this.ctx.storage.kv.put<StoredReconnect>("reconnecting", reconnect);
+      this.ctx.storage.kv.put<StoredNonce>("nonce", reconnect);
+      await this.ctx.storage.setAlarm(reconnect.expiresAt);
       await this.#revokeObserverAuthorities();
     });
+  }
+
+  async #expireReconnectIfDue(): Promise<void> {
+    let reconnect = this.ctx.storage.kv.get<StoredReconnect>("reconnecting");
+    if (!reconnect) return;
+    if (Date.now() < reconnect.expiresAt) {
+      await this.ctx.storage.setAlarm(reconnect.expiresAt);
+      return;
+    }
+    if (reconnect.generation !== this.#credentialGeneration()) return;
+
+    let nonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    this.ctx.storage.kv.delete("reconnecting");
+    if (nonce?.value === reconnect.value) this.ctx.storage.kv.delete("nonce");
   }
 
   /** This account's Marketo credentials, or undefined if it was never completed or was revoked. */
@@ -977,7 +1008,10 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials")) {
+    if (this.ctx.storage.kv.get<StoredReconnect>("reconnecting")) {
+      await this.#withCredentialLifecycle(() => this.#expireReconnectIfDue());
+    } else if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials") &&
+               this.ctx.storage.kv.get<StoredNonce>("nonce")) {
       await this.ctx.storage.deleteAll();
     }
   }

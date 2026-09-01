@@ -647,8 +647,106 @@ describe("optional deployment defaults", () => {
       releaseCallback();
 
       await expect(older).resolves.toMatchObject({ kind: "error" });
-      expect(state.storage.kv.get<boolean>("reconnecting")).toBe(true);
+      expect(state.storage.kv.get("reconnecting")).toBeTruthy();
       expect(state.storage.kv.get<{ value: string }>("nonce")?.value).toBe(newNonce);
+    });
+  });
+
+  it("expires an abandoned reconnect without reviving old credential authority", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+    let credentials = { endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret" };
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", credentials);
+      let oldState = instance.getCredentialState();
+      state.storage.kv.put("observer:binding:observer", {
+        admissionId: "old-admission",
+        observerId: "observer",
+        accountId: state.id.toString(),
+        ownerGeneration: oldState.generation,
+        collaboratorGeneration: oldState.generation,
+      });
+      await instance.prepareReconnect("old-nonce");
+      let reconnectState = instance.getCredentialState();
+      let reconnect = state.storage.kv.get<{
+        value: string; expiresAt: number; generation: number;
+      }>("reconnecting")!;
+      expect(await state.storage.getAlarm()).toBe(reconnect.expiresAt);
+
+      let expired = { ...reconnect, expiresAt: Date.now() - 1 };
+      state.storage.kv.put("reconnecting", expired);
+      state.storage.kv.put("nonce", expired);
+      await instance.alarm();
+
+      expect(state.storage.kv.get("reconnecting")).toBeUndefined();
+      expect(state.storage.kv.get("nonce")).toBeUndefined();
+      expect(instance.getCredentials()).toEqual(credentials);
+      expect(instance.isCredentialStateCurrent({ ...oldState, credentials })).toBe(false);
+      expect(instance.isCredentialStateCurrent({ ...reconnectState, credentials })).toBe(true);
+      expect(await instance.getExcludedObservers("binding")).toEqual(["observer"]);
+    });
+  });
+
+  it("reschedules a stale alarm for a newer reconnect", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", {
+        endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret",
+      });
+      await instance.prepareReconnect("old-nonce");
+      await instance.prepareReconnect("new-nonce");
+      let newerExpiry = state.storage.kv.get<{ expiresAt: number }>("reconnecting")!.expiresAt;
+
+      await instance.alarm();
+
+      expect(state.storage.kv.get<{ value: string }>("reconnecting")?.value).toBe("new-nonce");
+      expect(state.storage.kv.get<{ value: string }>("nonce")?.value).toBe("new-nonce");
+      expect(await state.storage.getAlarm()).toBe(newerExpiry);
+    });
+  });
+
+  it("does not let a stale reconnect alarm overwrite completion", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+    let initial = { endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret" };
+    let replacement = { ...initial, clientSecret: "replacement-secret" };
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", initial);
+      await instance.prepareReconnect("nonce");
+      let get = state.storage.kv.get.bind(state.storage.kv);
+      vi.spyOn(state.storage.kv, "get").mockImplementation((key: string) =>
+        key === "callback" ? { credentialsRestored: async () => {} } : get(key));
+      await expect(instance.completeConnection("nonce", replacement)).resolves.toEqual({ kind: "ok" });
+
+      await instance.alarm();
+
+      expect(instance.getCredentials()).toEqual(replacement);
+      expect(state.storage.kv.get("reconnecting")).toBeUndefined();
+      expect(state.storage.kv.get("nonce")).toBeUndefined();
+    });
+  });
+
+  it("does not let a stale reconnect alarm erase revoke generation", async () => {
+    let namespace = (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount;
+    let account = namespace.get(namespace.newUniqueId());
+
+    await runInDurableObject(account, async (instance, state) => {
+      state.storage.kv.put("credentials", {
+        endpoint: ORIGIN, clientId: "saved-id", clientSecret: "saved-secret",
+      });
+      await instance.prepareReconnect("nonce");
+      await instance.revoke();
+      let revokedGeneration = instance.getCredentialState().generation;
+
+      await instance.alarm();
+
+      expect(instance.getCredentialState()).toEqual({ generation: revokedGeneration });
+      expect(state.storage.kv.get("reconnecting")).toBeUndefined();
+      expect(state.storage.kv.get("nonce")).toBeUndefined();
     });
   });
 });
