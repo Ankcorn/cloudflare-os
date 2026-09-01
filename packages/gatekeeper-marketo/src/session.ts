@@ -786,7 +786,8 @@ export class MarketoStaticListImpl extends RpcTarget {
       `Read the name of static list \`${this.#listId}\` before submitting an action.`,
     );
     let list = await (await this.#ctx.client()).getList(this.#listId);
-    return list?.name ?? `list ${this.#listId}`;
+    if (!list) throw notFound("static list", this.#listId);
+    return list.name ?? `list ${this.#listId}`;
   }
 
   async describe(): Promise<MarketoStaticListSummary> {
@@ -1607,6 +1608,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       values,
       queryFields,
     );
+    validateCustomObjectRecords(records);
     let requested = new Set(values.map(String));
     if (records.some(record => !isRequestedFilterValue(record[field], requested))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested filter.");
@@ -1657,6 +1659,7 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       input,
       fields === undefined ? undefined : [...new Set([...fields, ...dedupeFields])],
     );
+    validateCustomObjectRecords(records);
     if (records.some(record => !input.some(key => dedupeFields.every(field =>
       sameFilterValue(record[field], key[field]))))) {
       throw new MarketoError("Marketo returned a custom-object record outside the requested dedupe keys.");
@@ -1712,6 +1715,20 @@ export class MarketoCustomObjectImpl extends RpcTarget {
       });
     }
     await this.#ctx.submit({ type: "customObjectDelete", apiName: this.#apiName, records, deleteBy });
+  }
+}
+
+function validateCustomObjectRecords(records: Record<string, unknown>[]): void {
+  let guids = new Set<string>();
+  for (let record of records) {
+    let guid = record.marketoGUID;
+    if (typeof guid !== "string" || !guid.trim()) {
+      throw new MarketoError("Marketo returned a custom-object record without a non-empty marketoGUID.");
+    }
+    if (guids.has(guid)) {
+      throw new MarketoError(`Marketo returned duplicate custom-object marketoGUID ${guid}.`);
+    }
+    guids.add(guid);
   }
 }
 

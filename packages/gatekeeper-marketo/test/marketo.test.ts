@@ -2148,6 +2148,58 @@ describe("Design Studio simulation", () => {
     await expect(email.describe()).rejects.toThrow(/was deleted/);
   });
 
+  it("projects form summaries without weakening internal lifecycle snapshots", async () => {
+    let raw = {
+      id: 51,
+      name: "Signup",
+      description: "Public description",
+      status: "draft",
+      workspace: "Default",
+      locale: "en_US",
+      language: "English",
+      progressiveProfiling: true,
+      knownVisitor: { type: "custom", template: "secret" },
+      thankYouList: [{ followupType: "url", followupValue: "https://private.example" }],
+      theme: "simple",
+      providerExtension: "private",
+    };
+    let { ctx, actions } = designContext({
+      getForm: async () => raw,
+      getForms: async () => [raw],
+      getFormFields: async () => [],
+      getFormUsedBy: async () => [],
+    });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let form = studio.getForm("51");
+    let publicSummary = {
+      id: "51",
+      name: "Signup",
+      description: "Public description",
+      status: "draft",
+      workspaceName: "Default",
+      locale: "en_US",
+      language: "English",
+    };
+
+    await expect(form.describe()).resolves.toEqual(publicSummary);
+    await expect(studio.listForms()).resolves.toEqual({ items: [publicSummary] });
+
+    await form.approve();
+    expect(actions[0]).toMatchObject({
+      snapshot: {
+        metadata: {
+          settings: {
+            progressiveProfiling: true,
+            knownVisitor: raw.knownVisitor,
+            thankYouList: raw.thankYouList,
+            theme: "simple",
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(actions[0])).not.toContain("providerExtension");
+  });
+
   it("simulates snippet content without replacing an untouched rendition", async () => {
     let { ctx } = designContext({
       getSnippetContent: async () => [
@@ -3069,6 +3121,29 @@ describe("custom object normalization", () => {
     }, notes), "orderStatus");
     await expect(compound.queryByDedupeKeys([{ sourceID: "source-1", leadID: 7 }], ["status"]))
       .rejects.toThrow(/outside the requested dedupe keys/);
+    expect(notes).toEqual([]);
+  });
+
+  it.each([
+    ["missing", [{ sourceID: "source-1" }]],
+    ["empty", [{ marketoGUID: "   ", sourceID: "source-1" }]],
+    ["duplicate", [
+      { marketoGUID: "g1", sourceID: "source-1" },
+      { marketoGUID: "g1", sourceID: "source-1" },
+    ]],
+  ])("rejects %s custom-object GUIDs before observation", async (_label, rows) => {
+    let notes: string[] = [];
+    let scalar = new MarketoCustomObjectImpl(stubContext({
+      queryCustomObject: async () => rows,
+    }, notes), "orderStatus");
+    await expect(scalar.query("sourceID", ["source-1"])).rejects.toThrow(/marketoGUID/);
+
+    let compound = new MarketoCustomObjectImpl(stubContext({
+      describeCustomObject: async () => SCHEMA,
+      queryCustomObjectByDedupeKeys: async () => rows,
+    }, notes), "orderStatus");
+    await expect(compound.queryByDedupeKeys([{ sourceID: "source-1", leadID: 7 }]))
+      .rejects.toThrow(/marketoGUID/);
     expect(notes).toEqual([]);
   });
 
@@ -5785,6 +5860,19 @@ describe("actions report no outcome at submission time", () => {
       await new MarketoSessionImpl(ctx).createOrUpdatePeople([{ email: "a@example.com" }]),
     ).toBeUndefined();
   });
+
+  it.each(["addMembers", "removeMembers"] as const)(
+    "rejects %s when the exact static list does not exist before submission",
+    async operation => {
+      let submitted: MarketoActionInput[] = [];
+      let ctx = stubContext({ getList: async () => undefined });
+      ctx.submit = async action => void submitted.push(action);
+
+      await expect(new MarketoStaticListImpl(ctx, 5500)[operation]([7]))
+        .rejects.toThrow(/static list 5500 was not found/);
+      expect(submitted).toEqual([]);
+    },
+  );
 
   it("rejects invalid person id upserts without submitting an approval", async () => {
     let submitted: MarketoActionInput[] = [];

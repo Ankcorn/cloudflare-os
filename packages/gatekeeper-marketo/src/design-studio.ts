@@ -431,6 +431,12 @@ function lifecycleMetadata(summary: Summary): Record<string, unknown> {
   return publishable;
 }
 
+function formSummary(summary: Summary): MarketoFormSummary {
+  return Object.fromEntries([
+    "id", "name", "description", "status", "workspaceName", "createdAt", "updatedAt", "locale", "language",
+  ].flatMap(key => summary[key] === undefined ? [] : [[key, summary[key]]])) as MarketoFormSummary;
+}
+
 function normalizeFolder(raw: unknown): Summary {
   let value = recordValue(raw);
   let parent = recordValue(value.parent);
@@ -989,6 +995,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       resolvedMask(this.#ctx, pageState.masked),
       maxReturn,
     );
+    if (kind === "form") result.items = result.items.map(formSummary);
     await this.#ctx.observe(`List Marketo ${kind} assets`, `Read ${result.items.length} Design Studio ${kind} asset(s).`);
     return result;
   }
@@ -1670,7 +1677,7 @@ export class MarketoFormImpl extends AssetImpl {
     }
     return canonicalFormFields(await (await this.ctx.client()).getFormFields(physicalId(this.ctx, this.id)));
   }
-  async describe(): Promise<MarketoFormSummary> { return await this.summary() as MarketoFormSummary; }
+  async describe(): Promise<MarketoFormSummary> { return formSummary(await this.summary()); }
   async getFields(): Promise<MarketoFormField[]> {
     this.assertReadable();
     let creation = findCreation(this.ctx, this.kind, this.id); let source = creation?.type === "designClone" ? creation.sourceId : this.id;
