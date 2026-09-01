@@ -386,6 +386,12 @@ type AccountCredentialState = {
   generation: number;
 };
 
+type ObserverAdmissionState = AccountCredentialState & { observerEpoch: number };
+
+type StoredObserver = {
+  generation: number;
+};
+
 type AccountDispatchResult =
   | { ok: true; response: Response }
   | { ok: false; error: TokenCacheError }
@@ -536,6 +542,14 @@ export class UserAccount extends DurableObject<Env> {
     };
   }
 
+  /** Credential and membership generations used to prepare an observer admission. */
+  getObserverAdmissionState(observerId: string): ObserverAdmissionState {
+    return {
+      ...this.getCredentialState(),
+      observerEpoch: this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0,
+    };
+  }
+
   /** Validate submitted credentials while the connect nonce and account generation remain live. */
   async validateConnectionCredentials(
     nonce: string,
@@ -676,16 +690,28 @@ export class UserAccount extends DurableObject<Env> {
   /** Atomically admit an observer if the verified owner credential generation is still current. */
   commitCollaborator(
     observerId: string,
-    expected: AccountCredentialState & { credentials: MarketoCredentials },
+    expected: ObserverAdmissionState & { credentials: MarketoCredentials },
+    collaboratorGeneration: number,
   ): boolean {
-    if (!this.#matchesCredentialState(expected)) return false;
-    this.ctx.storage.kv.put(`observer:${observerId}`, expected.generation);
+    let observerEpoch = this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0;
+    if (!this.#matchesCredentialState(expected) || observerEpoch !== expected.observerEpoch) return false;
+    this.ctx.storage.kv.put<StoredObserver>(`observer:${observerId}`, {
+      generation: collaboratorGeneration,
+    });
     return true;
   }
 
   /** Forget an observer previously admitted for this account. */
   removeCollaborator(observerId: string): void {
+    let epoch = (this.ctx.storage.kv.get<number>(`observerEpoch:${observerId}`) ?? 0) + 1;
+    this.ctx.storage.kv.put(`observerEpoch:${observerId}`, epoch);
     this.ctx.storage.kv.delete(`observer:${observerId}`);
+  }
+
+  /** Confirm that phase-one collaborator verification is still authoritative. */
+  commitCollaboratorGeneration(expectedGeneration: number): boolean {
+    return Boolean(this.ctx.storage.kv.get<MarketoCredentials>("credentials")) &&
+      this.#credentialGeneration() === expectedGeneration;
   }
 
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
@@ -776,8 +802,9 @@ type MarketoUserVerifierProps = { userObjectId: string };
 
 interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
   hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<
-    { valid: boolean } | { error: TokenCacheError }
+    { valid: false } | { valid: true; generation: number } | { error: TokenCacheError }
   >;
+  commitCredentialGeneration(generation: number): Promise<boolean>;
 }
 
 async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
@@ -803,7 +830,7 @@ export class MarketoUserVerifier
     endpoint: string,
     clientId: string,
     fingerprint: string,
-  ): Promise<{ valid: boolean } | { error: TokenCacheError }> {
+  ): Promise<{ valid: false } | { valid: true; generation: number } | { error: TokenCacheError }> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
     let state = await readAccountCredentialState(account);
     let credentials = state.credentials;
@@ -822,7 +849,12 @@ export class MarketoUserVerifier
       disposeRpcResult(result);
     }
     if (!valid) await account.credentialsExpired();
-    return { valid };
+    return valid ? { valid: true, generation: state.generation } : { valid: false };
+  }
+
+  async commitCredentialGeneration(generation: number): Promise<boolean> {
+    return await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .commitCollaboratorGeneration(generation);
   }
 }
 
@@ -1288,7 +1320,16 @@ export class MarketoGatekeeperImpl
 
   async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
-    let ownerState = await readAccountCredentialState(account);
+    let ownerStateResult = await account.getObserverAdmissionState(id);
+    let ownerState: ObserverAdmissionState;
+    try {
+      ownerState = {
+        ...copyCredentialState(ownerStateResult),
+        observerEpoch: ownerStateResult.observerEpoch,
+      };
+    } finally {
+      disposeRpcResult(ownerStateResult);
+    }
     let credentials = ownerState.credentials;
     if (!credentials) {
       throw new Error("The Marketo account behind this binding has been disconnected.");
@@ -1299,6 +1340,7 @@ export class MarketoGatekeeperImpl
       credentials.clientId,
       await credentialFingerprint(credentials),
     );
+    let collaboratorGeneration: number;
     try {
       if ("error" in verification) {
         throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
@@ -1308,10 +1350,18 @@ export class MarketoGatekeeperImpl
           "This collaborator is not connected with the same Marketo LaunchPoint service.",
         );
       }
+      collaboratorGeneration = verification.generation;
     } finally {
       disposeRpcResult(verification);
     }
-    if (!await account.commitCollaborator(id, { ...ownerState, credentials })) {
+    if (!await verifier.commitCredentialGeneration(collaboratorGeneration)) {
+      throw new Error("The collaborator's Marketo account changed while access was being verified.");
+    }
+    if (!await account.commitCollaborator(
+      id,
+      { ...ownerState, credentials },
+      collaboratorGeneration,
+    )) {
       throw new Error("The Marketo account changed while collaborator access was being verified.");
     }
   }
