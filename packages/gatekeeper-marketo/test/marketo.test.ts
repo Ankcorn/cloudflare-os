@@ -5328,6 +5328,58 @@ describe("actions report no outcome at submission time", () => {
       await new MarketoSessionImpl(ctx).createOrUpdatePeople([{ email: "a@example.com" }]),
     ).toBeUndefined();
   });
+
+  it("rejects invalid person id upserts without submitting an approval", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({});
+    ctx.submit = async action => void submitted.push(action);
+    let session = new MarketoSessionImpl(ctx);
+
+    for (let action of ["createOnly", "createOrUpdate"] as const) {
+      await expect(session.createOrUpdatePeople([{ id: 7 }], { action, lookupField: "id" }))
+        .rejects.toThrow(/only for updateOnly/);
+    }
+    for (let id of [undefined, "7", 1.5, 0, -1, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+      await expect(session.createOrUpdatePeople(
+        [{ id }],
+        { action: "updateOnly", lookupField: "id" },
+      )).rejects.toThrow(/positive safe integer id/);
+    }
+
+    expect(submitted).toEqual([]);
+  });
+
+  it("preserves non-id person lookup fields", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({});
+    ctx.submit = async action => void submitted.push(action);
+    let session = new MarketoSessionImpl(ctx);
+
+    await session.createOrUpdatePeople(
+      [{ externalPersonKey: "person-1" }],
+      { action: "createOrUpdate", lookupField: "externalPersonKey" },
+    );
+
+    expect(submitted).toEqual([{
+      type: "upsertPeople",
+      records: [{ externalPersonKey: "person-1" }],
+      upsertAction: "createOrUpdate",
+      lookupField: "externalPersonKey",
+    }]);
+  });
+
+  it("permits canonical person ids with updateOnly", async () => {
+    let submitted: MarketoActionInput[] = [];
+    let ctx = stubContext({});
+    ctx.submit = async action => void submitted.push(action);
+
+    await new MarketoSessionImpl(ctx).createOrUpdatePeople(
+      [{ id: 7, firstName: "Updated" }],
+      { action: "updateOnly", lookupField: "id" },
+    );
+
+    expect(submitted).toHaveLength(1);
+  });
 });
 
 // Per-record failures can appear inside a successful response envelope.
@@ -7548,6 +7600,25 @@ describe("action dispatch lifecycle", () => {
     listName: "Customers",
     personIds: [7],
   };
+
+  it("revalidates person id upserts before dispatch", async () => {
+    let invalidActions: Extract<MarketoAction, { type: "upsertPeople" }>[] = [
+      { id: 1, type: "upsertPeople", records: [{ id: 7 }], upsertAction: "createOrUpdate", lookupField: "id" },
+      { id: 2, type: "upsertPeople", records: [{ id: "7" }], upsertAction: "updateOnly", lookupField: "id" },
+    ];
+    for (let action of invalidActions) {
+      let calls = 0;
+      vi.stubGlobal("fetch", async () => { calls++; throw new Error("No provider call expected"); });
+      let stub = await actionGatekeeper(action);
+      await runInDurableObject(stub, async instance => {
+        await expect(instance.applyAction(action.id)).rejects.toThrow(
+          action.upsertAction === "updateOnly" ? /positive safe integer id/ : /only for updateOnly/,
+        );
+      });
+      expect(calls).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("orders conflicts consistently across non-asset action families", async () => {
     let cases: MarketoAction[][] = [

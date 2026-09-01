@@ -30,7 +30,7 @@ import {
   type RawTagType,
   type RawLeadField,
 } from "./marketo-api";
-import type { MarketoActionInput } from "./actions";
+import { validatePeopleUpsertLookup, type MarketoActionInput } from "./actions";
 import {
   MarketoBusinessObjectImpl,
   type BusinessObjectContext,
@@ -1791,6 +1791,7 @@ export class MarketoSessionImpl extends RpcTarget {
       throw new Error(`Unsupported Marketo upsert action: ${String(upsertAction)}.`);
     }
     let lookupField = options?.lookupField?.trim() || "email";
+    validatePeopleUpsertLookup(records, upsertAction, lookupField);
     await this.#ctx.submit({ type: "upsertPeople", records, upsertAction, lookupField });
   }
 

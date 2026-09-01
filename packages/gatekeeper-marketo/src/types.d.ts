@@ -1055,8 +1055,9 @@ export interface MarketoSession {
   /**
    * Create and/or update people in bulk.
    *
-   * `lookupField` (default `email`) selects how each record matches an existing person. Read the
-   * records afterward to learn the assigned ids and final values.
+   * `lookupField` (default `email`) selects how each record matches an existing person. Matching
+   * on `id` requires `action: "updateOnly"` and a positive safe integer `id` in every record.
+   * Read the records afterward to learn the assigned ids and final values.
    */
   createOrUpdatePeople(
     records: MarketoPersonInput[],

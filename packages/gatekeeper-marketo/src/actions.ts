@@ -94,6 +94,22 @@ export type MarketoActionInput = MarketoAction extends infer T
 /** Maximum UTF-8 size of the complete approval description submitted to the Workshop. */
 export const MAX_APPROVAL_DESCRIPTION_BYTES = 128 * 1024;
 
+/** Validate the restrictions Marketo places on person upserts matched by lead id. */
+export function validatePeopleUpsertLookup(
+  records: Record<string, unknown>[],
+  action: MarketoUpsertAction,
+  lookupField: string,
+): void {
+  if (lookupField !== "id") return;
+  if (action !== "updateOnly") {
+    throw new Error("Marketo person id matching is available only for updateOnly.");
+  }
+  if (records.some(record =>
+    typeof record.id !== "number" || !Number.isSafeInteger(record.id) || record.id <= 0)) {
+    throw new Error("Each record matched by id must contain a positive safe integer id.");
+  }
+}
+
 function fieldTable(fields: Record<string, unknown>): string {
   let entries = Object.entries(fields);
   if (entries.length === 0) return "_(no fields)_";
@@ -318,12 +334,15 @@ export class MarketoActionResultError extends Error {
 const MIN_SCHEDULE_DELAY_MS = 5 * 60 * 1000;
 const MAX_SCHEDULE_DELAY_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
-/** Revalidate time-sensitive approved inputs immediately before dispatch. */
+/** Revalidate approved inputs immediately before dispatch. */
 export function validateActionForDispatch(action: MarketoAction, now = Date.now()): void {
-  if (action.type !== "campaignSchedule") return;
-  let delay = new Date(action.runAt).getTime() - now;
-  if (!Number.isFinite(delay) || delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
-    throw new Error("The approved Marketo campaign run time is no longer between 5 minutes and 2 years from dispatch.");
+  if (action.type === "upsertPeople") {
+    validatePeopleUpsertLookup(action.records, action.upsertAction, action.lookupField);
+  } else if (action.type === "campaignSchedule") {
+    let delay = new Date(action.runAt).getTime() - now;
+    if (!Number.isFinite(delay) || delay < MIN_SCHEDULE_DELAY_MS || delay > MAX_SCHEDULE_DELAY_MS) {
+      throw new Error("The approved Marketo campaign run time is no longer between 5 minutes and 2 years from dispatch.");
+    }
   }
 }
 
