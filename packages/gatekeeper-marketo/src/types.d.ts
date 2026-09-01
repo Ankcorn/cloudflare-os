@@ -493,7 +493,7 @@ export type MarketoDesignStudioListOptions = {
   /** Limit results to this folder, including program folders when Marketo permits them. */
   folder?: MarketoDesignStudioFolderRef;
   /** Return only assets with this lifecycle status. */
-  status?: MarketoDesignStudioStatus;
+  status?: "draft" | "approved";
   /** Opaque continuation token from the preceding page. */
   pageToken?: string;
   /** Requested page size. Marketo may enforce a smaller service limit. */

@@ -8,7 +8,11 @@ export default {
   initial: {},
 
   async initialValuesFromResourceUrl({ resourceUrl, ui }) {
-    if (new URL(resourceUrl).href !== new URL(await ui.resourceUrl()).href) {
+    let requested = new URL(resourceUrl);
+    let expected = new URL(await ui.resourceUrl());
+    requested.pathname = requested.pathname.replace(/\/$/, "");
+    expected.pathname = expected.pathname.replace(/\/$/, "");
+    if (requested.href !== expected.href) {
       throw new Error("This resource belongs to a different Marketo instance. Select its account instead.");
     }
     return {};

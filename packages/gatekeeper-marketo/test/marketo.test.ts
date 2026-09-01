@@ -2363,8 +2363,8 @@ describe("Design Studio simulation", () => {
 
   it("pages by raw rows when a folder filter is applied locally", async () => {
     let records = [
-      { id: 1, name: "Same", folder: { id: 11 } },
-      { id: 2, name: "Same", folder: { id: 10 } },
+      { id: 1, name: "Same", folder: { id: 11, type: "Folder" } },
+      { id: 2, name: "Same", folder: { id: 10, type: "Folder" } },
     ];
     let getLandingPagesByName = vi.fn(async (_name: string, { offset = 0, maxReturn = 20 }: {
       offset?: number;

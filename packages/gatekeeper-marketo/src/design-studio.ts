@@ -708,7 +708,8 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     if (physicalRoot !== undefined) raw = raw.filter(item => readId(item) !== physicalRoot);
     let upstream = raw.map(item => normalizeFolder(item))
       .map(item => overlaySummary(item, actionsFor(this.#ctx, "folder", item.id, pending))).filter(notNull)
-      .filter(item => name === undefined || item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      .filter(item => name === undefined || item.name.toLocaleLowerCase() === name.toLocaleLowerCase())
+      .filter(item => validated.workspace === undefined || item.workspaceName === validated.workspace);
     let candidateIds = (state.pending ?? pendingFolderIds(this.#ctx, root, validated.maxDepth, pending))
       .filter(id => !root || !sameLogicalId(this.#ctx, id, root.id));
     let candidateBatch = pendingFolderBatch(this.#ctx, candidateIds, maxReturn, pending);
@@ -882,7 +883,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       raw = raw.filter(item => {
         let rawFolder = recordValue(recordValue(item).folder);
         let id = rawFolder.id ?? rawFolder.value;
-        return id === physicalParent;
+        return id === physicalParent && textValue(rawFolder.type)?.toLowerCase() === logicalParent?.type.toLowerCase();
       });
     }
     let upstream = raw.map(item => normalize(kind, item))
@@ -979,7 +980,7 @@ function pendingAssetIds(
   let ids: string[] = [];
   for (let action of pending) {
     if ((action.type === "designCreate" || action.type === "designClone") && action.asset === kind &&
-        (!parent || sameLogicalId(ctx, action.parent.id, parent.id))) {
+        (!parent || sameLogicalId(ctx, action.parent.id, parent.id) && action.parent.type === parent.type)) {
       pushLogicalId(ctx, ids, action.provisionalId);
     } else if ("targetId" in action && action.type !== "designDeleteFolder" && action.asset === kind) {
       pushLogicalId(ctx, ids, action.targetId);
@@ -1134,7 +1135,9 @@ async function pendingAssetSummaries(
   let summaries = await Promise.all(ids.map(async id => {
     let creation = findCreation(ctx, kind, id, pending);
     if (creation) {
-      if (parent && !sameLogicalId(ctx, creation.parent.id, parent.id)) return undefined;
+      if (parent && (!sameLogicalId(ctx, creation.parent.id, parent.id) || creation.parent.type !== parent.type)) {
+        return undefined;
+      }
       return creation.type === "designClone"
         ? await simulatedSummary(ctx, kind, id, undefined, pending)
         : creationSummary(creation);
@@ -1148,7 +1151,9 @@ async function pendingAssetSummaries(
     if (parent && physicalParent !== undefined) {
       let rawFolder = recordValue(recordValue(raw).folder);
       let folderId = rawFolder.id ?? rawFolder.value;
-      if (folderId !== physicalParent) return undefined;
+      if (folderId !== physicalParent || textValue(rawFolder.type)?.toLowerCase() !== parent.type.toLowerCase()) {
+        return undefined;
+      }
     }
     return { ...normalize(kind, raw), id };
   }));
@@ -1529,6 +1534,6 @@ export class MarketoFileImpl extends AssetImpl {
     let digest = await sha256(file);
     let fileName = (await this.describe()).name;
     await submitDesign(this.ctx, { type: "designContent", asset: this.kind, targetId: this.id,
-      data: file, mimeType: requiredText(mimeType, "MIME type"), sha256: digest, fileName });
+      data: file, mimeType: normalizeMimeType(mimeType), sha256: digest, fileName });
   }
 }

@@ -35,6 +35,11 @@ describe("Marketo configurator resource URLs", () => {
       resourceUrlPattern: "https://*",
       ui,
     } as never)).resolves.toEqual(values);
+    await expect(spec.initialValuesFromResourceUrl!({
+      resourceUrl: `${ORIGIN_A}${path}/`,
+      resourceUrlPattern: "https://*",
+      ui,
+    } as never)).resolves.toEqual(values);
     await expect(spec.resourceUrl({ values, ui } as never)).resolves.toBe(`${ORIGIN_A}${path}`);
 
     await expect(spec.initialValuesFromResourceUrl!({

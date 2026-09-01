@@ -6,7 +6,12 @@ import {
   type DesignStudioActionInput,
 } from "../src/design-studio-actions";
 import { MarketoDesignStudioImpl, type DesignStudioContext } from "../src/design-studio";
-import type { MarketoDesignStudio, MarketoDesignStudioFileListOptions } from "../src/types";
+import type {
+  MarketoDesignStudio,
+  MarketoDesignStudioFileListOptions,
+  MarketoDesignStudioListOptions,
+  MarketoDesignStudioStatus,
+} from "../src/types";
 
 function context(client: Partial<MarketoClient>, initial: DesignStudioAction[] = []) {
   let actions = [...initial];
@@ -351,6 +356,59 @@ describe("classic Design Studio regressions", () => {
 
     expect(() => studio.listFiles({ status: "approved" } as never))
       .toThrow(/status is not supported/);
+  });
+
+  it("exposes only supported list statuses while preserving provider summary statuses", () => {
+    expectTypeOf<MarketoDesignStudioListOptions["status"]>()
+      .toEqualTypeOf<"draft" | "approved" | undefined>();
+    expectTypeOf<"provider-specific">().toExtend<MarketoDesignStudioStatus>();
+  });
+
+  it("normalizes file update MIME before approval, simulation, and dispatch", async () => {
+    let updateFileContent = vi.fn(async (_id: number, _file: Blob, _name: string) => [{ id: 20 }]);
+    let client = {
+      getFile: async () => ({ id: 20, name: "note.txt", mimeType: "text/plain" }),
+      updateFileContent,
+    };
+    let { actions, ctx } = context(client);
+    let file = new MarketoDesignStudioImpl(ctx).getFile("20");
+
+    await file.updateContent(new Uint8Array([1]), "TEXT/PLAIN");
+
+    expect(actions[0]).toMatchObject({ type: "designContent", mimeType: "text/plain" });
+    await expect(file.describe()).resolves.toMatchObject({ mimeType: "text/plain" });
+    await executeDesignStudioAction(actions[0]!, client as unknown as MarketoClient, Number, () => {});
+    expect((updateFileContent.mock.calls[0]![1] as Blob).type).toBe("text/plain");
+  });
+
+  it("correlates folder listings with the requested workspace", async () => {
+    let { ctx } = context({
+      getFolders: async () => [
+        { id: 10, name: "Right", folderId: { id: 10, type: "Folder" }, workspace: "Default" },
+        { id: 11, name: "Wrong", folderId: { id: 11, type: "Folder" }, workspace: "Other" },
+        { id: 12, name: "Missing", folderId: { id: 12, type: "Folder" } },
+      ],
+    });
+
+    let result = await new MarketoDesignStudioImpl(ctx).listFolders({ workspace: "Default" });
+
+    expect(result.items.map(item => item.id)).toEqual(["10"]);
+  });
+
+  it("correlates folder-scoped asset rows with parent id and discriminator", async () => {
+    let records = [
+      { id: 1, name: "Right", folder: { id: 10, type: "Folder" } },
+      { id: 2, name: "Wrong type", folder: { id: 10, type: "Program" } },
+      { id: 3, name: "Missing type", folder: { id: 10 } },
+      { id: 4, name: "Wrong id", folder: { id: 11, type: "Folder" } },
+    ];
+    let { ctx } = context({ getEmails: async () => records });
+
+    let result = await new MarketoDesignStudioImpl(ctx).listEmails({
+      folder: { id: "10", type: "folder" },
+    });
+
+    expect(result.items.map(item => item.id)).toEqual(["1"]);
   });
 
   it("does not queue or dispatch an empty snippet content update", async () => {
