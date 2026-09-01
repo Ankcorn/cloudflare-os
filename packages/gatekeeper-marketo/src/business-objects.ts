@@ -51,6 +51,8 @@ export type BusinessObjectContext = {
   submitBusinessObject(action: BusinessObjectActionInput): Promise<void>;
   getBusinessObjectAccess(kind: MarketoBusinessObjectKind): MarketoBusinessObjectAccess;
   setBusinessObjectAccess(kind: MarketoBusinessObjectKind, access: MarketoBusinessObjectAccess): void;
+  issuePageCursor?(state: unknown, scope: string): Promise<string>;
+  consumePageCursor?(pageToken: string, scope: string): Promise<unknown>;
   dispose(): void;
 };
 
@@ -113,6 +115,21 @@ function sameFilterValue(actual: unknown, requested: unknown): boolean {
   let scalar = (value: unknown) =>
     typeof value === "string" || typeof value === "number" || typeof value === "boolean";
   return scalar(actual) && scalar(requested) && String(actual) === String(requested);
+}
+
+function queryScope(kind: MarketoBusinessObjectKind, query: MarketoBusinessObjectQuery): string {
+  let filter = "dedupeKeys" in query.filter
+    ? {
+        dedupeKeys: query.filter.dedupeKeys.map(key =>
+          Object.fromEntries(Object.entries(key).toSorted(([left], [right]) => left.localeCompare(right)))),
+      }
+    : query.filter;
+  return JSON.stringify({
+    kind,
+    filter,
+    fields: query.fields?.toSorted() ?? null,
+    maxResults: query.maxResults ?? null,
+  });
 }
 
 @validateRpc()
@@ -200,8 +217,19 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
         ? BUSINESS_OBJECTS[this.kind].dedupeFields
         : [filter.field];
       let requestedFields = query.fields === undefined ? undefined : new Set(query.fields);
+      let scope = queryScope(this.kind, query);
+      let providerToken: string | undefined;
+      if (query.pageToken !== undefined) {
+        if (!this.ctx.consumePageCursor) throw new Error("Marketo pagination is unavailable in this session.");
+        try {
+          providerToken = await this.ctx.consumePageCursor(query.pageToken, scope) as string;
+        } catch {
+          throw new Error("Invalid Marketo business-object page token for this query and field projection.");
+        }
+      }
       let page = await (await this.ctx.client()).queryBusinessObject(this.kind, {
         ...query,
+        pageToken: providerToken,
         fields: requestedFields ? [...new Set([...requestedFields, ...correlationFields])] : query.fields,
       });
       let maxResults = query.maxResults ?? MAX_FILTER_VALUES;
@@ -223,7 +251,12 @@ export class MarketoBusinessObjectImpl extends RpcTarget {
         : page.result;
       let count = page.result.length;
       await this.ctx.observe(`Read ${count} Marketo ${this.kind} record(s)`, `Queried one page using ${"dedupeKeys" in query.filter ? "compound dedupe keys" : `field ${query.filter.field}`}; ${count} record(s) returned.`);
-      return { records, moreResult: page.moreResult, nextPageToken: page.nextPageToken };
+      let nextPageToken: string | undefined;
+      if (page.moreResult) {
+        if (!this.ctx.issuePageCursor) throw new Error("Marketo pagination is unavailable in this session.");
+        nextPageToken = await this.ctx.issuePageCursor(page.nextPageToken, scope);
+      }
+      return { records, moreResult: page.moreResult, nextPageToken };
     } catch (error) {
       if (this.kind === "opportunityRole" && businessObjectPermissionDenied(error)) {
         this.ctx.setBusinessObjectAccess(this.kind, "unavailable");

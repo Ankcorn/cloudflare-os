@@ -587,7 +587,6 @@ export async function resolveDesignStudioFolderWorkspace(
 }
 
 const MAX_PAGE_TOKEN_IDS = 1_000;
-const MAX_PAGE_TOKEN_LENGTH = 32_768;
 
 type PageState = {
   offset: number;
@@ -604,15 +603,16 @@ function validTokenIds(value: unknown): value is string[] {
     new Set(value).size === value.length;
 }
 
-function paging(options: { pageToken?: string; maxResults?: number }, scope: string): PageState & { maxReturn: number } {
+async function paging(
+  ctx: DesignStudioContext,
+  options: { pageToken?: string; maxResults?: number },
+  scope: string,
+): Promise<PageState & { maxReturn: number }> {
   let state: PageState | undefined;
   if (options.pageToken !== undefined) {
     try {
-      if (options.pageToken.length > MAX_PAGE_TOKEN_LENGTH) throw new Error();
-      let encoded = options.pageToken.replace(/-/g, "+").replace(/_/g, "/");
-      let binary = atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="));
-      let bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-      let value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)) as Partial<PageState>;
+      if (!ctx.consumePageCursor) throw new Error();
+      let value = await ctx.consumePageCursor(options.pageToken, scope) as Partial<PageState>;
       if (typeof value.offset !== "number" || !Number.isSafeInteger(value.offset) || value.offset < 0 ||
           typeof value.skip !== "number" || !Number.isSafeInteger(value.skip) || value.skip < 0 ||
           typeof value.batchSize !== "number" || !Number.isSafeInteger(value.batchSize) ||
@@ -641,24 +641,17 @@ function paging(options: { pageToken?: string; maxResults?: number }, scope: str
   return { ...(state ?? { offset: 0, skip: 0, batchSize: maxReturn, scope }), maxReturn };
 }
 
-function pageToken(state: PageState): string {
+async function pageToken(ctx: DesignStudioContext, state: PageState): Promise<string> {
   if (state.pending !== undefined && !validTokenIds(state.pending) ||
       state.masked !== undefined && !validTokenIds(state.masked)) {
     throw new Error("Too many pending Design Studio changes to create a page token.");
   }
-  let bytes = new TextEncoder().encode(JSON.stringify(state));
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 8192) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-  }
-  let token = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  if (token.length > MAX_PAGE_TOKEN_LENGTH) {
-    throw new Error("Too many pending Design Studio changes to create a page token.");
-  }
-  return token;
+  if (!ctx.issuePageCursor) throw new Error("Design Studio pagination is unavailable in this session.");
+  return await ctx.issuePageCursor(state, state.scope);
 }
 
-function pageItems(
+async function pageItems(
+  ctx: DesignStudioContext,
   candidates: Summary[],
   remainingCandidates: string[],
   upstream: Summary[],
@@ -667,7 +660,7 @@ function pageItems(
   state: PageState,
   maskedIds: Set<string>,
   maxReturn: number,
-): { items: Summary[]; nextPageToken?: string } {
+): Promise<{ items: Summary[]; nextPageToken?: string }> {
   let items = candidates.slice(0, maxReturn);
   let available = upstream.filter(item => !maskedIds.has(item.id));
   let fromUpstream = available.slice(state.skip, state.skip + maxReturn - items.length);
@@ -682,7 +675,7 @@ function pageItems(
   return {
     items,
     nextPageToken: hasMore
-      ? pageToken({
+      ? await pageToken(ctx, {
           offset,
           skip,
           batchSize: state.batchSize,
@@ -759,7 +752,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let root = options.root ? logicalFolder(this.#ctx, options.root) : undefined;
     let name = options.name === undefined ? undefined : requiredText(options.name, "name");
     let scope = JSON.stringify(["folder", name?.toLocaleLowerCase(), root, validated.maxDepth, validated.workspace]);
-    let state = paging(options, scope);
+    let state = await paging(this.#ctx, options, scope);
     let { offset, maxReturn, batchSize } = state;
     let client = await this.#ctx.client();
     let pending = this.#ctx.pending();
@@ -808,7 +801,8 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       ...state,
       masked: candidateIds,
     } : state;
-    let result = pageItems(
+    let result = await pageItems(
+      this.#ctx,
       candidates,
       candidateIds.slice(candidateBatch.length),
       upstream,
@@ -953,7 +947,7 @@ export class MarketoDesignStudioImpl extends RpcTarget {
     let name = options.name === undefined ? undefined : requiredText(options.name, "name");
     let status = statusValue(options.status);
     let scope = JSON.stringify([kind, name?.toLocaleLowerCase(), status, logicalParent]);
-    let state = paging(options, scope);
+    let state = await paging(this.#ctx, options, scope);
     let { offset, maxReturn, batchSize } = state;
     let physicalParent = logicalParent ? this.#ctx.resolveId(logicalParent.id) : undefined;
     let folder = logicalParent && physicalParent !== undefined ? { id: physicalParent, type: logicalParent.type } : undefined;
@@ -985,7 +979,8 @@ export class MarketoDesignStudioImpl extends RpcTarget {
       ...state,
       masked: candidateIds,
     } : state;
-    let result = pageItems(
+    let result = await pageItems(
+      this.#ctx,
       candidates,
       candidateIds.slice(candidateBatch.length),
       upstream,

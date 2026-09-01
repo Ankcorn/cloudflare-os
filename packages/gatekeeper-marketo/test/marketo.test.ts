@@ -1064,23 +1064,23 @@ describe("observation descriptions", () => {
  * `notes` to capture what the session would have written to the observation log.
  */
 function stubContext(client: Partial<MarketoClient>, notes?: string[]): SessionContext {
-  let cursors = new Map<string, { providerToken: string; scope: string }>();
+  let cursors = new Map<string, { state: unknown; scope: string }>();
   return {
     client: async () => client as MarketoClient,
     observe: async (summary: string, detail: string) => { notes?.push(summary, detail); },
     submit: async () => {},
-    issueListMemberCursor: async (providerToken, scope) => {
+    issuePageCursor: async (state, scope) => {
       let token = crypto.randomUUID();
-      cursors.set(token, { providerToken, scope });
+      cursors.set(token, { state, scope });
       return token;
     },
-    consumeListMemberCursor: async (pageToken, scope) => {
+    consumePageCursor: async (pageToken, scope) => {
       let cursor = cursors.get(pageToken);
       cursors.delete(pageToken);
       if (!cursor || cursor.scope !== scope) {
-        throw new Error("Invalid Marketo static-list member page token for this list and field projection.");
+        throw new Error("Invalid Marketo page token for this query.");
       }
-      return cursor.providerToken;
+      return cursor.state;
     },
     retain: () => {},
     dispose: () => {},
@@ -2582,6 +2582,27 @@ describe("Design Studio simulation", () => {
       .rejects.toThrow(/Invalid Design Studio page token/);
   });
 
+  it("keeps Design Studio offsets and masked IDs opaque and rejects replay", async () => {
+    let { ctx } = designContext({
+      getEmails: async ({ offset = 0 }: { offset?: number }) => offset === 0
+        ? [{ id: 1, name: "One" }, { id: 2, name: "Two" }]
+        : [],
+    });
+    let studio = new MarketoDesignStudioImpl(ctx);
+    let first = await studio.listEmails({ maxResults: 1 });
+    let token = first.nextPageToken!;
+
+    expect(token).not.toContain("offset");
+    expect(token).not.toContain("masked");
+    let tampered = token.slice(0, -1) + (token.endsWith("0") ? "1" : "0");
+    await expect(studio.listEmails({ maxResults: 1, pageToken: tampered }))
+      .rejects.toThrow(/Invalid Design Studio page token/);
+    await expect(studio.listEmails({ maxResults: 1, pageToken: token }))
+      .resolves.toMatchObject({ items: [expect.objectContaining({ id: "2" })] });
+    await expect(studio.listEmails({ maxResults: 1, pageToken: token }))
+      .rejects.toThrow(/Invalid Design Studio page token/);
+  });
+
   it("pages by raw rows when a folder filter is applied locally", async () => {
     let records = [
       { id: 1, name: "Same", folder: { id: 11, type: "Folder" } },
@@ -3385,6 +3406,18 @@ describe("activity normalization", () => {
     }, first.nextPageToken)).rejects.toThrow(/page token for this query/);
   });
 
+  it("does not allow an instance activity cursor to cross into a person stream", async () => {
+    let ctx = stubContext({
+      getPagingToken: async () => "provider-1",
+      getActivities: async () => ({ result: [], moreResult: true, nextPageToken: "provider-2" }),
+    });
+    let query = { sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [1] };
+    let token = (await new MarketoSessionImpl(ctx).getActivities(query)).nextPageToken;
+
+    await expect(new MarketoPersonImpl(ctx, { field: "id", value: "7" }).getActivities(query, token))
+      .rejects.toThrow(/page token for this query/);
+  });
+
   it("rejects malformed activity continuation tokens before calling Marketo", async () => {
     let calls = 0;
     let session = new MarketoSessionImpl(stubContext({
@@ -3431,7 +3464,8 @@ describe("activity normalization", () => {
     let query = { sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [2, 1], maxResults: 25 };
 
     let first = await session.getActivities(query);
-    expect(first.nextPageToken).toMatch(/^gk-activity:/);
+    expect(first.nextPageToken).toEqual(expect.any(String));
+    expect(first.nextPageToken).not.toContain("provider-2");
     let second = await session.getActivities({ ...query, activityTypeIds: [1, 2] }, first.nextPageToken);
 
     expect(second).toEqual({ activities: [], moreResult: false, nextPageToken: undefined });
@@ -3559,6 +3593,33 @@ describe("person field normalization", () => {
       .resolves.toMatchObject({ moreResult: false });
     await expect(list.getMembers(["email", "firstName"], tamperToken))
       .rejects.toThrow(/for this list and field projection/);
+  });
+
+  it("scopes program-member continuations and consumes them once", async () => {
+    let providerTokens: (string | undefined)[] = [];
+    let ctx = stubContext({
+      getProgramMembers: async (programId, _fields, pageToken) => {
+        providerTokens.push(pageToken);
+        return pageToken === undefined
+          ? {
+              result: [{ id: 7, membership: { id: programId } }],
+              moreResult: true,
+              nextPageToken: "private-program-token",
+            }
+          : { result: [], moreResult: false };
+      },
+    });
+    let program = new MarketoProgramImpl(ctx, 99);
+    let first = await program.getMembers(["email"]);
+
+    expect(first.nextPageToken).not.toContain("private-program-token");
+    await expect(program.getMembers(["firstName"], first.nextPageToken))
+      .rejects.toThrow(/program and field projection/);
+
+    let replay = (await program.getMembers(["email"])).nextPageToken!;
+    await expect(program.getMembers(["email"], replay)).resolves.toMatchObject({ moreResult: false });
+    await expect(program.getMembers(["email"], replay)).rejects.toThrow(/program and field projection/);
+    expect(providerTokens).toEqual([undefined, undefined, "private-program-token"]);
   });
 
   it("treats empty person projections as id-only without exposing default PII", async () => {
@@ -3845,6 +3906,31 @@ describe("whole-instance listings", () => {
     expect(calls).toEqual([undefined, "upstream-2"]);
   });
 
+  it("keeps campaign continuation state opaque, scoped, and single-use", async () => {
+    let upstream = Array.from({ length: 300 }, (_, index) => ({ id: index + 1, name: `C${index}` }));
+    let { ctx } = campaignContext({
+      getCampaigns: async filter => filter?.pageToken === "private-campaign-token"
+        ? { result: [], moreResult: false }
+        : { result: upstream, moreResult: true, nextPageToken: "private-campaign-token" },
+    });
+    let session = new MarketoSessionImpl(ctx);
+    let issue = async () => (await session.listSmartCampaigns({ nameContains: "C" })).nextPageToken!;
+
+    let crossScope = await issue();
+    expect(crossScope).not.toContain("private-campaign-token");
+    await expect(session.listSmartCampaigns({ nameContains: "other", pageToken: crossScope }))
+      .rejects.toThrow(/smart campaign page token/);
+
+    let token = await issue();
+    let tampered = token.slice(0, -1) + (token.endsWith("0") ? "1" : "0");
+    await expect(session.listSmartCampaigns({ nameContains: "C", pageToken: tampered }))
+      .rejects.toThrow(/smart campaign page token/);
+    await expect(session.listSmartCampaigns({ nameContains: "C", pageToken: token }))
+      .resolves.toMatchObject({ moreResult: false });
+    await expect(session.listSmartCampaigns({ nameContains: "C", pageToken: token }))
+      .rejects.toThrow(/smart campaign page token/);
+  });
+
   it("accepts its continuation token with more than 100 pending campaign changes", async () => {
     let actions: CampaignAction[] = Array.from({ length: 150 }, (_, index) => ({
       id: index + 1,
@@ -3909,19 +3995,26 @@ describe("whole-instance listings", () => {
     ]);
   });
 
-  it("returns one page and passes the continuation token through", async () => {
+  it("returns opaque static-list continuations and consumes them once", async () => {
     let seen: (string | undefined)[] = [];
     let session = new MarketoSessionImpl(stubContext({
       getLists: async (filter?: { pageToken?: string }) => {
         seen.push(filter?.pageToken);
-        return { result: [{ id: 1, name: "L" }], moreResult: true, nextPageToken: "tok2" };
+        return filter?.pageToken === "tok2"
+          ? { result: [], moreResult: false }
+          : { result: [{ id: 1, name: "L" }], moreResult: true, nextPageToken: "tok2" };
       },
     }));
-    let page = await session.listStaticLists({ pageToken: "tok1" });
-    expect(seen).toEqual(["tok1"]);
+    let page = await session.listStaticLists();
+    expect(seen).toEqual([undefined]);
     expect(page.lists.map(l => l.id)).toEqual([1]);
     expect(page.moreResult).toBe(true);
-    expect(page.nextPageToken).toBe("tok2");
+    expect(page.nextPageToken).not.toContain("tok2");
+    await expect(session.listStaticLists({ pageToken: page.nextPageToken }))
+      .resolves.toMatchObject({ moreResult: false });
+    await expect(session.listStaticLists({ pageToken: page.nextPageToken }))
+      .rejects.toThrow(/static-list page token/);
+    expect(seen).toEqual([undefined, "tok2"]);
   });
 
   it.each([
@@ -4177,12 +4270,24 @@ describe("classic used-by pages", () => {
 
 function businessContext(client: Partial<MarketoClient>, submitted: MarketoActionInput[] = [], notes: string[] = []) {
   let access = new Map<string, "read-write" | "read-only" | "unavailable">();
+  let cursors = new Map<string, { state: unknown; scope: string }>();
   let ctx: BusinessObjectContext = {
     client: async () => client as MarketoClient,
     observe: async (title, description) => { notes.push(title, description); },
     submitBusinessObject: async action => void submitted.push(action),
     getBusinessObjectAccess: kind => access.get(kind) ?? "read-write",
     setBusinessObjectAccess: (kind, value) => void access.set(kind, value),
+    issuePageCursor: async (state, scope) => {
+      let token = crypto.randomUUID();
+      cursors.set(token, { state, scope });
+      return token;
+    },
+    consumePageCursor: async (token, scope) => {
+      let cursor = cursors.get(token);
+      cursors.delete(token);
+      if (!cursor || cursor.scope !== scope) throw new Error("Invalid page token.");
+      return cursor.state;
+    },
     dispose: () => {},
   };
   return { ctx, access };
@@ -4606,6 +4711,39 @@ describe("standard CRM business objects", () => {
       maxResults: 1,
     })).rejects.toThrow(/more than the requested 1 company records/);
     expect(notes).toEqual([]);
+  });
+
+  it("binds business-object cursors to kind, filter, projection, and page size", async () => {
+    let providerTokens: (string | undefined)[] = [];
+    let { ctx } = businessContext({
+      queryBusinessObject: async (_kind, query) => {
+        providerTokens.push(query.pageToken);
+        return query.pageToken === undefined
+          ? { result: [{ id: 7, company: "Acme" }], moreResult: true, nextPageToken: "private-object-token" }
+          : { result: [], moreResult: false };
+      },
+    });
+    let companies = new MarketoBusinessObjectImpl(ctx, "company");
+    let query = { filter: { field: "id", values: [7] }, fields: ["company"], maxResults: 25 };
+    let issue = async () => (await companies.query(query)).nextPageToken!;
+
+    let projectionToken = await issue();
+    expect(projectionToken).not.toContain("private-object-token");
+    await expect(companies.query({
+      ...query,
+      fields: ["company", "externalCompanyId"],
+      pageToken: projectionToken,
+    })).rejects.toThrow(/business-object page token/);
+
+    let token = await issue();
+    let tampered = token.slice(0, -1) + (token.endsWith("0") ? "1" : "0");
+    await expect(companies.query({ ...query, pageToken: tampered }))
+      .rejects.toThrow(/business-object page token/);
+    await expect(companies.query({ ...query, pageToken: token }))
+      .resolves.toMatchObject({ moreResult: false });
+    await expect(companies.query({ ...query, pageToken: token }))
+      .rejects.toThrow(/business-object page token/);
+    expect(providerTokens).toEqual([undefined, undefined, "private-object-token"]);
   });
 
   it("sends compound custom-object keys as JSON", async () => {
@@ -6053,6 +6191,52 @@ class TestApprovalQueue extends RpcTarget {
     await this.submit(id, description);
   }
 }
+
+describe("binding page cursor storage", () => {
+  it("stores provider state server-side and rejects expired or replayed cursors", async () => {
+    let accountId = await accountWithCredentials({
+      endpoint: ORIGIN, clientId: "cursor-client", clientSecret: crypto.randomUUID(),
+    });
+    let gatekeeper = await gatekeeperForAccount(accountId.toString());
+    vi.stubGlobal("fetch", async (urlText: string) => {
+      let url = new URL(urlText);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ access_token: "token", expires_in: 3600 });
+      }
+      if (url.pathname === "/rest/v1/lists.json" && url.searchParams.get("nextPageToken")) {
+        return Response.json({ success: true, result: [] });
+      }
+      return Response.json({
+        success: true,
+        result: [{ id: 1, name: "List" }],
+        nextPageToken: "private-provider-token",
+      });
+    });
+
+    await runInDurableObject(gatekeeper, async (instance, state) => {
+      let queue = new RpcStub(new TestApprovalQueue()) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      let expired = (await session.listStaticLists()).nextPageToken!;
+      expect(expired).not.toContain("private-provider-token");
+      let stored = [...state.storage.kv.list<{ state: unknown; expiresAt: number }>({
+        prefix: "pageCursor:",
+      })];
+      expect(stored).toHaveLength(1);
+      expect(stored[0]?.[1].state).toBe("private-provider-token");
+      state.storage.kv.put(stored[0]![0], { ...stored[0]![1], expiresAt: Date.now() - 1 });
+      await expect(session.listStaticLists({ pageToken: expired }))
+        .rejects.toThrow(/static-list page token/);
+
+      let token = (await session.listStaticLists()).nextPageToken!;
+      await expect(session.listStaticLists({ pageToken: token }))
+        .resolves.toMatchObject({ moreResult: false });
+      await expect(session.listStaticLists({ pageToken: token }))
+        .rejects.toThrow(/static-list page token/);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+  });
+});
 
 async function testCredentialFingerprint(credentials: MarketoCredentials): Promise<string> {
   let bytes = new TextEncoder().encode(

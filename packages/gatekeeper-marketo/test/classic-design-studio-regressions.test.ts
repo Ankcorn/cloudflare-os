@@ -18,12 +18,24 @@ const EMPTY_LIFECYCLE_SNAPSHOT = { metadata: {}, content: [], affectedDependents
 function context(client: Partial<MarketoClient>, initial: DesignStudioAction[] = []) {
   let actions = [...initial];
   let nextProvisional = 0;
+  let cursors = new Map<string, { state: unknown; scope: string }>();
   let ctx: DesignStudioContext = {
     client: async () => client as MarketoClient,
     observe: async () => {},
     submit: async () => {},
     dispose: () => {},
     retain: () => {},
+    issuePageCursor: async (state, scope) => {
+      let token = crypto.randomUUID();
+      cursors.set(token, { state, scope });
+      return token;
+    },
+    consumePageCursor: async (token, scope) => {
+      let cursor = cursors.get(token);
+      cursors.delete(token);
+      if (!cursor || cursor.scope !== scope) throw new Error("Invalid page token.");
+      return cursor.state;
+    },
     allocateProvisional: () => `~${++nextProvisional}`,
     logicalKind: id => actions.find((action): action is Extract<DesignStudioAction, { type: "designCreate" | "designClone" }> =>
       (action.type === "designCreate" || action.type === "designClone") && action.provisionalId === id

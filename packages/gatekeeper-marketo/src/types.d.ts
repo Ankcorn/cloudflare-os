@@ -10,7 +10,8 @@
 //
 // PAGING. For results containing both `moreResult` and `nextPageToken`, continue while
 // `moreResult` is true and pass `nextPageToken` back as `pageToken`. A page may be empty
-// while `moreResult` is still true (see MarketoActivityPage).
+// while `moreResult` is still true (see MarketoActivityPage). Page tokens expire after ten
+// minutes and can be used exactly once with the same resource, query, and field projection.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
