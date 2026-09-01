@@ -7998,6 +7998,50 @@ describe("action dispatch lifecycle", () => {
     expect(writes).toBe(0);
   });
 
+  it("serializes revoke before the authoritative dispatch check and network use", async () => {
+    let dispatchEntered!: () => void;
+    let entered = new Promise<void>(resolve => { dispatchEntered = resolve; });
+    let releaseDispatch!: () => void;
+    let released = new Promise<void>(resolve => { releaseDispatch = resolve; });
+    let originalDispatch = UserAccount.prototype.dispatch;
+    let dispatchSpy = vi.spyOn(UserAccount.prototype, "dispatch").mockImplementation(async function(
+      this: UserAccount,
+      ...args: Parameters<UserAccount["dispatch"]>
+    ) {
+      dispatchEntered();
+      await released;
+      return await originalDispatch.apply(this, args);
+    });
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) {
+        return Response.json({ access_token: "prepared-token", expires_in: 3600 });
+      }
+      writes++;
+      return Response.json({ success: true, result: [{ id: 7, status: "added" }] });
+    });
+    let stub = await actionGatekeeper(ACTION);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      let applying = instance.applyAction(ACTION.id);
+      await entered;
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBe("dispatching");
+      let ctx = (instance as unknown as {
+        ctx: { exports: Cloudflare.Exports; props: { userObjectId: string } };
+      }).ctx;
+      await ctx.exports.UserAccount.get(
+        ctx.exports.UserAccount.idFromString(ctx.props.userObjectId),
+      ).revoke();
+      releaseDispatch();
+
+      await expect(applying).rejects.toThrow(/account changed/);
+      expect(state.storage.kv.get(`applying:${ACTION.id}`)).toBeUndefined();
+      expect(state.storage.kv.get(`pending:${ACTION.id}`)).toBeDefined();
+    });
+    expect(writes).toBe(0);
+    dispatchSpy.mockRestore();
+  });
+
   it("allows pre-dispatch rejection but rejects every state that may have applied", async () => {
     let preparing = await actionGatekeeper(ACTION);
     await runInDurableObject(preparing, async (instance, state) => {

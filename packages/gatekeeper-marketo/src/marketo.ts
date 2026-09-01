@@ -46,6 +46,7 @@ import {
   makeClient,
   tokenCacheStub,
   unwrapTokenCacheResult,
+  type MarketoDispatchRequest,
   type TokenCacheError,
 } from "./token-cache";
 import { logger } from "./logger";
@@ -112,6 +113,7 @@ import {
 } from "./session";
 import {
   fetchAccessToken,
+  MarketoDispatchAbortedError,
   MarketoError,
   MarketoResponseValidationError,
   type MarketoClient,
@@ -373,8 +375,22 @@ type AccountCredentialState = {
   generation: number;
 };
 
+type AccountDispatchResult =
+  | { ok: true; response: Response }
+  | { ok: false; error: TokenCacheError }
+  | { ok: false; networkFailure: true }
+  | { ok: false; credentialChanged: true };
+
 export class UserAccount extends DurableObject<Env> {
-  #credentialGeneration = 0;
+  #credentialGeneration(): number {
+    return this.ctx.storage.kv.get<number>("credentialGeneration") ?? 0;
+  }
+
+  #advanceCredentialGeneration(): number {
+    let generation = this.#credentialGeneration() + 1;
+    this.ctx.storage.kv.put("credentialGeneration", generation);
+    return generation;
+  }
 
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string): Promise<void> {
     if (!this.ctx.storage.kv.get<MarketoCredentials>("credentials")) {
@@ -409,27 +425,27 @@ export class UserAccount extends DurableObject<Env> {
     // Re-checked here rather than trusted from the fetch handler: this is the call that stores the
     // credentials, so it is the one that must be safe on its own.
     if (!this.#nonceIsValid(nonce)) return { kind: "invalid_nonce" };
-    let generation = this.#credentialGeneration;
+    let generation = this.#credentialGeneration();
     let storedNonce = this.ctx.storage.kv.get<StoredNonce>("nonce");
-    if (generation !== this.#credentialGeneration) {
+    if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
     this.ctx.storage.kv.delete("nonce");
 
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
-      if (generation === this.#credentialGeneration && storedNonce && storedNonce.expiresAt > Date.now()) {
+      if (generation === this.#credentialGeneration() && storedNonce && storedNonce.expiresAt > Date.now()) {
         this.ctx.storage.kv.put("nonce", storedNonce);
       }
       return { kind: "error", message: "Connection callback expired. Please retry." };
     }
 
-    if (generation !== this.#credentialGeneration) {
+    if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
     let reconnecting = Boolean(this.ctx.storage.kv.get<boolean>("reconnecting"));
     let previousCredentials = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
-    if (generation !== this.#credentialGeneration) {
+    if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
     this.ctx.storage.kv.put<MarketoCredentials>("credentials", credentials);
@@ -437,7 +453,7 @@ export class UserAccount extends DurableObject<Env> {
     try {
       if (reconnecting) {
         await callback.credentialsRestored();
-        if (generation !== this.#credentialGeneration) {
+        if (generation !== this.#credentialGeneration()) {
           return { kind: "error", message: "Connection state changed. Please retry." };
         }
         this.ctx.storage.kv.delete("reconnecting");
@@ -448,7 +464,7 @@ export class UserAccount extends DurableObject<Env> {
     } catch {
       // A revoke or newer reconnect owns the credential state now. Never roll an older failed
       // callback over that lifecycle change.
-      if (generation === this.#credentialGeneration) {
+      if (generation === this.#credentialGeneration()) {
         if (previousCredentials) {
           this.ctx.storage.kv.put("credentials", previousCredentials);
         } else {
@@ -465,7 +481,7 @@ export class UserAccount extends DurableObject<Env> {
       };
     }
 
-    if (generation !== this.#credentialGeneration) {
+    if (generation !== this.#credentialGeneration()) {
       return { kind: "error", message: "Connection state changed. Please retry." };
     }
     await this.ctx.storage.deleteAlarm();
@@ -473,7 +489,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(nonce: string): Promise<void> {
-    this.#credentialGeneration++;
+    this.#advanceCredentialGeneration();
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: nonce,
@@ -490,8 +506,68 @@ export class UserAccount extends DurableObject<Env> {
   getCredentialState(): AccountCredentialState {
     return {
       credentials: this.ctx.storage.kv.get<MarketoCredentials>("credentials"),
-      generation: this.#credentialGeneration,
+      generation: this.#credentialGeneration(),
     };
+  }
+
+  /** Validate the captured credential and initiate one Marketo request atomically with revoke. */
+  async dispatch(
+    expected: AccountCredentialState & { credentials: MarketoCredentials },
+    urlText: string,
+    request: MarketoDispatchRequest,
+    forceRefresh: boolean,
+    timeoutMs: number,
+  ): Promise<AccountDispatchResult> {
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+    let endpoint = new URL(expected.credentials.endpoint);
+    let url = new URL(urlText);
+    if (url.origin !== endpoint.origin || !url.pathname.startsWith("/rest/")) {
+      throw new Error("Refusing to dispatch a request outside the connected Marketo REST API.");
+    }
+
+    let token = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
+      .getToken(expected.credentials, forceRefresh);
+    if (!token.ok) return token;
+    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+
+    let headers = new Headers(request.headers);
+    headers.set("Authorization", `Bearer ${token.value}`);
+    let body: BodyInit | undefined;
+    if (typeof request.body === "string") {
+      body = request.body;
+    } else if (request.body) {
+      let form = new FormData();
+      for (let entry of request.body.formData) {
+        if ("text" in entry) form.append(entry.name, entry.text);
+        else form.append(
+          entry.name,
+          new Blob([entry.bytes], { type: entry.type }),
+          entry.fileName,
+        );
+      }
+      body = form;
+    }
+    let init: RequestInit = {
+      ...request,
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+      body,
+    };
+    // fetch() is invoked before this turn yields, so revoke cannot complete between validation and
+    // network initiation.
+    try {
+      return { ok: true, response: await fetch(urlText, init) };
+    } catch {
+      return { ok: false, networkFailure: true };
+    }
+  }
+
+  #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
+    let current = this.ctx.storage.kv.get<MarketoCredentials>("credentials");
+    return this.#credentialGeneration() === expected.generation && current !== undefined &&
+      current.endpoint === expected.credentials.endpoint &&
+      current.clientId === expected.credentials.clientId &&
+      current.clientSecret === expected.credentials.clientSecret;
   }
 
   async credentialsExpired(): Promise<void> {
@@ -501,9 +577,10 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async revoke(): Promise<void> {
-    this.#credentialGeneration++;
+    let generation = this.#advanceCredentialGeneration();
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.ctx.storage.kv.put("credentialGeneration", generation);
   }
 
   async alarm(): Promise<void> {
@@ -897,12 +974,32 @@ export class MarketoGatekeeperImpl
     ).getCredentialState();
   }
 
-  async #client(credentials?: MarketoCredentials): Promise<MarketoClient> {
+  async #client(
+    credentials?: MarketoCredentials,
+    credentialState?: AccountCredentialState & { credentials: MarketoCredentials },
+  ): Promise<MarketoClient> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
     return await makeClient(
       this.ctx.exports,
       credentials ?? await this.#credentials(),
       () => account.credentialsExpired(),
+      credentialState ? async (url, init, forceRefresh, timeoutMs) => {
+        let result = await account.dispatch(
+          credentialState,
+          url,
+          init,
+          forceRefresh,
+          timeoutMs,
+        );
+        if (!result.ok) {
+          if ("error" in result) return unwrapTokenCacheResult<never>(result);
+          if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
+          throw new MarketoDispatchAbortedError(
+            "The Marketo account changed before the request was dispatched.",
+          );
+        }
+        return result.response;
+      } : undefined,
     );
   }
 
@@ -1126,7 +1223,10 @@ export class MarketoGatekeeperImpl
       if (!credentialState.credentials) {
         throw new Error("The Marketo account behind this binding has been disconnected.");
       }
-      client = await this.#client(credentialState.credentials);
+      client = await this.#client(credentialState.credentials, {
+        ...credentialState,
+        credentials: credentialState.credentials,
+      });
       if (isBusinessObjectAction(pending.action)) {
         let access = await this.#probeBusinessObjectAccess(pending.action.kind, client);
         if (access !== "read-write") {

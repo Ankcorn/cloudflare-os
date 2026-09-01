@@ -83,6 +83,14 @@ export class MarketoResponseValidationError extends MarketoError {
   }
 }
 
+/** A side-effecting request refused before network initiation because its authority changed. */
+export class MarketoDispatchAbortedError extends MarketoError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MarketoDispatchAbortedError";
+  }
+}
+
 /** Marketo's standard response envelope. */
 type MarketoEnvelope<T> = {
   requestId?: string;
@@ -346,6 +354,12 @@ export function parseMarketoDate(value: unknown): Date | undefined {
  * Durable Object so one token is shared across all callers. */
 export type TokenProvider = {
   getToken(forceRefresh?: boolean): Promise<string>;
+  fetch?(
+    url: string,
+    init: RequestInit,
+    forceRefresh?: boolean,
+    timeoutMs?: number,
+  ): Promise<Response>;
   credentialsExpired?(): Promise<void>;
 };
 
@@ -439,7 +453,7 @@ export class MarketoClient {
       timeoutMs?: number;
     },
   ): Promise<MarketoEnvelope<T>> {
-    let attempt = async (token: string): Promise<MarketoEnvelope<T>> => {
+    let attempt = async (token?: string, forceRefresh = false): Promise<MarketoEnvelope<T>> => {
       let url = `${this.#endpoint}${options?.withoutRestPrefix ? "" : "/rest"}${path}${buildQuery(options?.query)}`;
       let longRunning = path.startsWith("/asset/v1/") || path.startsWith("/asset/v2/") ||
         path === "/v1/activities/pagingtoken.json";
@@ -448,19 +462,17 @@ export class MarketoClient {
         : options?.body !== undefined
           ? "application/json"
           : undefined;
+      let timeoutMs = options?.timeoutMs ?? (longRunning ? LONG_RUNNING_REQUEST_TIMEOUT_MS : 60_000);
       let init: RequestInit = {
         method: options?.method ?? "GET",
         redirect: "error",
         headers: {
           // Marketo is removing `access_token` query-parameter auth on 2026-07-31; the
           // Authorization header is the only supported form going forward.
-          Authorization: `Bearer ${token}`,
+          ...(token === undefined ? {} : { Authorization: `Bearer ${token}` }),
           ...(options?.appType ? { "x-app-type": "marketo" } : {}),
           ...(contentType ? { "Content-Type": contentType } : {}),
         },
-        signal: AbortSignal.timeout(
-          options?.timeoutMs ?? (longRunning ? LONG_RUNNING_REQUEST_TIMEOUT_MS : 60_000),
-        ),
       };
       if (options?.multipart) init.body = options.multipart;
       else if (options?.form) init.body = options.form.toString();
@@ -468,8 +480,11 @@ export class MarketoClient {
 
       let response: Response;
       try {
-        response = await fetch(url, init);
-      } catch {
+        response = this.#tokens.fetch
+          ? await this.#tokens.fetch(url, init, forceRefresh, timeoutMs)
+          : await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (error) {
+        if (error instanceof MarketoDispatchAbortedError) throw error;
         throw new MarketoError("Could not reach the Marketo API.", {
           operation: path,
         });
@@ -510,11 +525,15 @@ export class MarketoClient {
       let preparedToken = this.#preparedToken;
       this.#preparedToken = undefined;
       try {
-        return await attempt(preparedToken ?? await this.#tokens.getToken());
+        return await (this.#tokens.fetch
+          ? attempt(undefined)
+          : attempt(preparedToken ?? await this.#tokens.getToken()));
       } catch (e) {
         if (e instanceof MarketoError && e.isAuthError) {
           try {
-            return await attempt(await this.#tokens.getToken(true));
+            return await (this.#tokens.fetch
+              ? attempt(undefined, true)
+              : attempt(await this.#tokens.getToken(true)));
           } catch (retryError) {
             if (retryError instanceof MarketoError && retryError.isAuthError) {
               try {

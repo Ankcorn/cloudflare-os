@@ -32,6 +32,18 @@ export type TokenCacheResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: TokenCacheError };
 
+type SerializedFormDataEntry =
+  | { name: string; text: string }
+  | { name: string; bytes: Uint8Array; type: string; fileName: string };
+
+/** Signal-free HTTP request data that can cross the Durable Object RPC boundary. */
+export type MarketoDispatchRequest = {
+  method?: string;
+  redirect?: "follow" | "error" | "manual";
+  headers?: HeadersInit;
+  body?: string | { formData: SerializedFormDataEntry[] };
+};
+
 type CachedToken = {
   accessToken: string;
   /** Epoch millis at which Marketo says the token stops working. */
@@ -195,12 +207,54 @@ export async function makeClient(
   exports: Cloudflare.Exports,
   creds: MarketoCredentials,
   credentialsExpired?: () => Promise<void>,
+  dispatch?: (
+    url: string,
+    init: MarketoDispatchRequest,
+    forceRefresh: boolean,
+    timeoutMs: number,
+  ) => Promise<Response>,
 ): Promise<MarketoClient> {
   let cache = await tokenCacheStub(exports, creds);
   let provider: TokenProvider = {
     getToken: async (forceRefresh?: boolean) =>
       unwrapTokenCacheResult(await cache.getToken(creds, forceRefresh ?? false)),
+    ...(dispatch ? { fetch: async (
+      url: string,
+      init: RequestInit,
+      forceRefresh = false,
+      timeoutMs = 60_000,
+    ) => await dispatch(url, await serializeRequest(init), forceRefresh, timeoutMs) } : {}),
     credentialsExpired,
   };
   return new MarketoClient(creds.endpoint, provider);
+}
+
+async function serializeRequest(init: RequestInit): Promise<MarketoDispatchRequest> {
+  let body: MarketoDispatchRequest["body"];
+  if (init.body instanceof FormData) {
+    let entries: SerializedFormDataEntry[] = [];
+    for (let [name, value] of init.body) {
+      entries.push(typeof value === "string"
+        ? { name, text: value }
+        : {
+            name,
+            bytes: new Uint8Array(await value.arrayBuffer()),
+            type: value.type,
+            fileName: value.name,
+          });
+    }
+    body = { formData: entries };
+  } else if (typeof init.body === "string") {
+    body = init.body;
+  } else if (init.body !== undefined && init.body !== null) {
+    throw new Error("Unsupported Marketo request body.");
+  }
+  return {
+    method: init.method,
+    ...(init.redirect === "follow" || init.redirect === "error" || init.redirect === "manual"
+      ? { redirect: init.redirect }
+      : {}),
+    headers: init.headers,
+    ...(body === undefined ? {} : { body }),
+  };
 }
