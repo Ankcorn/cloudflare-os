@@ -157,6 +157,9 @@ export type GitHubCommitResponse = {
     message: string;
     author?: GitHubGitIdentityResponse | null;
     committer?: GitHubGitIdentityResponse | null;
+    tree?: {
+      sha: string;
+    };
   };
   author?: GitHubSimpleUser | null;
   parents: Array<{
@@ -174,9 +177,35 @@ export type GitHubCompareResponse = {
   base_commit: {
     sha: string;
   };
+  /** The merge base of the two compared commits (what a three-dot compare diffs from). */
+  merge_base_commit?: {
+    sha: string;
+  };
   commits?: GitHubCommitResponse[];
   total_commits: number;
   files?: GitHubPullFileResponse[];
+};
+
+/** One entry of a git tree object, as the git-data trees API reports it. */
+export type GitHubGitTreeEntryResponse = {
+  path: string;
+  mode: string;
+  type: "blob" | "tree" | "commit";
+  sha: string;
+  size?: number;
+};
+
+export type GitHubGitTreeResponse = {
+  sha: string;
+  tree: GitHubGitTreeEntryResponse[];
+  truncated?: boolean;
+};
+
+type GitHubGitBlobResponse = {
+  sha: string;
+  size: number;
+  content: string;
+  encoding: string;
 };
 
 export class GitHubApiError extends Error {
@@ -1196,6 +1225,54 @@ export class GitHubApi {
       undefined,
       options,
     );
+  }
+
+  /**
+   * One level of a git tree object via the git-data API, or null if the tree is unknown to
+   * GitHub. Used to enumerate the on-remote side of a simulated pull request diff when the tree
+   * object is not in the workspace git cache.
+   */
+  async getGitTree(owner: string, repo: string, sha: string): Promise<GitHubGitTreeResponse | null> {
+    try {
+      return (await this.#request<GitHubGitTreeResponse>(
+        "GET",
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(sha)}`,
+      )).data;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * A blob's raw bytes via the git-data API. Returns null if the blob is unknown to GitHub, and
+   * `"oversized"` when its size exceeds `maxBytes` (the content is then never downloaded) or the
+   * response is not base64 (GitHub's signal that the blob is too large to inline).
+   */
+  async getGitBlob(
+    owner: string,
+    repo: string,
+    sha: string,
+    maxBytes: number,
+  ): Promise<Uint8Array | "oversized" | null> {
+    let response: GitHubGitBlobResponse;
+    try {
+      response = (await this.#request<GitHubGitBlobResponse>(
+        "GET",
+        `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs/${encodeURIComponent(sha)}`,
+      )).data;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+    if (response.size > maxBytes || response.encoding !== "base64") {
+      return "oversized";
+    }
+    return Uint8Array.from(atob(response.content.replace(/\s+/g, "")), char => char.charCodeAt(0));
   }
 
   async listCommitsConditional(

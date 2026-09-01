@@ -46,7 +46,15 @@ import {
   normalizeCommitDetails,
   normalizeCommitSummary,
   normalizeTagSummary,
+  parseGitCommitPayload,
 } from "./git-commits";
+import {
+  MAX_DIFF_BLOB_BYTES,
+  changedPathsBetweenTrees,
+  diffGitTrees,
+  parseGitTreePayload,
+  type TreeDiffSource,
+} from "./git-diff";
 import {
   GitRefUpdateRejectedError,
   ZERO_OID,
@@ -310,6 +318,22 @@ type StoredActionRecord = {
   revertInfo?: GitHubRevertInfo;
 };
 
+/**
+ * A `base...head` pull request comparison computed as if the head branch's queued pushes had
+ * already landed (see `#simulatedPullComparison`). `pendingCommitIds` are the commits that are
+ * not on GitHub yet -- sessions must not advertise them.
+ */
+type SimulatedPullComparison = {
+  revision: GitHubPullRequestRevision;
+  files: GitHubPullRequestDiffFile[];
+  additions: number;
+  deletions: number;
+  totalCommits: number;
+  /** Oldest-first: GitHub's `compare(base...anchor)` commits, then the pending chain. */
+  commitSummaries: GitHubCommitSummary[];
+  pendingCommitIds: GitOid[];
+};
+
 const NONCE_BYTES = 32;
 const INITIATION_NONCE_LIFETIME_MS = 10 * 60 * 1000;
 const OAUTH_NONCE_LIFETIME_MS = 10 * 60 * 1000;
@@ -319,6 +343,9 @@ const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
 const MAX_REPLY_TARGET_HOPS = 50;
+// Cap on the queued-but-not-yet-pushed commits walked when simulating a branch's history
+// (mirrors GitHub's own 250-commit cap on compare listings).
+const MAX_PENDING_CHAIN_COMMITS = 250;
 
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
@@ -1508,6 +1535,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
   #pendingActionsCache?: GitHubAction[];
 
+  /**
+   * Commit ids this instance has served from the workspace git cache as part of simulating
+   * queued pushes (branch heads *and* the intermediate commits of pending chains). Session
+   * advertising callbacks consult it (via `isSimulatedCommitId`) to withhold these ids: they are
+   * not on GitHub yet, so advertising one would record a wrong pull-routing hint that outlives a
+   * rejection. In-memory only -- entries are always recorded in the same call that returns the
+   * ids, so a restart cannot leak an unfiltered id.
+   */
+  #servedSimulatedCommitIds = new Set<GitOid>();
+
   #userAccount() {
     return this.ctx.exports.UserAccount.get(this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId));
   }
@@ -2106,6 +2143,31 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     }
   }
 
+  /**
+   * Cascade for a rejected push: reject every queued `createPullRequest` whose head or base
+   * branch no longer exists on the remote or as the outcome of the remaining queued pushes,
+   * along with everything queued against the doomed pull request. Returns whether anything was
+   * cascaded.
+   */
+  async #rejectPullRequestsForMissingBranches(): Promise<boolean> {
+    let cascaded = false;
+    for (const pending of this.#listPendingActions()) {
+      if (pending.type !== "createPullRequest") continue;
+      for (const branch of [pending.options.head, pending.options.base]) {
+        const realHead = await this.#withApi(api =>
+          api.getBranchHead(this.ctx.props.owner, this.ctx.props.repo, branch));
+        if (this.#simulateBranchHead(branch, realHead) === null) {
+          this.#markActionRejected(pending);
+          this.#rejectActionsForResource("pull", pending.provisionalId);
+          this.ctx.storage.kv.delete(`provisional:${pending.provisionalId}`);
+          cascaded = true;
+          break;
+        }
+      }
+    }
+    return cascaded;
+  }
+
   #rejectReplyDependencyChain(rootCommentIds: string[]): void {
     const pendingActions = this.#listPendingActions();
     const pendingReplies = pendingActions.filter(
@@ -2370,7 +2432,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#overlayIssueLike(await this.#getRemoteIssueDetails(logicalId), "issue", logicalId);
   }
 
-  async #getPullRequestDetails(logicalId: string): Promise<GitHubPullRequestDetails> {
+  async #getPullRequestDetails(logicalId: string, gitCache?: RpcStub<GitCache>): Promise<GitHubPullRequestDetails> {
     if (logicalId.startsWith("~")) {
       const provisional = this.#getProvisionalResource(logicalId);
       if (!provisional || provisional.kind !== "pull") {
@@ -2379,7 +2441,8 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
       if (provisional.realId) {
         const remote = await this.#getRemotePullRequestDetails(provisional.realId);
-        return this.#overlayIssueLike(remote, "pull", logicalId);
+        return await this.#overlaySimulatedPullHead(
+          this.#overlayIssueLike(remote, "pull", logicalId), gitCache);
       }
 
       const createAction = this.#findCreateAction(logicalId, "pull") as CreatePullRequestAction | undefined;
@@ -2387,11 +2450,62 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         throw new Error(`Provisional pull request ${logicalId} is no longer available.`);
       }
 
-      const provisionalPull = await this.#buildProvisionalPullRequestDetails(createAction);
+      const provisionalPull = await this.#buildProvisionalPullRequestDetails(createAction, gitCache);
       return this.#overlayIssueLike(provisionalPull, "pull", logicalId, true);
     }
 
-    return this.#overlayIssueLike(await this.#getRemotePullRequestDetails(logicalId), "pull", logicalId);
+    return await this.#overlaySimulatedPullHead(
+      this.#overlayIssueLike(await this.#getRemotePullRequestDetails(logicalId), "pull", logicalId),
+      gitCache);
+  }
+
+  /**
+   * Overlay queued pushes onto an existing pull request's head: when the (same-repo) head branch
+   * has pending pushes, the details read as if they had landed -- simulated head sha and
+   * recomputed commit/diff stats. `mergeable` is dropped: GitHub's verdict describes the remote
+   * head, not the simulated one. Degrades to the remote details if the simulation fails.
+   */
+  async #overlaySimulatedPullHead(
+    details: GitHubPullRequestDetails,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<GitHubPullRequestDetails> {
+    if (gitCache === undefined || details.head.repo.fullName !== this.#repoFullName()) {
+      return details;
+    }
+    if (this.#pendingPushActions(details.head.ref).length === 0) return details;
+    try {
+      const simulated =
+        await this.#simulatedPullComparison(gitCache, details.base.ref, details.head.ref);
+      if (simulated === null) return details;
+      return {
+        ...details,
+        head: { ...details.head, sha: simulated.revision.headSha },
+        commits: simulated.totalCommits,
+        additions: simulated.additions,
+        deletions: simulated.deletions,
+        changedFiles: simulated.files.length,
+        mergeable: undefined,
+      };
+    } catch (error) {
+      logger.warn("failed to overlay queued pushes onto pull request details", {
+        event: "pull.request.simulated.head.overlay.failed", error,
+      });
+      return details;
+    }
+  }
+
+  /**
+   * The synchronous sibling of `#overlaySimulatedPullHead` for pull request *summaries* (which
+   * carry no diff stats): a same-repo head branch with queued pushes reads at its simulated
+   * head. The simulated sha is always a queued push's newSha, so `isSimulatedCommitId` already
+   * withholds it from session advertising.
+   */
+  #overlayPullSummaryHead<T extends GitHubPullRequestSummary>(item: T): T {
+    if (item.head.repo.fullName !== this.#repoFullName()) return item;
+    if (this.#pendingPushActions(item.head.ref).length === 0) return item;
+    const simulated = this.#simulateBranchHead(item.head.ref, item.head.sha);
+    if (simulated === null || simulated === item.head.sha) return item;
+    return { ...item, head: { ...item.head, sha: simulated } };
   }
 
   async #getRemoteIssueDetails(realId: string): Promise<GitHubIssueDetails> {
@@ -2473,7 +2587,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     };
   }
 
-  async #buildProvisionalPullRequestDetails(action: CreatePullRequestAction): Promise<GitHubPullRequestDetails> {
+  async #buildProvisionalPullRequestDetails(
+    action: CreatePullRequestAction,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<GitHubPullRequestDetails> {
     const viewer = await this.#getViewerActor();
     let baseSha = "";
     let headSha = "";
@@ -2483,18 +2600,32 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     let changedFiles = 0;
 
     try {
-      const comparison = await this.#withApi(api => api.compareBranches(
-        this.ctx.props.owner,
-        this.ctx.props.repo,
-        action.options.base,
-        action.options.head,
-      ));
-      baseSha = comparison.base_commit.sha;
-      headSha = comparison.commits?.at(-1)?.sha ?? comparison.base_commit.sha;
-      commits = comparison.total_commits;
-      additions = (comparison.files ?? []).reduce((sum, file) => sum + file.additions, 0);
-      deletions = (comparison.files ?? []).reduce((sum, file) => sum + file.deletions, 0);
-      changedFiles = comparison.files?.length ?? 0;
+      // The head branch may itself be provisional -- moved, or outright created, by queued
+      // pushes. The simulated comparison reads it as if those pushes had landed; only when no
+      // overlay applies is GitHub's live compare the truth.
+      const simulated =
+        await this.#simulatedPullComparison(gitCache, action.options.base, action.options.head);
+      if (simulated !== null) {
+        baseSha = simulated.revision.baseSha;
+        headSha = simulated.revision.headSha;
+        commits = simulated.totalCommits;
+        additions = simulated.additions;
+        deletions = simulated.deletions;
+        changedFiles = simulated.files.length;
+      } else {
+        const comparison = await this.#withApi(api => api.compareBranches(
+          this.ctx.props.owner,
+          this.ctx.props.repo,
+          action.options.base,
+          action.options.head,
+        ));
+        baseSha = comparison.base_commit.sha;
+        headSha = comparison.commits?.at(-1)?.sha ?? comparison.base_commit.sha;
+        commits = comparison.total_commits;
+        additions = (comparison.files ?? []).reduce((sum, file) => sum + file.additions, 0);
+        deletions = (comparison.files ?? []).reduce((sum, file) => sum + file.deletions, 0);
+        changedFiles = comparison.files?.length ?? 0;
+      }
     } catch (error) {
       logger.warn("failed to compute provisional pull request comparison", {
         event: "pull.request.provisional.comparison.compute.failed", error,
@@ -2731,16 +2862,21 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     });
   }
 
-  async #listPullSummaries(filter: GitHubPullRequestFilter | undefined, pageSize: number): Promise<Cursor<GitHubPullRequestSummary>> {
+  async #listPullSummaries(
+    filter: GitHubPullRequestFilter | undefined,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubPullRequestSummary>> {
     const compare = pullComparator(filter?.sort, filter?.direction);
     const touched = await this.#buildTouchedPullSummaries(item => pullMatchesFilter(item, filter), compare);
 
     const provisionals = (await Promise.all(this.#listPendingActions()
       .filter((action): action is CreatePullRequestAction => action.type === "createPullRequest")
-      .map(action => this.#buildProvisionalPullRequestDetails(action).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
+      .map(action => this.#buildProvisionalPullRequestDetails(action, gitCache).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
       .filter(item => pullMatchesFilter(item, filter))
       .toSorted(compare);
-    const injectedItems = [...touched.items, ...provisionals].toSorted(compare);
+    const injectedItems = [...touched.items.map(item => this.#overlayPullSummaryHead(item)), ...provisionals]
+      .toSorted(compare);
 
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
@@ -2772,7 +2908,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           };
         });
       },
-      overlay: item => this.#overlayIssueLike(item, "pull", item.id),
+      overlay: item => this.#overlayPullSummaryHead(this.#overlayIssueLike(item, "pull", item.id)),
       filter: item => pullMatchesFilter(item, filter),
       comparator: compare,
       injectedItems,
@@ -2780,12 +2916,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     });
   }
 
-  async #searchPullSummaries(query: GitHubPullRequestSearch, pageSize: number): Promise<Cursor<GitHubPullRequestSummary>> {
+  async #searchPullSummaries(
+    query: GitHubPullRequestSearch,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubPullRequestSummary>> {
     const compare = pullComparator("updated", "desc");
 
     const provisionals = (await Promise.all(this.#listPendingActions()
       .filter((action): action is CreatePullRequestAction => action.type === "createPullRequest")
-      .map(action => this.#buildProvisionalPullRequestDetails(action).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
+      .map(action => this.#buildProvisionalPullRequestDetails(action, gitCache).then(pull => this.#overlayIssueLike(pull, "pull", action.provisionalId, true)))))
       .filter(item => pullMatchesSearch(item, query))
       .toSorted(compare);
 
@@ -2849,7 +2989,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
 
         return matches;
       },
-      overlay: item => this.#overlayIssueLike(item, "pull", item.id),
+      overlay: item => this.#overlayPullSummaryHead(this.#overlayIssueLike(item, "pull", item.id)),
       filter: () => true,
       comparator: compare,
       injectedItems: provisionals,
@@ -3108,50 +3248,43 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     );
   }
 
-  async #getDiff(logicalId: string, pageSize: number): Promise<{ revision: GitHubPullRequestRevision; files: Cursor<GitHubPullRequestDiffFile> }> {
+  async #getDiff(
+    logicalId: string,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<{ revision: GitHubPullRequestRevision; files: Cursor<GitHubPullRequestDiffFile> }> {
     if (logicalId.startsWith("~") && !this.#resolveProvisionalId(logicalId)) {
       const action = this.#findCreateAction(logicalId, "pull") as CreatePullRequestAction | undefined;
       if (!action) {
         throw new Error(`Provisional pull request ${logicalId} is no longer available.`);
       }
 
-      const cacheKey = this.#cacheKey("diff-provisional", logicalId);
-      const cached = await this.#loadCachedWithEtag<{ revision: GitHubPullRequestRevision; files: GitHubPullRequestDiffFile[] }>(
-        cacheKey,
-        ENTITY_CACHE_TTL_MS,
-        async etag => {
-          const comparison = await this.#withApi(api =>
-            api.compareBranchesConditional(
-              this.ctx.props.owner,
-              this.ctx.props.repo,
-              action.options.base,
-              action.options.head,
-              { ifNoneMatch: etag },
-            )
-          );
-          if (comparison.status === 304) {
-            return comparison;
-          }
+      // The head branch may itself be provisional (moved or created by queued pushes); read the
+      // comparison as if those pushes had landed. GitHub's live compare would 404 on a branch
+      // that does not exist yet, or silently describe its stale head.
+      const simulated = await this.#simulatedPullComparisonOrWarn(
+        gitCache, action.options.base, action.options.head);
+      if (simulated !== null) {
+        return { revision: simulated.revision, files: new ArrayCursor(simulated.files, pageSize) };
+      }
 
-          const revision = {
-            baseSha: comparison.data.base_commit.sha,
-            headSha: comparison.data.commits?.at(-1)?.sha ?? comparison.data.base_commit.sha,
-          };
-          return {
-            status: 200,
-            headers: comparison.headers,
-            data: {
-              revision,
-              files: (comparison.data.files ?? []).map(file => this.#normalizeDiffFile(file)),
-            },
-          };
-        },
-      );
+      const cached = await this.#compareForProvisionalPull(
+        this.#cacheKey("compare-provisional", logicalId), action);
       return { revision: cached.revision, files: new ArrayCursor(cached.files, pageSize) };
     }
 
     const realId = logicalId.startsWith("~") ? this.#resolveProvisionalId(logicalId)! : logicalId;
     const details = await this.#getRemotePullRequestDetails(realId);
+    // An existing pull request whose head branch has queued pushes reads its diff at the
+    // simulated head, like every other read of that branch.
+    if (gitCache !== undefined && details.head.repo.fullName === this.#repoFullName() &&
+        this.#pendingPushActions(details.head.ref).length > 0) {
+      const simulated = await this.#simulatedPullComparisonOrWarn(
+        gitCache, details.base.ref, details.head.ref);
+      if (simulated !== null) {
+        return { revision: simulated.revision, files: new ArrayCursor(simulated.files, pageSize) };
+      }
+    }
     const revision = {
       baseSha: details.base.sha,
       headSha: details.head.sha,
@@ -3417,13 +3550,29 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         return;
       }
       case "createPullRequest": {
-        const response = await this.#withApi(api => api.createPullRequest(action.owner, action.repo, {
-          title: action.options.title,
-          body: action.options.bodyMarkdown ? this.#rewriteKnownReferences(action.options.bodyMarkdown, true) : undefined,
-          head: action.options.head,
-          base: action.options.base,
-          draft: action.options.draft,
-        }));
+        let response;
+        try {
+          response = await this.#withApi(api => api.createPullRequest(action.owner, action.repo, {
+            title: action.options.title,
+            body: action.options.bodyMarkdown ? this.#rewriteKnownReferences(action.options.bodyMarkdown, true) : undefined,
+            head: action.options.head,
+            base: action.options.base,
+            draft: action.options.draft,
+          }));
+        } catch (error) {
+          // The typical cause of a validation failure here is ordering: the pull request was
+          // queued against a branch whose push is still awaiting approval, and this action was
+          // approved first (GitHub then sees a missing branch, or one with no commits against
+          // the base). The action stays pending; applying it again after the push works.
+          if (error instanceof GitHubApiError && error.status === 422 &&
+              this.#pendingPushActions(action.options.head).length > 0) {
+            throw new Error(
+              `Cannot create this pull request yet: branch "${action.options.head}" has a queued ` +
+              `push that has not been applied. Approve the push to "${action.options.head}" ` +
+              `first, then approve this pull request.`, { cause: error });
+          }
+          throw error;
+        }
         this.#setProvisionalResource(action.provisionalId, { kind: "pull", realId: String(response.number) });
         this.#markActionApproved(action);
         this.#clearCaches();
@@ -3675,6 +3824,18 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       return { restart: true };
     }
 
+    if (action.type === "push") {
+      // A queued pull request may depend on this push for its head (or base) branch to exist at
+      // all. With the push rejected, such a pull request can never be created -- cascade-reject
+      // it (and, transitively, everything queued against it), mirroring how rejecting a
+      // provisional create rejects its dependents. A pull request whose branches still exist --
+      // really, or through the remaining queued pushes -- is left queued: a later push can still
+      // deliver the branch content.
+      const cascaded = await this.#rejectPullRequestsForMissingBranches();
+      this.#clearCaches();
+      return cascaded ? { restart: true } : undefined;
+    }
+
     if (action.type === "postReview") {
       this.#rejectReplyDependencyChain((action.review.diffComments ?? []).map(comment => comment.provisionalCommentId));
     } else if (action.type === "replyToDiffComment") {
@@ -3788,16 +3949,16 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#getIssueDetails(id);
   }
 
-  async openPullRequest(id: string): Promise<GitHubPullRequestDetails> {
-    return this.#getPullRequestDetails(id);
+  async openPullRequest(id: string, gitCache?: RpcStub<GitCache>): Promise<GitHubPullRequestDetails> {
+    return await this.#getPullRequestDetails(id, gitCache);
   }
 
   async issueDiscussion(kind: EntityKind, id: string, pageSize: number): Promise<Cursor<GitHubDiscussionEntry>> {
     return this.#getDiscussion(kind, id, pageSize);
   }
 
-  async pullDiff(id: string, pageSize: number): Promise<{ revision: GitHubPullRequestRevision; files: Cursor<GitHubPullRequestDiffFile> }> {
-    return this.#getDiff(id, pageSize);
+  async pullDiff(id: string, pageSize: number, gitCache?: RpcStub<GitCache>): Promise<{ revision: GitHubPullRequestRevision; files: Cursor<GitHubPullRequestDiffFile> }> {
+    return this.#getDiff(id, pageSize, gitCache);
   }
 
   async pullThreads(id: string, pageSize: number): Promise<Cursor<GitHubDiffThread>> {
@@ -3812,12 +3973,20 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#searchIssueSummaries(query, pageSize);
   }
 
-  async listPullRequests(filter: GitHubPullRequestFilter | undefined, pageSize: number): Promise<Cursor<GitHubPullRequestSummary>> {
-    return this.#listPullSummaries(filter, pageSize);
+  async listPullRequests(
+    filter: GitHubPullRequestFilter | undefined,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubPullRequestSummary>> {
+    return this.#listPullSummaries(filter, pageSize, gitCache);
   }
 
-  async searchPullRequests(query: GitHubPullRequestSearch, pageSize: number): Promise<Cursor<GitHubPullRequestSummary>> {
-    return this.#searchPullSummaries(query, pageSize);
+  async searchPullRequests(
+    query: GitHubPullRequestSearch,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubPullRequestSummary>> {
+    return this.#searchPullSummaries(query, pageSize, gitCache);
   }
 
   /** The queued pushes, oldest first (optionally only those targeting `branch`). */
@@ -3835,6 +4004,277 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
    */
   isCommitPendingPush(commitId: GitOid): boolean {
     return this.#pendingPushActions().some(action => action.newSha === commitId);
+  }
+
+  /**
+   * Whether `commitId` is a commit simulation may have handed back that is not on GitHub yet: a
+   * queued push's head, or any commit this instance served from the workspace git cache while
+   * simulating one (pending chains include the intermediate commits between stacked pushes,
+   * which `isCommitPendingPush` alone would miss). Session advertising callbacks consult this,
+   * synchronously like `isCommitPendingPush`, to withhold such ids from `advertiseCommit()`.
+   */
+  isSimulatedCommitId(commitId: GitOid): boolean {
+    return this.#servedSimulatedCommitIds.has(commitId) || this.isCommitPendingPush(commitId);
+  }
+
+  #repoFullName(): string {
+    return `${this.ctx.props.owner}/${this.ctx.props.repo}`;
+  }
+
+  /**
+   * A branch's current remote head (null if the branch does not exist), cached briefly.
+   * Simulation reads use this; the push queue path deliberately keeps using the uncached
+   * `getBranchHead`, since a push's expected old head must reflect the remote's live state.
+   */
+  async #getBranchHeadCached(branch: string): Promise<string | null> {
+    const key = this.#cacheKey("branch-head", stableKey(branch));
+    const cached = this.#loadCached<{ head: string | null }>(key, ENTITY_CACHE_TTL_MS);
+    if (cached !== undefined) return cached.head;
+    const head = await this.#withApi(api =>
+      api.getBranchHead(this.ctx.props.owner, this.ctx.props.repo, branch));
+    this.#storeCached(key, { head });
+    return head;
+  }
+
+  /** Whether GitHub knows this commit (the anchor test for pending-chain walks). */
+  async #isCommitOnGitHub(oid: GitOid): Promise<boolean> {
+    try {
+      await this.#getRemoteCommitDetails(oid);
+      return true;
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  /**
+   * Walk a simulated branch head down to its **anchor** -- the first commit GitHub already knows
+   * -- reading the not-yet-pushed commits from the workspace git cache (which serves this
+   * gatekeeper's queued-push closure, pulling objects through on demand). Returns the pending
+   * commits newest-first plus the anchor. Multi-parent (merge) commits are walked through their
+   * first parent; a chain that leaves the cache or bottoms out with no GitHub-known ancestor
+   * throws, and callers degrade.
+   *
+   * Every commit id read here is recorded in `#servedSimulatedCommitIds`, so sessions withhold
+   * it from advertising.
+   */
+  async #collectPendingChain(gitCache: RpcStub<GitCache>, head: GitOid): Promise<{
+    commits: { summary: GitHubCommitSummary; tree: GitOid }[];
+    anchor: GitOid;
+  }> {
+    // A push's expectedOldSha is usually known to GitHub without a probe: it was read from the
+    // remote at queue time. But not always -- stacked pushes bind each expectedOldSha to the
+    // *previous queued push's* newSha (a pending commit), so anything that is itself a queued
+    // push's newSha is excluded here, and the walk continues through it to the real anchor
+    // (ZERO_OID -- branch creation -- likewise).
+    const pendingNewShas = new Set(this.#pendingPushActions().map(action => action.newSha));
+    const knownShas = new Set(this.#pendingPushActions()
+      .map(action => action.expectedOldSha)
+      .filter(sha => sha !== ZERO_OID && !pendingNewShas.has(sha)));
+
+    const commits: { summary: GitHubCommitSummary; tree: GitOid }[] = [];
+    let current = head;
+    while (commits.length <= MAX_PENDING_CHAIN_COMMITS) {
+      if (knownShas.has(current) || await this.#isCommitOnGitHub(current)) {
+        return { commits, anchor: current };
+      }
+      const object = await gitCache.get(current);
+      if (object === null || object.type !== "commit") {
+        throw new Error(`Commit ${current} is not available from the workspace git cache.`);
+      }
+      const parsed = parseGitCommitPayload(object.content, current);
+      this.#servedSimulatedCommitIds.add(current);
+      commits.push({
+        summary: commitDetailsFromGitObject(
+          current, object.content, canonicalRepoUrl(this.ctx.props.owner, this.ctx.props.repo)),
+        tree: parsed.tree,
+      });
+      if (parsed.parents.length === 0) {
+        throw new Error(`Commit ${current} has no ancestor known to GitHub.`);
+      }
+      current = parsed.parents[0];
+    }
+    throw new Error(`More than ${MAX_PENDING_CHAIN_COMMITS} commits are queued for push.`);
+  }
+
+  /** The tree oid of a commit, from cached bytes when available, else GitHub's commit API. */
+  async #treeOidOfCommit(gitCache: RpcStub<GitCache>, sha: GitOid): Promise<GitOid> {
+    const object = await gitCache.get(sha);
+    if (object !== null && object.type === "commit") {
+      return parseGitCommitPayload(object.content, sha).tree;
+    }
+    const key = this.#cacheKey("commit-tree", sha);
+    const cached = this.#loadCached<GitOid>(key, ENTITY_CACHE_TTL_MS);
+    if (cached !== undefined) return cached;
+    const result = await this.#withApi(api =>
+      api.getCommitConditional(this.ctx.props.owner, this.ctx.props.repo, sha));
+    const tree = result.status === 200 ? result.data.commit.tree?.sha : undefined;
+    if (tree === undefined) {
+      throw new Error(`Could not resolve the tree of commit ${sha}.`);
+    }
+    this.#storeCached(key, tree);
+    return tree;
+  }
+
+  /**
+   * Object source for the simulated-diff tree walk: the workspace git cache first (the pending
+   * side always resolves there -- the queued-push closure pulls through on demand), falling back
+   * to GitHub's git-data API for on-remote objects the cache does not hold.
+   */
+  #treeDiffSource(gitCache: RpcStub<GitCache>): TreeDiffSource {
+    const { owner, repo } = this.ctx.props;
+    return {
+      getTree: async oid => {
+        const object = await gitCache.get(oid);
+        if (object !== null && object.type === "tree") {
+          return parseGitTreePayload(object.content, oid);
+        }
+        const remote = await this.#withApi(api => api.getGitTree(owner, repo, oid));
+        if (remote === null || remote.truncated) return null;
+        return remote.tree.map(entry => ({ mode: entry.mode, name: entry.path, oid: entry.sha }));
+      },
+      getBlob: async oid => {
+        const object = await gitCache.get(oid);
+        if (object !== null && object.type === "blob") return object.content;
+        const remote = await this.#withApi(api =>
+          api.getGitBlob(owner, repo, oid, MAX_DIFF_BLOB_BYTES));
+        return remote === null || remote === "oversized" ? "unavailable" : remote;
+      },
+    };
+  }
+
+  /**
+   * The simulated `base...head` comparison for a pull request whose head branch has queued
+   * pushes, computed as if those pushes had already landed: the head is the simulated branch
+   * head, the commit list splices GitHub's `compare(base...anchor)` with the pending chain, and
+   * the file diff is a local tree diff from the merge base to the simulated head (GitHub cannot
+   * compute it -- the pending commits are not on the remote). Returns null when no overlay
+   * applies (no cache, no queued pushes, or the remote has invalidated their expectations), so
+   * callers fall through to the ordinary remote reads.
+   *
+   * Results are cached per (base, simulated head); every write action bumps the cache
+   * generation, so a queued/applied/rejected push invalidates them.
+   *
+   * Known gap: a queued push to the *base* branch is not overlaid here -- the comparison uses
+   * the base branch's remote state (the merge base against a not-yet-pushed base commit is
+   * unknowable to GitHub).
+   */
+  async #simulatedPullComparison(
+    gitCache: RpcStub<GitCache> | undefined,
+    baseRef: string,
+    headBranch: string,
+  ): Promise<SimulatedPullComparison | null> {
+    if (gitCache === undefined) return null;
+    if (this.#pendingPushActions(headBranch).length === 0) return null;
+    const realHead = await this.#getBranchHeadCached(headBranch);
+    const simulatedHead = this.#simulateBranchHead(headBranch, realHead);
+    if (simulatedHead === null || simulatedHead === realHead) return null;
+
+    const cacheKey = this.#cacheKey("pull-simulated", stableKey(baseRef), simulatedHead);
+    const cached = this.#loadCached<SimulatedPullComparison>(cacheKey, ENTITY_CACHE_TTL_MS);
+    if (cached !== undefined) {
+      // The served-id set is in-memory; re-record the cached result's pending ids so this
+      // instance's advertising filter covers them too.
+      for (const id of cached.pendingCommitIds) this.#servedSimulatedCommitIds.add(id);
+      return cached;
+    }
+
+    const chain = await this.#collectPendingChain(gitCache, simulatedHead);
+    const compare = await this.#withApi(api =>
+      api.compareBranches(this.ctx.props.owner, this.ctx.props.repo, baseRef, chain.anchor));
+    const mergeBase = compare.merge_base_commit?.sha ?? compare.base_commit.sha;
+
+    const newTree = chain.commits.length > 0
+      ? chain.commits[0].tree
+      : await this.#treeOidOfCommit(gitCache, simulatedHead);
+    const files = await diffGitTrees(
+      this.#treeDiffSource(gitCache), await this.#treeOidOfCommit(gitCache, mergeBase), newTree);
+
+    const result: SimulatedPullComparison = {
+      revision: { baseSha: compare.base_commit.sha, headSha: simulatedHead },
+      files,
+      additions: files.reduce((sum, file) => sum + file.additions, 0),
+      deletions: files.reduce((sum, file) => sum + file.deletions, 0),
+      totalCommits: compare.total_commits + chain.commits.length,
+      // Oldest-first, like GitHub's compare and PR commit listings.
+      commitSummaries: [
+        ...(compare.commits ?? []).map(normalizeCommitSummary),
+        ...chain.commits.map(commit => commit.summary).toReversed(),
+      ],
+      pendingCommitIds: chain.commits.map(commit => commit.summary.id),
+    };
+    this.#storeCached(cacheKey, result);
+    return result;
+  }
+
+  /**
+   * `#simulatedPullComparison`, degrading a simulation failure (e.g. a chain commit no longer
+   * pullable) to null with a warning, so read paths fall back to their remote reads rather than
+   * failing outright.
+   */
+  async #simulatedPullComparisonOrWarn(
+    gitCache: RpcStub<GitCache> | undefined,
+    baseRef: string,
+    headBranch: string,
+  ): Promise<SimulatedPullComparison | null> {
+    try {
+      return await this.#simulatedPullComparison(gitCache, baseRef, headBranch);
+    } catch (error) {
+      logger.warn("failed to simulate a pull request comparison over queued pushes", {
+        event: "pull.request.simulated.comparison.failed", error,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * GitHub's live `base...head` compare for a provisional pull request with no queued-push
+   * overlay, cached and normalized. A 404 -- either branch missing from the remote -- becomes an
+   * agent-actionable error instead of a raw API failure.
+   */
+  async #compareForProvisionalPull(cacheKey: string, action: CreatePullRequestAction): Promise<{
+    revision: GitHubPullRequestRevision;
+    files: GitHubPullRequestDiffFile[];
+    commits: GitHubCommitSummary[];
+  }> {
+    try {
+      return await this.#loadCachedWithEtag(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
+        const comparison = await this.#withApi(api =>
+          api.compareBranchesConditional(
+            this.ctx.props.owner,
+            this.ctx.props.repo,
+            action.options.base,
+            action.options.head,
+            { ifNoneMatch: etag },
+          )
+        );
+        if (comparison.status === 304) {
+          return comparison;
+        }
+
+        const revision = {
+          baseSha: comparison.data.base_commit.sha,
+          headSha: comparison.data.commits?.at(-1)?.sha ?? comparison.data.base_commit.sha,
+        };
+        return {
+          status: 200,
+          headers: comparison.headers,
+          data: {
+            revision,
+            files: (comparison.data.files ?? []).map(file => this.#normalizeDiffFile(file)),
+            commits: (comparison.data.commits ?? []).map(normalizeCommitSummary),
+          },
+        };
+      });
+    } catch (error) {
+      if (error instanceof GitHubApiError && error.status === 404) {
+        throw new Error(
+          `Cannot compare branches "${action.options.base}" and "${action.options.head}" for ` +
+          `pull request ${action.provisionalId}: at least one of them does not exist on GitHub. ` +
+          `Push the missing branch first.`, { cause: error });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -4029,15 +4469,49 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     });
   }
 
-  async listCommits(filter: GitHubCommitFilter | undefined, pageSize: number): Promise<Cursor<GitHubCommitSummary>> {
+  async listCommits(
+    filter: GitHubCommitFilter | undefined,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubCommitSummary>> {
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
+
+    // A ref naming a branch with queued pushes enumerates from the simulated head: the pending
+    // chain (locally filtered) is injected newest-first ahead of GitHub's listing, which starts
+    // from the chain's anchor -- the first commit GitHub actually knows. Without this, a branch
+    // a queued push creates 404s, and a moved one lists its stale history.
+    let injected: GitHubCommitSummary[] = [];
+    let startRef = filter?.ref;
+    if (gitCache !== undefined && filter?.ref !== undefined &&
+        this.#pendingPushActions(filter.ref).length > 0) {
+      const realHead = await this.#getBranchHeadCached(filter.ref);
+      const simulatedHead = this.#simulateBranchHead(filter.ref, realHead);
+      if (simulatedHead !== null && simulatedHead !== realHead) {
+        try {
+          const chain = await this.#collectPendingChain(gitCache, simulatedHead);
+          injected = await this.#filterPendingCommitsForListing(gitCache, chain, filter);
+          startRef = chain.anchor;
+        } catch (error) {
+          logger.warn("failed to simulate a commit listing over queued pushes", {
+            event: "commits.list.simulated.failed", error,
+          });
+          if (realHead === null) {
+            throw new Error(
+              `Branch "${filter.ref}" does not exist on GitHub yet and the commits queued to ` +
+              `create it could not be read. Retry, or list commits from an existing ref.`,
+              { cause: error });
+          }
+        }
+      }
+    }
+
     return new StreamingCursor<GitHubCommitSummary>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("list-commits", stableKey(filter ?? {}), `p${page}`);
+        const cacheKey = this.#cacheKey("list-commits", stableKey({ ...filter, ref: startRef }), `p${page}`);
         return await this.#loadCachedWithEtag<GitHubCommitSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api => api.listCommitsConditional(owner, repo, {
-            sha: filter?.ref,
+            sha: startRef,
             path: filter?.path,
             author: filter?.author,
             since: filter?.since?.toISOString(),
@@ -4058,13 +4532,54 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
       },
       overlay: item => item,
       filter: () => true,
-      comparator: () => 0,
-      injectedItems: [],
+      // Injected pending commits are newer than everything the remote lists (newest-first).
+      comparator: () => -1,
+      injectedItems: injected,
       pageSize,
     });
   }
 
-  async pullCommits(logicalId: string, pageSize: number): Promise<Cursor<GitHubCommitSummary>> {
+  /**
+   * Apply a commit listing's filters to a pending chain locally, the way GitHub would have:
+   * author matches the commit identity's name or email, since/until compare the committer date,
+   * and path membership is decided by a tree diff against the commit's first parent.
+   */
+  async #filterPendingCommitsForListing(
+    gitCache: RpcStub<GitCache>,
+    chain: { commits: { summary: GitHubCommitSummary; tree: GitOid }[]; anchor: GitOid },
+    filter: GitHubCommitFilter | undefined,
+  ): Promise<GitHubCommitSummary[]> {
+    const results: GitHubCommitSummary[] = [];
+    for (let index = 0; index < chain.commits.length; index++) {
+      const { summary, tree } = chain.commits[index];
+      if (filter?.author !== undefined &&
+          summary.author.email !== filter.author && summary.author.name !== filter.author) {
+        continue;
+      }
+      const date = summary.committer.date ?? summary.author.date;
+      if (filter?.since !== undefined && (date === undefined || date < filter.since)) continue;
+      if (filter?.until !== undefined && (date === undefined || date > filter.until)) continue;
+      if (filter?.path !== undefined) {
+        const parentTree = index + 1 < chain.commits.length
+          ? chain.commits[index + 1].tree
+          : await this.#treeOidOfCommit(gitCache, chain.anchor);
+        const changed =
+          await changedPathsBetweenTrees(this.#treeDiffSource(gitCache), parentTree, tree);
+        const path = filter.path.replace(/\/+$/, "");
+        if (!changed.some(candidate => candidate === path || candidate.startsWith(`${path}/`))) {
+          continue;
+        }
+      }
+      results.push(summary);
+    }
+    return results;
+  }
+
+  async pullCommits(
+    logicalId: string,
+    pageSize: number,
+    gitCache?: RpcStub<GitCache>,
+  ): Promise<Cursor<GitHubCommitSummary>> {
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
     if (logicalId.startsWith("~") && !this.#resolveProvisionalId(logicalId)) {
@@ -4073,27 +4588,36 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         throw new Error(`Provisional pull request ${logicalId} is no longer available.`);
       }
 
-      // The pull request doesn't exist on GitHub yet; simulate its commit list from the branch
-      // comparison, the same source #getDiff uses for provisional pull requests.
-      const cacheKey = this.#cacheKey("pull-commits-provisional", logicalId);
-      const commits = await this.#loadCachedWithEtag<GitHubCommitSummary[]>(cacheKey, ENTITY_CACHE_TTL_MS, async etag => {
-        const comparison = await this.#withApi(api =>
-          api.compareBranchesConditional(owner, repo, action.options.base, action.options.head, { ifNoneMatch: etag })
-        );
-        if (comparison.status === 304) {
-          return comparison;
-        }
+      // The pull request doesn't exist on GitHub yet; simulate its commit list. When the head
+      // branch has queued pushes, the spliced simulation is the truth (GitHub's compare would
+      // 404 on a branch the queued push creates, or miss the pushed commits); otherwise the
+      // branch comparison is, the same source #getDiff uses for provisional pull requests.
+      const simulated = await this.#simulatedPullComparisonOrWarn(
+        gitCache, action.options.base, action.options.head);
+      if (simulated !== null) {
+        return new ArrayCursor(simulated.commitSummaries, pageSize);
+      }
 
-        return {
-          status: 200,
-          headers: comparison.headers,
-          data: (comparison.data.commits ?? []).map(normalizeCommitSummary),
-        };
-      });
-      return new ArrayCursor(commits, pageSize);
+      const cached = await this.#compareForProvisionalPull(
+        this.#cacheKey("compare-provisional", logicalId), action);
+      return new ArrayCursor(cached.commits, pageSize);
     }
 
     const realId = logicalId.startsWith("~") ? this.#resolveProvisionalId(logicalId)! : logicalId;
+    // An existing pull request whose head branch has queued pushes: list the simulated
+    // comparison instead of the remote pages (a force push may even have replaced the listed
+    // history, so splicing pages with the pending chain would misreport it).
+    if (gitCache !== undefined && this.#pendingPushActions().length > 0) {
+      const details = await this.#getRemotePullRequestDetails(realId);
+      if (details.head.repo.fullName === this.#repoFullName() &&
+          this.#pendingPushActions(details.head.ref).length > 0) {
+        const simulated = await this.#simulatedPullComparisonOrWarn(
+          gitCache, details.base.ref, details.head.ref);
+        if (simulated !== null) {
+          return new ArrayCursor(simulated.commitSummaries, pageSize);
+        }
+      }
+    }
     return new StreamingCursor<GitHubCommitSummary>({
       fetchPage: async (page, perPage) => {
         const cacheKey = this.#cacheKey("pull-commits", realId, `p${page}`);
@@ -4133,6 +4657,21 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async prepareCreatePullRequest(options: GitHubCreatePullRequestOptions): Promise<CreatePullRequestAction> {
+    // Queue-time validation: both branches must exist -- on the remote, or as the not-yet-applied
+    // outcome of queued pushes (`#simulateBranchHead` overlays those). Failing here surfaces a
+    // typo'd or forgotten-to-push branch to the caller immediately, instead of queuing an action
+    // GitHub will later refuse.
+    for (const [role, branch] of [["head", options.head], ["base", options.base]] as const) {
+      const realHead = await this.#getBranchHeadCached(branch);
+      if (this.#simulateBranchHead(branch, realHead) === null) {
+        throw new Error(role === "head"
+          ? `Cannot create a pull request from branch "${branch}": the branch does not exist in ` +
+            `${this.#repoFullName()}. Push your commits to the branch first (see push()), then ` +
+            `create the pull request.`
+          : `Cannot create a pull request into branch "${branch}": the base branch does not ` +
+            `exist in ${this.#repoFullName()}.`);
+      }
+    }
     return {
       type: "createPullRequest",
       approvalId: this.#nextActionId(),
@@ -4392,6 +4931,12 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
   }
 
   async createPullRequest(options: GitHubCreatePullRequestOptions): Promise<GitHubPullRequest> {
+    // Queue-time validation reads both branches' current heads (see prepareCreatePullRequest).
+    await this.#approvalQueue.authorizeObservation({
+      title: `Read heads of branches ${options.head} and ${options.base}`,
+      description: `Read the current heads of branches "${options.head}" and "${options.base}" ` +
+        `in order to create a pull request from one into the other.`,
+    });
     const action = await this.#gatekeeper.prepareCreatePullRequest(options);
     await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
       title: `Create pull request ${options.title}`,
@@ -4411,7 +4956,7 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
   }
 
   async getPullRequest(id: string): Promise<GitHubPullRequest> {
-    const details = await this.#gatekeeper.openPullRequest(id);
+    const details = await this.#gatekeeper.openPullRequest(id, await this.#gitCache.stub());
     await this.#approvalQueue.authorizeObservation({
       title: `Open pull request #${details.id}: ${details.title}`,
       description: `Open a capability for pull request #${details.id} in ${details.repo.fullName}.`,
@@ -4440,8 +4985,15 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       title: `List pull requests`,
       description: `List pull requests in the GitHub repository.`,
     });
-    const cursor = await this.#gatekeeper.listPullRequests(options, options?.resultsPerPage ?? 50);
-    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
+    const cursor = await this.#gatekeeper.listPullRequests(
+      options, options?.resultsPerPage ?? 50, await this.#gitCache.stub());
+    // Simulated ids -- heads of queued pushes, which listings show as if already pushed -- are
+    // withheld from advertising: they are not on GitHub yet, and the hint would outlive a
+    // rejection (see GitHubGatekeeperImpl.isSimulatedCommitId). Checked live per page, since a
+    // push may be queued while the cursor is being drained.
+    const gatekeeper = this.#gatekeeper;
+    return await this.#gitCache.wrap(cursor, pull =>
+      commitIdsOfPullSummary(pull).filter(id => !gatekeeper.isSimulatedCommitId(id)));
   }
 
   async searchPullRequests(query: GitHubPullRequestSearch): Promise<Cursor<GitHubPullRequestSummary>> {
@@ -4449,8 +5001,12 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       title: `Search pull requests for "${query.text}"`,
       description: `Search pull requests in the GitHub repository for "${query.text}".`,
     });
-    const cursor = await this.#gatekeeper.searchPullRequests(query, query.resultsPerPage ?? 50);
-    return await this.#gitCache.wrap(cursor, commitIdsOfPullSummary);
+    const cursor = await this.#gatekeeper.searchPullRequests(
+      query, query.resultsPerPage ?? 50, await this.#gitCache.stub());
+    // Simulated ids withheld from advertising, as in listPullRequests.
+    const gatekeeper = this.#gatekeeper;
+    return await this.#gitCache.wrap(cursor, pull =>
+      commitIdsOfPullSummary(pull).filter(id => !gatekeeper.isSimulatedCommitId(id)));
   }
 
   async listBranches(options?: GitHubBranchFilter): Promise<Cursor<GitHubBranchSummary>> {
@@ -4461,11 +5017,11 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
     const cursor = await this.#gatekeeper.listBranches(options, options?.resultsPerPage ?? 50);
     // A simulated head -- a queued push's commit, which the listing shows as if already pushed
     // -- is withheld from advertising: it is not on GitHub yet, and the hint would outlive a
-    // rejection (see GitHubGatekeeperImpl.isCommitPendingPush). Checked live per page, since a
+    // rejection (see GitHubGatekeeperImpl.isSimulatedCommitId). Checked live per page, since a
     // push may be queued while the cursor is being drained.
     const gatekeeper = this.#gatekeeper;
     return await this.#gitCache.wrap(cursor, branch =>
-      gatekeeper.isCommitPendingPush(branch.headCommit) ? [] : [branch.headCommit]);
+      gatekeeper.isSimulatedCommitId(branch.headCommit) ? [] : [branch.headCommit]);
   }
 
   async listTags(options?: GitHubPageOptions): Promise<Cursor<GitHubTagSummary>> {
@@ -4527,8 +5083,13 @@ export class GitHubRepoSessionImpl extends RpcTarget implements GitHubRepoSessio
       title: `List commit history`,
       description: `List commits in the GitHub repository.`,
     });
-    const cursor = await this.#gatekeeper.listCommits(options, options?.resultsPerPage ?? 50);
-    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
+    const cursor = await this.#gatekeeper.listCommits(
+      options, options?.resultsPerPage ?? 50, await this.#gitCache.stub());
+    // Pending (queued-push) commits in a simulated listing are withheld from advertising; their
+    // GitHub-known parents still advertise.
+    const gatekeeper = this.#gatekeeper;
+    return await this.#gitCache.wrap(cursor, item =>
+      commitIdsOfSummary(item).filter(id => !gatekeeper.isSimulatedCommitId(id)));
   }
 }
 
@@ -4665,13 +5226,17 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
   }
 
   async getDetails(): Promise<GitHubPullRequestDetails> {
-    const details = await this.gatekeeper.openPullRequest(this.logicalId);
+    const details =
+      await this.gatekeeper.openPullRequest(this.logicalId, await this.#gitCache.stub());
     await this.approvalQueue.authorizeObservation({
       title: `Read pull request #${details.id}: ${details.title}`,
       description: `Read the full details of pull request #${details.id} in ${details.repo.fullName}.`,
     });
-    // A provisional pull request may carry empty branch shas; advertise() skips them.
-    await this.#gitCache.advertise(commitIdsOfPullSummary(details));
+    // A provisional pull request may carry empty branch shas (advertise() skips them) or a
+    // simulated head -- a queued push's commit, withheld from advertising because it is not on
+    // GitHub yet and the hint would outlive a rejection.
+    await this.#gitCache.advertise(
+      commitIdsOfPullSummary(details).filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
     return details;
   }
 
@@ -4680,8 +5245,11 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
       title: `Read diff for #${this.logicalId}`,
       description: `Read the diff for pull request #${this.logicalId}.`,
     });
-    const diff = await this.gatekeeper.pullDiff(this.logicalId, options?.resultsPerPage ?? 20);
-    await this.#gitCache.advertise([diff.revision.baseSha, diff.revision.headSha]);
+    const diff = await this.gatekeeper.pullDiff(
+      this.logicalId, options?.resultsPerPage ?? 20, await this.#gitCache.stub());
+    // A simulated head revision (a queued push's commit) is withheld from advertising.
+    await this.#gitCache.advertise([diff.revision.baseSha, diff.revision.headSha]
+      .filter(id => !this.gatekeeper.isSimulatedCommitId(id)));
     return diff;
   }
 
@@ -4690,8 +5258,13 @@ export class GitHubPullRequestImpl extends GitHubIssueImpl implements GitHubPull
       title: `List commits for #${this.logicalId}`,
       description: `List the commits of pull request #${this.logicalId}.`,
     });
-    const cursor = await this.gatekeeper.pullCommits(this.logicalId, options?.resultsPerPage ?? 50);
-    return await this.#gitCache.wrap(cursor, commitIdsOfSummary);
+    const cursor = await this.gatekeeper.pullCommits(
+      this.logicalId, options?.resultsPerPage ?? 50, await this.#gitCache.stub());
+    // Pending (queued-push) commits in a simulated listing are withheld from advertising; their
+    // GitHub-known parents still advertise. Checked live per page.
+    const gatekeeper = this.gatekeeper;
+    return await this.#gitCache.wrap(cursor, item =>
+      commitIdsOfSummary(item).filter(id => !gatekeeper.isSimulatedCommitId(id)));
   }
 
   async readDiffThreads(options?: GitHubPageOptions): Promise<Cursor<GitHubDiffThread>> {

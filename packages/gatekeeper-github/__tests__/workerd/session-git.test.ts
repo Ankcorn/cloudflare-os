@@ -99,9 +99,13 @@ function commitSummary(id: string, parents: string[]): GitHubCommitSummary {
   };
 }
 
-/** The session only calls what the test drives, so each test supplies just those methods. */
+/**
+ * The session only calls what the test drives, so each test supplies just those methods.
+ * `isSimulatedCommitId` -- consulted by every advertising callback -- defaults to "nothing is
+ * simulated"; tests exercising the withholding override it.
+ */
 function fakeGatekeeper(methods: Partial<Record<string, unknown>>): GitHubGatekeeperImpl {
-  return methods as unknown as GitHubGatekeeperImpl;
+  return { isSimulatedCommitId: () => false, ...methods } as unknown as GitHubGatekeeperImpl;
 }
 
 function repoSession(queue: TestApprovalQueue, methods: Partial<Record<string, unknown>>) {
@@ -145,13 +149,42 @@ describe("GitHubRepoSessionImpl advertising", () => {
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2)]);
   });
 
+  it("withholds a simulated pull request head sha from list and search advertising", async () => {
+    // oid(1) is a queued push's commit standing in as the head of a provisional branch; only the
+    // real base sha may be advertised.
+    const queue = new TestApprovalQueue();
+    const session = repoSession(queue, {
+      listPullRequests: async () => pagesCursor([[pullSummary(1, oid(1), oid(2))]]),
+      searchPullRequests: async () => pagesCursor([[pullSummary(1, oid(1), oid(2))]]),
+      isSimulatedCommitId: (id: string) => id === oid(1),
+    });
+
+    await (await session.listPullRequests()).next();
+    expect(queue.cache.advertised).toEqual([oid(2)]);
+    await (await session.searchPullRequests({ text: "x" })).next();
+    expect(queue.cache.advertised.toSorted()).toEqual([oid(2), oid(2)]);
+  });
+
+  it("withholds pending commits from a simulated repo commit listing", async () => {
+    // oid(1) is a pending chain commit; its parent oid(2) is the GitHub-known anchor.
+    const queue = new TestApprovalQueue();
+    const session = repoSession(queue, {
+      listCommits: async () => pagesCursor([
+        [commitSummary(oid(1), [oid(2)]), commitSummary(oid(2), [oid(3)])],
+      ]),
+      isSimulatedCommitId: (id: string) => id === oid(1),
+    });
+
+    await (await session.listCommits({ ref: "feature" })).next();
+    expect(queue.cache.advertised.toSorted()).toEqual([oid(2), oid(3)]);
+  });
+
   it("advertises branch heads from listBranches", async () => {
     const queue = new TestApprovalQueue();
     const session = repoSession(queue, {
       listBranches: async () => pagesCursor([
         [{ name: "main", headCommit: oid(1), protected: true }],
       ]),
-      isCommitPendingPush: () => false,
     });
 
     const cursor = await session.listBranches();
@@ -171,7 +204,7 @@ describe("GitHubRepoSessionImpl advertising", () => {
           { name: "other", headCommit: oid(1), protected: false },
         ],
       ]),
-      isCommitPendingPush: (id: string) => id === oid(2),
+      isSimulatedCommitId: (id: string) => id === oid(2),
     });
 
     const cursor = await session.listBranches();
@@ -335,5 +368,48 @@ describe("GitHubPullRequestImpl advertising", () => {
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2)]);
     await cursor.next();
     expect(queue.cache.advertised.toSorted()).toEqual([oid(1), oid(2), oid(3)]);
+  });
+
+  it("withholds a simulated head from getDetails and readDiff advertising", async () => {
+    // oid(1) is a queued push's commit simulating the pull request's head; only the base sha is
+    // real, so only it may be advertised.
+    const queue = new TestApprovalQueue();
+    const session = pullSession(queue, "1", {
+      openPullRequest: async () => ({
+        ...pullSummary(1, oid(1), oid(2)),
+        bodyMarkdown: "",
+        requestedReviewers: [],
+        commits: 1,
+        additions: 0,
+        deletions: 0,
+        changedFiles: 0,
+      }),
+      pullDiff: async () => ({
+        revision: { baseSha: oid(2), headSha: oid(1) },
+        files: pagesCursor([]),
+      }),
+      isSimulatedCommitId: (id: string) => id === oid(1),
+    });
+
+    await session.getDetails();
+    expect(queue.cache.advertised).toEqual([oid(2)]);
+    await session.readDiff();
+    expect(queue.cache.advertised.toSorted()).toEqual([oid(2), oid(2)]);
+  });
+
+  it("withholds pending chain commits from a simulated pull commit listing", async () => {
+    // The provisional pull request's commit list splices GitHub-known commits (oid(3), and the
+    // anchor oid(2) as a parent) with pending ones (oid(1)); only real ids advertise.
+    const queue = new TestApprovalQueue();
+    const session = pullSession(queue, "~1", {
+      pullCommits: async () => pagesCursor([
+        [commitSummary(oid(3), []), commitSummary(oid(1), [oid(2)])],
+      ]),
+      isSimulatedCommitId: (id: string) => id === oid(1),
+    });
+
+    const cursor = await session.listCommits();
+    await cursor.next();
+    expect(queue.cache.advertised.toSorted()).toEqual([oid(2), oid(3)]);
   });
 });

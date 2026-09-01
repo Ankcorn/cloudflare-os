@@ -61,7 +61,8 @@ export interface GitHubRepo {
    * overwrite the branch (which may discard others' commits -- prefer rebasing).
    *
    * To open a pull request for newly pushed work: `push(branch, commitId)` to a new branch, then
-   * `createPullRequest({head: branch, base: ...})`.
+   * `createPullRequest({head: branch, base: ...})` -- immediately is fine; the pull request will
+   * reflect the pushed commits.
    */
   push(branch: string, commitId: string, options?: { force?: boolean }): Promise<void>;
 
@@ -86,7 +87,9 @@ export interface GitHubRepo {
    * returned object is fully functional in the meantime.
    *
    * To create a pull request from a commit you made (e.g. in a worktree), first `push()` the
-   * commit to a new branch, then create the pull request with that branch as `head`.
+   * commit to a new branch, then create the pull request with that branch as `head` -- the two
+   * calls may be made back to back. Both `head` and `base` must name branches that exist (or
+   * that you have just pushed); otherwise this call fails immediately.
    */
   createPullRequest(options: GitHubCreatePullRequestOptions): Promise<GitHubPullRequest>;
 
@@ -497,6 +500,7 @@ export type GitHubPullRequestDiffFile = {
   status: "added" | "modified" | "removed" | "renamed" | "copied";
   additions: number;
   deletions: number;
+  /** True when the patch is not included (e.g. binary files, very large files or diffs). */
   diffOmitted?: boolean;
   hunks: GitHubPullRequestDiffHunk[];
 }
