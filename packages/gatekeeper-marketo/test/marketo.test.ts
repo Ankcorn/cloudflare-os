@@ -3057,6 +3057,74 @@ describe("activity normalization", () => {
     })).rejects.toThrow(/outside the requested person scope/);
     expect(notes).toEqual([]);
   });
+
+  it("binds continuation tokens to the originating activity query", async () => {
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => "provider-1",
+      getActivities: async () => ({ result: [], moreResult: true, nextPageToken: "provider-2" }),
+    }));
+    let firstQuery = { sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [1] };
+    let first = await session.getActivities(firstQuery);
+
+    await expect(session.getActivities({
+      sinceDate: new Date("2026-08-30T00:00:00Z"),
+      activityTypeIds: [1],
+    }, first.nextPageToken)).rejects.toThrow(/page token for this query/);
+  });
+
+  it("rejects malformed activity continuation tokens before calling Marketo", async () => {
+    let calls = 0;
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => { calls++; return "provider-1"; },
+      getActivities: async () => { calls++; return { result: [], moreResult: false }; },
+    }));
+    let query = { sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [1] };
+
+    for (let token of ["provider-token", "gk-activity:not-base64", "gk-activity:e30"]) {
+      await expect(session.getActivities(query, token)).rejects.toThrow(/Invalid Marketo activities page token/);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it("rejects provider activities older than sinceDate before observing", async () => {
+    let notes: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async () => "provider-1",
+      getActivities: async () => ({
+        result: [{ id: 1, activityTypeId: 1, leadId: 7, activityDate: "2026-08-30T23:59:59Z" }],
+        moreResult: false,
+      }),
+    }, notes));
+
+    await expect(session.getActivities({
+      sinceDate: new Date("2026-08-31T00:00:00Z"),
+      activityTypeIds: [1],
+    })).rejects.toThrow(/older than the requested sinceDate/);
+    expect(notes).toEqual([]);
+  });
+
+  it("continues activities with the wrapped provider token", async () => {
+    let pagingDates: Date[] = [];
+    let providerTokens: string[] = [];
+    let session = new MarketoSessionImpl(stubContext({
+      getPagingToken: async sinceDate => { pagingDates.push(sinceDate); return "provider-1"; },
+      getActivities: async ({ nextPageToken }) => {
+        providerTokens.push(nextPageToken);
+        return nextPageToken === "provider-1"
+          ? { result: [], moreResult: true, nextPageToken: "provider-2" }
+          : { result: [], moreResult: false };
+      },
+    }));
+    let query = { sinceDate: new Date("2026-08-31T00:00:00Z"), activityTypeIds: [2, 1], maxResults: 25 };
+
+    let first = await session.getActivities(query);
+    expect(first.nextPageToken).toMatch(/^gk-activity:/);
+    let second = await session.getActivities({ ...query, activityTypeIds: [1, 2] }, first.nextPageToken);
+
+    expect(second).toEqual({ activities: [], moreResult: false, nextPageToken: undefined });
+    expect(providerTokens).toEqual(["provider-1", "provider-2"]);
+    expect(pagingDates).toEqual([query.sinceDate]);
+  });
 });
 
 describe("person field normalization", () => {

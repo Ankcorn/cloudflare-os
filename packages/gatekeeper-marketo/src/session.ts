@@ -494,6 +494,54 @@ function normalizeActivity(raw: RawActivity): MarketoActivity {
   };
 }
 
+const ACTIVITY_TOKEN_PREFIX = "gk-activity:";
+const ACTIVITY_TOKEN_MAX_LENGTH = 16_384;
+
+type ActivityPageState = {
+  version: 1;
+  providerToken: string;
+  scope: string;
+};
+
+function activityScope(query: MarketoActivityQuery, leadIds: number[] | undefined): string {
+  return JSON.stringify({
+    sinceDate: query.sinceDate.toISOString(),
+    activityTypeIds: query.activityTypeIds.toSorted((left, right) => left - right),
+    maxResults: query.maxResults ?? null,
+    leadIds: leadIds ? leadIds.toSorted((left, right) => left - right) : null,
+  });
+}
+
+function activityPageToken(providerToken: string, scope: string): string {
+  if (!providerToken || providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH) {
+    throw new MarketoError("Marketo returned an invalid activities page token.");
+  }
+  let bytes = new TextEncoder().encode(JSON.stringify({ version: 1, providerToken, scope }));
+  let token = ACTIVITY_TOKEN_PREFIX + btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (token.length > ACTIVITY_TOKEN_MAX_LENGTH) {
+    throw new MarketoError("Marketo returned an activities page token that is too long.");
+  }
+  return token;
+}
+
+function providerActivityPageToken(pageToken: string, scope: string): string {
+  try {
+    if (typeof pageToken !== "string" || pageToken.length > ACTIVITY_TOKEN_MAX_LENGTH ||
+        !pageToken.startsWith(ACTIVITY_TOKEN_PREFIX)) throw new Error();
+    let encoded = pageToken.slice(ACTIVITY_TOKEN_PREFIX.length)
+      .replace(/-/g, "+").replace(/_/g, "/");
+    let bytes = Uint8Array.from(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")),
+      character => character.charCodeAt(0));
+    let state = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)) as Partial<ActivityPageState>;
+    if (state.version !== 1 || typeof state.providerToken !== "string" || !state.providerToken ||
+        state.providerToken.length > ACTIVITY_TOKEN_MAX_LENGTH || state.scope !== scope) throw new Error();
+    return state.providerToken;
+  } catch {
+    throw new Error("Invalid Marketo activities page token for this query.");
+  }
+}
+
 function validateActivityQuery(query: MarketoActivityQuery): void {
   if (!(query?.sinceDate instanceof Date) || Number.isNaN(query.sinceDate.getTime())) {
     throw new Error("query.sinceDate is required and must be a valid Date.");
@@ -519,7 +567,7 @@ function validateActivityQuery(query: MarketoActivityQuery): void {
   }
 }
 
-function validateActivity(raw: RawActivity, requestedTypeIds: Set<number>): void {
+function validateActivity(raw: RawActivity, requestedTypeIds: Set<number>, sinceDate: Date): void {
   let hasGuid = typeof raw.marketoGUID === "string" && Boolean(raw.marketoGUID.trim());
   if (!hasGuid && (!Number.isSafeInteger(raw.id) || raw.id! <= 0)) {
     throw new MarketoError("Marketo returned an activity without a valid positive numeric id or GUID.");
@@ -533,8 +581,12 @@ function validateActivity(raw: RawActivity, requestedTypeIds: Set<number>): void
   if (!Number.isSafeInteger(raw.leadId) || raw.leadId! <= 0) {
     throw new MarketoError("Marketo returned an activity with an invalid lead id.");
   }
-  if (!parseMarketoDate(raw.activityDate)) {
+  let activityDate = parseMarketoDate(raw.activityDate);
+  if (!activityDate) {
     throw new MarketoError("Marketo returned an activity with an invalid activity date.");
+  }
+  if (activityDate < sinceDate) {
+    throw new MarketoError("Marketo returned an activity older than the requested sinceDate.");
   }
 }
 
@@ -549,7 +601,10 @@ async function readActivities(
   validateActivityQuery(query);
 
   let client = await ctx.client();
-  let token = pageToken ?? (await client.getPagingToken(query.sinceDate));
+  let scope = activityScope(query, leadIds);
+  let token = pageToken === undefined
+    ? await client.getPagingToken(query.sinceDate)
+    : providerActivityPageToken(pageToken, scope);
   let page = await client.getActivities({
     nextPageToken: token,
     activityTypeIds: query.activityTypeIds,
@@ -557,7 +612,7 @@ async function readActivities(
     batchSize: query.maxResults,
   });
   let requestedTypeIds = new Set(query.activityTypeIds);
-  for (let activity of page.result) validateActivity(activity, requestedTypeIds);
+  for (let activity of page.result) validateActivity(activity, requestedTypeIds, query.sinceDate);
   if (leadIds && page.result.some(activity => !leadIds.includes(activity.leadId ?? -1))) {
     throw new MarketoError("Marketo returned an activity outside the requested person scope.", {
       operation: "/v1/activities.json",
@@ -571,7 +626,7 @@ async function readActivities(
   return {
     activities: page.result.map(normalizeActivity),
     moreResult: page.moreResult,
-    nextPageToken: page.nextPageToken,
+    nextPageToken: page.moreResult ? activityPageToken(page.nextPageToken!, scope) : undefined,
   };
 }
 
