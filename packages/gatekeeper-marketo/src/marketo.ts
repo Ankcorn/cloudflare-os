@@ -432,6 +432,10 @@ type CollaboratorCommitResult =
   | { committed: false }
   | { committed: true; replaced?: { admissionId: string; accountId: string } };
 
+type CollaboratorInvalidationResult =
+  | { invalidated: false }
+  | { invalidated: true; admissionId: string };
+
 function observerStorageKey(prefix: string, bindingId: string, observerId: string): string {
   return `${prefix}:${bindingId}:${encodeURIComponent(observerId)}`;
 }
@@ -863,10 +867,64 @@ export class UserAccount extends DurableObject<Env> {
     );
   }
 
+  /** Tombstone this binding's admission when its collaborator fails live verification. */
+  invalidateCollaborator(
+    bindingId: string,
+    observerId: string,
+    collaboratorAccountId: string,
+    expected: { ownerGeneration: number; collaboratorGeneration: number },
+  ): CollaboratorInvalidationResult {
+    let observerKey = observerStorageKey("observer", bindingId, observerId);
+    let observer = this.ctx.storage.kv.get<StoredObserver>(observerKey);
+    if (!observer || observer.accountId !== collaboratorAccountId ||
+        observer.ownerGeneration !== expected.ownerGeneration ||
+        observer.collaboratorGeneration !== expected.collaboratorGeneration) {
+      return { invalidated: false };
+    }
+    let epochKey = observerStorageKey("observerEpoch", bindingId, observerId);
+    let epoch = (this.ctx.storage.kv.get<number>(epochKey) ?? 0) + 1;
+    this.ctx.storage.kv.put(epochKey, epoch);
+    this.ctx.storage.kv.delete(observerKey);
+    this.ctx.storage.kv.put<StoredRevokedObserver>(
+      observerStorageKey("revokedObserver", bindingId, observerId),
+      { admissionId: observer.admissionId, observerId },
+    );
+    return { invalidated: true, admissionId: observer.admissionId };
+  }
+
   /** Drop one admission after its owner binding no longer references it. */
   async removeObserverAdmission(admissionId: string): Promise<void> {
     await this.#withCredentialLifecycle(async () => {
       this.ctx.storage.kv.delete(`observerAuthority:${admissionId}`);
+    });
+  }
+
+  /** Invalidate both facets of one failed live observer admission. */
+  async invalidateObserverAdmission(
+    expectedGeneration: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    expectedOwnerGeneration: number,
+  ): Promise<void> {
+    await this.#withCredentialLifecycle(async () => {
+      if (this.#credentialGeneration() !== expectedGeneration) return;
+      let result = await userAccountStub(this.ctx.exports, ownerAccountId).invalidateCollaborator(
+        bindingId,
+        observerId,
+        this.ctx.id.toString(),
+        {
+          ownerGeneration: expectedOwnerGeneration,
+          collaboratorGeneration: expectedGeneration,
+        },
+      );
+      try {
+        if (result.invalidated) {
+          this.ctx.storage.kv.delete(`observerAuthority:${result.admissionId}`);
+        }
+      } finally {
+        disposeRpcResult(result);
+      }
     });
   }
 
@@ -1085,7 +1143,7 @@ type MarketoUserVerifierProps = { userObjectId: string };
 
 interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
   hasLiveCredential(endpoint: string, clientId: string, fingerprint: string): Promise<
-    { valid: false } |
+    { valid: false; generation: number } |
     { valid: true; generation: number } |
     { error: TokenCacheError }
   >;
@@ -1096,6 +1154,13 @@ interface MarketoUserVerifierApi extends GatekeeperUserVerifier {
     observerId: string,
     expected: ObserverCommitExpectation,
   ): Promise<boolean>;
+  invalidateObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    ownerGeneration: number,
+  ): Promise<void>;
 }
 
 async function credentialFingerprint(credentials: MarketoCredentials): Promise<string> {
@@ -1122,7 +1187,7 @@ export class MarketoUserVerifier
     clientId: string,
     fingerprint: string,
   ): Promise<
-    { valid: false } |
+    { valid: false; generation: number } |
     { valid: true; generation: number } |
     { error: TokenCacheError }
   > {
@@ -1132,12 +1197,12 @@ export class MarketoUserVerifier
     if (
       !credentials || credentials.endpoint !== endpoint || credentials.clientId !== clientId ||
       await credentialFingerprint(credentials) !== fingerprint
-    ) return { valid: false };
+    ) return { valid: false, generation: state.generation };
 
     let result = await account.verifyCredentials({ ...state, credentials });
     let valid: boolean;
     try {
-      if ("credentialChanged" in result) return { valid: false };
+      if ("credentialChanged" in result) return { valid: false, generation: state.generation };
       if (!result.ok) return { error: { ...result.error } };
       valid = result.value;
     } finally {
@@ -1146,7 +1211,7 @@ export class MarketoUserVerifier
     if (!valid) await account.credentialsExpired();
     return valid
       ? { valid: true, generation: state.generation }
-      : { valid: false };
+      : { valid: false, generation: state.generation };
   }
 
   async commitObserverAdmission(
@@ -1158,6 +1223,23 @@ export class MarketoUserVerifier
   ): Promise<boolean> {
     return await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
       .commitObserverAdmission(generation, ownerAccountId, bindingId, observerId, expected);
+  }
+
+  async invalidateObserverAdmission(
+    generation: number,
+    ownerAccountId: string,
+    bindingId: string,
+    observerId: string,
+    ownerGeneration: number,
+  ): Promise<void> {
+    await userAccountStub(this.ctx.exports, this.ctx.props.userObjectId)
+      .invalidateObserverAdmission(
+        generation,
+        ownerAccountId,
+        bindingId,
+        observerId,
+        ownerGeneration,
+      );
   }
 }
 
@@ -1819,6 +1901,13 @@ export class MarketoGatekeeperImpl
         throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
       }
       if (!verification.valid) {
+        await verifier.invalidateObserverAdmission(
+          verification.generation,
+          this.ctx.props.userObjectId,
+          this.ctx.props.bindingId,
+          id,
+          ownerState.generation,
+        );
         throw new Error(
           "This collaborator is not connected with the same Marketo LaunchPoint service.",
         );

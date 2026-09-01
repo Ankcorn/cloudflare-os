@@ -6435,7 +6435,7 @@ describe("read authorization lifetime", () => {
       if (operation === "description") {
         await expect(pending).resolves.toMatchObject({ displayName: "Marketo" });
       } else {
-        await expect(pending).resolves.toEqual({ valid: false });
+        await expect(pending).resolves.toEqual({ valid: false, generation: 1 });
       }
       expect(fetches).toBe(0);
     },
@@ -7760,10 +7760,78 @@ describe("collaborator credentials", () => {
     expect(expiryNotification).toHaveBeenCalledOnce();
   });
 
+  it("invalidates an open session when live re-verification rejects its observer", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, observerId.toString());
+    let providerStarted!: () => void;
+    let started = new Promise<void>(resolve => { providerStarted = resolve; });
+    let releaseProvider!: () => void;
+    let released = new Promise<void>(resolve => { releaseProvider = resolve; });
+    let providerFetches = 0;
+    vi.stubGlobal("fetch", async (requestUrl: string) => {
+      let url = new URL(requestUrl);
+      if (url.pathname === "/identity/oauth/token") {
+        return Response.json({ error: "invalid_client" }, { status: 401 });
+      }
+      providerFetches++;
+      providerStarted();
+      await released;
+      return Response.json({ success: true, result: [] });
+    });
+    let observations: ObservationDescription[] = [];
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let queue = new RpcStub(new TestApprovalQueue(
+        undefined,
+        async description => { observations.push(description); },
+      )) as unknown as RpcStub<ApprovalQueue>;
+      let session = await instance.startSession(queue) as MarketoSessionImpl;
+      let read = session.getChannels();
+      await started;
+
+      let exports = (instance as unknown as { ctx: { exports: Cloudflare.Exports } }).ctx.exports;
+      let verifier = (exports as unknown as {
+        TestMarketoUserVerifier(options: { props: { userObjectId: string } }): Fetcher;
+      }).TestMarketoUserVerifier({ props: { userObjectId: observerId.toString() } });
+      await expect(instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      )).rejects.toThrow(/not connected with the same Marketo LaunchPoint service/);
+
+      await expect(session.getChannels()).rejects.toThrow(/observer's credentials were revoked/);
+      expect(providerFetches).toBe(1);
+      releaseProvider();
+      await expect(read).resolves.toEqual([]);
+      session[Symbol.dispose]();
+      queue[Symbol.dispose]();
+    });
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0].excludeObservers).toEqual(["observer"]);
+    let bindingId = await gatekeeperBindingId(gatekeeper);
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      async (instance, state) => {
+        expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(0);
+        expect([...state.storage.kv.list({ prefix: "revokedObserver:" })]).toHaveLength(1);
+        expect(await instance.getExcludedObservers(bindingId)).toEqual(["observer"]);
+      },
+    );
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(observerId),
+      (_instance, state) => {
+        expect([...state.storage.kv.list({ prefix: "observerAuthority:" })]).toHaveLength(0);
+      },
+    );
+  });
+
   it("surfaces transient Identity failures without expiring the credential", async () => {
     let ownerId = await accountWithCredentials(OWNER);
     let gatekeeper = await gatekeeperForAccount(ownerId.toString());
     let observerId = await accountWithCredentials(OWNER);
+    await addObserverFromAccount(gatekeeper, observerId.toString());
     let expiryNotification = vi.spyOn(UserAccount.prototype, "credentialsExpired");
     vi.stubGlobal("fetch", async () => {
       throw new Error("temporary outage");
@@ -7773,6 +7841,19 @@ describe("collaborator credentials", () => {
       /Could not reach the Marketo Identity endpoint/,
     );
     expect(expiryNotification).not.toHaveBeenCalled();
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(ownerId),
+      (_instance, state) => {
+        expect([...state.storage.kv.list({ prefix: "observer:" })]).toHaveLength(1);
+        expect([...state.storage.kv.list({ prefix: "revokedObserver:" })]).toHaveLength(0);
+      },
+    );
+    await runInDurableObject(
+      (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> }).UserAccount.get(observerId),
+      (_instance, state) => {
+        expect([...state.storage.kv.list({ prefix: "observerAuthority:" })]).toHaveLength(1);
+      },
+    );
   });
 });
 
