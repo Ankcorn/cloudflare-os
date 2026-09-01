@@ -47,22 +47,27 @@ export interface Worktree {
   deleteFile(path: string): Promise<void>;
 
   /**
-   * Search the given file (or recursively search the given directory) for all lines matching the
-   * given regular expression.
+   * Search for all lines matching the given regular expression. With `path` omitted, searches
+   * every file in the worktree. A string `path` searches that file, or recursively searches that
+   * directory. An array searches each listed file/directory (deduplicated), which is more
+   * efficient than separate `grep()` calls; an empty array searches nothing.
+   *
+   * Files that cannot be searched (binary/over-limit files, symlinks, submodules) are skipped
+   * with a note, as is a listed path that doesn't exist -- but if *every* listed path fails this
+   * way, the call throws instead.
    *
    * Returns results in the format `grep -n` would return, intended to be viewed by a human or
    * agent. This format is useful if you just intend to console.log() it. Do not try to parse this
    * format; if you intend to operate on the result programmatically, use `structuredGrep()`
    * instead.
    */
-  grep(path: string, pattern: RegExp): Promise<string>;
+  grep(pattern: RegExp, path?: string | Array<string>): Promise<string>;
 
   /**
-   * Like grep but returns a structured format useful for analyzing in code. Unsearchable files
-   * (binary/over-limit files, symlinks, submodules) are silently skipped here (whereas `grep()`
-   * will include notes about them in the output).
+   * Like grep but returns a structured format useful for analyzing in code. The files `grep()`
+   * would skip with a note are reported in `errors`.
    */
-  structuredGrep(path: string, pattern: RegExp): Promise<GrepMatch[]>;
+  structuredGrep(pattern: RegExp, path?: string | Array<string>): Promise<StructuredGrepResult>;
 
   // ---------------------------------------------------------------------------
   // Git operations
@@ -107,6 +112,27 @@ export type WorktreeFileEntry = {
    * pinned commit), and searches skip them. This will change in the future.
    */
   kind: "file" | "executable" | "dir" | "symlink" | "submodule";
+};
+
+/** Result of `structuredGrep()`. */
+export type StructuredGrepResult = {
+  /** All matching lines, ordered by file path. */
+  matches: GrepMatch[];
+
+  /**
+   * Files that could not be searched: symlinks, submodules, binary or over-limit content, and
+   * listed paths that don't exist.
+   */
+  errors: GrepFileError[];
+};
+
+/** One unsearchable file reported by `structuredGrep()`. */
+export type GrepFileError = {
+  /** Full path of the file that could not be searched. */
+  file: string;
+
+  /** Human-readable description of why (the text `grep()` renders as a `(skipped: ...)` note). */
+  error: string;
 };
 
 /** One match returned by `structuredGrep()`. */

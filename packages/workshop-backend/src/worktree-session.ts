@@ -12,12 +12,15 @@
 // Content rules match the file tools': regular files of either mode are operable (an edited
 // executable keeps its bit), symlink/gitlink/directory paths throw their descriptive errors,
 // and unreadable *content* (oversized/binary) is distinguished from path-shape errors by
-// UnreadableContentError -- writeFile falls back to a whole-file `set` on it, while grep and
-// diff render it as a skip note.
+// UnreadableContentError -- writeFile falls back to a whole-file `set` on it, while grep
+// reports it as a structured error entry (a "(skipped: ...)" note in the freeform format) and
+// diff renders it as a skip note.
 
 import { RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
-import type { GrepMatch, Worktree, WorktreeFileEntry } from "./worktree-binding";
+import type {
+  GrepFileError, StructuredGrepResult, Worktree, WorktreeFileEntry,
+} from "./worktree-binding";
 import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { diffFiles, type FileChange } from "@gadgets/workshop-shared/code-change";
 import type { GitOid } from "@gadgets/workshop-shared/gatekeeper";
@@ -203,8 +206,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     this.turn.appendChange(this.worktreeId, path, { remove: true });
   }
 
-  async grep(path: string, pattern: RegExp): Promise<string> {
-    let { files, notes, single } = await this.#grepFiles(path);
+  async grep(pattern: RegExp, path?: string | string[]): Promise<string> {
+    let { files, errors, single } = await this.#grepFiles(path);
     let out: string[] = [];
     for (let file of files) {
       for (let match of matchLines(file.text, pattern)) {
@@ -214,71 +217,100 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
       }
     }
     if (out.length === 0) out.push("(no matches)");
-    out.push(...notes.map(note => `(skipped: ${note})`));
+    out.push(...errors.map(error => `(skipped: ${error.error})`));
     return out.join("\n");
   }
 
-  async structuredGrep(path: string, pattern: RegExp): Promise<GrepMatch[]> {
-    let { files } = await this.#grepFiles(path);
-    return files.flatMap(file =>
-        matchLines(file.text, pattern).map(match => ({ file: file.path, ...match })));
+  async structuredGrep(pattern: RegExp, path?: string | string[])
+      : Promise<StructuredGrepResult> {
+    let { files, errors } = await this.#grepFiles(path);
+    return {
+      matches: files.flatMap(file =>
+          matchLines(file.text, pattern).map(match => ({ file: file.path, ...match }))),
+      errors,
+    };
   }
 
-  // Resolves a grep scope to the searchable files' text: one file (whose own unsearchability
-  // throws, since the caller named it explicitly), or a directory scan in the overlay-over-base
-  // view, where unsearchable files -- symlinks, submodules, oversized and binary blobs -- are
-  // skipped with a note. Missing base blobs are filled in one batched pull, never a serial
-  // walk-and-fetch; an oversized blob (measured, or omitted by the pull's own filter) drops out
-  // of the batch with a note rather than failing it.
-  async #grepFiles(scope: string)
-      : Promise<{ files: { path: string, text: string }[], notes: string[], single: boolean }> {
+  // Resolves a grep path argument to the searchable files' text. Each listed scope is a file or
+  // a directory to scan recursively in the overlay-over-base view (undefined means the whole
+  // tree); unsearchable files -- symlinks, submodules, oversized and binary blobs -- and listed
+  // paths that don't exist degrade to error entries, except that when *every* listed scope
+  // fails, the whole call throws (so a lone bad path is an exception, not an easily-missed
+  // one-line result). Missing base blobs are filled in one batched pull across all scopes --
+  // the reason the argument accepts an array -- never a serial walk-and-fetch; an oversized
+  // blob (measured, or omitted by the pull's own filter) drops out of the batch with an error
+  // entry rather than failing it.
+  async #grepFiles(pathArg: string | string[] | undefined): Promise<{
+    files: { path: string, text: string }[],
+    errors: GrepFileError[],
+    single: boolean,
+  }> {
     let base = this.#pinBase();
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let removed = this.turn.getRemovedPaths(this.worktreeId);
-    let notes: string[] = [];
 
-    let overlayText = overlay.get(scope);
-    if (scope !== "" && overlayText !== undefined) {
-      return { files: [{ path: scope, text: overlayText }], notes, single: true };
-    }
-    let entry = scope !== "" && removed.has(scope)
-        ? undefined : await this.host.gitCache.pathEntryAtCommit(base, scope);
-    if (entry !== undefined && entry.kind !== "dir") {
-      // A single named file: read through the turn, so symlink/submodule/unreadable content
-      // throws its descriptive error rather than degrading to a note.
-      let text = await this.turn.readFile(this.worktreeId, scope);
-      if (text === undefined) throw new Error(`${scope}: no such file`);
-      return { files: [{ path: scope, text }], notes, single: true };
-    }
+    // Overlapping scopes (["src", "src/util.js"]) resolve to one candidate per path, and one
+    // error entry per unsearchable file, no matter how many scopes cover it.
+    let scopes = [...new Set(typeof pathArg === "string" ? [pathArg] : pathArg ?? [""])];
+    let candidates = new Map<string, GrepCandidate>();
+    let errorByFile = new Map<string, string>();
+    let failedScopes = new Map<string, string>();
+    // Scopes that named a base file directly: unreadable *content* (oversized/binary),
+    // discovered only after the batched pull, still counts as the scope failing.
+    let namedFiles = new Set<string>();
+    let single = false;
 
-    let prefix = scope === "" ? "" : `${scope}/`;
-    let candidates: GrepCandidate[] = [];
-    if (entry !== undefined) {
-      for (let treeEntry of await this.host.gitCache.listCommitTreePaths(
-          base, scope === "" ? undefined : scope, { recursive: true })) {
-        if (treeEntry.kind === "dir") continue;
-        if (treeEntry.kind === "symlink" || treeEntry.kind === "submodule") {
-          notes.push(`${treeEntry.path} is a ${treeEntry.kind}`);
+    for (let scope of scopes) {
+      let overlayText = overlay.get(scope);
+      if (scope !== "" && overlayText !== undefined) {
+        candidates.set(scope, { path: scope });
+        single = typeof pathArg === "string";
+        continue;
+      }
+      let entry = scope !== "" && removed.has(scope)
+          ? undefined : await this.host.gitCache.pathEntryAtCommit(base, scope);
+      if (entry !== undefined && entry.kind !== "dir") {
+        if (entry.kind === "symlink" || entry.kind === "submodule") {
+          failedScopes.set(scope, `${scope} is a ${entry.kind}`);
           continue;
         }
-        if (removed.has(treeEntry.path) || overlay.has(treeEntry.path)) continue;
-        candidates.push({ path: treeEntry.path, oid: treeEntry.oid });
+        candidates.set(scope, { path: scope, oid: entry.oid });
+        namedFiles.add(scope);
+        single = typeof pathArg === "string";
+        continue;
       }
-    }
-    for (let overlayPath of overlay.keys()) {
-      if (prefix === "" || overlayPath.startsWith(prefix)) {
-        candidates.push({ path: overlayPath });
+
+      // A directory scope: its base entries (when it exists in the base) plus the overlay's
+      // paths under it. A scope with neither doesn't exist.
+      let prefix = scope === "" ? "" : `${scope}/`;
+      let found = false;
+      if (entry !== undefined) {
+        found = true;
+        for (let treeEntry of await this.host.gitCache.listCommitTreePaths(
+            base, scope === "" ? undefined : scope, { recursive: true })) {
+          if (treeEntry.kind === "dir") continue;
+          if (treeEntry.kind === "symlink" || treeEntry.kind === "submodule") {
+            errorByFile.set(treeEntry.path, `${treeEntry.path} is a ${treeEntry.kind}`);
+            continue;
+          }
+          if (removed.has(treeEntry.path) || overlay.has(treeEntry.path)) continue;
+          candidates.set(treeEntry.path, { path: treeEntry.path, oid: treeEntry.oid });
+        }
       }
-    }
-    if (entry === undefined && candidates.length === 0) {
-      throw new Error(`${scope}: no such file or directory`);
+      for (let overlayPath of overlay.keys()) {
+        if (prefix === "" || overlayPath.startsWith(prefix)) {
+          candidates.set(overlayPath, { path: overlayPath });
+          found = true;
+        }
+      }
+      if (!found) failedScopes.set(scope, `${scope}: no such file or directory`);
     }
 
-    // One batched fetch for every missing base blob. Paths with identical content share one
-    // blob oid, so each oid maps to every path holding it: an oversized blob then notes each
-    // of those files, keeping the one-note-per-skipped-file promise.
+    // One batched fetch for every missing base blob, across all scopes. Paths with identical
+    // content share one blob oid, so each oid maps to every path holding it: an oversized blob
+    // then notes each of those files, keeping the one-error-per-skipped-file promise.
     let missing = new Map<GitOid, string[]>();
-    for (let candidate of candidates) {
+    for (let candidate of candidates.values()) {
       if (candidate.oid !== undefined && !this.host.gitCache.hasLocalObject(candidate.oid)) {
         let missingPaths = missing.get(candidate.oid);
         if (missingPaths === undefined) missing.set(candidate.oid, missingPaths = []);
@@ -297,7 +329,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
       } catch (err) {
         if (err instanceof GitObjectTooLargeError && missing.has(err.oid)) {
           for (let missingPath of missing.get(err.oid)!) {
-            notes.push(`${missingPath} is too large to read`);
+            errorByFile.set(missingPath, `${missingPath} is too large to read`);
           }
           skipped.add(err.oid);
           missing.delete(err.oid);
@@ -308,7 +340,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     }
 
     let files: { path: string, text: string }[] = [];
-    for (let candidate of candidates.toSorted((a, b) => a.path < b.path ? -1 : 1)) {
+    for (let candidate of [...candidates.values()]
+        .toSorted((a, b) => a.path < b.path ? -1 : 1)) {
       if (candidate.oid === undefined) {
         files.push({ path: candidate.path, text: overlay.get(candidate.path)! });
         continue;
@@ -321,13 +354,30 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
         });
       } catch (err) {
         if (err instanceof UnreadableContentError) {
-          notes.push(err.message);
+          errorByFile.set(candidate.path, err.message);
           continue;
         }
         throw err;
       }
     }
-    return { files, notes, single: false };
+
+    // The all-listed-scopes-failed throw. A directly named file whose content proved unreadable
+    // failed its scope too; a scope that resolved (the root always does) succeeded even if it
+    // yielded nothing searchable. An empty array lists nothing, so it fails nothing: an empty
+    // result.
+    for (let scope of namedFiles) {
+      let message = errorByFile.get(scope);
+      if (message !== undefined) failedScopes.set(scope, message);
+    }
+    if (scopes.length > 0 && failedScopes.size === scopes.length) {
+      throw new Error([...failedScopes.values()].join("; "));
+    }
+    for (let [file, message] of failedScopes) errorByFile.set(file, message);
+
+    let errors = [...errorByFile]
+        .map(([file, message]) => ({ file, error: message }))
+        .toSorted((a, b) => a.file < b.file ? -1 : 1);
+    return { files, errors, single };
   }
 
   async commit(message: string): Promise<string> {

@@ -367,34 +367,72 @@ describe("grep", () => {
     await loadFixtureRepo(impl);
     let { session } = await createWorktreeSession(impl, 1, COMMIT_1);
 
-    expect(await session.grep("src/util.js", /answer/)).toBe(
+    expect(await session.grep(/answer/, "src/util.js")).toBe(
         "1:export const answer = 42;");
-    expect(await session.grep("src", /answer/)).toBe(
+    expect(await session.grep(/answer/, "src")).toBe(
         "src/util.js:1:export const answer = 42;");
-    expect(await session.grep("src/main.js", /answer/)).toBe("(no matches)");
+    expect(await session.grep(/answer/, "src/main.js")).toBe("(no matches)");
 
-    // A root scan skips the symlink and submodule entries, with notes.
-    let root = await session.grep("", /answer/);
+    // Omitting the path searches the whole tree, skipping the symlink and submodule entries
+    // with notes.
+    let root = await session.grep(/answer/);
     expect(root).toContain("src/util.js:1:export const answer = 42;");
     expect(root).toContain("(skipped: link.md is a symlink)");
     expect(root).toContain("(skipped: vendored is a submodule)");
 
     // Overlay content is searched (and overrides the base).
     await session.writeFile("src/util.js", "export const answer = 43;\n");
-    expect(await session.grep("src", /answer = 43/)).toBe(
+    expect(await session.grep(/answer = 43/, "src")).toBe(
         "src/util.js:1:export const answer = 43;");
 
-    // Naming an unsearchable file explicitly throws rather than noting.
-    await expect(session.grep("link.md", /x/)).rejects.toThrow(/symlink/);
+    // A lone listed path that is unsearchable -- or doesn't exist -- throws rather than noting.
+    await expect(session.grep(/x/, "link.md")).rejects.toThrow(/symlink/);
+    await expect(session.grep(/x/, "no/such/path")).rejects.toThrow(
+        "no/such/path: no such file or directory");
   }));
 
-  it("returns structured matches", () => withImpl(async impl => {
+  it("searches an array of paths, degrading listed failures to skips unless all fail",
+      () => withImpl(async impl => {
     addChat(impl, 1);
     await loadFixtureRepo(impl);
     let { session } = await createWorktreeSession(impl, 1, COMMIT_1);
-    expect(await session.structuredGrep("src", /answer/)).toEqual([
-      { file: "src/util.js", line: 1, text: "export const answer = 42;" },
-    ]);
+
+    // A mixed list of directories and files, with overlapping entries deduplicated.
+    expect(await session.grep(/answer|hello/, ["src", "src/util.js", "README.md"])).toBe(
+        'src/main.js:1:console.log("hello");\n' +
+        "src/util.js:1:export const answer = 42;");
+
+    // An empty array searches nothing (and fails nothing).
+    expect(await session.grep(/answer/, [])).toBe("(no matches)");
+    expect(await session.structuredGrep(/answer/, [])).toEqual({ matches: [], errors: [] });
+
+    // A failing listed path degrades to a skip when another listed path succeeds...
+    expect(await session.grep(/answer/, ["src", "link.md", "missing.txt"])).toBe(
+        "src/util.js:1:export const answer = 42;\n" +
+        "(skipped: link.md is a symlink)\n" +
+        "(skipped: missing.txt: no such file or directory)");
+
+    // ...whereas every listed path failing throws, naming each failure.
+    await expect(session.grep(/x/, ["link.md", "missing.txt"])).rejects.toThrow(
+        "link.md is a symlink; missing.txt: no such file or directory");
+  }));
+
+  it("returns structured matches and errors", () => withImpl(async impl => {
+    addChat(impl, 1);
+    await loadFixtureRepo(impl);
+    let { session } = await createWorktreeSession(impl, 1, COMMIT_1);
+    expect(await session.structuredGrep(/answer/, "src")).toEqual({
+      matches: [{ file: "src/util.js", line: 1, text: "export const answer = 42;" }],
+      errors: [],
+    });
+    // The whole-tree search reports the files grep() would render as skip notes.
+    expect(await session.structuredGrep(/answer/)).toEqual({
+      matches: [{ file: "src/util.js", line: 1, text: "export const answer = 42;" }],
+      errors: [
+        { file: "link.md", error: "link.md is a symlink" },
+        { file: "vendored", error: "vendored is a submodule" },
+      ],
+    });
   }));
 
   it("fills a directory's missing blobs in one batched pull", async () => {
@@ -416,7 +454,7 @@ describe("grep", () => {
     }
     let session = harness.session(COMMIT_1);
 
-    expect(await session.grep("src", /answer/)).toBe(
+    expect(await session.grep(/answer/, "src")).toBe(
         "src/util.js:1:export const answer = 42;");
     // All three of src's blobs arrived in a single batched pull -- never a per-file fetch.
     expect(pulls.length).toBe(1);
@@ -426,12 +464,23 @@ describe("grep", () => {
       "702f4280cee76a8b022e896aedf2bad15b43726f",  // src/main.js
     ].toSorted());
     expect(pulls[0].hints.type).toBe("blob");
+
+    // An array of scopes likewise fills all of its missing blobs in one pull -- the reason the
+    // path argument accepts a list.
+    expect(await session.grep(/Fixture|run/, ["README.md", "run.sh"])).toBe(
+        "README.md:1:# Fixture\n" +
+        "run.sh:2:echo run");
+    expect(pulls.length).toBe(2);
+    expect(pulls[1].oids.toSorted()).toEqual([
+      "85ba14df52f8c72688537de6e7555fb402217b1e",  // run.sh
+      "ca69e6d08b5b8bb4f11a74f9695e329c203cbfd8",  // README.md @ commit 1
+    ].toSorted());
   });
 
   it("notes every path sharing one unobtainable oversized blob", async () => {
     // Two paths with identical content share a single blob oid. The pull "succeeds" but
     // delivers nothing, which the batched fetch's size filter reads as omitted-for-size: the
-    // skip must then note *each* file holding that blob, not just one of them.
+    // skip must then report *each* file holding that blob, not just one of them.
     let harness = makeLocalHarness(async () => {});
     let cache = harness.cache;
     let smallBlob = await cache.putFromGatekeeper(
@@ -446,10 +495,27 @@ describe("grep", () => {
         7, "commit", commitPayload(treeOid, [], "shared blob fixture"));
     let session = harness.session(commitOid);
 
-    let result = await session.grep("", /x/);
+    let result = await session.grep(/x/);
     expect(result).toContain("small.txt:1:x marks the spot");
     expect(result).toContain("(skipped: big1.txt is too large to read)");
     expect(result).toContain("(skipped: big2.txt is too large to read)");
+
+    // structuredGrep reports the same skips as error entries.
+    expect(await session.structuredGrep(/x/)).toEqual({
+      matches: [{ file: "small.txt", line: 1, text: "x marks the spot" }],
+      errors: [
+        { file: "big1.txt", error: "big1.txt is too large to read" },
+        { file: "big2.txt", error: "big2.txt is too large to read" },
+      ],
+    });
+
+    // A directly named file whose *content* is unreadable fails its scope: alone it throws,
+    // beside a searchable path it degrades to a skip.
+    await expect(session.grep(/x/, "big1.txt")).rejects.toThrow(
+        "big1.txt is too large to read");
+    expect(await session.grep(/x/, ["big1.txt", "small.txt"])).toBe(
+        "small.txt:1:x marks the spot\n" +
+        "(skipped: big1.txt is too large to read)");
   });
 });
 
