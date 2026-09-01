@@ -24,6 +24,8 @@ export type DesignStudioMetadata = Record<string, string | undefined>;
 
 /** Complete overlaid state shown when an existing classic asset changes lifecycle state. */
 export type DesignStudioLifecycleSnapshot = {
+  /** Lifecycle status reviewed with this action. */
+  status?: string;
   metadata: Record<string, unknown>;
   content: unknown;
   /** Complete known dependencies, or null when this asset/operation has no documented endpoint. */
@@ -148,6 +150,9 @@ export function validateDesignStudioActionForDispatch(action: DesignStudioAction
     throw new Error("Unknown persisted Marketo landing-page template type.");
   }
   if (action.type === "designLifecycle") {
+    if (action.asset === "form" && action.operation === "delete" && action.snapshot.status !== "draft") {
+      throw new Error("A Marketo form must have reviewed draft status before deletion.");
+    }
     switch (action.operation) {
       case "approve":
       case "unapprove":
@@ -241,6 +246,7 @@ export function describeDesignStudioAction(action: DesignStudioAction): ActionDe
         title: `${action.operation} Marketo ${label(action.asset)} ${target ?? ""}`,
         description: `${action.operation === "delete" ? "Permanently delete" : action.operation} ` +
           `Design Studio ${label(action.asset)}:\n\n${codeBlock(target)}\n\n` +
+          `Lifecycle status:\n\n${codeBlock(action.snapshot.status ?? "unknown")}\n\n` +
           `Publishable metadata, headers, and settings:\n\n${codeBlock(action.snapshot.metadata)}\n\n` +
           `Publishable content:\n\n${codeBlock(action.snapshot.content)}\n\n` +
           `Affected dependents (null means unsupported/unknown):\n\n${codeBlock(action.snapshot.affectedDependents)}`,
@@ -545,7 +551,7 @@ export async function executeDesignStudioAction(
     case "form":
       switch (operation) {
         case "approve": assertTargetResult(await client.approveForm(id), id, `form ${operation}`); return;
-        case "unapprove": throw new Error("Marketo forms do not support unapprove.");
+        case "unapprove": assertTargetResult(await client.unapproveForm(id), id, `form ${operation}`); return;
         case "discardDraft": assertTargetResult(await client.discardFormDraft(id), id, `form ${operation}`); return;
         case "delete": assertTargetResult(await client.deleteForm(id), id, `form ${operation}`); return;
         default: throw new Error("Unknown persisted Marketo Design Studio lifecycle operation.");

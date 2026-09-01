@@ -1475,9 +1475,11 @@ export interface MarketoForm {
   updateMetadata(patch: MarketoFormMetadataPatch): Promise<void>;
   /** Approve the current form draft. */
   approve(): Promise<void>;
+  /** Return an approved form to draft state. An approved form must be unapproved before deletion. */
+  unapprove(): Promise<void>;
   /** Discard the current form draft and restore the approved version. */
   discardDraft(): Promise<void>;
-  /** Permanently delete this form. */
+  /** Permanently delete this draft form. Call `unapprove()` first when it is approved. */
   delete(): Promise<void>;
 }
 

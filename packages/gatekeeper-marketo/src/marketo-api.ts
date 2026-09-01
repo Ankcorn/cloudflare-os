@@ -1491,6 +1491,10 @@ export class MarketoClient {
     return await this.#assetLifecycle("form", id, "approveDraft");
   }
 
+  async unapproveForm(id: number): Promise<RawAssetId[]> {
+    return await this.#assetLifecycle("form", id, "unapprove");
+  }
+
   async discardFormDraft(id: number): Promise<RawAssetId[]> {
     return await this.#assetLifecycle("form", id, "discardDraft");
   }

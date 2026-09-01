@@ -11,6 +11,7 @@ import type {
   MarketoDesignStudioFileListOptions,
   MarketoDesignStudioListOptions,
   MarketoDesignStudioStatus,
+  MarketoForm,
 } from "../src/types";
 
 const EMPTY_LIFECYCLE_SNAPSHOT = { metadata: {}, content: [], affectedDependents: [] };
@@ -659,6 +660,73 @@ describe("classic Design Studio regressions", () => {
         affectedDependents: [],
       },
     });
+  });
+
+  it("requires approved forms to queue unapprove before delete", async () => {
+    expectTypeOf<MarketoForm["unapprove"]>().toBeFunction();
+    let fields = [{ id: "Email", label: "Email", required: true }];
+    let { actions, ctx } = context({
+      getForm: async () => ({
+        id: 51, name: "Signup", status: "approved", locale: "en_US", language: "English",
+      }),
+      getFormFields: async () => fields,
+      getFormUsedBy: async () => [{
+        id: 9, name: "Page", type: "Landing Page", status: "approved", updatedAt: "2026-01-01T00:00:00Z",
+      }],
+    });
+    let form = new MarketoDesignStudioImpl(ctx).getForm("51");
+
+    await expect(form.delete()).rejects.toThrow(/must be unapproved/);
+    expect(actions).toEqual([]);
+
+    await form.unapprove();
+    await form.delete();
+
+    expect(actions).toEqual([
+      expect.objectContaining({
+        type: "designLifecycle", asset: "form", targetId: "51", operation: "unapprove",
+        snapshot: expect.objectContaining({
+          status: "approved",
+          metadata: { name: "Signup", locale: "en_US", language: "English", settings: {} },
+          content: fields,
+          affectedDependents: null,
+        }),
+      }),
+      expect.objectContaining({
+        type: "designLifecycle", asset: "form", targetId: "51", operation: "delete",
+        snapshot: expect.objectContaining({
+          status: "draft",
+          metadata: { name: "Signup", locale: "en_US", language: "English", settings: {} },
+          content: fields,
+          affectedDependents: [{
+            id: 9, name: "Page", type: "Landing Page", status: "approved", updatedAt: "2026-01-01T00:00:00Z",
+          }],
+        }),
+      }),
+    ]);
+  });
+
+  it("dispatches form unapprove and only draft form deletes", async () => {
+    let unapproveForm = vi.fn(async () => [{ id: 51 }]);
+    let deleteForm = vi.fn(async () => [{ id: 51 }]);
+    let client = { unapproveForm, deleteForm } as unknown as MarketoClient;
+    let snapshot = { status: "draft", metadata: {}, content: [], affectedDependents: [] };
+
+    await executeDesignStudioAction({
+      id: 1, type: "designLifecycle", asset: "form", targetId: "51", operation: "unapprove",
+      snapshot: { ...snapshot, status: "approved" },
+    }, client, Number, () => {});
+    await executeDesignStudioAction({
+      id: 2, type: "designLifecycle", asset: "form", targetId: "51", operation: "delete", snapshot,
+    }, client, Number, () => {});
+
+    expect(unapproveForm).toHaveBeenCalledWith(51);
+    expect(deleteForm).toHaveBeenCalledWith(51);
+    await expect(executeDesignStudioAction({
+      id: 3, type: "designLifecycle", asset: "form", targetId: "51", operation: "delete",
+      snapshot: { ...snapshot, status: "approved" },
+    }, client, Number, () => {})).rejects.toThrow(/reviewed draft status/);
+    expect(deleteForm).toHaveBeenCalledOnce();
   });
 
   it("snapshots complete classic email publishable state", async () => {

@@ -9506,6 +9506,79 @@ describe("provisional id kind safety", () => {
 describe("Design Studio action lifecycle", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("unapproves an approved form before its ordered delete", async () => {
+    let fields = [{ id: "Email", label: "Email", required: true }];
+    let metadata = { name: "Signup", locale: "en_US", language: "English", settings: {} };
+    let actions: DesignStudioAction[] = [{
+      id: 1, type: "designLifecycle", asset: "form", targetId: "51", operation: "unapprove",
+      snapshot: { status: "approved", metadata, content: fields, affectedDependents: null },
+    }, {
+      id: 2, type: "designLifecycle", asset: "form", targetId: "51", operation: "delete",
+      snapshot: { status: "draft", metadata, content: fields, affectedDependents: [] },
+    }];
+    let status = "approved";
+    let paths: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      paths.push(path);
+      if (path.endsWith("/form/51.json")) {
+        return Response.json({ success: true, result: [{ id: 51, ...metadata, settings: undefined, status }] });
+      }
+      if (path.endsWith("/form/51/fields.json")) return Response.json({ success: true, result: fields });
+      if (path.endsWith("/form/51/usedBy.json")) return Response.json({ success: true, result: [] });
+      if (path.endsWith("/form/51/unapprove.json")) status = "draft";
+      return Response.json({ success: true, result: [{ id: 51 }] });
+    });
+    let stub = await designActionGatekeeper(actions);
+
+    await runInDurableObject(stub, async instance => {
+      await expect(instance.applyAction(2)).rejects.toThrow(/form 51 has an earlier pending mutation/);
+      expect(paths).toEqual([]);
+      await instance.applyAction(1);
+      await instance.applyAction(2);
+    });
+
+    expect(paths).toEqual([
+      "/rest/asset/v1/form/51.json",
+      "/rest/asset/v1/form/51/fields.json",
+      "/rest/asset/v1/form/51/unapprove.json",
+      "/rest/asset/v1/form/51.json",
+      "/rest/asset/v1/form/51/fields.json",
+      "/rest/asset/v1/form/51/usedBy.json",
+      "/rest/asset/v1/form/51/delete.json",
+    ]);
+  });
+
+  it("rejects form deletion when the provider still reports approved status", async () => {
+    let action: DesignStudioAction = {
+      id: 1, type: "designLifecycle", asset: "form", targetId: "51", operation: "delete",
+      snapshot: {
+        status: "draft", metadata: { name: "Signup", settings: {} }, content: [], affectedDependents: [],
+      },
+    };
+    let deleteRequests = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.includes("/identity/")) return Response.json({ access_token: "token", expires_in: 3600 });
+      let path = new URL(url).pathname;
+      if (path.endsWith("/form/51.json")) {
+        return Response.json({ success: true, result: [{ id: 51, name: "Signup", status: "approved" }] });
+      }
+      if (path.endsWith("/form/51/fields.json") || path.endsWith("/form/51/usedBy.json")) {
+        return Response.json({ success: true, result: [] });
+      }
+      deleteRequests++;
+      return Response.json({ success: true, result: [{ id: 51 }] });
+    });
+    let stub = await designActionGatekeeper([action]);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      await expect(instance.applyAction(1)).rejects.toThrow(/publishable state changed/);
+      expect(state.storage.kv.get("pending:1")).toBeDefined();
+    });
+    expect(deleteRequests).toBe(0);
+  });
+
   it("rejects changed classic dependencies before publishing or deleting", async () => {
     let reviewed = {
       id: 91, name: "Dependent email", type: "Email", status: "approved", updatedAt: "2026-01-01T00:00:00Z",

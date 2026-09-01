@@ -1295,7 +1295,11 @@ abstract class AssetImpl extends RpcTarget {
     if (operation === "unapprove" && status !== "approved" && status !== "approved with draft") {
       throw new Error(`Marketo ${this.kind} ${this.id} is not approved.`);
     }
+    if (this.kind === "form" && operation === "delete" && status !== "draft") {
+      throw new Error(`Marketo form ${this.id} must be unapproved before it can be deleted.`);
+    }
     let snapshot: DesignStudioLifecycleSnapshot = {
+      status,
       metadata: lifecycleMetadata(metadata),
       content: await handle(snapshotCtx, this.kind, this.id, this.folderType).lifecycleSnapshotContent(),
       affectedDependents: await readClassicDependents(
@@ -1420,8 +1424,10 @@ export async function readDesignStudioLifecycleSnapshot(
     }
     content = result;
   }
+  let summary = normalize(kind, raw);
   return {
-    metadata: lifecycleMetadata(normalize(kind, raw)),
+    status: summary.status?.toLocaleLowerCase(),
+    metadata: lifecycleMetadata(summary),
     content,
     affectedDependents: await readClassicDependents(client, kind, id, operation),
   };
@@ -1690,7 +1696,7 @@ export class MarketoFormImpl extends AssetImpl {
   updateMetadata(patch: MarketoFormMetadataPatch) {
     return this.metadata(metadataPatch(patch, ["name", "description", "locale", "language"]));
   }
-  approve() { return this.lifecycle("approve"); } discardDraft() { return this.lifecycle("discardDraft"); } delete() { return this.lifecycle("delete"); }
+  approve() { return this.lifecycle("approve"); } unapprove() { return this.lifecycle("unapprove"); } discardDraft() { return this.lifecycle("discardDraft"); } delete() { return this.lifecycle("delete"); }
 }
 
 @validateRpc()

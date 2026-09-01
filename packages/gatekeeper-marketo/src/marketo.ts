@@ -2821,6 +2821,7 @@ export class MarketoGatekeeperImpl
           { cause: error },
         );
       }
+      if (action.snapshot.status === undefined) delete current.status;
       if (canonicalApprovalValue(current) !== canonicalApprovalValue(action.snapshot)) {
         throw new DesignerPreDispatchError(
           `The Marketo ${action.asset} publishable state changed after approval; nothing was dispatched.`,
