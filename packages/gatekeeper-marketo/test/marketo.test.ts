@@ -89,10 +89,17 @@ import {
   BUSINESS_OBJECT_RESTRICTION_TTL_MS,
   MarketoGatekeeperImpl,
   MarketoUserImpl,
+  MarketoUserVerifier,
   readConnectBody,
   UserAccount,
 } from "../src/marketo";
-import { MarketoTokenCache, unwrapTokenCacheResult } from "../src/token-cache";
+import {
+  MarketoTokenCache,
+  serializeTokenError,
+  unwrapTokenCacheResult,
+  type IdentityTokenAuthority,
+  type TokenCredentialState,
+} from "../src/token-cache";
 import { MarketoBusinessObjectImpl, type BusinessObjectContext } from "../src/business-objects";
 import type { BusinessObjectAction } from "../src/business-object-actions";
 import type { MarketoBusinessObjectQuery } from "../src/types";
@@ -633,15 +640,15 @@ describe("optional deployment defaults", () => {
 describe("account description", () => {
   it("distinguishes API users on one instance without exposing client credentials", async () => {
     let describeAccount = async (clientId: string, clientSecret: string, scope = "api-user@example.com") => {
-      let account = { getCredentials: async () => ({ endpoint: ORIGIN, clientId, clientSecret }) };
+      let credentials = { endpoint: ORIGIN, clientId, clientSecret };
+      let account = {
+        getCredentialState: async () => ({ credentials, generation: 1 }),
+        getScope: async () => ({ ok: true, value: scope }),
+      };
       let ctx = {
         props: { userObjectId: `account-${clientId}` },
         exports: {
           UserAccount: { idFromString: () => "account-id", get: () => account },
-          MarketoTokenCache: {
-            idFromName: () => "cache-id",
-            get: () => ({ getScope: async () => ({ ok: true, value: scope }) }),
-          },
         },
       } as unknown as ExecutionContext;
       return await new MarketoUserImpl(ctx, {} as Env).describe();
@@ -664,7 +671,11 @@ describe("account description", () => {
   it("logs a sanitized classification when scope lookup fails", async () => {
     let credentials = { endpoint: ORIGIN, clientId: "client", clientSecret: "secret-marker" };
     let account = {
-      getCredentials: async () => credentials,
+      getCredentialState: async () => ({ credentials, generation: 1 }),
+      getScope: async () => ({
+        ok: false,
+        error: { kind: "provider", status: scopeError.status },
+      }),
       credentialsExpired: async () => {},
     };
     let scopeError = new MarketoError(`provider echoed ${credentials.clientSecret}`, {
@@ -677,10 +688,6 @@ describe("account description", () => {
         UserAccount: {
           idFromString: () => "account-id",
           get: () => account,
-        },
-        MarketoTokenCache: {
-          idFromName: () => "cache-id",
-          get: () => ({ getScope: async () => { throw scopeError; } }),
         },
       },
     } as unknown as ExecutionContext;
@@ -4946,11 +4953,39 @@ describe("token cache RPC protocol", () => {
     vi.unstubAllGlobals();
   });
 
+  class TestIdentityTokenAuthority extends RpcTarget implements IdentityTokenAuthority {
+    async fetchIdentityToken(expected: TokenCredentialState) {
+      try {
+        return { ok: true as const, value: await fetchAccessToken(expected.credentials) };
+      } catch (error) {
+        return { ok: false as const, error: serializeTokenError(error) };
+      }
+    }
+  }
+
   function cache() {
     let namespace = (env as unknown as {
       MarketoTokenCache: DurableObjectNamespace<MarketoTokenCache>;
     }).MarketoTokenCache;
-    return namespace.get(namespace.newUniqueId());
+    let raw = namespace.get(namespace.newUniqueId());
+    return {
+      raw,
+      async getToken(creds: MarketoCredentials, forceRefresh = false) {
+        let authority = new RpcStub(new TestIdentityTokenAuthority());
+        try {
+          let result = await raw.getToken(
+            creds,
+            forceRefresh,
+            authority,
+            { credentials: creds, generation: 1 },
+          );
+          if ("credentialChanged" in result) throw new Error("Unexpected credential change.");
+          return result;
+        } finally {
+          authority[Symbol.dispose]();
+        }
+      },
+    };
   }
 
   it("serializes auth and network failures as sanitized tagged results", async () => {
@@ -5104,7 +5139,7 @@ describe("token cache RPC protocol", () => {
     });
     let stub = cache();
     let creds = { endpoint: ORIGIN, clientId: crypto.randomUUID(), clientSecret: "secret" };
-    await runInDurableObject(stub, (_instance, state) => {
+    await runInDurableObject(stub.raw, (_instance, state) => {
       state.storage.kv.put("token", { accessToken: "expired-token", expiresAt: now - 1 });
     });
 
@@ -5499,6 +5534,14 @@ class TestApprovalQueue extends RpcTarget {
   }
 }
 
+async function testCredentialFingerprint(credentials: MarketoCredentials): Promise<string> {
+  let bytes = new TextEncoder().encode(
+    `${credentials.endpoint}\u0000${credentials.clientId}\u0000${credentials.clientSecret}`,
+  );
+  let digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 describe("read authorization lifetime", () => {
   it.each([
     ["session", "instance", (session: MarketoSessionImpl | MarketoDesignStudioImpl) =>
@@ -5639,6 +5682,60 @@ describe("read authorization lifetime", () => {
     expect(apiFetches).toBe(0);
     frame.ui[Symbol.dispose]();
   });
+
+  it.each(["description", "verifier"] as const)(
+    "does not start an Identity fetch for a stale account %s read",
+    async operation => {
+      let credentials = {
+        endpoint: ORIGIN, clientId: "client", clientSecret: crypto.randomUUID(),
+      };
+      let generation = 1;
+      let refreshEntered!: () => void;
+      let entered = new Promise<void>(resolve => { refreshEntered = resolve; });
+      let releaseRefresh!: () => void;
+      let released = new Promise<void>(resolve => { releaseRefresh = resolve; });
+      let fetches = 0;
+      let authorize = async (expected: { generation: number }) => {
+        refreshEntered();
+        await released;
+        if (expected.generation !== generation) {
+          return { ok: false as const, credentialChanged: true as const };
+        }
+        fetches++;
+        return { ok: true as const, value: operation === "description" ? "api-user" : true };
+      };
+      let account = {
+        getCredentialState: async () => ({ credentials, generation }),
+        getScope: authorize,
+        verifyCredentials: authorize,
+        credentialsExpired: async () => {},
+      };
+      let ctx = {
+        props: { userObjectId: "account-id" },
+        exports: {
+          UserAccount: { idFromString: () => "account-id", get: () => account },
+        },
+      } as unknown as ExecutionContext;
+
+      let pending = operation === "description"
+        ? new MarketoUserImpl(ctx, TEST_ENV).describe()
+        : new MarketoUserVerifier(ctx, TEST_ENV).hasLiveCredential(
+            credentials.endpoint,
+            credentials.clientId,
+            await testCredentialFingerprint(credentials),
+          );
+      await entered;
+      generation++;
+      releaseRefresh();
+
+      if (operation === "description") {
+        await expect(pending).resolves.toMatchObject({ displayName: "Marketo" });
+      } else {
+        await expect(pending).resolves.toEqual({ valid: false });
+      }
+      expect(fetches).toBe(0);
+    },
+  );
 });
 
 describe("Design Studio scoped binding", () => {

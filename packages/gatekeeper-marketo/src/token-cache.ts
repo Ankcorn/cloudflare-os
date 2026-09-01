@@ -7,8 +7,8 @@
 
 import { DurableObject } from "cloudflare:workers";
 import {
-  fetchAccessToken,
   MarketoClient,
+  MarketoDispatchAbortedError,
   MarketoError,
   type MarketoCredentials,
   type TokenProvider,
@@ -31,6 +31,26 @@ export type TokenCacheError = {
 export type TokenCacheResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: TokenCacheError };
+
+/** Credentials and account lifecycle generation authorizing one token refresh. */
+export type TokenCredentialState = {
+  credentials: MarketoCredentials;
+  generation: number;
+};
+
+/** Data returned by Marketo's Identity endpoint and retained in the token cache. */
+export type IdentityToken = {
+  accessToken: string;
+  expiresInSeconds: number;
+  scope?: string;
+};
+
+/** Account capability that authoritatively initiates Identity requests. */
+export interface IdentityTokenAuthority {
+  fetchIdentityToken(expected: TokenCredentialState): Promise<
+    TokenCacheResult<IdentityToken> | { ok: false; credentialChanged: true }
+  >;
+}
 
 type SerializedFormDataEntry =
   | { name: string; text: string }
@@ -55,14 +75,21 @@ type CachedToken = {
 };
 
 type CachedFailure = { retryAfter: number; error: TokenCacheError };
+class CredentialChangedError extends Error {}
 
 export class MarketoTokenCache extends DurableObject<Env> {
   /** De-duplicates concurrent refreshes within one instance. */
   #inflight: Promise<CachedToken> | undefined;
 
   /** Return a usable bearer token, refreshing when stale or when `forceRefresh` is set. */
-  async getToken(creds: MarketoCredentials, forceRefresh = false): Promise<TokenCacheResult<string>> {
-    return await this.#result(async () => (await this.#current(creds, forceRefresh)).accessToken);
+  async getToken(
+    creds: MarketoCredentials,
+    forceRefresh: boolean,
+    authority: IdentityTokenAuthority,
+    expected: TokenCredentialState,
+  ): Promise<TokenCacheResult<string> | { ok: false; credentialChanged: true }> {
+    return await this.#result(async () =>
+      (await this.#current(creds, forceRefresh, authority, expected)).accessToken);
   }
 
   /**
@@ -71,30 +98,47 @@ export class MarketoTokenCache extends DurableObject<Env> {
    * Used to label the connection in the UI so it is obvious which Marketo identity the account's
    * actions are attributed to.
    */
-  async getScope(creds: MarketoCredentials): Promise<TokenCacheResult<string | undefined>> {
-    return await this.#result(async () => (await this.#current(creds, false)).scope);
+  async getScope(
+    creds: MarketoCredentials,
+    authority: IdentityTokenAuthority,
+    expected: TokenCredentialState,
+  ): Promise<TokenCacheResult<string | undefined> | { ok: false; credentialChanged: true }> {
+    return await this.#result(async () => (await this.#current(creds, false, authority, expected)).scope);
   }
 
   /** Force a provider round trip and distinguish rejected credentials from operational failures. */
-  async verifyCredentials(creds: MarketoCredentials): Promise<TokenCacheResult<boolean>> {
+  async verifyCredentials(
+    creds: MarketoCredentials,
+    authority: IdentityTokenAuthority,
+    expected: TokenCredentialState,
+  ): Promise<TokenCacheResult<boolean> | { ok: false; credentialChanged: true }> {
     try {
-      await this.#current(creds, true);
+      await this.#current(creds, true, authority, expected);
       return { ok: true, value: true };
     } catch (error) {
+      if (error instanceof CredentialChangedError) return { ok: false, credentialChanged: true };
       if (error instanceof MarketoError && error.isAuthError) return { ok: true, value: false };
       return { ok: false, error: serializeTokenError(error) };
     }
   }
 
-  async #result<T>(operation: () => Promise<T>): Promise<TokenCacheResult<T>> {
+  async #result<T>(operation: () => Promise<T>): Promise<
+    TokenCacheResult<T> | { ok: false; credentialChanged: true }
+  > {
     try {
       return { ok: true, value: await operation() };
     } catch (error) {
+      if (error instanceof CredentialChangedError) return { ok: false, credentialChanged: true };
       return { ok: false, error: serializeTokenError(error) };
     }
   }
 
-  async #current(creds: MarketoCredentials, forceRefresh: boolean): Promise<CachedToken> {
+  async #current(
+    creds: MarketoCredentials,
+    forceRefresh: boolean,
+    authority: IdentityTokenAuthority,
+    expected: TokenCredentialState,
+  ): Promise<CachedToken> {
     let cached = this.ctx.storage.kv.get<CachedToken>("token");
     let now = Date.now();
     let failure = this.ctx.storage.kv.get<CachedFailure>("refreshFailure");
@@ -107,12 +151,14 @@ export class MarketoTokenCache extends DurableObject<Env> {
       return cached;
     }
     // Collapse concurrent refreshes: the first caller fetches, the rest await the same promise.
-    this.#inflight ??= this.#refresh(creds, cached)
+    this.#inflight ??= this.#refresh(authority, expected, cached)
       .catch(error => {
-        this.ctx.storage.kv.put<CachedFailure>("refreshFailure", {
-          retryAfter: Date.now() + REFRESH_FAILURE_BACKOFF_MS,
-          error: serializeTokenError(error),
-        });
+        if (!(error instanceof CredentialChangedError)) {
+          this.ctx.storage.kv.put<CachedFailure>("refreshFailure", {
+            retryAfter: Date.now() + REFRESH_FAILURE_BACKOFF_MS,
+            error: serializeTokenError(error),
+          });
+        }
         throw error;
       })
       .finally(() => {
@@ -129,8 +175,19 @@ export class MarketoTokenCache extends DurableObject<Env> {
     }
   }
 
-  async #refresh(creds: MarketoCredentials, previous?: CachedToken): Promise<CachedToken> {
-    let { accessToken, expiresInSeconds, scope } = await fetchAccessToken(creds);
+  async #refresh(
+    authority: IdentityTokenAuthority,
+    expected: TokenCredentialState,
+    previous?: CachedToken,
+  ): Promise<CachedToken> {
+    let result = await authority.fetchIdentityToken(expected);
+    if (!result.ok) {
+      if ("credentialChanged" in result) {
+        throw new CredentialChangedError();
+      }
+      throw unwrapTokenCacheResult<never>(result);
+    }
+    let { accessToken, expiresInSeconds, scope } = result.value;
     let now = Date.now();
     let expiresAt = now + Math.max(0, expiresInSeconds) * 1000;
     let sameNearlyExpiredToken = previous?.accessToken === accessToken &&
@@ -154,7 +211,8 @@ function isTransientTokenError(error: TokenCacheError): boolean {
     (error.kind === "provider" && (error.status === 429 || (error.status ?? 0) >= 500));
 }
 
-function serializeTokenError(error: unknown): TokenCacheError {
+/** Reduce an Identity failure to credential-free data safe for an RPC result. */
+export function serializeTokenError(error: unknown): TokenCacheError {
   if (!(error instanceof MarketoError)) return { kind: "network" };
   return {
     kind: error.isAuthError ? "auth" : error.status === undefined ? "network" : "provider",
@@ -206,6 +264,8 @@ export async function tokenCacheStub(
 export async function makeClient(
   exports: Cloudflare.Exports,
   creds: MarketoCredentials,
+  authority: IdentityTokenAuthority,
+  expected: TokenCredentialState,
   credentialsExpired?: () => Promise<void>,
   dispatch?: (
     url: string,
@@ -216,8 +276,13 @@ export async function makeClient(
 ): Promise<MarketoClient> {
   let cache = await tokenCacheStub(exports, creds);
   let provider: TokenProvider = {
-    getToken: async (forceRefresh?: boolean) =>
-      unwrapTokenCacheResult(await cache.getToken(creds, forceRefresh ?? false)),
+    getToken: async (forceRefresh?: boolean) => {
+      let result = await cache.getToken(creds, forceRefresh ?? false, authority, expected);
+      if ("credentialChanged" in result) {
+        throw new MarketoDispatchAbortedError("The Marketo account changed before token refresh.");
+      }
+      return unwrapTokenCacheResult(result);
+    },
     ...(dispatch ? { fetch: async (
       url: string,
       init: RequestInit,
