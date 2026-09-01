@@ -296,10 +296,14 @@ export default {
     let scope: string | undefined;
     try {
       let validation = await stub.validateConnectionCredentials(segments[1], creds);
-      if ("invalidNonce" in validation || "credentialChanged" in validation) {
-        return jsonResponse({ error: EXPIRED_LINK_MESSAGE }, 400);
+      try {
+        if ("invalidNonce" in validation || "credentialChanged" in validation) {
+          return jsonResponse({ error: EXPIRED_LINK_MESSAGE }, 400);
+        }
+        scope = unwrapTokenCacheResult(validation).scope;
+      } finally {
+        disposeRpcResult(validation);
       }
-      scope = unwrapTokenCacheResult(validation).scope;
     } catch (e) {
       return jsonResponse({ error: describeCredentialFailure(e) }, 400);
     }
@@ -389,6 +393,26 @@ type AccountDispatchResult =
   | { ok: false; credentialChanged: true };
 
 type AccountTokenResult<T> = TokenCacheResult<T> | { ok: false; credentialChanged: true };
+
+function disposeRpcResult(value: unknown): void {
+  if (typeof value !== "object" || value === null) return;
+  let dispose = (value as { [Symbol.dispose]?: () => void })[Symbol.dispose];
+  dispose?.call(value);
+}
+
+function copyCredentialState(state: AccountCredentialState): AccountCredentialState {
+  return {
+    generation: state.generation,
+    ...(state.credentials ? { credentials: { ...state.credentials } } : {}),
+  };
+}
+
+function sameCredentialState(left: AccountCredentialState, right: AccountCredentialState): boolean {
+  return left.generation === right.generation && left.credentials !== undefined &&
+    right.credentials !== undefined && left.credentials.endpoint === right.credentials.endpoint &&
+    left.credentials.clientId === right.credentials.clientId &&
+    left.credentials.clientSecret === right.credentials.clientSecret;
+}
 
 export class UserAccount extends DurableObject<Env> {
   #credentialGeneration(): number {
@@ -558,11 +582,20 @@ export class UserAccount extends DurableObject<Env> {
     let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
     let token = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
       .getToken(expected.credentials, forceRefresh, authority, expected);
-    if (!token.ok) return token;
+    let tokenValue: string;
+    try {
+      if (!token.ok) {
+        if ("credentialChanged" in token) return { ok: false, credentialChanged: true };
+        return { ok: false, error: { ...token.error } };
+      }
+      tokenValue = token.value;
+    } finally {
+      disposeRpcResult(token);
+    }
     if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
 
     let headers = new Headers(request.headers);
-    headers.set("Authorization", `Bearer ${token.value}`);
+    headers.set("Authorization", `Bearer ${tokenValue}`);
     let body: BodyInit | undefined;
     if (typeof request.body === "string") {
       body = request.body;
@@ -617,8 +650,15 @@ export class UserAccount extends DurableObject<Env> {
     let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
     let result = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
       .getScope(expected.credentials, authority, expected);
-    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
-    return result;
+    try {
+      if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+      if ("credentialChanged" in result) return { ok: false, credentialChanged: true };
+      return result.ok
+        ? { ok: true, value: result.value }
+        : { ok: false, error: { ...result.error } };
+    } finally {
+      disposeRpcResult(result);
+    }
   }
 
   /** Verify credentials under the captured credential generation. */
@@ -629,8 +669,15 @@ export class UserAccount extends DurableObject<Env> {
     let authority = this.ctx.exports.UserAccount.get(this.ctx.id);
     let result = await (await tokenCacheStub(this.ctx.exports, expected.credentials))
       .verifyCredentials(expected.credentials, authority, expected);
-    if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
-    return result;
+    try {
+      if (!this.#matchesCredentialState(expected)) return { ok: false, credentialChanged: true };
+      if ("credentialChanged" in result) return { ok: false, credentialChanged: true };
+      return result.ok
+        ? { ok: true, value: result.value }
+        : { ok: false, error: { ...result.error } };
+    } finally {
+      disposeRpcResult(result);
+    }
   }
 
   #matchesCredentialState(expected: AccountCredentialState & { credentials: MarketoCredentials }): boolean {
@@ -668,13 +715,24 @@ function userAccountStub(
   return exports.UserAccount.get(exports.UserAccount.idFromString(userObjectId));
 }
 
+async function readAccountCredentialState(
+  account: DurableObjectStub<UserAccount>,
+): Promise<AccountCredentialState> {
+  let result = await account.getCredentialState();
+  try {
+    return copyCredentialState(result);
+  } finally {
+    disposeRpcResult(result);
+  }
+}
+
 async function makeAccountClient(
   exports: Cloudflare.Exports,
   userObjectId: string,
   state?: AccountCredentialState,
 ): Promise<MarketoClient> {
   let account = userAccountStub(exports, userObjectId);
-  let captured = state ?? await account.getCredentialState();
+  let captured = state ?? await readAccountCredentialState(account);
   if (!captured.credentials) {
     throw new Error("This Marketo account is no longer connected.");
   }
@@ -687,14 +745,18 @@ async function makeAccountClient(
     () => account.credentialsExpired(),
     async (url, init, forceRefresh, timeoutMs) => {
       let result = await account.dispatch(expected, url, init, forceRefresh, timeoutMs);
-      if (!result.ok) {
-        if ("error" in result) return unwrapTokenCacheResult<never>(result);
-        if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
-        throw new MarketoDispatchAbortedError(
-          "The Marketo account changed before the request was dispatched.",
-        );
+      try {
+        if (!result.ok) {
+          if ("error" in result) return unwrapTokenCacheResult<never>(result);
+          if ("networkFailure" in result) throw new Error("Marketo request failed in transit.");
+          throw new MarketoDispatchAbortedError(
+            "The Marketo account changed before the request was dispatched.",
+          );
+        }
+        return result.response;
+      } finally {
+        disposeRpcResult(result);
       }
-      return result.response;
     },
   );
 }
@@ -735,7 +797,7 @@ export class MarketoUserVerifier
     fingerprint: string,
   ): Promise<{ valid: boolean } | { error: TokenCacheError }> {
     let account = userAccountStub(this.ctx.exports, this.ctx.props.userObjectId);
-    let state = await account.getCredentialState();
+    let state = await readAccountCredentialState(account);
     let credentials = state.credentials;
     if (
       !credentials || credentials.endpoint !== endpoint || credentials.clientId !== clientId ||
@@ -743,9 +805,14 @@ export class MarketoUserVerifier
     ) return { valid: false };
 
     let result = await account.verifyCredentials({ ...state, credentials });
-    if ("credentialChanged" in result) return { valid: false };
-    if (!result.ok) return { error: result.error };
-    let valid = result.value;
+    let valid: boolean;
+    try {
+      if ("credentialChanged" in result) return { valid: false };
+      if (!result.ok) return { error: { ...result.error } };
+      valid = result.value;
+    } finally {
+      disposeRpcResult(result);
+    }
     if (!valid) await account.credentialsExpired();
     return { valid };
   }
@@ -776,7 +843,7 @@ export class MarketoUserImpl
 
   async describe(): Promise<AccountDescription> {
     let account = this.#account();
-    let state = await account.getCredentialState();
+    let state = await readAccountCredentialState(account);
     let creds = state.credentials;
     if (!creds) {
       let identity = await accountIdentityFingerprint("https://disconnected.invalid", this.ctx.props.userObjectId);
@@ -790,7 +857,11 @@ export class MarketoUserImpl
     let scope: string | undefined;
     try {
       let result = await account.getScope({ ...state, credentials: creds });
-      if (!("credentialChanged" in result)) scope = unwrapTokenCacheResult(result);
+      try {
+        if (!("credentialChanged" in result)) scope = unwrapTokenCacheResult(result);
+      } finally {
+        disposeRpcResult(result);
+      }
     } catch (error) {
       // Credentials may have been revoked in Marketo; fall back to a generic label.
       if (error instanceof MarketoError && error.isAuthError) {
@@ -1046,23 +1117,11 @@ export class MarketoGatekeeperImpl
 {
   #preparingActions = new Set<number>();
 
-  /**
-   * The account's credentials. Read on every operation rather than cached in props, so
-   * disconnecting the account immediately stops existing bindings from working.
-   */
-  async #credentials(): Promise<MarketoCredentials> {
-    let creds = (await this.#credentialState()).credentials;
-    if (!creds) {
-      throw new Error("The Marketo account behind this binding has been disconnected.");
-    }
-    return creds;
-  }
-
   async #credentialState(): Promise<AccountCredentialState> {
-    return await userAccountStub(
+    return await readAccountCredentialState(userAccountStub(
       this.ctx.exports,
       this.ctx.props.userObjectId,
-    ).getCredentialState();
+    ));
   }
 
   async #client(state?: AccountCredentialState): Promise<MarketoClient> {
@@ -1220,20 +1279,32 @@ export class MarketoGatekeeperImpl
   }
 
   async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    let credentials = await this.#credentials();
+    let ownerState = await this.#credentialState();
+    let credentials = ownerState.credentials;
+    if (!credentials) {
+      throw new Error("The Marketo account behind this binding has been disconnected.");
+    }
+    let fingerprint = await credentialFingerprint(credentials);
+    if (!sameCredentialState(ownerState, await this.#credentialState())) {
+      throw new Error("The Marketo account changed while collaborator access was being verified.");
+    }
     let verifier = user as unknown as Fetcher<MarketoUserVerifierApi>;
     let verification = await verifier.hasLiveCredential(
       credentials.endpoint,
       credentials.clientId,
-      await credentialFingerprint(credentials),
+      fingerprint,
     );
-    if ("error" in verification) {
-      throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
-    }
-    if (!verification.valid) {
-      throw new Error(
-        "This collaborator is not connected with the same Marketo LaunchPoint service.",
-      );
+    try {
+      if ("error" in verification) {
+        throw unwrapTokenCacheResult<never>({ ok: false, error: verification.error });
+      }
+      if (!verification.valid) {
+        throw new Error(
+          "This collaborator is not connected with the same Marketo LaunchPoint service.",
+        );
+      }
+    } finally {
+      disposeRpcResult(verification);
     }
   }
 

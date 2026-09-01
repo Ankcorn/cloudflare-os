@@ -77,6 +77,12 @@ type CachedToken = {
 type CachedFailure = { retryAfter: number; error: TokenCacheError };
 class CredentialChangedError extends Error {}
 
+function disposeRpcResult(value: unknown): void {
+  if (typeof value !== "object" || value === null) return;
+  let dispose = (value as { [Symbol.dispose]?: () => void })[Symbol.dispose];
+  dispose?.call(value);
+}
+
 export class MarketoTokenCache extends DurableObject<Env> {
   /** De-duplicates concurrent refreshes within one instance. */
   #inflight: Promise<CachedToken> | undefined;
@@ -181,28 +187,32 @@ export class MarketoTokenCache extends DurableObject<Env> {
     previous?: CachedToken,
   ): Promise<CachedToken> {
     let result = await authority.fetchIdentityToken(expected);
-    if (!result.ok) {
-      if ("credentialChanged" in result) {
-        throw new CredentialChangedError();
+    try {
+      if (!result.ok) {
+        if ("credentialChanged" in result) {
+          throw new CredentialChangedError();
+        }
+        throw unwrapTokenCacheResult<never>(result);
       }
-      throw unwrapTokenCacheResult<never>(result);
+      let { accessToken, expiresInSeconds, scope } = result.value;
+      let now = Date.now();
+      let expiresAt = now + Math.max(0, expiresInSeconds) * 1000;
+      let sameNearlyExpiredToken = previous?.accessToken === accessToken &&
+        expiresAt - REFRESH_MARGIN_MS <= now;
+      let token: CachedToken = {
+        accessToken,
+        expiresAt,
+        ...(sameNearlyExpiredToken && expiresAt > now ? {
+          refreshAfter: expiresAt,
+        } : {}),
+        scope,
+      };
+      this.ctx.storage.kv.put<CachedToken>("token", token);
+      this.ctx.storage.kv.delete("refreshFailure");
+      return token;
+    } finally {
+      disposeRpcResult(result);
     }
-    let { accessToken, expiresInSeconds, scope } = result.value;
-    let now = Date.now();
-    let expiresAt = now + Math.max(0, expiresInSeconds) * 1000;
-    let sameNearlyExpiredToken = previous?.accessToken === accessToken &&
-      expiresAt - REFRESH_MARGIN_MS <= now;
-    let token: CachedToken = {
-      accessToken,
-      expiresAt,
-      ...(sameNearlyExpiredToken && expiresAt > now ? {
-        refreshAfter: expiresAt,
-      } : {}),
-      scope,
-    };
-    this.ctx.storage.kv.put<CachedToken>("token", token);
-    this.ctx.storage.kv.delete("refreshFailure");
-    return token;
   }
 }
 
@@ -278,10 +288,14 @@ export async function makeClient(
   let provider: TokenProvider = {
     getToken: async (forceRefresh?: boolean) => {
       let result = await cache.getToken(creds, forceRefresh ?? false, authority, expected);
-      if ("credentialChanged" in result) {
-        throw new MarketoDispatchAbortedError("The Marketo account changed before token refresh.");
+      try {
+        if ("credentialChanged" in result) {
+          throw new MarketoDispatchAbortedError("The Marketo account changed before token refresh.");
+        }
+        return unwrapTokenCacheResult(result);
+      } finally {
+        disposeRpcResult(result);
       }
-      return unwrapTokenCacheResult(result);
     },
     ...(dispatch ? { fetch: async (
       url: string,

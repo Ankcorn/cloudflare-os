@@ -4979,8 +4979,14 @@ describe("token cache RPC protocol", () => {
             authority,
             { credentials: creds, generation: 1 },
           );
-          if ("credentialChanged" in result) throw new Error("Unexpected credential change.");
-          return result;
+          try {
+            if ("credentialChanged" in result) throw new Error("Unexpected credential change.");
+            return result.ok
+              ? { ok: true as const, value: result.value }
+              : { ok: false as const, error: { ...result.error } };
+          } finally {
+            result[Symbol.dispose]();
+          }
         } finally {
           authority[Symbol.dispose]();
         }
@@ -6005,6 +6011,45 @@ describe("collaborator credentials", () => {
         verifier as unknown as Fetcher<GatekeeperUserVerifier>,
       )).rejects.toThrow(/not connected with the same Marketo LaunchPoint service/);
     });
+  });
+
+  it("does not verify a collaborator after owner revoke completes during fingerprinting", async () => {
+    let ownerId = await accountWithCredentials(OWNER);
+    let gatekeeper = await gatekeeperForAccount(ownerId.toString());
+    let observerId = await accountWithCredentials(OWNER);
+    let fingerprintStarted!: () => void;
+    let started = new Promise<void>(resolve => { fingerprintStarted = resolve; });
+    let releaseFingerprint!: () => void;
+    let released = new Promise<void>(resolve => { releaseFingerprint = resolve; });
+    let digest = crypto.subtle.digest.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(async (...args) => {
+      fingerprintStarted();
+      await released;
+      return await digest(...args);
+    });
+    let fetches = 0;
+    vi.stubGlobal("fetch", async () => {
+      fetches++;
+      return Response.json({ access_token: "token", expires_in: 3600 });
+    });
+
+    await runInDurableObject(gatekeeper, async instance => {
+      let exports = (instance as unknown as { ctx: { exports: Cloudflare.Exports } }).ctx.exports;
+      let verifier = (exports as unknown as {
+        TestMarketoUserVerifier(options: { props: { userObjectId: string } }): Fetcher;
+      }).TestMarketoUserVerifier({ props: { userObjectId: observerId.toString() } });
+      let admission = instance.addObserver(
+        "observer",
+        verifier as unknown as Fetcher<GatekeeperUserVerifier>,
+      );
+      await started;
+      await (env as unknown as { UserAccount: DurableObjectNamespace<UserAccount> })
+        .UserAccount.get(ownerId).revoke();
+      releaseFingerprint();
+
+      await expect(admission).rejects.toThrow(/account changed/);
+    });
+    expect(fetches).toBe(0);
   });
 
   it("rejects a previously admitted observer when Marketo revokes the credential", async () => {
