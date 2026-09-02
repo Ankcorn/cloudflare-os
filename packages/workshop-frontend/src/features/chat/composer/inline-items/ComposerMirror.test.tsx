@@ -58,6 +58,8 @@ describe("ComposerMirror geometry", () => {
           start: 0,
           length: 6,
           label: "Review",
+          description: "Review the project",
+          providerLabel: "Projects",
         }]}
         disabled={false}
       />,

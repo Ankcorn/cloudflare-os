@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useId,
   useRef,
   useMemo,
   useCallback,
@@ -165,6 +166,7 @@ export const ChatComposer = ({
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
    * pre-approval catalog and proactively offer to pre-approve its actions. */
 }) => {
+  const skillDetailsId = useId();
   const toasts = useKumoToastManager();
   const {
     attachments: pendingAttachments,
@@ -673,6 +675,9 @@ export const ChatComposer = ({
       start: selectedSlashCommand.start,
       length: selectedSlashCommand.length,
       label: selectedSlashCommand.choice.name,
+      description: selectedSlashCommand.choice.description,
+      providerLabel: selectedSlashCommand.choice.providerLabel,
+      resourceLabel: selectedSlashCommand.choice.resourceLabel,
     }] : []),
     ...formatTokens.map(({start, length, logo}) => ({
       kind: "capsule" as const,
@@ -749,13 +754,21 @@ export const ChatComposer = ({
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
           {slashCommandPicker.popup}
-          {/* The painted pill is hidden from assistive technology, so announce its state here. */}
+          {/* The painted pill is hidden from assistive technology; expose its full details here. */}
           <div className="sr-only" aria-live="polite">
             {slashCommandPicker.status ||
               (selectedSlashCommand
                 ? `Skill ${selectedSlashCommand.choice.name} from ${selectedSlashCommand.choice.providerLabel} is ready to send`
                 : "")}
           </div>
+          {selectedSlashCommand && (
+            <div id={skillDetailsId} className="sr-only">
+              {`Selected skill ${selectedSlashCommand.choice.name}. ${selectedSlashCommand.choice.description} Provider: ${selectedSlashCommand.choice.providerLabel}.`}
+              {selectedSlashCommand.choice.resourceLabel
+                ? ` Resource: ${selectedSlashCommand.choice.resourceLabel}.`
+                : ""}
+            </div>
+          )}
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
             {activeUrl && (
               <CapsuleOverlay
@@ -784,6 +797,7 @@ export const ChatComposer = ({
               aria-expanded={slashCommandPicker.open}
               aria-controls={slashCommandPicker.open ? slashCommandPicker.listboxId : undefined}
               aria-activedescendant={slashCommandPicker.activeDescendant}
+              aria-describedby={selectedSlashCommand ? skillDetailsId : undefined}
               onChange={(e) => {
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
                 syncPickerCaret(e.target.selectionStart ?? 0);

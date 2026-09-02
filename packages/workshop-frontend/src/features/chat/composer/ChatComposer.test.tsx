@@ -188,7 +188,9 @@ describe("ChatComposer", () => {
     await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     await act(async () => vi.waitFor(() => expect(textarea.value).not.toContain("/review")));
 
-    expect(document.body.textContent).toContain("Skill review from Projects is ready to send");
+    const details = document.getElementById(textarea.getAttribute("aria-describedby")!);
+    expect(details?.textContent).toContain("Review the current project.");
+    expect(details?.textContent).toContain("Current project");
 
     const copied = new Map<string, string>();
     const copyEvent = new Event("copy", { bubbles: true, cancelable: true });
