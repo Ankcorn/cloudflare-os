@@ -622,6 +622,21 @@ describe("commit and diff", () => {
     await expect(session.diff("feed".repeat(10))).rejects.toThrow(/not known/);
   }));
 
+  it("diff() reports EOF-newline changes with git's no-newline markers", () => withImpl(async impl => {
+    addChat(impl, 1);
+    // The base file has no trailing newline; the overlay only adds one. This must be a real
+    // diff -- git records it as a remove-plus-add with a `\ No newline at end of file` marker
+    // -- not an empty result. (formatUnifiedDiff delegates to jsdiff, which emits the marker;
+    // this pins that behavior, since a hand-rolled sibling implementation once lost it.)
+    let c1 = await commitFiles(impl, { "a.txt": "one" });
+    let { session } = await createWorktreeSession(impl, 1, c1);
+    await session.writeFile("a.txt", "one\n");
+
+    let diff = await session.diff();
+    expect(diff).toBe(formatUnifiedDiff("a.txt", "one", "one\n", true, true));
+    expect(diff).toContain("-one\n\\ No newline at end of file\n+one");
+  }));
+
   it("diff() notes special entries instead of failing", () => withImpl(async impl => {
     addChat(impl, 1);
     await loadFixtureRepo(impl);

@@ -223,6 +223,13 @@ class FakeGitHub {
       });
     }
 
+    if (path === API_BASE) {
+      // Repo metadata: what resolves an omitted ref to the default branch.
+      return Response.json({
+        description: null, visibility: "public", private: false, default_branch: "main",
+      });
+    }
+
     if (path.startsWith(`${API_BASE}/branches/`)) {
       const name = decodeURIComponent(path.slice(`${API_BASE}/branches/`.length));
       const head = this.branches.get(name);
@@ -684,5 +691,51 @@ describe("repo commit listing on a provisional branch", () => {
     expect(filtered?.map(commit => commit.id)).toEqual([HEAD1]);
     const none = await gk.listCommitsFirstPage({ ref: "feature", path: "unrelated.txt" }, cache);
     expect(none).toBeNull();
+  });
+
+  it("resolves an omitted ref to the default branch before simulating", async () => {
+    // A queued push moves the default branch; a parameterless listing (documented as the
+    // default branch, like GitHub's own endpoint) must show the pending head just as
+    // getCommit()/resolveRef() do, not the stale remote history.
+    const github = scenarioGitHub();
+    github.commitListings.set(BASE, [{ sha: BASE, message: "base", parents: [] }]);
+    const gk = await repoGatekeeper();
+    const cache = scenarioCache();
+    await queuePush(gk, cache, "main", HEAD1);
+
+    const page = await gk.listCommitsFirstPage(undefined, cache);
+    expect(page?.map(commit => commit.id)).toEqual([HEAD1, BASE]);
+  });
+
+  it("lists the resolved default branch explicitly when the overlay is a no-op", async () => {
+    // The queued default-branch push already landed remotely (its expectation is stale), so
+    // nothing is injected -- but the remote listing must still name the branch the pending
+    // check consulted, so a parameterless listing stays consistent with getCommit() and
+    // resolveRef() even if the repo's live default changes concurrently. The fake keys
+    // listings by the `sha` parameter, so only an explicit ?sha=main request finds this one.
+    const github = scenarioGitHub();
+    const gk = await repoGatekeeper();
+    const cache = scenarioCache();
+    await queuePush(gk, cache, "main", HEAD1);
+    github.branches.set("main", HEAD1);  // landed out-of-band: the overlay is a no-op
+    github.commitListings.set("main", [
+      { sha: HEAD1, message: "feat: add new.txt", parents: [BASE] },
+      { sha: BASE, message: "base", parents: [] },
+    ]);
+
+    const page = await gk.listCommitsFirstPage(undefined, cache);
+    expect(page?.map(commit => commit.id)).toEqual([HEAD1, BASE]);
+  });
+
+  it("does not simulate a parameterless listing over a push to a non-default branch", async () => {
+    const github = scenarioGitHub();
+    // A listing with no `sha` parameter is GitHub's default-branch listing.
+    github.commitListings.set("", [{ sha: BASE, message: "base", parents: [] }]);
+    const gk = await repoGatekeeper();
+    const cache = scenarioCache();
+    await queuePush(gk, cache, "feature", HEAD1);
+
+    const page = await gk.listCommitsFirstPage(undefined, cache);
+    expect(page?.map(commit => commit.id)).toEqual([BASE]);
   });
 });

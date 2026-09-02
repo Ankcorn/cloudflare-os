@@ -15,6 +15,9 @@ catalogs:
     capnweb-validate:
       specifier: 0.3.0
       version: 0.3.0
+    diff:
+      specifier: ^8.0.4
+      version: 8.0.4
     typescript:
       specifier: 7.0.2
       version: 7.0.2
@@ -333,6 +336,9 @@ importers:
       capnweb-validate:
         specifier: 'catalog:'
         version: 0.3.0(capnweb@0.12.0)(esbuild@0.28.1)(rollup@4.62.3)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
+      diff:
+        specifier: 'catalog:'
+        version: 8.0.4
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 'catalog:'
@@ -822,7 +828,7 @@ importers:
         specifier: 'catalog:'
         version: 0.3.0(capnweb@0.12.0)(esbuild@0.28.1)(rollup@4.62.3)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))
       diff:
-        specifier: ^8.0.4
+        specifier: 'catalog:'
         version: 8.0.4
       diff3:
         specifier: ^0.0.3

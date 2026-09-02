@@ -4728,27 +4728,40 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     // A ref naming a branch with queued pushes enumerates from the simulated head: the pending
     // chain (locally filtered) is injected newest-first ahead of GitHub's listing, which starts
     // from the chain's anchor -- the first commit GitHub actually knows. Without this, a branch
-    // a queued push creates 404s, and a moved one lists its stale history.
+    // a queued push creates 404s, and a moved one lists its stale history. An omitted ref means
+    // the default branch (see GitHubCommitFilter.ref, matching GitHub's own default for the
+    // listing endpoint), so it is resolved before the queued-push check -- otherwise a
+    // parameterless listing after a queued default-branch push would show stale remote history
+    // while getCommit()/resolveRef() already show the pending head. The metadata read is gated
+    // on there being any queued push at all.
     let injected: GitHubCommitSummary[] = [];
     let startRef = filter?.ref;
-    if (gitCache !== undefined && filter?.ref !== undefined &&
-        this.#pendingPushActions(filter.ref).length > 0) {
-      const realHead = await this.#getBranchHeadCached(filter.ref);
-      const simulatedHead = this.#simulateBranchHead(filter.ref, realHead);
-      if (simulatedHead !== null && simulatedHead !== realHead) {
-        try {
-          const chain = await this.#collectPendingChain(gitCache, simulatedHead);
-          injected = await this.#filterPendingCommitsForListing(gitCache, chain, filter);
-          startRef = chain.anchor;
-        } catch (error) {
-          logger.warn("failed to simulate a commit listing over queued pushes", {
-            event: "commits.list.simulated.failed", error,
-          });
-          if (realHead === null) {
-            throw new Error(
-              `Branch "${filter.ref}" does not exist on GitHub yet and the commits queued to ` +
-              `create it could not be read. Retry, or list commits from an existing ref.`,
-              { cause: error });
+    if (gitCache !== undefined && this.#pendingPushActions().length > 0) {
+      const ref = filter?.ref ?? (await this.#getRepoMetadata()).defaultBranch;
+      if (this.#pendingPushActions(ref).length > 0) {
+        // From here on the listing names the resolved ref explicitly (simulation success
+        // narrows it to the chain's anchor below): the pending check just consulted `ref`, and
+        // a listing left to GitHub's live default could name a *different* branch than the one
+        // simulated against if the default changed under the cached metadata -- disagreeing
+        // with getCommit()/resolveRef(), which resolve from the same cache.
+        startRef = ref;
+        const realHead = await this.#getBranchHeadCached(ref);
+        const simulatedHead = this.#simulateBranchHead(ref, realHead);
+        if (simulatedHead !== null && simulatedHead !== realHead) {
+          try {
+            const chain = await this.#collectPendingChain(gitCache, simulatedHead);
+            injected = await this.#filterPendingCommitsForListing(gitCache, chain, filter);
+            startRef = chain.anchor;
+          } catch (error) {
+            logger.warn("failed to simulate a commit listing over queued pushes", {
+              event: "commits.list.simulated.failed", error,
+            });
+            if (realHead === null) {
+              throw new Error(
+                `Branch "${ref}" does not exist on GitHub yet and the commits queued to ` +
+                `create it could not be read. Retry, or list commits from an existing ref.`,
+                { cause: error });
+            }
           }
         }
       }

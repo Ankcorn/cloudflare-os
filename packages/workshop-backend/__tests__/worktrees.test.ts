@@ -430,6 +430,33 @@ describe("client delivery filtering", () => {
     expect(stored.pins).toHaveLength(1);
   }));
 
+  it("keeps stripping a reverted worktree's content after its record is deleted",
+      () => withImpl(async impl => {
+    addChat(impl, 1);
+    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
+    let created = await impl.createWorktree("Repo", 1, c1);
+    await barrier(impl, 1, {
+      createdWorktrees: [{ worktreeId: created.id, title: "Repo", bindingName: "REPO" }],
+      changes: [{ change: { [created.id]: [["secret.txt", { set: "worktree content\n" }]] } }],
+    });
+    let stamp = impl.storage.gadgets.get(created.id)!.pending!.sequence!;
+
+    // Reverting the creation deletes the registry record...
+    await impl.revertChanges(1, stamp, USER);
+    expect(impl.storage.gadgets.get(created.id)).toBeUndefined();
+
+    // ...but the reverted "changes" message -- content and pin included -- stays in the log,
+    // and a history read after the deletion must strip it exactly as before (the record is
+    // gone, so the stripping rests on the deadWorktreeIds tombstone).
+    let stored = chatMessages(impl, 1).find(msg => msg.type === "changes")!;
+    expect(stored.change).toBeDefined();
+    expect(stored.pins).toHaveLength(1);
+    let delivered = impl.hydrateChatMessageForClient(stored);
+    expect(delivered.change).toBeUndefined();
+    expect(delivered.pins).toBeUndefined();
+    expect(JSON.stringify(delivered)).not.toContain("worktree content");
+  }));
+
   it("keeps gadget entries while stripping worktree entries from a mixed batch",
       () => withImpl(async impl => {
     addChat(impl, 1);

@@ -1,14 +1,15 @@
 // Pure helpers for simulating pull request diffs from raw git objects. When a pull request's head
 // branch has queued pushes, GitHub cannot compute the diff (the pushed commits are not on the
 // remote yet), so the gatekeeper computes it locally: a pruning tree-to-tree walk enumerates the
-// changed paths, and a line-level Myers diff produces hunks in the same shape GitHub's own
+// changed paths, and jsdiff's line-level Myers diff produces hunks in the same shape GitHub's own
 // patches are parsed into (`parsePatch` in github.ts).
 //
-// This module deliberately has no runtime imports (in particular no `cloudflare:workers`), so its
+// This module deliberately has no platform imports (in particular no `cloudflare:workers`), so its
 // logic runs under the package's Node vitest project. All object reads go through an injected
 // `TreeDiffSource`, so the callers decide where bytes come from (the workspace git cache, with
 // GitHub's git-data REST API as fallback for the on-remote side).
 
+import { structuredPatch } from "diff";
 import type { GitOid } from "@gadgets/workshop-shared/gatekeeper";
 import type {
   GitHubPullRequestDiffFile,
@@ -44,16 +45,20 @@ export class TreeUnavailableError extends Error {
   }
 }
 
-/** Per-side line cap beyond which a file's hunks are not computed (reported as omitted). */
+/**
+ * Per-side line cap on a file's changed middle (after trimming the common prefix and suffix)
+ * beyond which the minimal diff is not computed and the whole middle is emitted as one
+ * remove-then-add block (see diffTextLines).
+ */
 export const MAX_DIFF_LINES_PER_FILE = 20000;
 /** Per-blob byte cap for diffing (either side); larger files are reported with diffOmitted. */
 export const MAX_DIFF_BLOB_BYTES = 1024 * 1024;
 /** Total bytes of blob content one tree diff may load; further files are reported as omitted. */
 export const MAX_DIFF_TOTAL_BYTES = 20 * 1024 * 1024;
 /**
- * Myers edit-distance cap. A middle section whose minimal diff would exceed this many edits is
- * emitted as one whole remove-then-add block instead -- still a correct unified diff, just not a
- * minimal one -- keeping worst-case time and memory bounded.
+ * Myers edit-distance cap (jsdiff's `maxEditLength`). A file whose minimal diff would exceed
+ * this many edits is emitted as one whole remove-then-add block instead -- still a correct
+ * unified diff, just not a minimal one -- keeping worst-case time and memory bounded.
  */
 const MAX_DIFF_EDIT_DISTANCE = 1000;
 
@@ -254,11 +259,6 @@ export async function diffGitTrees(
   return files;
 }
 
-type Edit = {
-  kind: "context" | "added" | "removed";
-  text: string;
-};
-
 function splitLines(text: string): string[] {
   if (text.length === 0) return [];
   const lines = text.split("\n");
@@ -266,11 +266,38 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
+/** The marker line git and GitHub emit after a final line missing its newline. */
+const NO_NEWLINE_MARKER = "\\ No newline at end of file";
+
+/** git's default unified-diff context. */
+const HUNK_CONTEXT_LINES = 3;
+
 /**
- * Unified-diff a file's text at line granularity: hunks with git's default 3 lines of context,
- * in the same shape `parsePatch` produces from GitHub's own patches. Minimality is bounded: a
- * pathological middle section is emitted as one whole remove-then-add block (see
- * `MAX_DIFF_EDIT_DISTANCE`).
+ * A hunk's `@@` header in git's own format: the count is omitted when it is 1, and a zero-count
+ * side names the line it attaches after (git's `-l,0` / `+m,0` convention, 0 at the start of
+ * the file) -- which is how GitHub's patches spell it, so `parsePatch` sees one grammar.
+ */
+function hunkHeader(oldStart: number, oldCount: number, newStart: number, newCount: number)
+    : string {
+  return `@@ -${oldStart}${oldCount === 1 ? "" : `,${oldCount}`}` +
+    ` +${newStart}${newCount === 1 ? "" : `,${newCount}`} @@`;
+}
+
+/**
+ * Unified-diff a file's text at line granularity: jsdiff's `structuredPatch` (a Myers diff, the
+ * same engine behind workshop-backend's formatUnifiedDiff) with git's default 3 lines of
+ * context, converted to the same shape `parsePatch` produces from GitHub's own patches --
+ * including git's `\ No newline at end of file` marker after a final line missing its newline
+ * (a numberless context line, exactly as `parsePatch` preserves it), which jsdiff emits
+ * natively.
+ *
+ * Minimality is bounded two ways, both degrading to one whole remove-then-add block (still a
+ * correct unified diff, just not a minimal one): a diff needing more than
+ * `MAX_DIFF_EDIT_DISTANCE` edits is cut off by jsdiff's `maxEditLength`, and a middle section
+ * (after trimming the common prefix and suffix) of more than `MAX_DIFF_LINES_PER_FILE` lines
+ * per side skips the Myers run entirely -- together they cap the worst case at
+ * O(lines x edits) with both factors bounded, while a huge file with a small change still
+ * diffs minimally.
  */
 export function diffTextLines(oldText: string, newText: string): {
   hunks: GitHubPullRequestDiffHunk[];
@@ -279,156 +306,110 @@ export function diffTextLines(oldText: string, newText: string): {
 } {
   const oldLines = splitLines(oldText);
   const newLines = splitLines(newText);
+  const oldNoEol = oldText.length > 0 && !oldText.endsWith("\n");
+  const newNoEol = newText.length > 0 && !newText.endsWith("\n");
 
-  // Trim the common prefix and suffix; Myers runs only on the middle.
+  // Trim the common prefix and suffix to find the changed middle. jsdiff re-derives this
+  // itself; the trim here sizes the middle for the line-cap guard and scopes the fallback. The
+  // trim is EOF-newline aware at the very last pair -- git treats the terminator as part of the
+  // line, so `"a"` -> `"a\n"` is a real change the final lines must stay in the middle for --
+  // which only the prefix's last possible step and the suffix's first can hit.
+  const eolMismatch = oldNoEol !== newNoEol;
   let start = 0;
-  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+  while (start < oldLines.length && start < newLines.length &&
+         oldLines[start] === newLines[start]) {
+    if (eolMismatch && start === oldLines.length - 1 && start === newLines.length - 1) break;
     start++;
   }
   let oldEnd = oldLines.length;
   let newEnd = newLines.length;
   while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    if (eolMismatch && oldEnd === oldLines.length && newEnd === newLines.length) break;
     oldEnd--;
     newEnd--;
   }
 
-  const middleOld = oldLines.slice(start, oldEnd);
-  const middleNew = newLines.slice(start, newEnd);
-  const middle = myersEditScript(middleOld, middleNew) ?? [
-    ...middleOld.map(text => ({ kind: "removed", text } as const)),
-    ...middleNew.map(text => ({ kind: "added", text } as const)),
-  ];
-
-  const edits: Edit[] = [
-    ...oldLines.slice(0, start).map(text => ({ kind: "context", text } as const)),
-    ...middle,
-    ...oldLines.slice(oldEnd).map(text => ({ kind: "context", text } as const)),
-  ];
-  return buildHunks(edits);
-}
-
-// Myers O((N+M)D) shortest edit script, capped at MAX_DIFF_EDIT_DISTANCE (null when exceeded).
-function myersEditScript(a: string[], b: string[]): Edit[] | null {
-  if (a.length === 0 && b.length === 0) return [];
-  if (a.length === 0) return b.map(text => ({ kind: "added", text }));
-  if (b.length === 0) return a.map(text => ({ kind: "removed", text }));
-  if (a.length > MAX_DIFF_LINES_PER_FILE || b.length > MAX_DIFF_LINES_PER_FILE) return null;
-
-  const max = Math.min(a.length + b.length, MAX_DIFF_EDIT_DISTANCE);
-  const offset = max;
-  const v = new Int32Array(2 * max + 1);
-  const trace: Int32Array[] = [];
-  for (let d = 0; d <= max; d++) {
-    trace.push(v.slice());
-    for (let k = -d; k <= d; k += 2) {
-      let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])
-        ? v[offset + k + 1]      // move down (an added line)
-        : v[offset + k - 1] + 1; // move right (a removed line)
-      let y = x - k;
-      while (x < a.length && y < b.length && a[x] === b[y]) {
-        x++;
-        y++;
-      }
-      v[offset + k] = x;
-      if (x >= a.length && y >= b.length) {
-        return backtrackEditScript(trace, d, a, b, offset);
-      }
-    }
+  const patch = oldEnd - start <= MAX_DIFF_LINES_PER_FILE &&
+      newEnd - start <= MAX_DIFF_LINES_PER_FILE
+    ? structuredPatch("a", "b", oldText, newText, undefined, undefined,
+                      { context: HUNK_CONTEXT_LINES, maxEditLength: MAX_DIFF_EDIT_DISTANCE })
+    : undefined;
+  if (patch === undefined) {
+    return wholesaleDiff(oldLines, newLines, oldNoEol, newNoEol, start, oldEnd, newEnd);
   }
-  return null;
-}
 
-function backtrackEditScript(
-  trace: Int32Array[], endD: number, a: string[], b: string[], offset: number,
-): Edit[] {
-  const edits: Edit[] = [];
-  let x = a.length;
-  let y = b.length;
-  for (let d = endD; d > 0; d--) {
-    const v = trace[d];
-    const k = x - y;
-    const prevK = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? k + 1 : k - 1;
-    const prevX = v[offset + prevK];
-    const prevY = prevX - prevK;
-    while (x > prevX && y > prevY) {
-      edits.push({ kind: "context", text: a[x - 1] });
-      x--;
-      y--;
-    }
-    if (prevK === k + 1) {
-      edits.push({ kind: "added", text: b[prevY] });
-      y--;
-    } else {
-      edits.push({ kind: "removed", text: a[prevX] });
-      x--;
-    }
-  }
-  while (x > 0 && y > 0) {
-    edits.push({ kind: "context", text: a[x - 1] });
-    x--;
-    y--;
-  }
-  return edits.toReversed();
-}
-
-const HUNK_CONTEXT_LINES = 3;
-
-function buildHunks(edits: Edit[]): {
-  hunks: GitHubPullRequestDiffHunk[];
-  additions: number;
-  deletions: number;
-} {
-  // Number every line, and remember the old/new position *before* each edit so a pure-insert or
-  // pure-delete hunk can state the line it attaches after (git's `-l,0` / `+m,0` convention).
-  const numbered: GitHubPullRequestDiffLine[] = [];
-  const oldBefore: number[] = [];
-  const newBefore: number[] = [];
-  let oldLine = 1;
-  let newLine = 1;
+  // Convert jsdiff's hunks (prefixed line strings, one-based starts and counts) to numbered
+  // lines, walking each hunk exactly as `parsePatch` walks a GitHub patch. One convention
+  // differs: jsdiff reports a zero-count side's start as one *past* the attach-after line,
+  // where git writes the attach-after line itself, so those starts shift down by one (the
+  // shift never affects numbering -- a zero-count side numbers no lines).
+  const hunks: GitHubPullRequestDiffHunk[] = [];
   let additions = 0;
   let deletions = 0;
-  for (const edit of edits) {
-    oldBefore.push(oldLine);
-    newBefore.push(newLine);
-    if (edit.kind === "context") {
-      numbered.push({ kind: "context", text: edit.text, oldLineNumber: oldLine++, newLineNumber: newLine++ });
-    } else if (edit.kind === "removed") {
-      numbered.push({ kind: "removed", text: edit.text, oldLineNumber: oldLine++ });
-      deletions++;
-    } else {
-      numbered.push({ kind: "added", text: edit.text, newLineNumber: newLine++ });
-      additions++;
+  for (const hunk of patch.hunks) {
+    const oldStart = hunk.oldLines === 0 ? hunk.oldStart - 1 : hunk.oldStart;
+    const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
+    let oldLine = oldStart;
+    let newLine = newStart;
+    const lines: GitHubPullRequestDiffLine[] = [];
+    for (const raw of hunk.lines) {
+      if (raw.startsWith("+")) {
+        lines.push({ kind: "added", text: raw.slice(1), newLineNumber: newLine++ });
+        additions++;
+      } else if (raw.startsWith("-")) {
+        lines.push({ kind: "removed", text: raw.slice(1), oldLineNumber: oldLine++ });
+        deletions++;
+      } else if (raw.startsWith("\\")) {
+        lines.push({ kind: "context", text: raw });
+      } else {
+        lines.push({ kind: "context", text: raw.slice(1),
+                     oldLineNumber: oldLine++, newLineNumber: newLine++ });
+      }
     }
+    hunks.push({ header: hunkHeader(oldStart, hunk.oldLines, newStart, hunk.newLines), lines });
   }
-
-  // Group changed lines into hunks: changes separated by more than 2 * context lines of pure
-  // context split into separate hunks, each padded with up to `context` lines on both sides.
-  const changeIndices = numbered.flatMap((line, index) => line.kind === "context" ? [] : [index]);
-  const hunks: GitHubPullRequestDiffHunk[] = [];
-  let groupStart = 0;
-  while (groupStart < changeIndices.length) {
-    let groupEnd = groupStart;
-    while (groupEnd + 1 < changeIndices.length &&
-           changeIndices[groupEnd + 1] - changeIndices[groupEnd] - 1 <= 2 * HUNK_CONTEXT_LINES) {
-      groupEnd++;
-    }
-
-    const sliceStart = Math.max(changeIndices[groupStart] - HUNK_CONTEXT_LINES, 0);
-    const sliceEnd = Math.min(changeIndices[groupEnd] + HUNK_CONTEXT_LINES + 1, numbered.length);
-    const lines = numbered.slice(sliceStart, sliceEnd);
-    const oldCount = lines.filter(line => line.oldLineNumber !== undefined).length;
-    const newCount = lines.filter(line => line.newLineNumber !== undefined).length;
-    const oldStart = oldCount > 0
-      ? lines.find(line => line.oldLineNumber !== undefined)!.oldLineNumber!
-      : oldBefore[sliceStart] - 1;
-    const newStart = newCount > 0
-      ? lines.find(line => line.newLineNumber !== undefined)!.newLineNumber!
-      : newBefore[sliceStart] - 1;
-    const header = `@@ -${oldStart}${oldCount === 1 ? "" : `,${oldCount}`}` +
-      ` +${newStart}${newCount === 1 ? "" : `,${newCount}`} @@`;
-    hunks.push({ header, lines });
-    groupStart = groupEnd + 1;
-  }
-
   return { hunks, additions, deletions };
+}
+
+/**
+ * The bounded fallback: one hunk removing the changed middle's every old line and adding its
+ * every new one, padded with up to `HUNK_CONTEXT_LINES` of the trimmed common prefix/suffix
+ * (only the middle, so a pathological change in a huge file cannot balloon into re-emitting
+ * the whole file). The EOF-newline markers are placed by hand here -- after the removed block
+ * when the old side's unterminated last line is in it, after the added block likewise, and
+ * after a trailing context line ending both sides -- since jsdiff never sees this path.
+ */
+function wholesaleDiff(
+  oldLines: string[], newLines: string[], oldNoEol: boolean, newNoEol: boolean,
+  start: number, oldEnd: number, newEnd: number,
+): { hunks: GitHubPullRequestDiffHunk[]; additions: number; deletions: number } {
+  const marker: GitHubPullRequestDiffLine = { kind: "context", text: NO_NEWLINE_MARKER };
+  const contextBefore = Math.min(HUNK_CONTEXT_LINES, start);
+  const contextAfter = Math.min(HUNK_CONTEXT_LINES, oldLines.length - oldEnd);
+  const lines: GitHubPullRequestDiffLine[] = [];
+  for (let i = start - contextBefore; i < start; i++) {
+    lines.push({ kind: "context", text: oldLines[i], oldLineNumber: i + 1, newLineNumber: i + 1 });
+  }
+  for (let i = start; i < oldEnd; i++) {
+    lines.push({ kind: "removed", text: oldLines[i], oldLineNumber: i + 1 });
+  }
+  if (oldNoEol && oldEnd === oldLines.length && oldEnd > start) lines.push(marker);
+  for (let i = start; i < newEnd; i++) {
+    lines.push({ kind: "added", text: newLines[i], newLineNumber: i + 1 });
+  }
+  if (newNoEol && newEnd === newLines.length && newEnd > start) lines.push(marker);
+  for (let i = 0; i < contextAfter; i++) {
+    lines.push({ kind: "context", text: oldLines[oldEnd + i],
+                 oldLineNumber: oldEnd + i + 1, newLineNumber: newEnd + i + 1 });
+  }
+  if (contextAfter > 0 && oldEnd + contextAfter === oldLines.length && oldNoEol && newNoEol) {
+    lines.push(marker);
+  }
+
+  const oldCount = contextBefore + (oldEnd - start) + contextAfter;
+  const newCount = contextBefore + (newEnd - start) + contextAfter;
+  const header = hunkHeader(
+    oldCount === 0 ? start : start - contextBefore + 1, oldCount,
+    newCount === 0 ? start : start - contextBefore + 1, newCount);
+  return { hunks: [{ header, lines }], additions: newEnd - start, deletions: oldEnd - start };
 }

@@ -1140,6 +1140,15 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       nextChatId: 0,
       nextHookId: 0,
 
+      // Permanent tombstones for deleted worktrees' workpiece ids, consulted only by the
+      // client-delivery stripping (see stripWorktreeChangeEntries): a revert covering a
+      // worktree's creation deletes its registry record while the reverted "changes" messages
+      // carrying its content stay in the chat log, so without a tombstone a later history read
+      // would deliver that content -- and the pin whose base commit is an entire repository
+      // tree -- to the client. Ids are never reused, so entries never invalidate; each is a
+      // single number, so the list stays cheap.
+      deadWorktreeIds: <WorkpieceId[]>[],
+
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
@@ -2159,10 +2168,19 @@ class OverseerImpl implements AgentHooks {
     return record;
   }
 
-  // Whether the id names a worktree record. (A deleted workpiece is not a worktree; see the
-  // delivery-stripping callers for why that suffices there.)
+  // Whether the id names a live worktree record. Live paths only (pins, content folds, file
+  // tools): a deleted workpiece is not a worktree here. Client-delivery stripping must use
+  // isEverWorktree instead, since the messages it strips can outlive the record.
   isWorktree(id: WorkpieceId): boolean {
     return this.storage.gadgets.get(id)?.type === "worktree";
+  }
+
+  // Whether the id names a worktree, live or deleted (see deadWorktreeIds). This is the
+  // delivery-stripping predicate: a revert covering a worktree's creation deletes its record
+  // while the reverted "changes" messages carrying its content remain in the chat log, and a
+  // history read must keep stripping them.
+  isEverWorktree(id: WorkpieceId): boolean {
+    return this.isWorktree(id) || this.storage.deadWorktreeIds.get().includes(id);
   }
 
   // Name of the legacy Y.Doc root map that held the given gadget's files in the retired
@@ -2541,7 +2559,8 @@ class OverseerImpl implements AgentHooks {
   // related histories. (Chat docs may still hold content in the gadget's files root; such
   // content is inert because the registry entry -- the enumeration source of truth -- is gone.)
   async removeWorkpiece(id: WorkpieceId): Promise<void> {
-    if (!this.storage.gadgets.get(id)) {
+    let record = this.storage.gadgets.get(id);
+    if (!record) {
       throw new Error(`No such workpiece: ${id}`);
     }
 
@@ -2551,6 +2570,14 @@ class OverseerImpl implements AgentHooks {
       if ((hook.gadgetId ?? def) === id) {
         await this.deleteHook(hook.id);
       }
+    }
+
+    // A worktree's id is tombstoned before the record goes: reverted "changes" messages that
+    // carry its content can outlive the record (a revert of the creation), and the
+    // client-delivery stripping must keep recognizing the id (see deadWorktreeIds).
+    if (record.type === "worktree") {
+      let dead = this.storage.deadWorktreeIds.get();
+      if (!dead.includes(id)) this.storage.deadWorktreeIds.put([...dead, id]);
     }
 
     let facetName = this.gadgetFacetName(id);
@@ -3063,13 +3090,12 @@ class OverseerImpl implements AgentHooks {
   // path strips worktree entries (this helper), worktree pins (stripWorktreePins), while
   // preserving revision numbering -- a stripped row is delivered with an empty change so the
   // revision stream stays gapless. Worktree *ids* are not hidden (the delivered createWorktree
-  // tool call carries one by design); only content and fetch triggers are. A deleted worktree's
-  // id no longer strips, which is fine: deletion happens only with its chat (messages gone) or a
-  // revert of the creation (rows erased; the reverted messages' payloads are dead weight clients
-  // never apply, and pins are only read from live metadata).
+  // tool call carries one by design); only content and fetch triggers are. Deleted worktrees
+  // still strip (isEverWorktree): a revert of the creation deletes the record but leaves the
+  // reverted "changes" messages -- content payloads included -- in the log for history reads.
   stripWorktreeChangeEntries(change: CodeChange): CodeChange {
     let worktreeKeys = Object.keys(change)
-        .filter(key => this.isWorktree(Number(key)));
+        .filter(key => this.isEverWorktree(Number(key)));
     if (worktreeKeys.length === 0) return change;
     let stripped = {...change};
     for (let key of worktreeKeys) delete stripped[Number(key)];
@@ -3079,8 +3105,8 @@ class OverseerImpl implements AgentHooks {
   // The pin-list half of the client-delivery stripping (see stripWorktreeChangeEntries): a
   // delivered worktree pin is exactly what would trigger the client's base-commit fetch.
   stripWorktreePins<T extends ChatGadgetPin>(pins: T[]): T[] {
-    return pins.some(pin => this.isWorktree(pin.gadgetId))
-        ? pins.filter(pin => !this.isWorktree(pin.gadgetId)) : pins;
+    return pins.some(pin => this.isEverWorktree(pin.gadgetId))
+        ? pins.filter(pin => !this.isEverWorktree(pin.gadgetId)) : pins;
   }
 
   // The gadgets this chat currently proposes changes to: pinned in the chat's current epoch (a
