@@ -1,0 +1,25 @@
+{
+  "name": "@gadgets/gatekeeper-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Building blocks for gatekeepers: connect-flow, credential, action, observation, and simulation primitives. Not a deployable Worker.",
+  "type": "module",
+  "exports": {
+    "./simulation": "./src/simulation.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test:run": "vitest run",
+    "test:watch:node": "vitest"
+  },
+  "dependencies": {
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260825.1",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
