@@ -149,4 +149,57 @@ describe("ChatComposer", () => {
     expect(consoleError).toHaveBeenCalledTimes(transient ? 0 : 1);
     consoleError.mockRestore();
   });
+
+  it("restores an accessible skill pill and copies readable plain text", async () => {
+    const draftStorageKey = "skill-pill-draft";
+    sessionStorage.setItem(draftStorageKey, JSON.stringify({
+      version: 1,
+      text: "/review next",
+      formats: [],
+      command: {
+        position: 0,
+        length: 7,
+        choice: {
+          selection: { gatekeeperId: 42, commandId: "review" },
+          name: "review",
+          description: "Review the current project.",
+          providerLabel: "Projects",
+          resourceLabel: "Current project",
+        },
+      },
+    }));
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(
+      <ChatComposer
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={() => {}}
+        isAgentActive={false}
+        models={[]}
+        selectedModel="model-a"
+        onModelChange={() => {}}
+        draftStorageKey={draftStorageKey}
+      />,
+    ));
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    await act(async () => vi.waitFor(() => expect(textarea.value).not.toContain("/review")));
+
+    expect(document.body.textContent).toContain("Skill review from Projects is ready to send");
+
+    const copied = new Map<string, string>();
+    const copyEvent = new Event("copy", { bubbles: true, cancelable: true });
+    Object.defineProperty(copyEvent, "clipboardData", { value: {
+      setData: (type: string, value: string) => copied.set(type, value),
+    }});
+    textarea.setSelectionRange(0, textarea.value.length);
+    act(() => textarea.dispatchEvent(copyEvent));
+
+    expect(copyEvent.defaultPrevented).toBe(true);
+    expect(copied.get("text/plain")).toBe("/review next");
+    expect(copied).toHaveLength(1);
+  });
 });

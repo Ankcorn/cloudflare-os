@@ -7,6 +7,7 @@ import {
   type Dispatch,
   type ReactNode,
   type SetStateAction,
+  type ClipboardEvent as ReactClipboardEvent,
 } from "react";
 import { DropdownMenu, useKumoToastManager } from "@cloudflare/kumo";
 import { Brain, File as FileIcon, Plug, Plus } from "@phosphor-icons/react";
@@ -30,7 +31,8 @@ import {
   ComposerMirror, composerTextareaClass, type ComposerMirrorHandle, type MirrorToken,
 } from "./inline-items/ComposerMirror";
 import {
-  snapCaretOutOfRanges, type ComposerRange,
+  serializeComposerSelection, slashCommandComposerText, snapCaretOutOfRanges,
+  type ComposerRange,
 } from "../../../components/chat/composer-tokens";
 import CapsuleOverlay from "../../../CapsuleOverlay";
 import type { SelectableItem } from "../../../ResourcePicker";
@@ -414,12 +416,12 @@ export const ChatComposer = ({
     return mirrorRef.current?.tokenAtPoint(clientX, clientY) ?? null;
   };
 
-  // Completing a command leaves the `/name` text in place (only its color changes) and parks the
-  // caret past it so the next keystroke doesn't grow the token.
+  // Completing a skill replaces the typed slash token with pill backing text and parks the caret
+  // after the separator that `spliceComposerToken` adds.
   const applySlashCommandSelection = useCallback((
       choice: SlashCommandChoice, tokenStart: number, tokenEnd: number) => {
     recordDraftEdit();
-    const commandText = `/${choice.name}`;
+    const commandText = slashCommandComposerText(choice.name, CAPSULE_LOGO_SLOT);
     const transition = resolveComposerSlashCommand(
       currentComposerDocument(), choice, tokenStart, tokenEnd, commandText,
     );
@@ -602,6 +604,25 @@ export const ChatComposer = ({
     scanForResourceUrl(cursorPos);
   };
 
+  const writeComposerClipboard = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const command = selectedSlashCommandRef.current;
+    const selectionStart = event.currentTarget.selectionStart;
+    const selectionEnd = event.currentTarget.selectionEnd;
+    if (!command || selectionStart === selectionEnd ||
+        selectionStart >= command.start + command.length || selectionEnd <= command.start) {
+      return null;
+    }
+    const copied = serializeComposerSelection(
+      inputValueRef.current,
+      selectionStart,
+      selectionEnd,
+      [{ ...command, text: `/${command.choice.name}` }],
+    );
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", copied);
+    return command;
+  };
+
   // Formats named in the message are inline tokens like capsules, addressed by the caret as one
   // unit. There can be several, and where each sits says which part of the request it belongs to,
   // so they stay in the text rather than becoming a separate field.
@@ -651,6 +672,7 @@ export const ChatComposer = ({
       kind: "command" as const,
       start: selectedSlashCommand.start,
       length: selectedSlashCommand.length,
+      label: selectedSlashCommand.choice.name,
     }] : []),
     ...formatTokens.map(({start, length, logo}) => ({
       kind: "capsule" as const,
@@ -727,11 +749,11 @@ export const ChatComposer = ({
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
           {slashCommandPicker.popup}
-          {/* The resolved command is marked by color alone, so announce it for screen readers. */}
+          {/* The painted pill is hidden from assistive technology, so announce its state here. */}
           <div className="sr-only" aria-live="polite">
             {slashCommandPicker.status ||
               (selectedSlashCommand
-                ? `Slash command /${selectedSlashCommand.choice.name} from ${selectedSlashCommand.choice.providerLabel} is ready to send`
+                ? `Skill ${selectedSlashCommand.choice.name} from ${selectedSlashCommand.choice.providerLabel} is ready to send`
                 : "")}
           </div>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
@@ -818,6 +840,25 @@ export const ChatComposer = ({
                   e.preventDefault();
                   void addFiles(files);
                 }
+              }}
+              onCopy={(e) => { writeComposerClipboard(e); }}
+              onCut={(e) => {
+                const selectionStart = e.currentTarget.selectionStart;
+                const selectionEnd = e.currentTarget.selectionEnd;
+                const commandRange = writeComposerClipboard(e);
+                if (!commandRange) return;
+
+                const cutStart = Math.min(selectionStart, commandRange.start);
+                const cutEnd = Math.max(selectionEnd, commandRange.start + commandRange.length);
+                handleInputChange(
+                  inputValueRef.current.slice(0, cutStart) + inputValueRef.current.slice(cutEnd),
+                  cutStart,
+                );
+                requestAnimationFrame(() => {
+                  moveCaret(cutStart);
+                  const textarea = composerTextareaRef.current;
+                  if (textarea) resizeTextarea(textarea);
+                });
               }}
               onKeyDown={(e) => {
                 // An IME commits a composition with Enter, and the browser reports that as an

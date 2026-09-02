@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {
-  removeComposerToken, snapCaretOutOfRanges, spliceComposerToken,
+  removeComposerToken, serializeComposerSelection, slashCommandComposerText,
+  snapCaretOutOfRanges, spliceComposerToken,
 } from "./composer-tokens";
 
 describe("composer tokens", () => {
@@ -56,5 +57,17 @@ describe("composer tokens", () => {
     expect(snapCaretOutOfRanges(6, ranges, "nearest")).toBe(4);
     expect(snapCaretOutOfRanges(4, ranges, "right")).toBe(4);
     expect(snapCaretOutOfRanges(10, ranges, "left")).toBe(10);
+  });
+
+  it("copies skill pills as readable slash commands", () => {
+    const pill = slashCommandComposerText("deploy app", "\u2003\u2060\u00a0");
+    const value = `Use ${pill} for staging`;
+    const token = {start: 4, length: pill.length, text: "/deploy app"};
+
+    expect(serializeComposerSelection(value, 0, value.length, [token]))
+      .toBe("Use /deploy app for staging");
+    expect(serializeComposerSelection(value, token.start + 1, token.start + 2, [token]))
+      .toBe("/deploy app");
+    expect(serializeComposerSelection(value, 0, 3, [token])).toBe("Use");
   });
 });

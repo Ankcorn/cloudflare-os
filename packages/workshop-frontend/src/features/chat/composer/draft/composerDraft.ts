@@ -5,6 +5,7 @@ import {
   type SlashCommandChoice,
   type SlashCommandId,
 } from "@gadgets/workshop-shared/api";
+import { slashCommandComposerText } from "../../../../components/chat/composer-tokens";
 
 const COMPOSER_DRAFT_PREFIX = "gadgets:composer-draft:v1";
 
@@ -143,7 +144,7 @@ export function decorateComposerDraft(
   text += draft.text.slice(cursor);
   if (!command) return { text, formats };
 
-  const commandText = `/${command.choice.name}`;
+  const commandText = slashCommandComposerText(command.choice.name, logoSlot);
   const commandEnd = command.start + command.length;
   const delta = commandText.length - command.length;
   text = text.slice(0, command.start) + commandText + text.slice(commandEnd);

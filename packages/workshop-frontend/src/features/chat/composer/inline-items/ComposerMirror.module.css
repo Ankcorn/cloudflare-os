@@ -1,7 +1,7 @@
 /* Clips the mirror when the textarea scrolls. */
 .clip {
   position: absolute;
-  top: 0; bottom: 0;
+  top: -4px; bottom: -4px;
   left: -4px; right: -4px;
   overflow: hidden;
   pointer-events: none;
@@ -10,7 +10,7 @@
 
 .mirror {
   position: absolute;
-  top: 0; bottom: 0;
+  top: 4px; bottom: 4px;
   left: 4px;
   pointer-events: none;
   overflow: visible;
@@ -40,10 +40,41 @@
   background-position: left 0.12em center;
   background-size: 0.9em auto;
 }
-.command { color: var(--color-kumo-brand); }
+.command {
+  display: inline-block;
+  position: relative;
+  color: transparent;
+  white-space: nowrap;
+}
+.commandLabel {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  color: var(--color-kumo-brand);
+  background-color: color-mix(in srgb, var(--color-kumo-brand) 12%, transparent);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  transform: translateY(-50%);
+}
+.legacyCommand { color: var(--color-kumo-brand); }
 .hovered {
   background-color: var(--color-kumo-tint);
   box-shadow: 0 0 0 1px var(--color-kumo-tint);
   border-radius: 4px;
   transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+.command.hovered {
+  background-color: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+.command.hovered .commandLabel {
+  background-color: color-mix(in srgb, var(--color-kumo-brand) 16%, transparent);
 }
