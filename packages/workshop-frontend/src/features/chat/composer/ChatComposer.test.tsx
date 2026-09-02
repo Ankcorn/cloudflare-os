@@ -5,7 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RpcStub } from "capnweb";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Overseer } from "@gadgets/workshop-shared/api";
+import type { Overseer, SlashCommandChoice } from "@gadgets/workshop-shared/api";
 
 const testState = vi.hoisted(() => ({
   addToast: vi.fn<(toast: unknown) => void>(),
@@ -264,7 +264,7 @@ describe("ChatComposer", () => {
 
     expect(textarea.value.startsWith("before ")).toBe(true);
     expect(textarea.value.endsWith(" after")).toBe(true);
-    expect(textarea.getAttribute("aria-describedby")).toBeTruthy();
+    expect(document.body.textContent).toContain("Skill review from Projects is ready to send");
     expect(document.activeElement).toBe(textarea);
 
     await act(async () => add.click());
