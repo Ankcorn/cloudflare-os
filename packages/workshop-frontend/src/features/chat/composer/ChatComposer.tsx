@@ -240,13 +240,14 @@ export const ChatComposer = ({
   const promptCardRef = useRef<HTMLDivElement>(null);
   const mirrorRef = useRef<ComposerMirrorHandle>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const connectionCreatedRef = useRef<() => void>(() => {});
 
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
   const {
     activeUrl,
-    attachCreated: attachResourceCreated,
+    attachCreated,
     attachModalOpen,
     closeAttachModal,
     createCapsule,
@@ -262,6 +263,7 @@ export const ChatComposer = ({
     capsuleTokenText: (description, vendorId) =>
       (vendorId && vendorBranding.get(vendorId)?.logoUrl ? CAPSULE_LOGO_SLOT : "") +
       description.title,
+    onConnectionCreated: () => connectionCreatedRef.current(),
     onSelectionRequest: (selection, documentRevision) => {
       requestAnimationFrame(() => {
         if (getDocumentSnapshot().documentRevision !== documentRevision) return;
@@ -446,8 +448,7 @@ export const ChatComposer = ({
     chatExists: !newChat,
   });
 
-  const handleConnectionCreated = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
-    await attachResourceCreated(gatekeeper);
+  connectionCreatedRef.current = () => {
     slashCommandPicker.invalidateCatalog();
     setCatalogVersion((current) => current + 1);
   };
@@ -1094,7 +1095,7 @@ export const ChatComposer = ({
         open={attachModalOpen}
         onClose={closeAttachModal}
         getOverseer={getOverseer}
-        onCreated={handleConnectionCreated}
+        onCreated={attachCreated}
       />
     </div>
   );
