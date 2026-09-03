@@ -72,7 +72,8 @@ export class Gadget extends DurableObject {
   }
 
   async getDocument() {
-    return this.assembleDocument(await this.loadMeta());
+    return this.enqueueMutation(async () =>
+      this.assembleDocument(await this.loadMeta()));
   }
 
   applyOperation(operation) {

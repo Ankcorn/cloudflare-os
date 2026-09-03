@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ExportHandler } from "../format-blueprints/workspace-sheets/files/server.js";
+import { ExportHandler, Gadget } from "../format-blueprints/workspace-sheets/files/server.js";
 import { workbookToXlsx } from "../format-blueprints/workspace-sheets/files/xlsx.js";
 import { createZip, crc32 } from "../format-blueprints/workspace-sheets/files/zip.js";
 
@@ -179,7 +179,7 @@ describe("Workspace Sheets XLSX", () => {
   it("preserves sheet order, normalizes names, and rewrites recognized formula references", async () => {
     const longName = "This worksheet name is substantially longer than Excel permits";
     const document = {
-      sheetOrder: ["a", "b", "c", "d", "e", "f"],
+      sheetOrder: ["a", "b", "c", "d", "e", "f", "g", "h"],
       sheets: {
         a: sheet("Sales/Data"),
         b: sheet("sales_data"),
@@ -187,14 +187,21 @@ describe("Workspace Sheets XLSX", () => {
         d: sheet(longName),
         e: sheet("   "),
         f: sheet("History"),
+        g: sheet("O'Brien"),
+        h: sheet("[Book.xlsx]Data"),
       },
       cells: {
         a: {A1: cell("1")},
         b: {A1: cell("2")},
-        c: {A1: cell('=\'Sales/Data\'!A1+sales_data!$A$1+"Sales/Data!A1"+History!A1')},
+        c: {
+          A1: cell('=\'Sales/Data\'!A1+sales_data!$A$1+"Sales/Data!A1"+History!A1+\'O\'\'Brien\'!A1'),
+          A2: cell("='[Book.xlsx]Data'!A1+'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1"),
+        },
         d: {},
         e: {},
         f: {A1: cell("3")},
+        g: {A1: cell("4")},
+        h: {A1: cell("5")},
       },
     };
     const {entries} = await readZip(workbookToXlsx(document));
@@ -207,11 +214,32 @@ describe("Workspace Sheets XLSX", () => {
       longName.slice(0, 31),
       "Sheet",
       "History_",
+      "O&apos;Brien",
+      "_Book.xlsx_Data",
     ]);
-    const formulaCell = cellXml(text(entries, "xl/worksheets/sheet3.xml"), "A1");
-    expect(formulaCell).toContain('<f>\'Sales_Data\'!A1+\'sales_data (2)\'!$A$1+"Sales/Data!A1"+\'History_\'!A1</f>');
+    const worksheet = text(entries, "xl/worksheets/sheet3.xml");
+    const formulaCell = cellXml(worksheet, "A1");
+    expect(formulaCell).toContain('<f>\'Sales_Data\'!A1+\'sales_data (2)\'!$A$1+"Sales/Data!A1"+\'History_\'!A1+\'O\'\'Brien\'!A1</f>');
     expect(formulaCell).not.toContain("<v>");
+    expect(cellXml(worksheet, "A2")).toContain(
+        "<f>'[Book.xlsx]Data'!A1+'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1</f>");
     expect(workbook).toContain('<calcPr calcId="0" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>');
+  });
+
+  it("preserves many maximum-length formulas with unmatched apostrophes", async () => {
+    const formula = "'".repeat(8191);
+    const cells = Object.fromEntries(Array.from({length: 64}, (_, index) => [
+      `A${index + 1}`,
+      cell("=" + formula),
+    ]));
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["formulas"],
+      sheets: {formulas: sheet("Formulas", {rows: 64, cols: 1})},
+      cells: {formulas: cells},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+
+    expect(worksheet.split(`<f>${formula}</f>`)).toHaveLength(65);
   });
 
   it("exports sparse typed cells safely and preserves dimensions and a combined frozen pane", async () => {
@@ -248,17 +276,20 @@ describe("Workspace Sheets XLSX", () => {
           D10: cell("=[Book.xlsx]Data!A1+Jan:Data!A1"),
           E10: cell("   "),
           Z1: cell("outside declared columns"),
+          M1: cell("'=A1"),
           A11: cell("outside declared rows"),
+          XFD1048576: cell("last Excel cell"),
           A0: cell("bad"),
           a1: cell("bad"),
           XFE1: cell("outside Excel"),
+          A1048577: cell("outside Excel"),
         },
       },
     };
     const {entries} = await readZip(workbookToXlsx(document));
     const xml = text(entries, "xl/worksheets/sheet1.xml");
 
-    expect(xml).toContain('<dimension ref="A1:L10"/>');
+    expect(xml).toContain('<dimension ref="A1:XFD1048576"/>');
     expect(xml).toContain('<sheetFormatPr defaultColWidth="12.4296875" defaultRowHeight="18"/>');
     expect(xml).toContain('<col min="1" max="1" width="13.5703125" customWidth="1"/>');
     expect(xml).toContain('<col min="11" max="11" width="255" customWidth="1"/>');
@@ -279,10 +310,15 @@ describe("Workspace Sheets XLSX", () => {
     expect(cellXml(xml, "K1")).toContain("<f>=A1</f>");
     expect(cellXml(xml, "L1")).toContain('t="inlineStr"');
     expect(cellXml(xml, "A10")).toContain('<f>"_x0041_"</f>');
-    expect(cellXml(xml, "B10")).toContain('<t xml:space="preserve">=A1</t>');
+    expect(cellXml(xml, "B10")).toContain("<f>A1</f>");
+    expect(styleId(xml, "B10")).toBe(styleId(xml, "I1"));
     expect(cellXml(xml, "D10")).toContain("<f>[Book.xlsx]Data!A1+Jan:Data!A1</f>");
     expect(cellXml(xml, "E10")).toBe('<c r="E10"/>');
-    for (const reference of ["Z1", "A11", "A0", "a1", "XFE1"]) expect(xml).not.toContain(`r="${reference}"`);
+    expect(cellXml(xml, "Z1")).toContain("outside declared columns");
+    expect(cellXml(xml, "M1")).toContain(">=A1</t>");
+    expect(cellXml(xml, "A11")).toContain("outside declared rows");
+    expect(cellXml(xml, "XFD1048576")).toContain("last Excel cell");
+    for (const reference of ["A0", "a1", "XFE1", "A1048577"]) expect(xml).not.toContain(`r="${reference}"`);
   });
 
   it("deduplicates styles while supporting every format field and number-format category", async () => {
@@ -392,6 +428,43 @@ describe("Workspace Sheets XLSX", () => {
     expect(cellXml(worksheet, "D2")).toContain("<v>125</v>");
     expect(worksheet).not.toContain("autoFilter");
     expect([...entries.keys()].some(name => /chart|comment|pivot/i.test(name))).toBe(false);
+  });
+});
+
+describe("Workspace Sheets document snapshots", () => {
+  it("completes a queued document read before beginning the next mutation", async () => {
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readReleased = new Promise<void>(resolve => { releaseRead = resolve; });
+    const readStarted = new Promise<void>(resolve => { markReadStarted = resolve; });
+    const order: string[] = [];
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      mutationQueue: Promise.resolve(),
+      loadMeta: vi.fn(async () => ({revision: 1})),
+      assembleDocument: vi.fn(async () => {
+        order.push("read started");
+        markReadStarted();
+        await readReleased;
+        order.push("read completed");
+        return {revision: 1};
+      }),
+      applyOperationLocked: vi.fn(async () => {
+        order.push("write started");
+        order.push("write completed");
+        return {status: "applied"};
+      }),
+    });
+
+    const read = fixture.getDocument();
+    await readStarted;
+    const write = fixture.applyOperation({});
+    await Promise.resolve();
+    expect(fixture.applyOperationLocked).not.toHaveBeenCalled();
+
+    releaseRead();
+    await expect(read).resolves.toEqual({revision: 1});
+    await expect(write).resolves.toEqual({status: "applied"});
+    expect(order).toEqual(["read started", "read completed", "write started", "write completed"]);
   });
 });
 

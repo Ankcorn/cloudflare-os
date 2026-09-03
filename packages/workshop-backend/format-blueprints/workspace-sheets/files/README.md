@@ -224,13 +224,14 @@ decimal-place, wrapping, column-width, row-height, and frozen-pane metadata. Pix
 converted deterministically to points and approximate Excel character widths; they are not expected
 to be pixel-perfect across spreadsheet applications and font environments.
 
-XLSX literal conversion uses a leading apostrophe to force text and hide the apostrophe. Plain-text
-formatting also forces text, booleans are recognized case-insensitively, and supported numeric
-literals include signs, commas, a leading dollar sign, and a trailing percent sign. Date- or
-time-looking text is not parsed; an existing numeric serial receives the requested date/time number
-format. Plain URLs remain text. Values beginning with `=`, including `HYPERLINK()` formulas, are
-written as formulas with no cached result or server-side evaluation. The workbook requests automatic
-full recalculation when opened. Formula support is not claimed to be fully compatible with Excel.
+XLSX literal conversion uses a leading apostrophe to force text and hide the apostrophe. Otherwise,
+values beginning with `=`, including `HYPERLINK()` formulas, are written as formulas even when the
+cell uses plain-text number formatting. Plain-text formatting forces non-formula literals to text.
+Booleans are recognized case-insensitively, and supported numeric literals include signs, commas, a
+leading dollar sign, and a trailing percent sign. Date- or time-looking text is not parsed; an
+existing numeric serial receives the requested date/time number format. Plain URLs remain text.
+Formulas have no cached result or server-side evaluation. The workbook requests automatic full
+recalculation when opened. Formula support is not claimed to be fully compatible with Excel.
 
 Worksheet names are made Excel-safe during export: invalid characters are replaced, blank names use
 `Sheet`, names are limited to 31 characters, and case-insensitive collisions receive numeric

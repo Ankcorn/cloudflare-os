@@ -135,7 +135,7 @@ function assignSheetNames(sheets) {
   }
 }
 
-function parseCellReference(reference, rows, columns) {
+function parseCellReference(reference) {
   const match = /^([A-Z]+)([1-9]\d*)$/.exec(reference);
   if (!match) return null;
   let column = 0;
@@ -144,7 +144,7 @@ function parseCellReference(reference, rows, columns) {
     if (column > MAX_COLUMNS) return null;
   }
   const row = Number(match[2]);
-  if (!Number.isSafeInteger(row) || row > MAX_ROWS || row > rows || column > columns) return null;
+  if (!Number.isSafeInteger(row) || row > MAX_ROWS) return null;
   return {row, column};
 }
 
@@ -358,7 +358,7 @@ function prepareWorkbook(document) {
     sheet.rowHeights = dimensions(sheet.metadata.rowHeights, sheet.rows, rowPoints);
     sheet.cells = [];
     for (const [reference, sourceCell] of Object.entries(sheet.sourceCells)) {
-      const position = parseCellReference(reference, sheet.rows, sheet.columns);
+      const position = parseCellReference(reference);
       if (!position || !sourceCell || typeof sourceCell !== "object") continue;
       const fmt = sourceCell.fmt && typeof sourceCell.fmt === "object" ? sourceCell.fmt : null;
       const style = styles.style(fmt);
@@ -382,27 +382,32 @@ function formulaReferenceAt(formula, offset) {
 }
 
 function quotedSheetReference(formula, offset, names) {
-  if (formula[offset - 1] === "]" || isThreeDimensionalReference(formula, offset)) return null;
-  let name = "";
+  const nameParts = [];
   for (let i = offset + 1; i < formula.length; ++i) {
     if (formula[i] !== "'") {
-      name += formula[i];
+      nameParts.push(formula[i]);
       continue;
     }
     if (formula[i + 1] === "'") {
-      name += "'";
+      nameParts.push("'");
       ++i;
       continue;
     }
-    if (formula[i + 1] !== "!" || !formulaReferenceAt(formula, i + 2)) {
-      name += "'";
-      continue;
-    }
+    const quoteEnd = i + 1;
+    const hasBang = formula[quoteEnd] === "!";
+    const end = quoteEnd + (hasBang ? 1 : 0);
+    const text = formula.slice(offset, end);
+    const name = nameParts.join("");
+    const malformed = offset > 0 && /[A-Za-z0-9_.$]/.test(formula[offset - 1]);
+    const external = formula[offset - 1] === "]" || /\[[^\]]*\]/.test(name);
+    if (!hasBang || !formulaReferenceAt(formula, end) || malformed || external ||
+        isThreeDimensionalReference(formula, offset)) return {end, text};
     const normalized = names.get(name.toLowerCase());
-    if (!normalized) return null;
-    return {end: i + 2, text: `'${normalized.replace(/'/g, "''")}'!`};
+    return normalized
+      ? {end, text: `'${normalized.replace(/'/g, "''")}'!`}
+      : {end, text};
   }
-  return null;
+  return {end: formula.length, text: formula.slice(offset)};
 }
 
 function unquotedSheetReference(formula, offset, names) {
@@ -427,14 +432,14 @@ function isThreeDimensionalReference(formula, offset) {
 }
 
 function rewriteFormula(formula, names) {
-  let result = "";
+  const result = [];
   let stringLiteral = false;
   for (let i = 0; i < formula.length;) {
     const character = formula[i];
     if (character === '"') {
-      result += character;
+      result.push(character);
       if (stringLiteral && formula[i + 1] === '"') {
-        result += formula[i + 1];
+        result.push(formula[i + 1]);
         i += 2;
         continue;
       }
@@ -447,21 +452,21 @@ function rewriteFormula(formula, names) {
         ? quotedSheetReference(formula, i, names)
         : unquotedSheetReference(formula, i, names);
       if (reference) {
-        result += reference.text;
+        result.push(reference.text);
         i = reference.end;
         continue;
       }
     }
-    result += character;
+    result.push(character);
     ++i;
   }
-  return result;
+  return result.join("");
 }
 
 function parsedCellValue(value, fmt, formulaNames) {
   if (value[0] === "'") return {type: "text", value: value.slice(1)};
-  if (fmt?.nf === "text") return {type: "text", value};
   if (value[0] === "=") return {type: "formula", value: rewriteFormula(value.slice(1), formulaNames)};
+  if (fmt?.nf === "text") return {type: "text", value};
   const trimmed = value.trim();
   if (trimmed === "") return {type: "blank", value: ""};
   if (/^(TRUE|FALSE)$/i.test(trimmed)) return {type: "boolean", value: /^true$/i.test(trimmed)};
