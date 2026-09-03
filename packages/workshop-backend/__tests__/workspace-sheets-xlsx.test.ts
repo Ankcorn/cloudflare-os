@@ -242,6 +242,19 @@ describe("Workspace Sheets XLSX", () => {
     expect(worksheet.split(`<f>${formula}</f>`)).toHaveLength(65);
   });
 
+  it("does not lengthen maximum-size formulas when unquoted sheet names are unchanged", async () => {
+    const value = "=data!A1" + "+0".repeat(4092);
+    expect(value).toHaveLength(8192);
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["data", "formulas"],
+      sheets: {data: sheet("Data"), formulas: sheet("Formulas")},
+      cells: {data: {A1: cell("1")}, formulas: {A1: cell(value)}},
+    }));
+
+    expect(cellXml(text(entries, "xl/worksheets/sheet2.xml"), "A1"))
+      .toContain(`<f>${value.slice(1)}</f>`);
+  });
+
   it("exports sparse typed cells safely and preserves dimensions and a combined frozen pane", async () => {
     const unusual = "_x0041_" + String.fromCharCode(1, 0xd800, 13) + String.fromCodePoint(0x1f642);
     const document = {
@@ -277,6 +290,7 @@ describe("Workspace Sheets XLSX", () => {
           E10: cell("   "),
           Z1: cell("outside declared columns"),
           M1: cell("'=A1"),
+          N1: cell("TRUE", {nf: "text"}),
           A11: cell("outside declared rows"),
           XFD1048576: cell("last Excel cell"),
           A0: cell("bad"),
@@ -290,6 +304,7 @@ describe("Workspace Sheets XLSX", () => {
     const xml = text(entries, "xl/worksheets/sheet1.xml");
 
     expect(xml).toContain('<dimension ref="A1:XFD1048576"/>');
+    expect(text(entries, "xl/styles.xml")).toContain('numFmtId="49"');
     expect(xml).toContain('<sheetFormatPr defaultColWidth="12.4296875" defaultRowHeight="18"/>');
     expect(xml).toContain('<col min="1" max="1" width="13.5703125" customWidth="1"/>');
     expect(xml).toContain('<col min="11" max="11" width="255" customWidth="1"/>');
@@ -305,7 +320,7 @@ describe("Workspace Sheets XLSX", () => {
     expect(cellXml(xml, "F1")).toContain('t="b"><v>0</v>');
     expect(cellXml(xml, "G1")).toContain("<v>1234.5</v>");
     expect(cellXml(xml, "H1")).toContain("<v>-0.125</v>");
-    expect(cellXml(xml, "I1")).toContain('t="inlineStr"');
+    expect(cellXml(xml, "I1")).toContain("<v>42</v>");
     expect(cellXml(xml, "J1")).toContain('t="inlineStr"');
     expect(cellXml(xml, "K1")).toContain("<f>=A1</f>");
     expect(cellXml(xml, "L1")).toContain('t="inlineStr"');
@@ -316,9 +331,27 @@ describe("Workspace Sheets XLSX", () => {
     expect(cellXml(xml, "E10")).toBe('<c r="E10"/>');
     expect(cellXml(xml, "Z1")).toContain("outside declared columns");
     expect(cellXml(xml, "M1")).toContain(">=A1</t>");
+    expect(cellXml(xml, "N1")).toContain('t="b"><v>1</v>');
+    expect(styleId(xml, "N1")).toBe(styleId(xml, "I1"));
     expect(cellXml(xml, "A11")).toContain("outside declared rows");
     expect(cellXml(xml, "XFD1048576")).toContain("last Excel cell");
     for (const reference of ["A0", "a1", "XFE1", "A1048577"]) expect(xml).not.toContain(`r="${reference}"`);
+  });
+
+  it("batches worksheet XML while exporting the maximum stored cell count", async () => {
+    const cells: Record<string, ReturnType<typeof cell>> = {};
+    for (let index = 0; index < 200000; ++index) {
+      cells[String.fromCharCode(65 + index % 4) + (Math.floor(index / 4) + 1)] = cell("1");
+    }
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["dense"],
+      sheets: {dense: sheet("Dense", {rows: 50000, cols: 4})},
+      cells: {dense: cells},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+
+    expect(worksheet).toContain('<dimension ref="A1:D50000"/>');
+    expect(cellXml(worksheet, "D50000")).toContain("<v>1</v>");
   });
 
   it("deduplicates styles while supporting every format field and number-format category", async () => {

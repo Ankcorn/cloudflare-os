@@ -13,6 +13,7 @@ const DEFAULT_COLUMN_PIXELS = 92;
 const MAX_FONTS = 512;
 const MAX_FILLS = 256;
 const MAX_CELL_FORMATS = 65490;
+const TEXT_CHUNK_SIZE = 64 * 1024;
 
 function spreadsheetXml(value, attribute = false) {
   const input = String(value).replace(/_x[0-9a-f]{4}_/gi, (match) => "_x005F_" + match.slice(1));
@@ -70,9 +71,19 @@ function textStream(iterable) {
   const iterator = iterable[Symbol.iterator]();
   return new ReadableStream({
     pull(controller) {
-      const result = iterator.next();
-      if (result.done) controller.close();
-      else controller.enqueue(encoder.encode(result.value));
+      const parts = [];
+      let length = 0;
+      while (length < TEXT_CHUNK_SIZE) {
+        const result = iterator.next();
+        if (result.done) {
+          if (parts.length) controller.enqueue(encoder.encode(parts.join("")));
+          controller.close();
+          return;
+        }
+        parts.push(result.value);
+        length += result.value.length;
+      }
+      controller.enqueue(encoder.encode(parts.join("")));
     },
     cancel(reason) {
       if (iterator.return) iterator.return(reason);
@@ -420,6 +431,9 @@ function unquotedSheetReference(formula, offset, names) {
   const name = formula.slice(offset, end);
   const normalized = names.get(name.toLowerCase());
   if (!normalized) return null;
+  if (normalized.toLowerCase() === name.toLowerCase()) {
+    return {end: end + 1, text: formula.slice(offset, end + 1)};
+  }
   return {end: end + 1, text: `'${normalized.replace(/'/g, "''")}'!`};
 }
 
@@ -463,10 +477,9 @@ function rewriteFormula(formula, names) {
   return result.join("");
 }
 
-function parsedCellValue(value, fmt, formulaNames) {
+function parsedCellValue(value, formulaNames) {
   if (value[0] === "'") return {type: "text", value: value.slice(1)};
   if (value[0] === "=") return {type: "formula", value: rewriteFormula(value.slice(1), formulaNames)};
-  if (fmt?.nf === "text") return {type: "text", value};
   const trimmed = value.trim();
   if (trimmed === "") return {type: "blank", value: ""};
   if (/^(TRUE|FALSE)$/i.test(trimmed)) return {type: "boolean", value: /^true$/i.test(trimmed)};
@@ -485,7 +498,7 @@ function parsedCellValue(value, fmt, formulaNames) {
 function cellXml(cell, formulaNames) {
   const style = cell.style ? ` s="${cell.style}"` : "";
   if (cell.value === "") return `<c r="${cell.reference}"${style}/>`;
-  const parsed = parsedCellValue(cell.value, cell.fmt, formulaNames);
+  const parsed = parsedCellValue(cell.value, formulaNames);
   if (parsed.type === "blank") return `<c r="${cell.reference}"${style}/>`;
   if (parsed.type === "formula") return `<c r="${cell.reference}"${style}><f>${formulaXml(parsed.value)}</f></c>`;
   if (parsed.type === "boolean") return `<c r="${cell.reference}"${style} t="b"><v>${parsed.value ? 1 : 0}</v></c>`;
