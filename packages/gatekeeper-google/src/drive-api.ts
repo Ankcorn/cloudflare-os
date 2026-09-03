@@ -8,6 +8,9 @@ const MAX_BATCH_FILES = 100;
 const MAX_BATCH_RESPONSE_BYTES = 1_000_000;
 const MAX_JSON_RESPONSE_BYTES = 5_000_000;
 
+/** Exact MIME type Drive gives a native folder. A shortcut to one has its own type, not this. */
+export const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+
 /** The subset of Drive's file resource this gatekeeper asks for. */
 export type DriveFile = {
   id: string;
@@ -25,6 +28,23 @@ export type DriveFile = {
 
 /** Current metadata for one shared drive. */
 export type DriveInfo = { id: string; name: string };
+
+/**
+ * The minimal per-file facts a folder-scope descendant proof rests on.
+ *
+ * Deliberately narrower than {@link DriveFile}: an ancestry walk touches folders the caller never
+ * asked about and must never see, so it fetches only what membership is decided from.
+ */
+export type DriveScopeNode = {
+  id: string;
+  mimeType?: string;
+  parents?: string[];
+  driveId?: string;
+  trashed?: boolean;
+};
+
+/** Field mask for {@link DriveApi.getScopeNodes}: ancestry and storage-domain facts only. */
+const DRIVE_SCOPE_NODE_FIELDS = "id,mimeType,parents,driveId,trashed";
 
 /** The per-file field mask. `getFile` sends this; {@link DRIVE_FILE_FIELDS} wraps it for lists. */
 export const DRIVE_FILE_ITEM_FIELDS = [
@@ -85,18 +105,26 @@ export class DriveApiRequestError extends Error {
     super(`Google Drive API request failed: ${status}${reason ? ` (${reason})` : ""}`);
   }
 
-  /** Whether this failure reports one of Google's documented quota reasons. */
-  get isQuotaExceeded(): boolean {
-    return this.status === 403 && this.reason !== undefined && QUOTA_403_REASONS.has(this.reason);
+  /**
+   * Whether this failure describes the account or the app rather than one file.
+   *
+   * A file-specific denial is a scope fact a caller may record; these are not, so recording one
+   * would narrow a listing or deny a binding on an outage.
+   */
+  get isAccountWide(): boolean {
+    return this.status === 403 && this.reason !== undefined &&
+      ACCOUNT_WIDE_403_REASONS.has(this.reason);
   }
 }
 
 const MAX_ERROR_BODY_BYTES = 4096;
 const API_DISABLED_REASON = "accessNotConfigured";
-const QUOTA_403_REASONS = new Set([
+const ACCOUNT_WIDE_403_REASONS = new Set([
   "dailyLimitExceeded",
   "rateLimitExceeded",
   "userRateLimitExceeded",
+  // The domain administrator has disabled Drive for this app, for every file it might ask about.
+  "domainPolicy",
 ]);
 function googleErrorReason(value: unknown): string | undefined {
   if (!isRecord(value) || !isRecord(value.error) || !Array.isArray(value.error.errors)) {
@@ -184,6 +212,14 @@ function optionalFields(value: Record<string, unknown>, fields: readonly string[
   return result;
 }
 
+function optionalParents(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some(parent => typeof parent !== "string")) {
+    throw new Error("Invalid Google Drive file parents");
+  }
+  return value as string[];
+}
+
 function parseDriveFile(value: unknown): DriveFile {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") {
     throw new Error("Invalid Google Drive file response");
@@ -201,13 +237,7 @@ function parseDriveFile(value: unknown): DriveFile {
     if (!isRecord(value.shortcutDetails)) throw new Error("Invalid Google Drive shortcut details");
     shortcutDetails = optionalFields(value.shortcutDetails, ["targetId", "targetMimeType"]);
   }
-  let parents: string[] | undefined;
-  if (value.parents !== undefined) {
-    if (!Array.isArray(value.parents) || value.parents.some(parent => typeof parent !== "string")) {
-      throw new Error("Invalid Google Drive file parents");
-    }
-    parents = value.parents as string[];
-  }
+  let parents = optionalParents(value.parents);
   let trashed = optionalBoolean(value.trashed, "file trashed");
   return {
     id: value.id,
@@ -219,6 +249,27 @@ function parseDriveFile(value: unknown): DriveFile {
     ...(owners ? { owners } : {}),
     ...(trashed === undefined ? {} : { trashed }),
     ...(shortcutDetails ? { shortcutDetails } : {}),
+  };
+}
+
+/**
+ * Parses one batch part's body as the scope node for `fileId`.
+ *
+ * The echo check is load-bearing, not defensive noise: these nodes decide whether a file is inside
+ * the bound folder, and a body answering for some other file would decide it from the wrong facts.
+ */
+function parseDriveScopeNode(body: string, fileId: string): DriveScopeNode {
+  let value: unknown = JSON.parse(body);
+  if (!isRecord(value) || value.id !== fileId) {
+    throw new Error("Google Drive batch response did not echo the requested file ID");
+  }
+  let parents = optionalParents(value.parents);
+  let trashed = optionalBoolean(value.trashed, "file trashed");
+  return {
+    id: fileId,
+    ...optionalFields(value, ["mimeType", "driveId"]),
+    ...(parents ? { parents } : {}),
+    ...(trashed === undefined ? {} : { trashed }),
   };
 }
 
@@ -314,7 +365,7 @@ function batchPartAllowed(part: BatchAccessPart): boolean {
     throw new DriveApiDisabledError(
       "the Google Drive API is not enabled for this OAuth project");
   }
-  if (part.status === 403 && reason !== undefined && QUOTA_403_REASONS.has(reason)) {
+  if (part.status === 403 && reason !== undefined && ACCOUNT_WIDE_403_REASONS.has(reason)) {
     throw new Error("Google Drive batch subrequest failed: 403");
   }
   if (part.status === 403 || part.status === 404) return false;
@@ -401,21 +452,48 @@ export class DriveApi {
 
   /** Fresh access checks, issued as multipart `files.get` batches of at most 100 IDs. */
   async checkFileAccess(fileIds: readonly string[]): Promise<boolean[]> {
-    let result: boolean[] = [];
+    return this.#batchGetFiles(fileIds, "id", batchPartAllowed);
+  }
+
+  /**
+   * Fresh ancestry facts for a folder-scope proof, in the requested order.
+   *
+   * `undefined` marks a file-specific denial (403/404). API disabled, quota, an account-wide policy
+   * block, malformed multipart, a bad Content-ID, and a body answering for another file all throw,
+   * so none of them can be read as "not a descendant" and quietly narrow a listing. A 403 whose
+   * reason Google does not document as account-wide still counts as a denial.
+   */
+  async getScopeNodes(fileIds: readonly string[]): Promise<(DriveScopeNode | undefined)[]> {
+    return this.#batchGetFiles(fileIds, DRIVE_SCOPE_NODE_FIELDS, (part, fileId) =>
+      batchPartAllowed(part) ? parseDriveScopeNode(part.body, fileId) : undefined);
+  }
+
+  /** Runs `files.get` batches of at most 100 IDs, mapping each placed part back to its ID. */
+  async #batchGetFiles<T>(
+    fileIds: readonly string[],
+    fields: string,
+    mapPart: (part: BatchAccessPart, fileId: string) => T,
+  ): Promise<T[]> {
+    let result: T[] = [];
     for (let offset = 0; offset < fileIds.length; offset += MAX_BATCH_FILES) {
-      result.push(...await this.#checkFileAccessBatch(fileIds.slice(offset, offset + MAX_BATCH_FILES)));
+      let chunk = fileIds.slice(offset, offset + MAX_BATCH_FILES);
+      let parts = await this.#batchGetChunk(chunk, fields);
+      result.push(...parts.map((part, index) => mapPart(part, chunk[index])));
     }
     return result;
   }
 
-  async #checkFileAccessBatch(fileIds: readonly string[]): Promise<boolean[]> {
+  async #batchGetChunk(
+    fileIds: readonly string[], fields: string,
+  ): Promise<BatchAccessPart[]> {
     let boundary = `gadgets_drive_${crypto.randomUUID()}`;
     let parts = fileIds.map((fileId, index) => [
       `--${boundary}`,
       "Content-Type: application/http",
       `Content-ID: <item-${index}>`,
       "",
-      `GET /drive/v3/files/${encodeURIComponent(fileId)}?fields=id&supportsAllDrives=true HTTP/1.1`,
+      `GET /drive/v3/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(fields)}` +
+        "&supportsAllDrives=true HTTP/1.1",
       "Accept: application/json",
       "",
       "",
@@ -455,7 +533,7 @@ export class DriveApi {
         continue;
       }
 
-      return placed.map(batchPartAllowed);
+      return placed;
     }
   }
 
