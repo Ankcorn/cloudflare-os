@@ -231,7 +231,11 @@ underlying type. Booleans are recognized case-insensitively, and supported numer
 signs, commas, a leading dollar sign, and a trailing percent sign. Date- or time-looking text is not
 parsed; an existing numeric serial receives the requested date/time number format. Plain URLs remain
 text. Formulas have no cached result or server-side evaluation. The workbook requests automatic
-full recalculation when opened. Formula support is not claimed to be fully compatible with Excel.
+full recalculation when opened. Supported future-function tokens receive Excel's required `_xlfn.`
+prefix, and `ERRORTYPE()` is translated to `ERROR.TYPE()`. If these compatibility rewrites or
+worksheet-name rewriting would exceed Excel's 8,192-character formula limit, the original stored
+formula is exported as text instead. Formula support is not claimed to be fully compatible with
+Excel.
 
 Worksheet names are made Excel-safe during export: invalid characters are replaced, blank names use
 `Sheet`, names are limited to 31 characters, and case-insensitive collisions receive numeric

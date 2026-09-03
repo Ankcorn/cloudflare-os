@@ -13,6 +13,7 @@ const DEFAULT_COLUMN_PIXELS = 92;
 const MAX_FONTS = 512;
 const MAX_FILLS = 256;
 const MAX_CELL_FORMATS = 65490;
+const MAX_FORMULA_CHARACTERS = 8192;
 const TEXT_CHUNK_SIZE = 64 * 1024;
 const FUTURE_FUNCTIONS = new Set([
   "CONCAT", "DAYS", "IFNA", "IFS", "SWITCH", "TEXTJOIN", "UNICHAR", "UNICODE", "XOR",
@@ -463,16 +464,17 @@ function isThreeDimensionalReference(formula, offset) {
   return !/^\$?[A-Za-z]{1,3}\$?[1-9]\d*$/.test(preceding);
 }
 
-function futureFunctionAt(formula, offset) {
+function formulaFunctionAt(formula, offset) {
   if (!/[A-Za-z_]/.test(formula[offset]) ||
-      (offset > 0 && /[A-Za-z0-9_.$]/.test(formula[offset - 1]))) return null;
+      (offset > 0 && /[A-Za-z0-9_.$!]/.test(formula[offset - 1]))) return null;
   let end = offset + 1;
   while (end < formula.length && /[A-Za-z0-9_.]/.test(formula[end])) ++end;
   const name = formula.slice(offset, end).toUpperCase();
-  if (!FUTURE_FUNCTIONS.has(name)) return null;
   let parenthesis = end;
   while (/\s/.test(formula[parenthesis])) ++parenthesis;
-  return formula[parenthesis] === "(" ? {end, text: "_xlfn." + name} : null;
+  if (formula[parenthesis] !== "(") return null;
+  if (FUTURE_FUNCTIONS.has(name)) return {end, text: "_xlfn." + name};
+  return name === "ERRORTYPE" ? {end, text: "ERROR.TYPE"} : null;
 }
 
 function rewriteFormula(formula, names) {
@@ -500,7 +502,7 @@ function rewriteFormula(formula, names) {
       const escapedBracket = apostrophes % 2 === 1;
       if (character === "[" && !escapedBracket) ++structuredReferenceDepth;
       else if (character === "]" && structuredReferenceDepth && !escapedBracket) --structuredReferenceDepth;
-      const reference = !structuredReferenceDepth && (futureFunctionAt(formula, i) || (character === "'"
+      const reference = !structuredReferenceDepth && (formulaFunctionAt(formula, i) || (character === "'"
         ? quotedSheetReference(formula, i, names)
         : unquotedSheetReference(formula, i, names)));
       if (reference) {
@@ -517,7 +519,12 @@ function rewriteFormula(formula, names) {
 
 function parsedCellValue(value, formulaNames) {
   if (value[0] === "'") return {type: "text", value: value.slice(1)};
-  if (value[0] === "=") return {type: "formula", value: rewriteFormula(value.slice(1), formulaNames)};
+  if (value[0] === "=") {
+    const formula = rewriteFormula(value.slice(1), formulaNames);
+    return formula.length + 1 <= MAX_FORMULA_CHARACTERS
+      ? {type: "formula", value: formula}
+      : {type: "text", value};
+  }
   const trimmed = value.trim();
   if (trimmed === "") return {type: "blank", value: ""};
   if (/^(TRUE|FALSE)$/i.test(trimmed)) return {type: "boolean", value: /^true$/i.test(trimmed)};

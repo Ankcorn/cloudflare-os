@@ -260,6 +260,28 @@ describe("Workspace Sheets XLSX", () => {
       .toContain(`<f>${value.slice(1)}</f>`);
   });
 
+  it("exports formulas as text when required rewrites exceed Excel's length limit", async () => {
+    const renamed = "=A_B!A10" + "+0".repeat(4092);
+    const future = "=IFS(TRUE,1)" + "+0".repeat(4090);
+    expect(renamed).toHaveLength(8192);
+    expect(future).toHaveLength(8192);
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["invalid", "collision", "formulas"],
+      sheets: {
+        invalid: sheet("A/B"),
+        collision: sheet("A_B"),
+        formulas: sheet("Formulas"),
+      },
+      cells: {invalid: {}, collision: {}, formulas: {A1: cell(renamed), A2: cell(future)}},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet3.xml");
+
+    expect(cellXml(worksheet, "A1"))
+      .toBe(`<c r="A1" t="inlineStr"><is><t xml:space="preserve">${renamed}</t></is></c>`);
+    expect(cellXml(worksheet, "A2"))
+      .toBe(`<c r="A2" t="inlineStr"><is><t xml:space="preserve">${future}</t></is></c>`);
+  });
+
   it("prefixes OOXML future functions without changing strings, sheet references, or existing prefixes", async () => {
     const calls = [
       "IFS(TRUE,1)", "IFNA(A1,0)", "XOR(TRUE,FALSE)", "SWITCH(1,1,1)",
@@ -275,6 +297,39 @@ describe("Workspace Sheets XLSX", () => {
 
     expect(cellXml(text(entries, "xl/worksheets/sheet2.xml"), "A1"))
       .toContain(`<f>${expected}</f>`);
+  });
+
+  it("translates ERRORTYPE function tokens to Excel's ERROR.TYPE name", async () => {
+    const value = '=ERRORTYPE(NA())+"ERRORTYPE("+ERRORTYPE!A1+Table1[ERRORTYPE(A1)]+' +
+      "'ERRORTYPE'!ERRORTYPE(A1)+[Book.xlsx]Sheet1!ERRORTYPE(A1)+ERROR.TYPE(NA())";
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["errorType", "formulas"],
+      sheets: {errorType: sheet("ERRORTYPE"), formulas: sheet("Formulas")},
+      cells: {errorType: {A1: cell("value")}, formulas: {A1: cell(value)}},
+    }));
+
+    expect(cellXml(text(entries, "xl/worksheets/sheet2.xml"), "A1")).toContain(
+        '<f>ERROR.TYPE(NA())+"ERRORTYPE("+ERRORTYPE!A1+Table1[ERRORTYPE(A1)]+' +
+        "'ERRORTYPE'!ERRORTYPE(A1)+[Book.xlsx]Sheet1!ERRORTYPE(A1)+ERROR.TYPE(NA())</f>");
+  });
+
+  it("accepts an exactly maximum-size rewritten formula and rejects the next character", async () => {
+    const exact = "=+ERRORTYPE(NA())" + "+0".repeat(4087);
+    const overflow = "=ERRORTYPE(NA())" + "+0".repeat(4088);
+    expect(exact).toHaveLength(8191);
+    expect(overflow).toHaveLength(8192);
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["data"],
+      sheets: {data: sheet("Data")},
+      cells: {data: {A1: cell(exact), A2: cell(overflow)}},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+    const exactXml = cellXml(worksheet, "A1");
+
+    expect(exactXml).toContain("<f>+ERROR.TYPE(NA())");
+    expect(exactXml).not.toContain("inlineStr");
+    expect(cellXml(worksheet, "A2"))
+      .toBe(`<c r="A2" t="inlineStr"><is><t xml:space="preserve">${overflow}</t></is></c>`);
   });
 
   it("tracks apostrophe-escaped brackets in structured references", async () => {
