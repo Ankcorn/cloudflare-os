@@ -1,0 +1,441 @@
+import { describe, expect, it, vi } from "vitest";
+import { ExportHandler } from "../format-blueprints/workspace-sheets/files/server.js";
+import { workbookToXlsx } from "../format-blueprints/workspace-sheets/files/xlsx.js";
+import { createZip, crc32 } from "../format-blueprints/workspace-sheets/files/zip.js";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+type ZipEntry = {
+  bytes: Uint8Array;
+  compressedSize: number;
+  crc: number;
+  flags: number;
+  localOffset: number;
+  method: number;
+  uncompressedSize: number;
+};
+
+async function streamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function uint16(bytes: Uint8Array, offset: number): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(offset, true);
+}
+
+function uint32(bytes: Uint8Array, offset: number): number {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true);
+}
+
+async function inflate(bytes: Uint8Array): Promise<Uint8Array> {
+  const input = new Response(bytes).body!.pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(input).arrayBuffer());
+}
+
+async function readZip(stream: ReadableStream<Uint8Array>) {
+  const archive = await streamBytes(stream);
+  const eocdOffset = archive.byteLength - 22;
+  expect(uint32(archive, eocdOffset)).toBe(0x06054b50);
+  expect(uint16(archive, eocdOffset + 4)).toBe(0);
+  expect(uint16(archive, eocdOffset + 6)).toBe(0);
+  const entryCount = uint16(archive, eocdOffset + 10);
+  expect(uint16(archive, eocdOffset + 8)).toBe(entryCount);
+  const centralSize = uint32(archive, eocdOffset + 12);
+  const centralOffset = uint32(archive, eocdOffset + 16);
+  expect(centralOffset + centralSize).toBe(eocdOffset);
+
+  const entries = new Map<string, ZipEntry>();
+  let offset = centralOffset;
+  for (let i = 0; i < entryCount; ++i) {
+    expect(uint32(archive, offset)).toBe(0x02014b50);
+    const flags = uint16(archive, offset + 8);
+    const method = uint16(archive, offset + 10);
+    const crc = uint32(archive, offset + 16);
+    const compressedSize = uint32(archive, offset + 20);
+    const uncompressedSize = uint32(archive, offset + 24);
+    const nameLength = uint16(archive, offset + 28);
+    const extraLength = uint16(archive, offset + 30);
+    const commentLength = uint16(archive, offset + 32);
+    const localOffset = uint32(archive, offset + 42);
+    const name = decoder.decode(archive.subarray(offset + 46, offset + 46 + nameLength));
+
+    expect(uint32(archive, localOffset)).toBe(0x04034b50);
+    expect(uint16(archive, localOffset + 6)).toBe(flags);
+    expect(uint16(archive, localOffset + 8)).toBe(method);
+    expect(uint16(archive, localOffset + 10)).toBe(0);
+    expect(uint16(archive, localOffset + 12)).toBe(33);
+    expect(uint32(archive, localOffset + 14)).toBe(0);
+    expect(uint32(archive, localOffset + 18)).toBe(0);
+    expect(uint32(archive, localOffset + 22)).toBe(0);
+    const localNameLength = uint16(archive, localOffset + 26);
+    const localExtraLength = uint16(archive, localOffset + 28);
+    expect(decoder.decode(archive.subarray(localOffset + 30, localOffset + 30 + localNameLength))).toBe(name);
+
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = archive.subarray(dataOffset, dataOffset + compressedSize);
+    const descriptorOffset = dataOffset + compressedSize;
+    expect(uint32(archive, descriptorOffset)).toBe(0x08074b50);
+    expect(uint32(archive, descriptorOffset + 4)).toBe(crc);
+    expect(uint32(archive, descriptorOffset + 8)).toBe(compressedSize);
+    expect(uint32(archive, descriptorOffset + 12)).toBe(uncompressedSize);
+
+    const bytes = await inflate(compressed);
+    expect(bytes.byteLength).toBe(uncompressedSize);
+    expect(crc32(bytes)).toBe(crc);
+    entries.set(name, {bytes, compressedSize, crc, flags, localOffset, method, uncompressedSize});
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  expect(offset).toBe(eocdOffset);
+  return {archive, entries};
+}
+
+function text(entries: Map<string, ZipEntry>, name: string): string {
+  const entry = entries.get(name);
+  expect(entry, name).toBeDefined();
+  return decoder.decode(entry!.bytes);
+}
+
+function cell(value: unknown, fmt: Record<string, unknown> | null = null) {
+  return {value, fmt, version: 1};
+}
+
+function sheet(name: string, extra: Record<string, unknown> = {}) {
+  return {
+    id: name,
+    name,
+    rows: 100,
+    cols: 26,
+    colWidths: {},
+    rowHeights: {},
+    frozenRows: 0,
+    frozenCols: 0,
+    ...extra,
+  };
+}
+
+function cellXml(xml: string, reference: string): string {
+  const match = new RegExp(`<c r="${reference}"[^>]*?/>|<c r="${reference}"[^>]*>[\\s\\S]*?</c>`).exec(xml);
+  expect(match, reference).not.toBeNull();
+  return match![0];
+}
+
+function styleId(xml: string, reference: string): string | undefined {
+  return / s="(\d+)"/.exec(cellXml(xml, reference))?.[1];
+}
+
+function handler(): ExportHandler {
+  return Object.create(ExportHandler.prototype) as ExportHandler;
+}
+
+describe("streaming ZIP32", () => {
+  it("calculates CRC32 and emits valid descriptor-based deflate entries", async () => {
+    expect(crc32(encoder.encode("123456789"))).toBe(0xcbf43926);
+    const chunks = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("streamed "));
+        controller.enqueue(encoder.encode("content"));
+        controller.close();
+      },
+    });
+
+    const {entries} = await readZip(createZip([
+      {name: "plain.txt", data: "hello"},
+      {name: "nested/utf8-\u2603.txt", data: chunks},
+    ]));
+
+    expect([...entries.keys()]).toEqual(["plain.txt", "nested/utf8-\u2603.txt"]);
+    expect(text(entries, "plain.txt")).toBe("hello");
+    expect(text(entries, "nested/utf8-\u2603.txt")).toBe("streamed content");
+    for (const entry of entries.values()) {
+      expect(entry.flags).toBe(0x0808);
+      expect(entry.method).toBe(8);
+      expect(entry.compressedSize).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("Workspace Sheets XLSX", () => {
+  it("emits the required OOXML package and a valid blank worksheet for malformed state", async () => {
+    for (const document of [{}, {sheetOrder: ["empty"], sheets: {empty: sheet("")}, cells: {empty: {}}}]) {
+      const {entries} = await readZip(workbookToXlsx(document));
+      expect([...entries.keys()]).toEqual([
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/styles.xml",
+        "xl/worksheets/sheet1.xml",
+      ]);
+      expect(text(entries, "[Content_Types].xml")).toContain("spreadsheetml.sheet.main+xml");
+      expect(text(entries, "_rels/.rels")).toContain('Target="xl/workbook.xml"');
+      expect(text(entries, "xl/_rels/workbook.xml.rels")).toContain('Target="worksheets/sheet1.xml"');
+      expect(text(entries, "xl/_rels/workbook.xml.rels")).toContain('Target="styles.xml"');
+      expect(text(entries, "xl/workbook.xml")).toContain('<sheet name="Sheet" sheetId="1" r:id="rId1"/>');
+      expect(text(entries, "xl/worksheets/sheet1.xml")).toContain("<sheetData></sheetData>");
+    }
+  });
+
+  it("preserves sheet order, normalizes names, and rewrites recognized formula references", async () => {
+    const longName = "This worksheet name is substantially longer than Excel permits";
+    const document = {
+      sheetOrder: ["a", "b", "c", "d", "e", "f"],
+      sheets: {
+        a: sheet("Sales/Data"),
+        b: sheet("sales_data"),
+        c: sheet("Sales/Data"),
+        d: sheet(longName),
+        e: sheet("   "),
+        f: sheet("History"),
+      },
+      cells: {
+        a: {A1: cell("1")},
+        b: {A1: cell("2")},
+        c: {A1: cell('=\'Sales/Data\'!A1+sales_data!$A$1+"Sales/Data!A1"+History!A1')},
+        d: {},
+        e: {},
+        f: {A1: cell("3")},
+      },
+    };
+    const {entries} = await readZip(workbookToXlsx(document));
+    const workbook = text(entries, "xl/workbook.xml");
+    const names = [...workbook.matchAll(/<sheet name="([^"]*)"/g)].map(match => match[1]);
+    expect(names).toEqual([
+      "Sales_Data",
+      "sales_data (2)",
+      "Sales_Data (3)",
+      longName.slice(0, 31),
+      "Sheet",
+      "History_",
+    ]);
+    const formulaCell = cellXml(text(entries, "xl/worksheets/sheet3.xml"), "A1");
+    expect(formulaCell).toContain('<f>\'Sales_Data\'!A1+\'sales_data (2)\'!$A$1+"Sales/Data!A1"+\'History_\'!A1</f>');
+    expect(formulaCell).not.toContain("<v>");
+    expect(workbook).toContain('<calcPr calcId="0" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>');
+  });
+
+  it("exports sparse typed cells safely and preserves dimensions and a combined frozen pane", async () => {
+    const unusual = "_x0041_" + String.fromCharCode(1, 0xd800, 13) + String.fromCodePoint(0x1f642);
+    const document = {
+      sheetOrder: ["data"],
+      sheets: {
+        data: sheet("Data", {
+          rows: 10,
+          cols: 12,
+          colWidths: {0: 100, 10: 2000, 11: 92, 12: 150},
+          rowHeights: {1: 40, 9: 2000, 10: 80},
+          frozenRows: 2,
+          frozenCols: 3,
+        }),
+      },
+      cells: {
+        data: {
+          A1: cell('  <&>" \t\n'),
+          B1: cell(unusual),
+          C1: cell('=HYPERLINK("https://example.com","Example")'),
+          D1: cell("'001"),
+          E1: cell(" true "),
+          F1: cell("FALSE"),
+          G1: cell("+$1,234.50"),
+          H1: cell("-12.5%"),
+          I1: cell("42", {nf: "text"}),
+          J1: cell("https://example.com"),
+          K1: cell("==A1"),
+          L1: cell("2026-09-02", {nf: "date"}),
+          A10: cell('="_x0041_"'),
+          B10: cell("=A1", {nf: "text"}),
+          C10: cell("last"),
+          D10: cell("=[Book.xlsx]Data!A1+Jan:Data!A1"),
+          E10: cell("   "),
+          Z1: cell("outside declared columns"),
+          A11: cell("outside declared rows"),
+          A0: cell("bad"),
+          a1: cell("bad"),
+          XFE1: cell("outside Excel"),
+        },
+      },
+    };
+    const {entries} = await readZip(workbookToXlsx(document));
+    const xml = text(entries, "xl/worksheets/sheet1.xml");
+
+    expect(xml).toContain('<dimension ref="A1:L10"/>');
+    expect(xml).toContain('<sheetFormatPr defaultColWidth="12.4296875" defaultRowHeight="18"/>');
+    expect(xml).toContain('<col min="1" max="1" width="13.5703125" customWidth="1"/>');
+    expect(xml).toContain('<col min="11" max="11" width="255" customWidth="1"/>');
+    expect(xml).toContain('<row r="2" ht="30" customHeight="1">');
+    expect(xml).toContain('<row r="10" ht="409" customHeight="1">');
+    expect(xml).toContain('<pane xSplit="3" ySplit="2" topLeftCell="D3" activePane="bottomRight" state="frozen"/>');
+    expect(cellXml(xml, "A1")).toContain('<t xml:space="preserve">  &lt;&amp;&gt;" \t\n</t>');
+    expect(cellXml(xml, "B1")).toContain("_x005F_x0041__x0001__xFFFD__x000D_");
+    expect(cellXml(xml, "B1")).toContain(String.fromCodePoint(0x1f642));
+    expect(cellXml(xml, "C1")).toContain('<f>HYPERLINK("https://example.com","Example")</f>');
+    expect(cellXml(xml, "D1")).toContain(">001</t>");
+    expect(cellXml(xml, "E1")).toContain('t="b"><v>1</v>');
+    expect(cellXml(xml, "F1")).toContain('t="b"><v>0</v>');
+    expect(cellXml(xml, "G1")).toContain("<v>1234.5</v>");
+    expect(cellXml(xml, "H1")).toContain("<v>-0.125</v>");
+    expect(cellXml(xml, "I1")).toContain('t="inlineStr"');
+    expect(cellXml(xml, "J1")).toContain('t="inlineStr"');
+    expect(cellXml(xml, "K1")).toContain("<f>=A1</f>");
+    expect(cellXml(xml, "L1")).toContain('t="inlineStr"');
+    expect(cellXml(xml, "A10")).toContain('<f>"_x0041_"</f>');
+    expect(cellXml(xml, "B10")).toContain('<t xml:space="preserve">=A1</t>');
+    expect(cellXml(xml, "D10")).toContain("<f>[Book.xlsx]Data!A1+Jan:Data!A1</f>");
+    expect(cellXml(xml, "E10")).toBe('<c r="E10"/>');
+    for (const reference of ["Z1", "A11", "A0", "a1", "XFE1"]) expect(xml).not.toContain(`r="${reference}"`);
+  });
+
+  it("deduplicates styles while supporting every format field and number-format category", async () => {
+    const formats = {
+      A1: {b: true}, B1: {i: true}, C1: {u: true}, D1: {s: true},
+      E1: {c: "#abc"}, F1: {bg: "#1234"}, G1: {a: "c"}, H1: {nf: "number", d: 3},
+      I1: {fs: 18}, J1: {wrap: true}, K1: {nf: "text"}, L1: {nf: "integer"},
+      M1: {nf: "currency"}, N1: {nf: "percent"}, O1: {nf: "scientific"},
+      P1: {nf: "date"}, Q1: {nf: "time"}, R1: {nf: "datetime"},
+      S1: {nf: "unknown"}, T1: {d: 4},
+    };
+    const cells: Record<string, ReturnType<typeof cell>> = {};
+    for (const [reference, fmt] of Object.entries(formats)) cells[reference] = cell("1", fmt);
+    const repeated = {b: true, bg: "#112233", a: "r"};
+    cells.A2 = cell("same", repeated);
+    cells.B2 = cell("same", {...repeated});
+    cells.C2 = cell("", {...repeated});
+    cells.D2 = cell("eight digit", {c: "#abcdef12"});
+
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["styles"],
+      sheets: {styles: sheet("Styles", {rows: 2, cols: 20})},
+      cells: {styles: cells},
+    }));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+    const styles = text(entries, "xl/styles.xml");
+
+    expect(styles).toContain("<b/>");
+    expect(styles).toContain("<i/>");
+    expect(styles).toContain("<u/>");
+    expect(styles).toContain("<strike/>");
+    expect(styles).toContain('rgb="FFAABBCC"');
+    expect(styles).toContain('rgb="44112233"');
+    expect(styles).toContain('rgb="FF112233"');
+    expect(styles).toContain('rgb="12ABCDEF"');
+    expect(styles).toContain('horizontal="center"');
+    expect(styles).toContain('horizontal="right"');
+    expect(styles).toContain('wrapText="1"');
+    expect(styles).toContain('<sz val="18"/>');
+    for (const code of [
+      "#,##0.000", "#,##0", '&quot;$&quot;#,##0.00;-&quot;$&quot;#,##0.00',
+      "0.00%", "0.00E+00", "mm/dd/yyyy", "h:mm:ss AM/PM",
+      "mm/dd/yyyy h:mm:ss AM/PM", "0.0000",
+    ]) expect(styles).toContain(`formatCode="${code}"`);
+    expect(styleId(worksheet, "S1")).toBeUndefined();
+    expect(styleId(worksheet, "A2")).toBe(styleId(worksheet, "B2"));
+    expect(styleId(worksheet, "B2")).toBe(styleId(worksheet, "C2"));
+    expect(cellXml(worksheet, "C2")).toMatch(/^<c r="C2" s="\d+"\/>$/);
+  });
+
+  it("writes row-only, column-only, and combined frozen panes", async () => {
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["rows", "columns", "both"],
+      sheets: {
+        rows: sheet("Rows", {frozenRows: 2}),
+        columns: sheet("Columns", {frozenCols: 3}),
+        both: sheet("Both", {frozenRows: 4, frozenCols: 5}),
+      },
+      cells: {rows: {}, columns: {}, both: {}},
+    }));
+    expect(text(entries, "xl/worksheets/sheet1.xml")).toContain('ySplit="2" topLeftCell="A3" activePane="bottomLeft"');
+    expect(text(entries, "xl/worksheets/sheet2.xml")).toContain('xSplit="3" topLeftCell="D1" activePane="topRight"');
+    expect(text(entries, "xl/worksheets/sheet3.xml")).toContain('xSplit="5" ySplit="4" topLeftCell="F5" activePane="bottomRight"');
+  });
+
+  it("fails clearly before generating more fill styles than Excel supports", () => {
+    const cells: Record<string, ReturnType<typeof cell>> = {};
+    for (let index = 0; index < 255; ++index) {
+      const reference = String.fromCharCode(65 + index % 26) + (Math.floor(index / 26) + 1);
+      cells[reference] = cell("", {bg: `#${index.toString(16).padStart(6, "0")}`});
+    }
+    expect(() => workbookToXlsx({
+      sheetOrder: ["styles"],
+      sheets: {styles: sheet("Styles", {rows: 10, cols: 26})},
+      cells: {styles: cells},
+    })).toThrow("XLSX fill count exceeds Excel's limit of 256");
+  });
+
+  it("ignores v5-only metadata while exporting ordinary and materialized pivot cells", async () => {
+    const document = {
+      sheetOrder: ["v5"],
+      sheets: {
+        v5: {
+          ...sheet("V5"),
+          filter: {range: "A1:B4"},
+          charts: [{type: "bar"}],
+          comments: {A1: "note"},
+          pivot: {source: "A1:B4", destination: "D1"},
+        },
+      },
+      cells: {
+        v5: {
+          A1: {...cell("ordinary"), comment: "ignored"},
+          D1: cell("Pivot total", {b: true}),
+          D2: cell("125"),
+        },
+      },
+      filter: {},
+      charts: [],
+      comments: {},
+      pivot: {},
+    };
+    const {entries} = await readZip(workbookToXlsx(document));
+    const worksheet = text(entries, "xl/worksheets/sheet1.xml");
+    expect(cellXml(worksheet, "A1")).toContain("ordinary");
+    expect(cellXml(worksheet, "D1")).toContain("Pivot total");
+    expect(cellXml(worksheet, "D2")).toContain("<v>125</v>");
+    expect(worksheet).not.toContain("autoFilter");
+    expect([...entries.keys()].some(name => /chart|comment|pivot/i.test(name))).toBe(false);
+  });
+});
+
+describe("Workspace Sheets export formats", () => {
+  it("reserves one of 32 slots for XLSX and applies the same CSV eligibility rules at export", async () => {
+    const ids = Array.from({length: 40}, (_, index) => `sheet-${index}`);
+    const longId = "x".repeat(125);
+    const sheetOrder = [ids[0], ids[0], "missing", longId, ...ids.slice(1)];
+    const sheets = Object.fromEntries(ids.map(id => [id, sheet(id)]));
+    const document = {sheetOrder, sheets, cells: Object.fromEntries(ids.map(id => [id, {}]))};
+    const gadget = {getDocument: vi.fn(async () => document)};
+
+    const formats = await handler().getExportFormats(gadget as never);
+    expect(formats).toHaveLength(32);
+    expect(formats[0]).toEqual({
+      id: "xlsx",
+      label: "Excel Workbook",
+      mode: "server",
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      fileExtension: ".xlsx",
+    });
+    expect(new Set(formats.map(format => format.id)).size).toBe(32);
+    expect(formats.some(format => format.id === "csv:missing" || format.id === `csv:${longId}`)).toBe(false);
+    await expect(handler().export(gadget as never, "csv:missing")).rejects.toThrow("unavailable");
+  });
+
+  it("retains raw-value CSV behavior and materializes state before returning an XLSX stream", async () => {
+    const document = {
+      sheetOrder: ["one"],
+      sheets: {one: sheet("One", {rows: 2, cols: 3})},
+      cells: {one: {
+        A1: cell("a,b"),
+        C1: cell('say "hi"'),
+        B2: cell("=SUM(A1:A2)"),
+      }},
+    };
+    const gadget = {getDocument: vi.fn(async () => document)};
+    const csv = await handler().export(gadget as never, "csv:one");
+    expect(await new Response(csv).text()).toBe('"a,b",,"say ""hi"""\r\n,=SUM(A1:A2),\r\n');
+
+    const xlsx = await handler().export(gadget as never, "xlsx");
+    expect(gadget.getDocument).toHaveBeenCalledTimes(2);
+    gadget.getDocument.mockImplementation(async () => { throw new Error("borrowed capability reused"); });
+    const {entries} = await readZip(xlsx);
+    expect(cellXml(text(entries, "xl/worksheets/sheet1.xml"), "B2")).toContain("<f>SUM(A1:A2)</f>");
+  });
+});

@@ -16,6 +16,7 @@ A lightweight, persistent spreadsheet Gadget with a familiar grid interface, for
 - Range sorting, AutoSum, copy/paste via TSV, and local undo/redo for cell edits
 - Automatic persistent saving with optimistic per-cell conflict detection
 - Real-time operation and presence synchronization in the server architecture
+- Excel workbook and per-sheet CSV export
 
 ## Using the spreadsheet
 
@@ -178,6 +179,14 @@ Exports the Durable Object class `Gadget`, which is the authoritative persistenc
 - Uses last-writer-wins semantics for document structure
 - Broadcasts operations and presence events to subscribed clients
 - Sanitizes titles, dimensions, cell contents, references, and formatting
+- Advertises and produces the server-side workbook and CSV exports
+
+### `xlsx.js` and `zip.js`
+
+`xlsx.js` converts a complete document snapshot into a streaming XLSX workbook. It writes sparse
+worksheet XML with inline strings, deduplicated styles, frozen panes, and ordinary static cells for
+all materialized data. `zip.js` packages those parts with a dependency-free streaming ZIP32 writer,
+using raw DEFLATE, incremental CRC32 calculation, and data descriptors.
 
 ## Storage model
 
@@ -202,7 +211,34 @@ The server and client synchronization code support multiple connected clients an
 
 ## CSV export
 
-Each worksheet is exposed as its own **CSV** export option. CSV files contain the stored cell values
-through the worksheet's used range. Formula cells are exported as their raw formulas (for example,
-`=SUM(A1:A10)`), not as browser-computed display values. Fields use standard CSV quoting and CRLF
-line endings.
+Up to 31 eligible worksheets are exposed as individual **CSV** export options, leaving one of the
+platform's 32 format slots for XLSX. CSV files contain the stored cell values through the worksheet's
+used range. Formula cells are exported as their raw formulas (for example, `=SUM(A1:A10)`), not as
+browser-computed display values. Fields use standard CSV quoting and CRLF line endings.
+
+## XLSX export
+
+**Excel Workbook** exports one XLSX file containing the worksheets in workbook order. Sparse and
+style-only cells are preserved, along with the existing font, color, fill, alignment, number-format,
+decimal-place, wrapping, column-width, row-height, and frozen-pane metadata. Pixel dimensions are
+converted deterministically to points and approximate Excel character widths; they are not expected
+to be pixel-perfect across spreadsheet applications and font environments.
+
+XLSX literal conversion uses a leading apostrophe to force text and hide the apostrophe. Plain-text
+formatting also forces text, booleans are recognized case-insensitively, and supported numeric
+literals include signs, commas, a leading dollar sign, and a trailing percent sign. Date- or
+time-looking text is not parsed; an existing numeric serial receives the requested date/time number
+format. Plain URLs remain text. Values beginning with `=`, including `HYPERLINK()` formulas, are
+written as formulas with no cached result or server-side evaluation. The workbook requests automatic
+full recalculation when opened. Formula support is not claimed to be fully compatible with Excel.
+
+Worksheet names are made Excel-safe during export: invalid characters are replaced, blank names use
+`Sheet`, names are limited to 31 characters, and case-insensitive collisions receive numeric
+suffixes. Recognizable quoted and unquoted cross-sheet references outside formula string literals are
+rewritten to those exported names. When source names are duplicated, references continue to resolve
+to the first matching worksheet, matching the grid's current behavior.
+
+The optional v5 `filter`, `charts`, `comments`, and `pivot` metadata is ignored safely. Materialized
+pivot results already present in the cell map export as ordinary static cells. Native Excel filters,
+filtered-row visibility, charts, comments or notes, native or refreshable pivot tables, and external
+hyperlink relationships for plain URLs are intentionally deferred.

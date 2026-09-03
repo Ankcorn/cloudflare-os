@@ -1,4 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { workbookToXlsx } from "./xlsx.js";
 
 const DEFAULT_TITLE = "Untitled spreadsheet";
 const DEFAULT_ROWS = 100;
@@ -324,28 +325,57 @@ function sanitizeCellMap(map) {
 
 
 const CSV_FORMAT_PREFIX = "csv:";
-const MAX_CSV_SHEETS = 32;
+const MAX_CSV_SHEETS = 31;
+const MAX_EXPORT_ID_LENGTH = 128;
+const XLSX_FORMAT = {
+  id: "xlsx",
+  label: "Excel Workbook",
+  mode: "server",
+  contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  fileExtension: ".xlsx",
+};
+
+function eligibleCsvSheetIds(document) {
+  const result = [];
+  const seen = new Set();
+  const order = Array.isArray(document?.sheetOrder) ? document.sheetOrder : [];
+  const sheets = document?.sheets && typeof document.sheets === "object" ? document.sheets : {};
+  for (const rawId of order) {
+    const sheetId = String(rawId);
+    if (seen.has(sheetId)) continue;
+    seen.add(sheetId);
+    if (!Object.hasOwn(sheets, sheetId) || !sheets[sheetId] || typeof sheets[sheetId] !== "object") continue;
+    if ((CSV_FORMAT_PREFIX + sheetId).length > MAX_EXPORT_ID_LENGTH) continue;
+    result.push(sheetId);
+    if (result.length === MAX_CSV_SHEETS) break;
+  }
+  return result;
+}
 
 export class ExportHandler extends WorkerEntrypoint {
   async getExportFormats(gadget) {
     const document = await gadget.getDocument();
-    const sheetIds = document.sheetOrder.slice(0, MAX_CSV_SHEETS);
-    return sheetIds.map((sheetId) => ({
+    const sheetIds = eligibleCsvSheetIds(document);
+    return [XLSX_FORMAT, ...sheetIds.map((sheetId) => ({
       id: CSV_FORMAT_PREFIX + sheetId,
-      label: sheetIds.length === 1 ? "CSV" : "CSV (" + document.sheets[sheetId].name + ")",
+      label: sheetIds.length === 1 ? "CSV" : "CSV (" + String(document.sheets[sheetId].name || "Sheet").slice(0, 122) + ")",
       mode: "server",
       contentType: "text/csv",
       fileExtension: ".csv",
-    }));
+    }))];
   }
 
   async export(gadget, id) {
+    if (id === XLSX_FORMAT.id) {
+      const document = await gadget.getDocument();
+      return workbookToXlsx(document);
+    }
     if (!id.startsWith(CSV_FORMAT_PREFIX)) {
       throw new Error("Unsupported spreadsheet export format: " + id);
     }
     const document = await gadget.getDocument();
     const sheetId = id.slice(CSV_FORMAT_PREFIX.length);
-    if (!document.sheetOrder.slice(0, MAX_CSV_SHEETS).includes(sheetId)) {
+    if (!eligibleCsvSheetIds(document).includes(sheetId)) {
       throw new Error("The selected worksheet is unavailable for CSV export.");
     }
     return new Response(workbookSheetToCsv(document, sheetId)).body;
@@ -353,7 +383,7 @@ export class ExportHandler extends WorkerEntrypoint {
 }
 
 function workbookSheetToCsv(document, sheetId) {
-  const cells = document.cells[sheetId] || {};
+  const cells = document.cells?.[sheetId] || {};
   let maxRow = -1;
   let maxColumn = -1;
   for (const [ref, cell] of Object.entries(cells)) {
