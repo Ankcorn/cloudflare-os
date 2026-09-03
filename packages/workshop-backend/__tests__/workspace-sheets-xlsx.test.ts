@@ -179,7 +179,7 @@ describe("Workspace Sheets XLSX", () => {
   it("preserves sheet order, normalizes names, and rewrites recognized formula references", async () => {
     const longName = "This worksheet name is substantially longer than Excel permits";
     const document = {
-      sheetOrder: ["a", "b", "c", "d", "e", "f", "g", "h"],
+      sheetOrder: ["a", "a", "b", "c", "d", "e", "f", "g", "h", "i"],
       sheets: {
         a: sheet("Sales/Data"),
         b: sheet("sales_data"),
@@ -189,19 +189,22 @@ describe("Workspace Sheets XLSX", () => {
         f: sheet("History"),
         g: sheet("O'Brien"),
         h: sheet("[Book.xlsx]Data"),
+        i: sheet("Q[1]"),
       },
       cells: {
         a: {A1: cell("1")},
         b: {A1: cell("2")},
         c: {
           A1: cell('=\'Sales/Data\'!A1+sales_data!$A$1+"Sales/Data!A1"+History!A1+\'O\'\'Brien\'!A1'),
-          A2: cell("='[Book.xlsx]Data'!A1+'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1"),
+          A2: cell("='[Book.xlsx]Data'!A1+[Other.xlsx]'Sales/Data'!A1+'Q[1]'!A1+" +
+              "'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1"),
         },
         d: {},
         e: {},
         f: {A1: cell("3")},
         g: {A1: cell("4")},
         h: {A1: cell("5")},
+        i: {A1: cell("6")},
       },
     };
     const {entries} = await readZip(workbookToXlsx(document));
@@ -216,13 +219,15 @@ describe("Workspace Sheets XLSX", () => {
       "History_",
       "O&apos;Brien",
       "_Book.xlsx_Data",
+      "Q_1_",
     ]);
     const worksheet = text(entries, "xl/worksheets/sheet3.xml");
     const formulaCell = cellXml(worksheet, "A1");
     expect(formulaCell).toContain('<f>\'Sales_Data\'!A1+\'sales_data (2)\'!$A$1+"Sales/Data!A1"+\'History_\'!A1+\'O\'\'Brien\'!A1</f>');
     expect(formulaCell).not.toContain("<v>");
     expect(cellXml(worksheet, "A2")).toContain(
-        "<f>'[Book.xlsx]Data'!A1+'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1</f>");
+        "<f>'_Book.xlsx_Data'!A1+[Other.xlsx]'Sales/Data'!A1+'Q_1_'!A1+" +
+        "'Sales/Data':'History'!A1+'Missing'!A1+'Sales/Data'!NOPE+foo'Sales/Data'!A1</f>");
     expect(workbook).toContain('<calcPr calcId="0" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>');
   });
 
@@ -253,6 +258,46 @@ describe("Workspace Sheets XLSX", () => {
 
     expect(cellXml(text(entries, "xl/worksheets/sheet2.xml"), "A1"))
       .toContain(`<f>${value.slice(1)}</f>`);
+  });
+
+  it("prefixes OOXML future functions without changing strings, sheet references, or existing prefixes", async () => {
+    const calls = [
+      "IFS(TRUE,1)", "IFNA(A1,0)", "XOR(TRUE,FALSE)", "SWITCH(1,1,1)",
+      'CONCAT("a","b")', 'TEXTJOIN(",",TRUE,A1)', "UNICHAR(65)", "UNICODE(A1)", "DAYS(2,1)",
+    ];
+    const suffix = '+"CONCAT("+CONCAT!A1+_xlfn.CONCAT(A1)+Table1[IFS(A1)]+Table1[CONCAT!A1]';
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["concat", "formulas"],
+      sheets: {concat: sheet("CONCAT"), formulas: sheet("Formulas")},
+      cells: {concat: {A1: cell("value")}, formulas: {A1: cell("=" + calls.join("+") + suffix)}},
+    }));
+    const expected = calls.map(call => "_xlfn." + call).join("+") + suffix;
+
+    expect(cellXml(text(entries, "xl/worksheets/sheet2.xml"), "A1"))
+      .toContain(`<f>${expected}</f>`);
+  });
+
+  it("tracks apostrophe-escaped brackets in structured references", async () => {
+    const value = "=Table1[[A'[B]]+IFS(TRUE,1)+Table1[[A']B]]+CONCAT(A1)+Table1[[A'']]+XOR(TRUE,FALSE)";
+    const {entries} = await readZip(workbookToXlsx({
+      sheetOrder: ["data"],
+      sheets: {data: sheet("Data")},
+      cells: {data: {A1: cell(value)}},
+    }));
+
+    expect(cellXml(text(entries, "xl/worksheets/sheet1.xml"), "A1"))
+      .toContain("<f>Table1[[A'[B]]+_xlfn.IFS(TRUE,1)+Table1[[A']B]]+_xlfn.CONCAT(A1)+Table1[[A'']]+_xlfn.XOR(TRUE,FALSE)</f>");
+  });
+
+  it("prepares large duplicate sheet-name lists without quadratic suffix searches", async () => {
+    const sheetIds = Array.from({length: 15000}, (_, index) => `sheet-${index}`);
+    const metadata = Object.fromEntries(sheetIds.map((id, index) => [
+      id,
+      sheet("x".repeat(27) + Math.floor(index / 2).toString(36).padStart(4, "0")),
+    ]));
+    const stream = workbookToXlsx({sheetOrder: sheetIds, sheets: metadata, cells: {}});
+
+    await stream.cancel();
   });
 
   it("exports sparse typed cells safely and preserves dimensions and a combined frozen pane", async () => {
@@ -498,6 +543,141 @@ describe("Workspace Sheets document snapshots", () => {
     await expect(read).resolves.toEqual({revision: 1});
     await expect(write).resolves.toEqual({status: "applied"});
     expect(order).toEqual(["read started", "read completed", "write started", "write completed"]);
+  });
+
+  it("allows subscriber callbacks to read the committed document without deadlocking", async () => {
+    const backgroundTasks: Promise<unknown>[] = [];
+    const stored = new Map<string, unknown>([
+      ["meta", {
+        revision: 0,
+        title: "Test",
+        sheetOrder: ["sheet"],
+        sheets: {sheet: sheet("Sheet")},
+        lastModified: 0,
+      }],
+      ["cells:sheet", {}],
+    ]);
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      ctx: {
+        waitUntil: (task: Promise<unknown>) => { backgroundTasks.push(task); },
+        storage: {
+          get: async (key: string) => stored.get(key),
+          put: async (key: string, value: unknown) => { stored.set(key, value); },
+          delete: async (key: string) => stored.delete(key),
+        },
+      },
+      mutationQueue: Promise.resolve(),
+      broadcastQueue: Promise.resolve(),
+      subscribers: new Map(),
+    });
+    let callbackDocument: any;
+    const subscriber = {
+      operation: vi.fn(async () => { callbackDocument = await fixture.getDocument(); }),
+    };
+    fixture.subscribers.set(subscriber, {});
+
+    const result = await fixture.applyOperation({
+      senderId: "test",
+      cellOps: [{sheetId: "sheet", ref: "A1", value: "committed", fmt: null, baseVersion: 0}],
+    });
+    await Promise.all(backgroundTasks);
+
+    expect(result.status).toBe("applied");
+    expect(subscriber.operation).toHaveBeenCalledOnce();
+    expect(callbackDocument.revision).toBe(1);
+    expect(callbackDocument.cells.sheet.A1.value).toBe("committed");
+  });
+
+  it("dispatches broadcasts in revision order without waiting for callbacks", async () => {
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>(resolve => { markFirstStarted = resolve; });
+    const order: string[] = [];
+    const backgroundTasks: Promise<unknown>[] = [];
+    let revision = 0;
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      ctx: {waitUntil: vi.fn((task: Promise<unknown>) => { backgroundTasks.push(task); })},
+      mutationQueue: Promise.resolve(),
+      broadcastQueue: Promise.resolve(),
+      applyOperationLocked: vi.fn(async () => ({
+        status: "applied",
+        type: "operation",
+        revision: ++revision,
+        conflicts: [],
+      })),
+      broadcast: vi.fn(async (event: {revision: number}) => {
+        order.push(`broadcast ${event.revision} started`);
+        if (event.revision === 1) {
+          markFirstStarted();
+          await firstReleased;
+        }
+        order.push(`broadcast ${event.revision} completed`);
+      }),
+    });
+
+    const first = fixture.applyOperation({});
+    await firstStarted;
+    const second = fixture.applyOperation({});
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      "broadcast 1 started",
+      "broadcast 2 started",
+      "broadcast 2 completed",
+    ]);
+
+    releaseFirst();
+    await Promise.all(backgroundTasks);
+    expect(order).toEqual([
+      "broadcast 1 started",
+      "broadcast 2 started",
+      "broadcast 2 completed",
+      "broadcast 1 completed",
+    ]);
+    expect(fixture.ctx.waitUntil).toHaveBeenCalledTimes(2);
+    for (const [event] of fixture.broadcast.mock.calls) {
+      expect(event).not.toHaveProperty("status");
+      expect(event).not.toHaveProperty("conflicts");
+    }
+  });
+
+  it("allows subscriber callbacks to apply another operation without deadlocking", async () => {
+    let markNestedBroadcast!: () => void;
+    const nestedBroadcast = new Promise<void>(resolve => { markNestedBroadcast = resolve; });
+    let revision = 0;
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      ctx: {waitUntil: vi.fn()},
+      mutationQueue: Promise.resolve(),
+      broadcastQueue: Promise.resolve(),
+      applyOperationLocked: vi.fn(async () => ({
+        status: "applied",
+        type: "operation",
+        revision: ++revision,
+        conflicts: [],
+      })),
+      broadcast: vi.fn(async (event: {revision: number}) => {
+        if (event.revision === 1) await fixture.applyOperation({nested: true});
+        else markNestedBroadcast();
+      }),
+    });
+
+    await fixture.applyOperation({});
+    await nestedBroadcast;
+    expect(fixture.ctx.waitUntil).toHaveBeenCalledTimes(2);
+    expect(fixture.broadcast.mock.calls.map(([event]: [{revision: number}]) => event.revision))
+      .toEqual([1, 2]);
+  });
+
+  it("continues broadcasting after a subscriber throws synchronously", async () => {
+    const failed = {operation: vi.fn(() => { throw new Error("broken"); })};
+    const healthy = {operation: vi.fn()};
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      subscribers: new Map([[failed, {}], [healthy, {}]]),
+    });
+
+    await fixture.broadcast({revision: 1});
+    expect(fixture.subscribers.has(failed)).toBe(false);
+    expect(healthy.operation).toHaveBeenCalledWith({revision: 1});
   });
 });
 

@@ -24,6 +24,7 @@ export class Gadget extends DurableObject {
     // Overlapping RPC calls are serialized so each observes/commits one
     // authoritative state in strict order.
     this.mutationQueue = Promise.resolve();
+    this.broadcastQueue = Promise.resolve();
   }
 
   enqueueMutation(fn) {
@@ -76,8 +77,19 @@ export class Gadget extends DurableObject {
       this.assembleDocument(await this.loadMeta()));
   }
 
-  applyOperation(operation) {
-    return this.enqueueMutation(() => this.applyOperationLocked(operation));
+  async applyOperation(operation) {
+    const result = await this.enqueueMutation(() => this.applyOperationLocked(operation));
+    if (result.type === "operation") {
+      const event = {...result};
+      delete event.status;
+      delete event.conflicts;
+      const dispatch = this.broadcastQueue.then(() => {
+        this.ctx.waitUntil(this.broadcast(event));
+      });
+      this.broadcastQueue = dispatch.catch(() => {});
+      await dispatch;
+    }
+    return result;
   }
 
   async applyOperationLocked(operation) {
@@ -195,8 +207,6 @@ export class Gadget extends DurableObject {
       event.replacedCells = {};
       for (const id of event.replacedSheets) event.replacedCells[id] = await this.loadCells(id);
     }
-    await this.broadcast(event);
-
     return { status: conflicts.length ? "conflict" : "applied", ...event, conflicts };
   }
 
@@ -246,7 +256,7 @@ export class Gadget extends DurableObject {
   async broadcast(event) {
     const calls = [];
     for (const [stub] of this.subscribers) {
-      calls.push(Promise.resolve(stub.operation(event)).catch(() => this.subscribers.delete(stub)));
+      calls.push(Promise.resolve().then(() => stub.operation(event)).catch(() => this.subscribers.delete(stub)));
     }
     await Promise.all(calls);
   }
@@ -254,7 +264,7 @@ export class Gadget extends DurableObject {
   async broadcastPresence(event) {
     const calls = [];
     for (const [stub] of this.subscribers) {
-      calls.push(Promise.resolve(stub.presence(event)).catch(() => this.subscribers.delete(stub)));
+      calls.push(Promise.resolve().then(() => stub.presence(event)).catch(() => this.subscribers.delete(stub)));
     }
     await Promise.all(calls);
   }

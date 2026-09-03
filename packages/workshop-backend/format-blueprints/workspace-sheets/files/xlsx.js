@@ -14,6 +14,9 @@ const MAX_FONTS = 512;
 const MAX_FILLS = 256;
 const MAX_CELL_FORMATS = 65490;
 const TEXT_CHUNK_SIZE = 64 * 1024;
+const FUTURE_FUNCTIONS = new Set([
+  "CONCAT", "DAYS", "IFNA", "IFS", "SWITCH", "TEXTJOIN", "UNICHAR", "UNICODE", "XOR",
+]);
 
 function spreadsheetXml(value, attribute = false) {
   const input = String(value).replace(/_x[0-9a-f]{4}_/gi, (match) => "_x005F_" + match.slice(1));
@@ -134,12 +137,24 @@ function safeSheetName(value) {
 
 function assignSheetNames(sheets) {
   const used = new Set();
+  const nextSuffixes = new Map();
   for (const sheet of sheets) {
     const base = safeSheetName(sheet.sourceName);
     let name = base;
-    for (let suffix = 2; used.has(name.toLowerCase()); ++suffix) {
+    let suffix = 2;
+    while (used.has(name.toLowerCase())) {
+      const digits = String(suffix).length;
+      const stem = truncateSheetName(base, 28 - digits);
+      const key = `${stem.toLowerCase()}|${digits}`;
+      const next = nextSuffixes.get(key);
+      if (next != null && next > suffix) {
+        suffix = next;
+        continue;
+      }
       const ending = ` (${suffix})`;
-      name = truncateSheetName(base, 31 - ending.length) + ending;
+      name = stem + ending;
+      nextSuffixes.set(key, suffix + 1);
+      ++suffix;
     }
     used.add(name.toLowerCase());
     sheet.name = name;
@@ -333,11 +348,14 @@ class Styles {
 
 function sourceSheets(document) {
   const result = [];
+  const seen = new Set();
   const order = Array.isArray(document?.sheetOrder) ? document.sheetOrder : [];
   const sheetMap = document?.sheets && typeof document.sheets === "object" ? document.sheets : {};
   const cellMap = document?.cells && typeof document.cells === "object" ? document.cells : {};
   for (const rawId of order) {
     const id = String(rawId);
+    if (seen.has(id)) continue;
+    seen.add(id);
     const metadata = sheetMap[id];
     if (!metadata || typeof metadata !== "object") continue;
     result.push({
@@ -409,11 +427,11 @@ function quotedSheetReference(formula, offset, names) {
     const end = quoteEnd + (hasBang ? 1 : 0);
     const text = formula.slice(offset, end);
     const name = nameParts.join("");
+    const normalized = names.get(name.toLowerCase());
     const malformed = offset > 0 && /[A-Za-z0-9_.$]/.test(formula[offset - 1]);
-    const external = formula[offset - 1] === "]" || /\[[^\]]*\]/.test(name);
+    const external = formula[offset - 1] === "]" || (!normalized && /\[[^\]]*\]/.test(name));
     if (!hasBang || !formulaReferenceAt(formula, end) || malformed || external ||
         isThreeDimensionalReference(formula, offset)) return {end, text};
-    const normalized = names.get(name.toLowerCase());
     return normalized
       ? {end, text: `'${normalized.replace(/'/g, "''")}'!`}
       : {end, text};
@@ -445,9 +463,22 @@ function isThreeDimensionalReference(formula, offset) {
   return !/^\$?[A-Za-z]{1,3}\$?[1-9]\d*$/.test(preceding);
 }
 
+function futureFunctionAt(formula, offset) {
+  if (!/[A-Za-z_]/.test(formula[offset]) ||
+      (offset > 0 && /[A-Za-z0-9_.$]/.test(formula[offset - 1]))) return null;
+  let end = offset + 1;
+  while (end < formula.length && /[A-Za-z0-9_.]/.test(formula[end])) ++end;
+  const name = formula.slice(offset, end).toUpperCase();
+  if (!FUTURE_FUNCTIONS.has(name)) return null;
+  let parenthesis = end;
+  while (/\s/.test(formula[parenthesis])) ++parenthesis;
+  return formula[parenthesis] === "(" ? {end, text: "_xlfn." + name} : null;
+}
+
 function rewriteFormula(formula, names) {
   const result = [];
   let stringLiteral = false;
+  let structuredReferenceDepth = 0;
   for (let i = 0; i < formula.length;) {
     const character = formula[i];
     if (character === '"') {
@@ -462,9 +493,16 @@ function rewriteFormula(formula, names) {
       continue;
     }
     if (!stringLiteral) {
-      const reference = character === "'"
+      let apostrophes = 0;
+      if (structuredReferenceDepth && (character === "[" || character === "]")) {
+        for (let j = i - 1; formula[j] === "'"; --j) ++apostrophes;
+      }
+      const escapedBracket = apostrophes % 2 === 1;
+      if (character === "[" && !escapedBracket) ++structuredReferenceDepth;
+      else if (character === "]" && structuredReferenceDepth && !escapedBracket) --structuredReferenceDepth;
+      const reference = !structuredReferenceDepth && (futureFunctionAt(formula, i) || (character === "'"
         ? quotedSheetReference(formula, i, names)
-        : unquotedSheetReference(formula, i, names);
+        : unquotedSheetReference(formula, i, names)));
       if (reference) {
         result.push(reference.text);
         i = reference.end;
