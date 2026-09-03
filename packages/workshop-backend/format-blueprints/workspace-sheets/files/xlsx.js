@@ -396,6 +396,7 @@ function prepareWorkbook(document) {
       if (!hasValue && !style) continue;
       sheet.cells.push({reference, ...position, value: sourceCell.value == null ? "" : String(sourceCell.value), fmt, style});
     }
+    delete sheet.sourceCells;
     sheet.cells.sort((a, b) => a.row - b.row || a.column - b.column);
   }
   return {sheets, styles, formulaNames};

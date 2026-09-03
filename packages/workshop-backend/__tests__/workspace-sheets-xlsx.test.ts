@@ -643,7 +643,7 @@ describe("Workspace Sheets document snapshots", () => {
     expect(callbackDocument.cells.sheet.A1.value).toBe("committed");
   });
 
-  it("dispatches broadcasts in revision order without waiting for callbacks", async () => {
+  it("serializes broadcasts without holding operation responses", async () => {
     let releaseFirst!: () => void;
     let markFirstStarted!: () => void;
     const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
@@ -675,19 +675,15 @@ describe("Workspace Sheets document snapshots", () => {
     await firstStarted;
     const second = fixture.applyOperation({});
     await Promise.all([first, second]);
-    expect(order).toEqual([
-      "broadcast 1 started",
-      "broadcast 2 started",
-      "broadcast 2 completed",
-    ]);
+    expect(order).toEqual(["broadcast 1 started"]);
 
     releaseFirst();
     await Promise.all(backgroundTasks);
     expect(order).toEqual([
       "broadcast 1 started",
+      "broadcast 1 completed",
       "broadcast 2 started",
       "broadcast 2 completed",
-      "broadcast 1 completed",
     ]);
     expect(fixture.ctx.waitUntil).toHaveBeenCalledTimes(2);
     for (const [event] of fixture.broadcast.mock.calls) {

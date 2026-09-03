@@ -83,11 +83,9 @@ export class Gadget extends DurableObject {
       const event = {...result};
       delete event.status;
       delete event.conflicts;
-      const dispatch = this.broadcastQueue.then(() => {
-        this.ctx.waitUntil(this.broadcast(event));
-      });
-      this.broadcastQueue = dispatch.catch(() => {});
-      await dispatch;
+      const broadcast = this.broadcastQueue.then(() => this.broadcast(event));
+      this.broadcastQueue = broadcast.catch(() => {});
+      this.ctx.waitUntil(this.broadcastQueue);
     }
     return result;
   }
