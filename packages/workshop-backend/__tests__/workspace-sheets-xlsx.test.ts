@@ -493,7 +493,7 @@ describe("Workspace Sheets XLSX", () => {
     expect(styles).toContain('<sz val="18"/>');
     for (const code of [
       "#,##0.000", "#,##0", '&quot;$&quot;#,##0.00;-&quot;$&quot;#,##0.00',
-      "0.00%", "0.00E+00", "mm/dd/yyyy", "h:mm:ss AM/PM",
+      "#,##0.00%", "0.00E+00", "mm/dd/yyyy", "h:mm:ss AM/PM",
       "mm/dd/yyyy h:mm:ss AM/PM", "0.0000",
     ]) expect(styles).toContain(`formatCode="${code}"`);
     expect(styleId(worksheet, "S1")).toBeUndefined();
@@ -655,6 +655,7 @@ describe("Workspace Sheets document snapshots", () => {
       ctx: {waitUntil: vi.fn((task: Promise<unknown>) => { backgroundTasks.push(task); })},
       mutationQueue: Promise.resolve(),
       broadcastQueue: Promise.resolve(),
+      subscribers: new Map(),
       applyOperationLocked: vi.fn(async () => ({
         status: "applied",
         type: "operation",
@@ -700,6 +701,7 @@ describe("Workspace Sheets document snapshots", () => {
       ctx: {waitUntil: vi.fn()},
       mutationQueue: Promise.resolve(),
       broadcastQueue: Promise.resolve(),
+      subscribers: new Map(),
       applyOperationLocked: vi.fn(async () => ({
         status: "applied",
         type: "operation",
@@ -719,11 +721,136 @@ describe("Workspace Sheets document snapshots", () => {
       .toEqual([1, 2]);
   });
 
+  it("captures broadcast recipients before later subscriptions", async () => {
+    let releaseBroadcasts!: () => void;
+    const broadcastsReleased = new Promise<void>(resolve => { releaseBroadcasts = resolve; });
+    const originalSubscriber = {operation: vi.fn()};
+    const laterSubscriber = {operation: vi.fn()};
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      ctx: {waitUntil: vi.fn()},
+      mutationQueue: Promise.resolve(),
+      broadcastQueue: broadcastsReleased,
+      subscribers: new Map([[originalSubscriber, {}]]),
+      applyOperationLocked: vi.fn(async () => ({
+        status: "applied",
+        type: "operation",
+        revision: 1,
+        conflicts: [],
+      })),
+      broadcast: vi.fn(),
+    });
+
+    await fixture.applyOperation({});
+    fixture.subscribers.set(laterSubscriber, {});
+    releaseBroadcasts();
+    await fixture.broadcastQueue;
+
+    expect(fixture.broadcast).toHaveBeenCalledWith(expect.objectContaining({revision: 1}), [originalSubscriber]);
+  });
+
+  it("evicts a stalled subscriber once across queued broadcasts", async () => {
+    vi.useFakeTimers();
+    try {
+      const dispose = vi.fn();
+      const stalled = {
+        operation: vi.fn(() => new Promise(() => {})),
+        presence: vi.fn(),
+        [Symbol.dispose]: dispose,
+      };
+      const healthy = {operation: vi.fn(), presence: vi.fn()};
+      let revision = 0;
+      const fixture = Object.assign(Object.create(Gadget.prototype), {
+        ctx: {waitUntil: vi.fn()},
+        mutationQueue: Promise.resolve(),
+        broadcastQueue: Promise.resolve(),
+        subscribers: new Map([[stalled, {clientId: "stalled"}], [healthy, {clientId: "healthy"}]]),
+        applyOperationLocked: vi.fn(async () => ({
+          status: "applied",
+          type: "operation",
+          revision: ++revision,
+          conflicts: [],
+        })),
+      });
+
+      await Promise.all([
+        fixture.applyOperation({}),
+        fixture.applyOperation({}),
+        fixture.applyOperation({}),
+      ]);
+      await vi.advanceTimersByTimeAsync(10000);
+      await fixture.broadcastQueue;
+
+      expect(fixture.subscribers.has(stalled)).toBe(false);
+      expect(stalled.operation).toHaveBeenCalledOnce();
+      expect(healthy.operation).toHaveBeenCalledTimes(3);
+      expect(healthy.presence).toHaveBeenCalledWith(expect.objectContaining({type: "leave", clientId: "stalled"}));
+      expect(dispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts a subscriber stalled during presence replay without announcing a join", async () => {
+    vi.useFakeTimers();
+    try {
+      const backgroundTasks: Promise<unknown>[] = [];
+      const existing = {operation: vi.fn(), presence: vi.fn()};
+      const dispose = vi.fn();
+      const newcomer = {
+        operation: vi.fn(),
+        presence: vi.fn(() => new Promise(() => {})),
+        onRpcBroken: vi.fn(),
+        [Symbol.dispose]: dispose,
+      };
+      const fixture = Object.assign(Object.create(Gadget.prototype), {
+        ctx: {waitUntil: (task: Promise<unknown>) => { backgroundTasks.push(task); }},
+        mutationQueue: Promise.resolve(),
+        subscribers: new Map([[existing, {clientId: "existing", name: "Existing", color: "blue"}]]),
+        loadMeta: vi.fn(async () => ({revision: 1})),
+        assembleDocument: vi.fn(async () => ({revision: 1})),
+      });
+
+      await fixture.subscribe({dup: () => newcomer}, {clientId: "newcomer"});
+      await vi.advanceTimersByTimeAsync(10000);
+      await Promise.all(backgroundTasks);
+
+      expect(fixture.subscribers.has(newcomer)).toBe(false);
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(existing.presence).toHaveBeenCalledWith(expect.objectContaining({type: "leave", clientId: "newcomer"}));
+      expect(existing.presence).not.toHaveBeenCalledWith(expect.objectContaining({type: "join", clientId: "newcomer"}));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disposes a subscriber when its initial snapshot fails", async () => {
+    const dispose = vi.fn();
+    const newcomer = {
+      presence: vi.fn(),
+      onRpcBroken: vi.fn(),
+      [Symbol.dispose]: dispose,
+    };
+    const fixture = Object.assign(Object.create(Gadget.prototype), {
+      mutationQueue: Promise.resolve(),
+      subscribers: new Map(),
+      loadMeta: vi.fn(async () => ({revision: 1})),
+      assembleDocument: vi.fn(async () => { throw new Error("storage failed"); }),
+    });
+
+    await expect(fixture.subscribe({dup: () => newcomer}, {clientId: "newcomer"}))
+      .rejects.toThrow("storage failed");
+    expect(fixture.subscribers.has(newcomer)).toBe(false);
+    expect(newcomer.onRpcBroken).not.toHaveBeenCalled();
+    expect(newcomer.presence).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it("continues broadcasting after a subscriber throws synchronously", async () => {
     const failed = {operation: vi.fn(() => { throw new Error("broken"); })};
-    const healthy = {operation: vi.fn()};
+    const healthy = {operation: vi.fn(), presence: vi.fn()};
     const fixture = Object.assign(Object.create(Gadget.prototype), {
-      subscribers: new Map([[failed, {}], [healthy, {}]]),
+      ctx: {waitUntil: vi.fn()},
+      subscribers: new Map([[failed, {clientId: "failed"}], [healthy, {clientId: "healthy"}]]),
     });
 
     await fixture.broadcast({revision: 1});

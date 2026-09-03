@@ -4,6 +4,17 @@ import { workbookToXlsx } from "./xlsx.js";
 const DEFAULT_TITLE = "Untitled spreadsheet";
 const DEFAULT_ROWS = 100;
 const DEFAULT_COLS = 26;
+const SUBSCRIBER_CALLBACK_TIMEOUT_MS = 10000;
+
+function subscriberCall(callback) {
+  let timeout;
+  return Promise.race([
+    Promise.resolve().then(callback),
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("Subscriber callback timed out.")), SUBSCRIBER_CALLBACK_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timeout));
+}
 
 // ---------------------------------------------------------------------------
 // Sheets — authoritative collaboration coordinator.
@@ -78,12 +89,17 @@ export class Gadget extends DurableObject {
   }
 
   async applyOperation(operation) {
-    const result = await this.enqueueMutation(() => this.applyOperationLocked(operation));
+    let recipients = [];
+    const result = await this.enqueueMutation(async () => {
+      const applied = await this.applyOperationLocked(operation);
+      if (applied.type === "operation") recipients = Array.from(this.subscribers.keys());
+      return applied;
+    });
     if (result.type === "operation") {
       const event = {...result};
       delete event.status;
       delete event.conflicts;
-      const broadcast = this.broadcastQueue.then(() => this.broadcast(event));
+      const broadcast = this.broadcastQueue.then(() => this.broadcast(event, recipients));
       this.broadcastQueue = broadcast.catch(() => {});
       this.ctx.waitUntil(this.broadcastQueue);
     }
@@ -209,29 +225,47 @@ export class Gadget extends DurableObject {
   }
 
   // --- Presence & subscription ------------------------------------------
+  removeSubscriber(stub) {
+    const info = this.subscribers.get(stub);
+    if (!info) return;
+    this.subscribers.delete(stub);
+    if (typeof stub[Symbol.dispose] === "function") stub[Symbol.dispose]();
+    this.ctx.waitUntil(this.broadcastPresence({ type: "leave", clientId: info.clientId, at: Date.now() }));
+  }
+
   async subscribe(callback, client = {}) {
     const dup = callback.dup();
-    const existing = Array.from(this.subscribers.values());
-    const info = {
-      callback: dup,
-      clientId: String(client.clientId || ""),
-      name: String(client.name || "Guest").slice(0, 40),
-      color: String(client.color || "#e1632e"),
-    };
-    this.subscribers.set(dup, info);
-    dup.onRpcBroken(() => {
-      this.subscribers.delete(dup);
-      this.broadcastPresence({ type: "leave", clientId: info.clientId });
-    });
-    queueMicrotask(async () => {
-      for (const person of existing) {
-        try {
-          await dup.presence({ type: "join", clientId: person.clientId, name: person.name, color: person.color });
-        } catch (e) { break; }
-      }
-      await this.broadcastPresence({ type: "join", clientId: info.clientId, name: info.name, color: info.color });
-    });
-    return this.assembleDocument(await this.loadMeta());
+    try {
+      return await this.enqueueMutation(async () => {
+        const document = await this.assembleDocument(await this.loadMeta());
+        const existing = Array.from(this.subscribers.values());
+        const info = {
+          callback: dup,
+          clientId: String(client.clientId || ""),
+          name: String(client.name || "Guest").slice(0, 40),
+          color: String(client.color || "#e1632e"),
+        };
+        this.subscribers.set(dup, info);
+        dup.onRpcBroken(() => this.removeSubscriber(dup));
+        queueMicrotask(async () => {
+          for (const person of existing) {
+            try {
+              await subscriberCall(() => dup.presence({ type: "join", clientId: person.clientId, name: person.name, color: person.color }));
+            } catch (e) {
+              this.removeSubscriber(dup);
+              return;
+            }
+          }
+          if (!this.subscribers.has(dup)) return;
+          await this.broadcastPresence({ type: "join", clientId: info.clientId, name: info.name, color: info.color });
+        });
+        return document;
+      });
+    } catch (error) {
+      if (this.subscribers.has(dup)) this.removeSubscriber(dup);
+      else if (typeof dup[Symbol.dispose] === "function") dup[Symbol.dispose]();
+      throw error;
+    }
   }
 
   async updatePresence(presence) {
@@ -251,10 +285,11 @@ export class Gadget extends DurableObject {
     await this.broadcastPresence({ type: "leave", clientId: String(clientId || ""), at: Date.now() });
   }
 
-  async broadcast(event) {
+  async broadcast(event, recipients = this.subscribers.keys()) {
     const calls = [];
-    for (const [stub] of this.subscribers) {
-      calls.push(Promise.resolve().then(() => stub.operation(event)).catch(() => this.subscribers.delete(stub)));
+    for (const stub of recipients) {
+      if (!this.subscribers.has(stub)) continue;
+      calls.push(subscriberCall(() => stub.operation(event)).catch(() => this.removeSubscriber(stub)));
     }
     await Promise.all(calls);
   }
@@ -262,7 +297,7 @@ export class Gadget extends DurableObject {
   async broadcastPresence(event) {
     const calls = [];
     for (const [stub] of this.subscribers) {
-      calls.push(Promise.resolve().then(() => stub.presence(event)).catch(() => this.subscribers.delete(stub)));
+      calls.push(subscriberCall(() => stub.presence(event)).catch(() => this.removeSubscriber(stub)));
     }
     await Promise.all(calls);
   }

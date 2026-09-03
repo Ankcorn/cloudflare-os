@@ -303,7 +303,7 @@ class Styles {
       const pattern = '"$"#,##0' + decimalPattern(places ?? 2);
       return this.customNumberFormat(pattern + ";-" + pattern);
     }
-    if (name === "percent") return this.customNumberFormat("0" + decimalPattern(places ?? 2) + "%");
+    if (name === "percent") return this.customNumberFormat("#,##0" + decimalPattern(places ?? 2) + "%");
     if (name === "scientific") return this.customNumberFormat("0" + decimalPattern(places ?? 2) + "E+00");
     if (name === "date") return this.customNumberFormat("mm/dd/yyyy");
     if (name === "time") return this.customNumberFormat("h:mm:ss AM/PM");
