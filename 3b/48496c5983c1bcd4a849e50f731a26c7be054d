@@ -1,0 +1,19 @@
+packages/gatekeeper-cloudflare/README.md
+  s_27e22c04db074b::t_9bdc2bd92fc761 36-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3b48496c5983c1bcd4a849e50f731a26c7be054d",
+  "prompts": {},
+  "sessions": {
+    "s_27e22c04db074b": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0685c-0569-7ad3-8f76-d7c4f744d1e6",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
