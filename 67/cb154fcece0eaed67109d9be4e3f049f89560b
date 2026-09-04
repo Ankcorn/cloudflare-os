@@ -1,0 +1,23 @@
+packages/gatekeeper-cloudflare/__tests__/worker.ts
+  s_bab3bdd042e5b4::t_f60222ef97dc2e 9-27,31,39-43,47-48,88-109,118-124,153-179
+packages/gatekeeper-cloudflare/__tests__/workerd/event-subscriptions.test.ts
+  s_bab3bdd042e5b4::t_26920c618a3aa4 1-36
+packages/gatekeeper-cloudflare/vitest.worker.config.ts
+  s_bab3bdd042e5b4::t_a9b31f56c3677d 26-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "67cb154fcece0eaed67109d9be4e3f049f89560b",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
