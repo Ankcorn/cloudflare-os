@@ -45,28 +45,13 @@ describe("ComposerMirror geometry", () => {
     expect(mirrorRef.current!.tokenAtPoint(40, 5)).toBeNull();
   });
 
-  it("renders selected commands as labeled skill pills", async () => {
-    const mirrorRef = createRef<ComposerMirrorHandle>();
-    container = document.createElement("div");
-    root = createRoot(container);
-    await act(async () => root!.render(
-      <ComposerMirror
-        ref={mirrorRef}
-        value="opaque"
-        tokens={[{
-          kind: "command",
-          start: 0,
-          length: 6,
-          label: "Review",
-          description: "Review the project",
-          providerLabel: "Projects",
-        }]}
-        disabled={false}
-      />,
-    ));
+  it("decorates commands without replacing their text", async () => {
+    await renderMirror();
+    const token = container!.querySelector<HTMLElement>("[data-token-start]")!;
 
-    expect(container.querySelector("[data-token-start]")?.textContent).toContain("Review");
-    expect(container.querySelector("[data-token-start]")?.textContent).toContain("opaque");
+    expect(token.textContent).toBe("/cmd");
+    expect(token.childNodes).toHaveLength(1);
+    expect(token.firstChild?.nodeType).toBe(Node.TEXT_NODE);
   });
 
   it("measures offsets in plain text segments", async () => {

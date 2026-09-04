@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { buildComposerSubmission } from "./composerSubmission";
-import { slashCommandComposerText } from "../../../components/chat/composer-tokens";
 
 const description: ResourceDescription = {
   url: "https://example.com/q3",
@@ -67,7 +66,7 @@ describe("composer submission", () => {
 
   it("removes an inline slash command after reducing earlier format tokens", () => {
     const logoSlot = "\u2003\u2060\u00a0";
-    const commandToken = slashCommandComposerText("deploy", logoSlot);
+    const commandToken = "/deploy";
     const text = `make ${logoSlot}Document using ${commandToken} today`;
 
     const result = buildComposerSubmission({

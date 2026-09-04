@@ -7,35 +7,6 @@ export type ComposerRange = {
   length: number;
 };
 
-/** Text stored behind a selected skill pill in the transparent composer textarea. */
-export function slashCommandComposerText(name: string, logoSlot: string): string {
-  return logoSlot + name.replaceAll(" ", "\u00a0") + "\u00a0\u202f\u202f";
-}
-
-/** Replaces touched atomic tokens with readable text when copying a textarea selection. */
-export function serializeComposerSelection(
-    value: string, start: number, end: number,
-    replacements: readonly (ComposerRange & {text: string})[]): string {
-  start = Math.max(0, Math.min(start, value.length));
-  end = Math.max(start, Math.min(end, value.length));
-  let copied = "";
-  let cursor = start;
-  let previousTokenEnd = 0;
-  for (const replacement of [...replacements].toSorted((a, b) => a.start - b.start)) {
-    const tokenEnd = replacement.start + replacement.length;
-    if (replacement.length < 0 || replacement.start < 0 || tokenEnd > value.length ||
-        replacement.start < previousTokenEnd) {
-      continue;
-    }
-    previousTokenEnd = tokenEnd;
-    if (tokenEnd <= start || replacement.start >= end) continue;
-    copied += value.slice(cursor, Math.max(cursor, replacement.start));
-    copied += replacement.text;
-    cursor = Math.max(cursor, tokenEnd);
-  }
-  return copied + value.slice(Math.min(cursor, end), end);
-}
-
 type TokenSplice = {
   value: string;
   start: number;

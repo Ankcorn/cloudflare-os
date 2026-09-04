@@ -17,7 +17,7 @@ const SkillTooltipContent = ({
 }) => (
   <div
     data-skill-tooltip
-    className="-mx-2.5 -my-1.5 w-fit max-w-64 p-3 text-left"
+    className="pointer-events-auto w-fit max-w-60 px-0.5 py-1.5 text-left"
     onMouseEnter={onMouseEnter}
     onMouseLeave={onMouseLeave}
   >
@@ -29,10 +29,10 @@ const SkillTooltipContent = ({
       {description}
     </p>
     <div className="mt-2.5 flex min-w-0 items-center gap-1.5 border-t border-kumo-line/70 pt-2.5 text-[12px] text-kumo-subtle">
-      <span className="shrink-0 font-medium">{providerLabel}</span>
+      <span className="min-w-0 truncate font-medium">{providerLabel}</span>
       {resourceLabel && (
         <>
-          <span className="text-kumo-inactive" aria-hidden="true">{"\u00b7"}</span>
+          <span className="shrink-0 text-kumo-inactive" aria-hidden="true">{"\u00b7"}</span>
           <span className="min-w-0 truncate text-kumo-inactive">{resourceLabel}</span>
         </>
       )}

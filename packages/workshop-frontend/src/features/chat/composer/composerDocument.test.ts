@@ -9,7 +9,6 @@ import {
   replaceComposerUrlWithCapsule,
   resolveComposerSlashCommand,
 } from "./composerDocument";
-import { slashCommandComposerText } from "../../../components/chat/composer-tokens";
 
 const description = {
   url: "https://example.com/plan",
@@ -117,28 +116,6 @@ describe("composer document transitions", () => {
       },
       caret: 12,
     });
-  });
-
-  it("treats a skill pill as an atomic text range", () => {
-    const commandText = slashCommandComposerText("review", "\u2003\u2060\u00a0");
-    const document: ComposerDocument = {
-      ...emptyDocument(`try ${commandText} today`),
-      command: { start: 4, length: commandText.length, choice: commandChoice },
-    };
-
-    expect(applyComposerTextEdit(
-      document,
-      document.text.slice(0, 5) + "X" + document.text.slice(5),
-      6,
-    )).toEqual({ document, caret: 5, rejected: true });
-
-    const edited = applyComposerTextEdit(
-      document,
-      document.text.slice(0, 5) + document.text.slice(6),
-      5,
-    );
-    expect(edited.document).toEqual(emptyDocument("try  today"));
-    expect(edited.caret).toBe(4);
   });
 
   it("inserts a format and shifts every later token", () => {

@@ -269,16 +269,8 @@ export const applyComposerTextEdit = (
   }
 
   const isPureInsertion = oldEnd === editStart;
-  // Legacy resolved slash commands remain editable text. Pill commands use opaque backing text and
-  // must be edited atomically, like resource capsules.
-  const atomicCommand = document.command &&
-    !document.text.slice(document.command.start, document.command.start + document.command.length)
-      .startsWith("/")
-    ? document.command
-    : null;
-  const atomicRanges = [...document.capsules, ...(atomicCommand ? [atomicCommand] : [])];
-  if (isPureInsertion && atomicRanges.some((range) =>
-      editStart > range.start && editStart < range.start + range.length)) {
+  if (isPureInsertion && document.capsules.some((capsule) =>
+      editStart > capsule.start && editStart < capsule.start + capsule.length)) {
     return { document, caret: editStart, rejected: true };
   }
 
@@ -291,25 +283,19 @@ export const applyComposerTextEdit = (
   const brokenCapsules = document.capsules
     .filter((capsule) => editStart < capsule.start + capsule.length && oldEnd > capsule.start)
     .toSorted((a, b) => b.start - a.start);
-  const commandBroken = atomicCommand !== null &&
-    editStart < atomicCommand.start + atomicCommand.length && oldEnd > atomicCommand.start;
-  const brokenAtomicRanges = [
-    ...brokenCapsules,
-    ...(commandBroken && atomicCommand ? [atomicCommand] : []),
-  ].toSorted((a, b) => b.start - a.start);
   const editShift = newEnd - oldEnd;
 
   let adjustedText = newText;
   let extraShift = 0;
-  for (const range of brokenAtomicRanges) {
-    let remainingStart = range.start;
-    let remainingEnd = range.start + range.length;
+  for (const capsule of brokenCapsules) {
+    let remainingStart = capsule.start;
+    let remainingEnd = capsule.start + capsule.length;
     if (remainingStart >= oldEnd) {
       remainingStart += editShift;
       remainingEnd += editShift;
     } else {
       remainingStart = Math.min(remainingStart, editStart);
-      const lengthAfterEdit = range.start + range.length - oldEnd;
+      const lengthAfterEdit = capsule.start + capsule.length - oldEnd;
       remainingEnd = lengthAfterEdit > 0 ? newEnd + lengthAfterEdit : newEnd;
     }
     const removeLength = remainingEnd - remainingStart;
@@ -336,8 +322,8 @@ export const applyComposerTextEdit = (
         .map(shiftSurvivor),
       command: commandEdited || !document.command ? null : shiftSurvivor(document.command),
     },
-    ...(brokenAtomicRanges.length > 0
-      ? { caret: brokenAtomicRanges[brokenAtomicRanges.length - 1].start }
+    ...(brokenCapsules.length > 0
+      ? { caret: brokenCapsules[brokenCapsules.length - 1].start }
       : {}),
   };
 };

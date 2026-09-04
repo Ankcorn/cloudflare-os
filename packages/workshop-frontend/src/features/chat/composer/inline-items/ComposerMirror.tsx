@@ -2,7 +2,6 @@ import {
   forwardRef, memo, useEffect, useImperativeHandle, useRef, useState, type ReactNode,
 } from "react";
 import { Tooltip } from "@cloudflare/kumo";
-import { ScrollIcon } from "@phosphor-icons/react";
 import type { ComposerRange } from "../../../../components/chat/composer-tokens";
 import styles from "./ComposerMirror.module.css";
 import SkillTooltipContent from "./SkillTooltipContent";
@@ -29,7 +28,6 @@ export const composerTextareaClass = styles.textarea;
 /** A range the mirror paints as one object rather than as text. */
 export type MirrorToken = ComposerRange & {
   kind: "capsule" | "command";
-  /** Display metadata for a command whose underlying text reserves the pill's layout width. */
   label?: string;
   description?: string;
   providerLabel?: string;
@@ -200,11 +198,7 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
       );
       continue;
     }
-    let className = token.kind === "capsule"
-      ? styles.capsule
-      : text.startsWith("/")
-        ? styles.legacyCommand
-        : styles.command;
+    let className = token.kind === "capsule" ? styles.capsule : styles.command;
     if (!disabled && token.start === hoveredToken) className += ` ${styles.hovered}`;
     const logo = cssLogoUrl(token.logoUrl);
     const tokenNode = (
@@ -217,19 +211,11 @@ export const ComposerMirror = memo(forwardRef<ComposerMirrorHandle, {
         data-text-start={start}
         data-text-end={end}
       >
-        {token.kind === "command" && token.label && !text.startsWith("/") ? (
-          <>
-            {text}
-            <span className={styles.commandLabel}>
-              <ScrollIcon size={12} weight="bold" />
-              {token.label}
-            </span>
-          </>
-        ) : text}
+        {text}
       </span>
     );
     const showSkillTooltip = token.kind === "command" && token.label && token.description &&
-      token.providerLabel && !text.startsWith("/");
+      token.providerLabel;
     segments.push(showSkillTooltip ? (
       <Tooltip
         key={start}
