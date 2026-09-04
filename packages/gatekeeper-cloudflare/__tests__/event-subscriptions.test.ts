@@ -33,8 +33,8 @@ describe("Cloudflare Event Subscription validation", () => {
 
   it("supports source-specific resource selection", () => {
     const spec = {
-      source: { service: "r2", account: ACCOUNT_ID, buckets: ["logs"] },
-      events: ["object.created"],
+      source: { service: "workersAI", model: "@cf/meta/llama" },
+      events: ["inference.completed"],
     };
     expect(parseEventSubscriptionSpec(spec)).toEqual(spec);
   });

@@ -3,7 +3,7 @@ import type {
   CloudflareEventSubscriptionSpec,
 } from "./types.js";
 
-const EVENT_NAME_PATTERN = /^[a-z0-9][a-z0-9.-]{0,127}$/;
+const EVENT_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -27,9 +27,9 @@ export function parseEventSubscriptionSpec(value: unknown): CloudflareEventSubsc
   const source = asRecord(spec?.source);
   const events = spec?.events;
   if (!spec || Object.keys(spec).length !== 2 || !source || !isJson(source) ||
-      typeof source.service !== "string" || !EVENT_NAME_PATTERN.test(source.service) ||
+      typeof source.service !== "string" || !EVENT_IDENTIFIER_PATTERN.test(source.service) ||
       !Array.isArray(events) || events.length === 0 || events.length > 20 ||
-      events.some(event => typeof event !== "string" || !EVENT_NAME_PATTERN.test(event)) ||
+      events.some(event => typeof event !== "string" || !EVENT_IDENTIFIER_PATTERN.test(event)) ||
       new Set(events).size !== events.length || JSON.stringify(source).length > 4_096) {
     throw new Error("Invalid Cloudflare Event Subscription source or events.");
   }
