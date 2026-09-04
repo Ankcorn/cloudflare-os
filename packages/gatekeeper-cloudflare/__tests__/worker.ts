@@ -6,12 +6,29 @@
 // instantiates a gatekeeper in production.
 
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
-import type { GatekeeperUserVerifier, GitCache, GitObjectType, GitOid }
-  from "@gadgets/workshop-shared/gatekeeper";
-import type { CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
+import type {
+  ActionDescription,
+  ApprovalQueue,
+  GatekeeperUserVerifier,
+  HookController,
+  GitCache,
+  GitObjectType,
+  GitOid,
+  HookDescription,
+  ObservationDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  CloudflareEventHook,
+  CloudflareEventSubscriptionSession,
+} from "../src/types.js";
+import type {
+  CloudflareEventSubscriptionsGatekeeper,
+  CloudflareObservabilityGatekeeper,
+} from "../src/cloudflare.js";
 
 export { default } from "../src/cloudflare.js";
 export * from "../src/cloudflare.js";
+export { CloudflareEventHookController } from "../src/event-subscriptions.js";
 
 type GatekeeperProps = {
   userObjectId: string;
@@ -19,9 +36,16 @@ type GatekeeperProps = {
   workerName?: string;
 };
 
+type EventSubscriptionProps = {
+  userObjectId: string;
+  accountId: string;
+};
+
 type TestExports = {
   CloudflareObservabilityGatekeeper(options: { props: GatekeeperProps }):
     DurableObjectClass<CloudflareObservabilityGatekeeper>;
+  CloudflareEventSubscriptionsGatekeeper(options: { props: EventSubscriptionProps }):
+    DurableObjectClass<CloudflareEventSubscriptionsGatekeeper>;
 };
 
 /**
@@ -61,11 +85,40 @@ class TestVerifier extends RpcTarget {
   }
 }
 
+class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
+  hook?: HookDescription;
+
+  async authorizeObservation(_description: ObservationDescription): Promise<void> {}
+  async getGitCache(): Promise<GitCache> {
+    throw new Error("Unexpected git cache access");
+  }
+  async submitAction(_action: number, _description: ActionDescription): Promise<void> {}
+
+  async bindHook<Hook extends RpcTarget>(
+    _controller: Fetcher<HookController<Hook>>,
+    _callback: RpcStub<Hook>,
+    description: HookDescription,
+  ): Promise<void> {
+    this.hook = description;
+  }
+}
+
+class TestEventCallback extends RpcTarget implements CloudflareEventHook {
+  async onEvent(): Promise<void> {}
+}
+
 export class TestHooks extends DurableObject<Env> {
   #gatekeeper(facetName: string, props: GatekeeperProps) {
     const exports = this.ctx.exports as unknown as TestExports;
     return this.ctx.facets.get<CloudflareObservabilityGatekeeper>(facetName, () => ({
       class: exports.CloudflareObservabilityGatekeeper({ props }),
+    }));
+  }
+
+  #eventGatekeeper(facetName: string, props: EventSubscriptionProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<CloudflareEventSubscriptionsGatekeeper>(facetName, () => ({
+      class: exports.CloudflareEventSubscriptionsGatekeeper({ props }),
     }));
   }
 
@@ -95,6 +148,33 @@ export class TestHooks extends DurableObject<Env> {
     const { url, title, suggestedBindingName } =
       await this.#gatekeeper(facetName, props).describe();
     return { url, title, suggestedBindingName };
+  }
+
+  async describeEventSubscription(
+    facetName: string,
+    props: EventSubscriptionProps,
+  ): Promise<{ url: string; title: string; suggestedBindingName: string }> {
+    const { url, title, suggestedBindingName } =
+      await this.#eventGatekeeper(facetName, props).describe();
+    return { url, title, suggestedBindingName };
+  }
+
+  async subscribeToEvents(
+    facetName: string,
+    props: EventSubscriptionProps,
+    subscription: Parameters<CloudflareEventSubscriptionSession["subscribe"]>[0],
+  ): Promise<HookDescription | { error: string }> {
+    try {
+      const queue = new TestApprovalQueue();
+      const session = await this.#eventGatekeeper(facetName, props).startSession(
+        new RpcStub(queue) as unknown as ApprovalQueue,
+      );
+      await session.subscribe(subscription, new RpcStub(new TestEventCallback()));
+      if (!queue.hook) throw new Error("Event subscription was not registered.");
+      return queue.hook;
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   /** Confirms the read-only resource refuses every mutating gatekeeper operation. */
