@@ -1,0 +1,52 @@
+{
+  "blueprintId": "real-time-issues",
+  "title": "Real-Time Issues Investigator",
+  "description": "Starts a constrained coding-agent investigation when Workers Observability reports a Real-Time Issue.",
+  "output": {
+    "id": "real-time-issue",
+    "noun": "Investigation",
+    "plural": "Investigations",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "created": "2026-09-04T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-09-04T00:00:00.000Z",
+  "bindings": {
+    "CLOUDFLARE_EVENTS": {
+      "title": "Cloudflare Event Subscriptions",
+      "description": "The account Event Subscriptions connection that receives Real-Time Issue events.",
+      "type": "gatekeeper",
+      "gatekeeperName": "cloudflare_events",
+      "typeUrlPattern": "https://dash.cloudflare.com/:accountId/workers/queues/event-subscriptions"
+    },
+    "CLOUDFLARE_OBSERVABILITY": {
+      "title": "Workers Observability",
+      "description": "Read-only telemetry for the account that produced the issue.",
+      "type": "gatekeeper",
+      "gatekeeperName": "cloudflare",
+      "typeUrlPattern": "https://dash.cloudflare.com/:accountId/workers-and-pages/observability"
+    },
+    "GIT_REPOSITORY": {
+      "title": "GitHub repository",
+      "description": "The only repository the investigator may inspect or modify.",
+      "type": "gatekeeper",
+      "gatekeeperName": "github",
+      "typeUrlPattern": "https://github.com/:owner/:repo"
+    },
+    "INVESTIGATOR": {
+      "title": "Investigation agent",
+      "description": "Agent Spawner restricted to the selected Observability and repository bindings.",
+      "type": "agentSpawner",
+      "env": {
+        "CLOUDFLARE_OBSERVABILITY": { "type": "binding", "name": "CLOUDFLARE_OBSERVABILITY" },
+        "GIT_REPOSITORY": { "type": "binding", "name": "GIT_REPOSITORY" }
+      }
+    }
+  }
+}
