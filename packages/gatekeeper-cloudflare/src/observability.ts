@@ -2,6 +2,8 @@ import { createObservabilityContext } from "@gadgets/backend-utils/observability
 
 /** Observability fields emitted by the Cloudflare gatekeeper. */
 export type CloudflareObservabilityFields = {
+  accountId: string;
+  queueId: string;
   accountsListed: number;
   /** Events a Worker-scoped read had to drop, proving the provider ignored the scope filter. */
   droppedEvents: number;

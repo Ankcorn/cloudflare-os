@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
+  REAL_TIME_ISSUES_RESOURCE,
   accountObservabilityUrl,
+  cloudflareScopesForResources,
+  grantedCloudflareResourcePatterns,
   grantedObservabilityResourcePatterns,
   observabilityScopesForResources,
   parseObservabilityResourceUrl,
+  parseRealTimeIssuesAutomationUrl,
+  realTimeIssuesAutomationUrl,
   workerObservabilityUrl,
 } from "../src/resources";
 import { BILLING_SCOPES, persistentScopesForResources } from "../src/oauth";
@@ -30,6 +35,15 @@ describe("Cloudflare observability resources", () => {
       accountId: ACCOUNT_ID,
       workerName: "api/production",
     });
+  });
+
+  it("round-trips Real-Time Issues automation URLs", () => {
+    const url = realTimeIssuesAutomationUrl(ACCOUNT_ID);
+
+    expect(url).toBe(
+      `https://dash.cloudflare.com/${ACCOUNT_ID}/workers-and-pages/observability/issues/automation`,
+    );
+    expect(parseRealTimeIssuesAutomationUrl(url)).toEqual({ accountId: ACCOUNT_ID });
   });
 
   it("accepts harmless dashboard state and a trailing slash", () => {
@@ -79,6 +93,22 @@ describe("Cloudflare observability OAuth scopes", () => {
   it("rejects unknown resource patterns", () => {
     expect(() => observabilityScopesForResources(["https://example.com/*"]))
       .toThrow("Unsupported Cloudflare resource type");
+  });
+
+  it("requests Queue authority only for the automation resource", () => {
+    expect(cloudflareScopesForResources([ACCOUNT_OBSERVABILITY_RESOURCE.urlPattern]))
+      .toEqual(["workers-observability.read"]);
+    expect(cloudflareScopesForResources([REAL_TIME_ISSUES_RESOURCE.urlPattern]))
+      .toEqual(["queues:write"]);
+    expect(cloudflareScopesForResources()).toEqual([
+      "workers-observability.read",
+      "queues:write",
+    ]);
+  });
+
+  it("maps granted Queue authority back to only the automation resource", () => {
+    expect(grantedCloudflareResourcePatterns(["queues:write"]))
+      .toEqual([REAL_TIME_ISSUES_RESOURCE.urlPattern]);
   });
 
   it("maps the shared OAuth permission back to both resource types", () => {

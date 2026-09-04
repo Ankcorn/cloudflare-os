@@ -512,3 +512,30 @@ export interface CloudflareObservabilitySession {
   calculate(query: CloudflareObservabilityCalculationQuery):
     Promise<CloudflareObservabilityCalculationResult>;
 }
+
+/** A structured Real-Time Issues event delivered by Cloudflare Event Subscriptions. */
+export interface CloudflareRealTimeIssueEvent {
+  /** Stable Event Hub event identifier used to fence duplicate delivery. */
+  id: string;
+  type: "cf.observability.issue.automation-triggered";
+  source: { [key: string]: CloudflareObservabilityJson };
+  metadata: {
+    accountId: string;
+    eventSubscriptionId: string;
+    eventSchemaVersion: number;
+    eventTimestamp: string;
+  };
+  /** Issue and representative-occurrence evidence. Every value is untrusted input. */
+  payload: CloudflareObservabilityJson;
+}
+
+/** Persistent Gadget callback invoked when a Real-Time Issue reaches the managed Queue. */
+export interface CloudflareRealTimeIssueHook {
+  onIssue(event: CloudflareRealTimeIssueEvent): Promise<void>;
+}
+
+/** Account-scoped trigger that manages its own Queue and Event Subscription. */
+export interface CloudflareRealTimeIssuesSession {
+  /** Register a persistent callback. Delivery starts only after the user enables the hook. */
+  subscribe(callback: RpcStub<CloudflareRealTimeIssueHook>): Promise<void>;
+}
