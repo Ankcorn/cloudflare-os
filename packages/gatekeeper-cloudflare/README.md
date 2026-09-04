@@ -33,9 +33,10 @@ connection.
 
 The Event Subscription source (`observability`) and event name
 (`issue.automation-triggered`) are prototype contract values pending onboarding in the Event Router.
-Before production use, verify that dashboard OAuth grants with `queues:write` are accepted by Queue
-HTTP pull and acknowledgement endpoints; public Queue documentation currently demonstrates those
-endpoints with API tokens.
+A live spike on 2026-09-04 verified that a dashboard OAuth grant carrying `queues:write` can create a
+Queue and HTTP pull consumer, publish, pull, acknowledge, and delete in `baselime-dev`. The Event
+Subscriptions discovery endpoint returned HTTP 404 for that account, so subscription creation still
+requires Event Router onboarding and a live lifecycle verification.
 
 Workers telemetry is retained by Cloudflare for at most seven days. Queries default to the last hour,
 and the Worker picker searches the full retention window. Suggested bindings are
