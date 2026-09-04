@@ -30,6 +30,10 @@ import { obsContext } from "./observability.js";
 
 const IDLE_POLL_INTERVAL_MS = 30_000;
 const RETRY_POLL_INTERVAL_MS = 10_000;
+const PROCESSED_EVENT_TTL_MS = 15 * 24 * 60 * 60 * 1_000;
+const PROCESSED_EVENT_CLEANUP_LIMIT = 100;
+const PROCESSED_EVENT_PREFIX = "processed-event:";
+const PROCESSED_EVENT_INDEX_PREFIX = "processed-event-index:";
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare.real-time-issues", vendorId: VENDOR_ID,
 });
@@ -134,6 +138,47 @@ export class CloudflareRealTimeIssueHookController
 
 /** Owns one managed Queue installation and wakes itself to pull events. */
 export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
+  #processedEventKey(eventId: string): string {
+    return `${PROCESSED_EVENT_PREFIX}${eventId}`;
+  }
+
+  #hasProcessedEvent(eventId: string): boolean {
+    return this.ctx.storage.kv.get<number>(this.#processedEventKey(eventId)) !== undefined;
+  }
+
+  #recordProcessedEvent(eventId: string): void {
+    const processedAt = Date.now();
+    const indexKey = `${PROCESSED_EVENT_INDEX_PREFIX}${String(processedAt).padStart(13, "0")}:` +
+      crypto.randomUUID();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put(this.#processedEventKey(eventId), processedAt);
+      this.ctx.storage.kv.put(indexKey, eventId);
+    });
+  }
+
+  #cleanupProcessedEvents(): void {
+    const cutoff = Date.now() - PROCESSED_EVENT_TTL_MS;
+    const expired: Array<[string, string]> = [];
+    for (const [indexKey, eventId] of this.ctx.storage.kv.list<string>({
+      prefix: PROCESSED_EVENT_INDEX_PREFIX,
+      limit: PROCESSED_EVENT_CLEANUP_LIMIT,
+    })) {
+      const timestampEnd = indexKey.indexOf(":", PROCESSED_EVENT_INDEX_PREFIX.length);
+      const processedAt = Number(indexKey.slice(PROCESSED_EVENT_INDEX_PREFIX.length, timestampEnd));
+      if (!Number.isSafeInteger(processedAt) || processedAt > cutoff) break;
+      expired.push([indexKey, eventId]);
+    }
+    if (expired.length === 0) return;
+    this.ctx.storage.transactionSync(() => {
+      for (const [indexKey, eventId] of expired) {
+        if ((this.ctx.storage.kv.get<number>(this.#processedEventKey(eventId)) ?? Infinity) <= cutoff) {
+          this.ctx.storage.kv.delete(this.#processedEventKey(eventId));
+        }
+        this.ctx.storage.kv.delete(indexKey);
+      }
+    });
+  }
+
   #props(): RealTimeIssuesProps {
     const props = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
     if (!props) throw new Error("Real-Time Issues poller is not configured.");
@@ -198,6 +243,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
         props.accountId,
         installation.queueId,
       );
+      this.#cleanupProcessedEvents();
       const acknowledged: string[] = [];
       for (const message of batch.messages) {
         try {
@@ -206,7 +252,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
             props.accountId,
             installation.subscriptionId,
           );
-          if (!this.ctx.storage.kv.get<boolean>(`event:${event.id}`)) {
+          if (!this.#hasProcessedEvent(event.id)) {
             // @ts-expect-error Worker RPC's mapped return type wraps the disposable hook result.
             using hook = initiator.startHook();
             await hook.approvalQueue.authorizeObservation({
@@ -214,7 +260,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
               description: `Received Real-Time Issue event ${event.id} from the bound account.`,
             });
             await hook.callback.onIssue(event);
-            this.ctx.storage.kv.put(`event:${event.id}`, true);
+            this.#recordProcessedEvent(event.id);
           }
           acknowledged.push(message.leaseId);
         } catch (error) {

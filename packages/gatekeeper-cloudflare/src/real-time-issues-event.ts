@@ -18,7 +18,7 @@ export function parseRealTimeIssueEvent(
   const source = asRecord(event?.source);
   const metadata = asRecord(event?.metadata);
   if (!event || event.type !== EVENT_TYPE || typeof event.id !== "string" || !event.id ||
-      !source || !metadata || metadata.accountId !== expectedAccountId ||
+      event.id.length > 256 || !source || !metadata || metadata.accountId !== expectedAccountId ||
       metadata.eventSubscriptionId !== expectedSubscriptionId ||
       typeof metadata.eventSchemaVersion !== "number" ||
       !Number.isSafeInteger(metadata.eventSchemaVersion) ||

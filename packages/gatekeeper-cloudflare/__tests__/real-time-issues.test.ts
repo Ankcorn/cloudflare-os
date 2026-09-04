@@ -43,6 +43,8 @@ describe("Real-Time Issues event validation", () => {
   it("rejects malformed or unexpected event types", () => {
     expect(() => parseRealTimeIssueEvent({ ...event(), type: "queue.created" }, ACCOUNT_ID, SUBSCRIPTION_ID))
       .toThrow("not a valid Real-Time Issues automation event");
+    expect(() => parseRealTimeIssueEvent({ ...event(), id: "x".repeat(257) }, ACCOUNT_ID, SUBSCRIPTION_ID))
+      .toThrow("not a valid Real-Time Issues automation event");
     expect(() => parseRealTimeIssueEvent(null, ACCOUNT_ID, SUBSCRIPTION_ID))
       .toThrow("not a valid Real-Time Issues automation event");
   });

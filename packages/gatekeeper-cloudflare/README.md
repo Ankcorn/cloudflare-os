@@ -20,8 +20,9 @@ This package provides Cloudflare OAuth integration for Gadgets. It serves three 
 - **Real-Time Issues automation (prototype):** an account-scoped hook provisions a dedicated Queue,
   HTTP pull consumer, and Event Subscription using the connected account's OAuth grant. A poller
   Durable Object validates each Event Hub envelope and invokes a persistent Gadget callback before
-  acknowledging the message. Queue credentials and generic Queue operations are never exposed to
-  Gadget or agent code.
+  acknowledging the message. Processed event IDs are retained for 15 days (longer than Queue
+  retention) and cleaned up in bounded alarm batches. Queue credentials and generic Queue operations
+  are never exposed to Gadget or agent code.
 
 Observability connections request `workers-observability.read`. Real-Time Issues automation requests
 `queues:write`, but only when that resource is selected. The OAuth client must allow the relevant
