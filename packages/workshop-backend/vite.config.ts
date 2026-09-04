@@ -60,9 +60,17 @@ export default {
         dependsOn: ['build:format-blueprints', 'build:browser-runtime'],
         cache: false,
       },
+      /**
+       * The unit suite needs a longer idle threshold than the watchdog's default: import dominates
+       * its runtime, and the non-TTY reporter only prints on file completion, so a healthy run goes
+       * quiet for long stretches -- past the default once CI is contended. The wall-clock backstop
+       * still bounds a real hang.
+       *
+       * The integration config is one file and keeps the default.
+       */
       test: {
         ...vitestTask([
-          'vitest run',
+          { command: 'vitest run', idleSeconds: 180 },
           'vitest run --config vitest.integration.config.ts',
         ]),
         dependsOn: ['build:format-blueprints', 'build:browser-runtime'],
