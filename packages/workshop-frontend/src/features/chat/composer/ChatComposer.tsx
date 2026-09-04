@@ -761,10 +761,6 @@ export const ChatComposer = ({
             />
             <textarea
               value={inputValue}
-              spellCheck={false}
-              data-gramm="false"
-              data-gramm_editor="false"
-              data-enable-grammarly="false"
               role="combobox"
               aria-autocomplete="list"
               aria-expanded={slashCommandPicker.open}
