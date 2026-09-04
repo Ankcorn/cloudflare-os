@@ -1,0 +1,27 @@
+packages/gatekeeper-cloudflare/__tests__/real-time-issues-api.test.ts
+  s_bab3bdd042e5b4::t_f34d8d7c162376 10-13,21,25,34,37,48-49,51,116
+packages/gatekeeper-cloudflare/__tests__/resources.test.ts
+  s_bab3bdd042e5b4::t_ce292bda1c6401 5,12-13,40-41,44,46,98,101,109,111
+packages/gatekeeper-cloudflare/src/cloudflare.ts
+  s_bab3bdd042e5b4::t_eab6521ee1e46f 19,24,34-35,446,451,478,480
+packages/gatekeeper-cloudflare/src/configurator/cloudflare-event-subscriptions-configurator-ui.tsx
+  s_bab3bdd042e5b4::t_99938209135e8a 16
+packages/gatekeeper-cloudflare/src/real-time-issues-api.ts
+  s_bab3bdd042e5b4::t_f839673ee38753 3,8,60,98,100,123-124,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ec785f97821a0fe22ed7a13f87b29baee3280806",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
