@@ -39,7 +39,7 @@ import TYPES_CODE from "./types.txt";
 import { obsContext } from "./observability.js";
 
 export {
-  CloudflareRealTimeIssueHookController,
+  CloudflareEventHookController,
   CloudflareRealTimeIssuesGatekeeper,
   RealTimeIssuePoller,
 } from "./real-time-issues.js";

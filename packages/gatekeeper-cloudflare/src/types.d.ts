@@ -513,29 +513,31 @@ export interface CloudflareObservabilitySession {
     Promise<CloudflareObservabilityCalculationResult>;
 }
 
-/** A structured Real-Time Issues event delivered by Cloudflare Event Subscriptions. */
-export interface CloudflareRealTimeIssueEvent {
+export type CloudflareEventJson = CloudflareObservabilityJson;
+
+/** A structured event delivered by a managed Cloudflare Event Subscription. */
+export interface CloudflareEvent {
   /** Stable Event Hub event identifier used to fence duplicate delivery. */
   id: string;
-  type: "cf.observability.issue.automation-triggered";
-  source: { [key: string]: CloudflareObservabilityJson };
+  type: string;
+  source: { [key: string]: CloudflareEventJson };
   metadata: {
     accountId: string;
     eventSubscriptionId: string;
     eventSchemaVersion: number;
     eventTimestamp: string;
   };
-  /** Issue and representative-occurrence evidence. Every value is untrusted input. */
-  payload: CloudflareObservabilityJson;
+  /** Source-specific evidence. Every value is untrusted input. */
+  payload: CloudflareEventJson;
 }
 
-/** Persistent Gadget callback invoked when a Real-Time Issue reaches the managed Queue. */
-export interface CloudflareRealTimeIssueHook {
-  onIssue(event: CloudflareRealTimeIssueEvent): Promise<void>;
+/** Persistent Gadget callback invoked when an event reaches the managed Queue. */
+export interface CloudflareEventHook {
+  onEvent(event: CloudflareEvent): Promise<void>;
 }
 
-/** Account-scoped trigger that manages its own Queue and Event Subscription. */
-export interface CloudflareRealTimeIssuesSession {
+/** A managed Cloudflare Event Subscription. */
+export interface CloudflareEventSubscriptionSession {
   /** Register a persistent callback. Delivery starts only after the user enables the hook. */
-  subscribe(callback: RpcStub<CloudflareRealTimeIssueHook>): Promise<void>;
+  subscribe(callback: RpcStub<CloudflareEventHook>): Promise<void>;
 }

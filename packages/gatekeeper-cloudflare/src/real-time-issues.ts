@@ -20,8 +20,8 @@ import {
 } from "./real-time-issues-api.js";
 import { realTimeIssuesAutomationUrl } from "./resources.js";
 import type {
-  CloudflareRealTimeIssueHook,
-  CloudflareRealTimeIssuesSession,
+  CloudflareEventHook,
+  CloudflareEventSubscriptionSession,
 } from "./types.js";
 import TYPES_CODE from "./types.txt";
 import { parseRealTimeIssueEvent } from "./real-time-issues-event.js";
@@ -38,7 +38,7 @@ const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare.real-time-issues", vendorId: VENDOR_ID,
 });
 
-type RealTimeIssueHookTarget = RpcTarget & CloudflareRealTimeIssueHook;
+type CloudflareEventHookTarget = RpcTarget & CloudflareEventHook;
 
 type RealTimeIssuesProps = {
   userObjectId: string;
@@ -51,8 +51,8 @@ function installationId(): string {
 }
 
 @validateRpc()
-class CloudflareRealTimeIssuesSessionImpl extends RpcTarget
-    implements CloudflareRealTimeIssuesSession {
+class CloudflareEventSubscriptionSessionImpl extends RpcTarget
+    implements CloudflareEventSubscriptionSession {
   constructor(
     private readonly ctx: DurableObjectState<Omit<RealTimeIssuesProps, "installationId">>,
     private readonly approvalQueue: RpcStub<ApprovalQueue>,
@@ -64,10 +64,10 @@ class CloudflareRealTimeIssuesSessionImpl extends RpcTarget
     this.approvalQueue[Symbol.dispose]();
   }
 
-  async subscribe(callback: RpcStub<RealTimeIssueHookTarget>): Promise<void> {
+  async subscribe(callback: RpcStub<CloudflareEventHookTarget>): Promise<void> {
     const props: RealTimeIssuesProps = { ...this.ctx.props, installationId: installationId() };
-    const controller: Fetcher<HookController<RealTimeIssueHookTarget>> =
-      this.ctx.exports.CloudflareRealTimeIssueHookController({ props });
+    const controller: Fetcher<HookController<CloudflareEventHookTarget>> =
+      this.ctx.exports.CloudflareEventHookController({ props });
     // @ts-ignore Cap'n Web loses the callback intersection while mapping this generic RPC.
     await this.approvalQueue.bindHook(controller, callback, {
       title: "Investigate Cloudflare Real-Time Issues",
@@ -80,23 +80,23 @@ class CloudflareRealTimeIssuesSessionImpl extends RpcTarget
 @validateRpc()
 export class CloudflareRealTimeIssuesGatekeeper
     extends DurableObject<Cloudflare.Env, Omit<RealTimeIssuesProps, "installationId">>
-    implements Gatekeeper<CloudflareRealTimeIssuesSession> {
+    implements Gatekeeper<CloudflareEventSubscriptionSession> {
   async describe(): Promise<ResourceDescription> {
     return {
       url: realTimeIssuesAutomationUrl(this.ctx.props.accountId),
       title: "Real-Time Issues automation",
       snippet: "Receive new Workers issues through a managed Queue and Event Subscription.",
       suggestedBindingName: "CLOUDFLARE_REAL_TIME_ISSUES",
-      tsType: "CloudflareRealTimeIssuesSession",
-      hookTsType: "CloudflareRealTimeIssueHook",
+      tsType: "CloudflareEventSubscriptionSession",
+      hookTsType: "CloudflareEventHook",
     };
   }
 
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<CloudflareRealTimeIssuesSession> {
-    return new CloudflareRealTimeIssuesSessionImpl(this.ctx, approvalQueue.dup());
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<CloudflareEventSubscriptionSession> {
+    return new CloudflareEventSubscriptionSessionImpl(this.ctx, approvalQueue.dup());
   }
 
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
@@ -117,15 +117,15 @@ export class CloudflareRealTimeIssuesGatekeeper
 }
 
 @validateRpc()
-export class CloudflareRealTimeIssueHookController
+export class CloudflareEventHookController
     extends WorkerEntrypoint<Cloudflare.Env, RealTimeIssuesProps>
-    implements HookController<RealTimeIssueHookTarget> {
+    implements HookController<CloudflareEventHookTarget> {
   #poller(): DurableObjectStub<RealTimeIssuePoller> {
     return this.ctx.exports.RealTimeIssuePoller.getByName(this.ctx.props.installationId);
   }
 
   async enable(
-    initiator: Fetcher<HookInitiator<RealTimeIssueHookTarget>>,
+    initiator: Fetcher<HookInitiator<CloudflareEventHookTarget>>,
     _target: HookTargetMetadata,
   ): Promise<void> {
     await this.#poller().enable(this.ctx.props, initiator);
@@ -192,7 +192,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
 
   async enable(
     props: RealTimeIssuesProps,
-    initiator: Fetcher<HookInitiator<RealTimeIssueHookTarget>>,
+    initiator: Fetcher<HookInitiator<CloudflareEventHookTarget>>,
   ): Promise<void> {
     const storedProps = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
     if (storedProps && JSON.stringify(storedProps) !== JSON.stringify(props)) {
@@ -227,7 +227,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
   }
 
   async alarm(): Promise<void> {
-    const initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<RealTimeIssueHookTarget>>>(
+    const initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<CloudflareEventHookTarget>>>(
       "initiator",
     );
     const installation = this.ctx.storage.kv.get<QueueInstallation>("installation");
@@ -259,7 +259,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
               title: "Cloudflare Real-Time Issue",
               description: `Received Real-Time Issue event ${event.id} from the bound account.`,
             });
-            await hook.callback.onIssue(event);
+            await hook.callback.onEvent(event);
             this.#recordProcessedEvent(event.id);
           }
           acknowledged.push(message.leaseId);

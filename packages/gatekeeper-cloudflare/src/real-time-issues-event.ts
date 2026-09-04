@@ -1,4 +1,4 @@
-import type { CloudflareRealTimeIssueEvent } from "./types.js";
+import type { CloudflareEvent } from "./types.js";
 
 const EVENT_TYPE = "cf.observability.issue.automation-triggered";
 
@@ -13,7 +13,7 @@ export function parseRealTimeIssueEvent(
   value: unknown,
   expectedAccountId: string,
   expectedSubscriptionId: string,
-): CloudflareRealTimeIssueEvent {
+): CloudflareEvent {
   const event = asRecord(value);
   const source = asRecord(event?.source);
   const metadata = asRecord(event?.metadata);
@@ -28,13 +28,13 @@ export function parseRealTimeIssueEvent(
   return {
     id: event.id,
     type: EVENT_TYPE,
-    source: source as CloudflareRealTimeIssueEvent["source"],
+    source: source as CloudflareEvent["source"],
     metadata: {
       accountId: expectedAccountId,
       eventSubscriptionId: expectedSubscriptionId,
       eventSchemaVersion: metadata.eventSchemaVersion,
       eventTimestamp: metadata.eventTimestamp,
     },
-    payload: event.payload as CloudflareRealTimeIssueEvent["payload"],
+    payload: event.payload as CloudflareEvent["payload"],
   };
 }
