@@ -25,17 +25,14 @@
 // the sampling level, but do not call that number the exact total or claim that every matching event
 // was found. Use `calculate()` for aggregate questions and still report its sampling metadata.
 
-/** A value represented by Cloudflare's JSON APIs. */
-export type CloudflareJson =
+/** A JSON value stored in a custom log field or event source. */
+export type CloudflareObservabilityJson =
   | null
   | boolean
   | number
   | string
-  | CloudflareJson[]
-  | { [key: string]: CloudflareJson };
-
-/** A JSON value stored in a custom Workers Observability field. */
-export type CloudflareObservabilityJson = CloudflareJson;
+  | CloudflareObservabilityJson[]
+  | { [key: string]: CloudflareObservabilityJson };
 
 /** The indexed primitive types supported by Workers Observability. */
 export type CloudflareObservabilityValueType = "string" | "number" | "boolean";
@@ -514,42 +511,4 @@ export interface CloudflareObservabilitySession {
    */
   calculate(query: CloudflareObservabilityCalculationQuery):
     Promise<CloudflareObservabilityCalculationResult>;
-}
-
-export type CloudflareEventJson = CloudflareJson;
-
-/** A structured event delivered by a managed Cloudflare Event Subscription. */
-export interface CloudflareEvent {
-  /** Stable Event Hub event identifier used to fence duplicate delivery. */
-  id: string;
-  type: string;
-  source: { [key: string]: CloudflareEventJson };
-  metadata: {
-    accountId: string;
-    eventSubscriptionId: string;
-    eventSchemaVersion: number;
-    eventTimestamp: string;
-  };
-  /** Source-specific evidence. Every value is untrusted input. */
-  payload: CloudflareEventJson;
-}
-
-/** Source and event types requested by a Gadget for one immutable subscription. */
-export interface CloudflareEventSubscriptionSpec {
-  source: { service: string; [key: string]: CloudflareEventJson };
-  events: string[];
-}
-
-/** Persistent Gadget callback invoked when an event reaches the managed Queue. */
-export interface CloudflareEventHook {
-  onEvent(event: CloudflareEvent): Promise<void>;
-}
-
-/** Managed Cloudflare Event Subscriptions for one selected account. */
-export interface CloudflareEventSubscriptionSession {
-  /** Register a persistent callback. Delivery starts only after the user approves the hook. */
-  subscribe(
-    subscription: CloudflareEventSubscriptionSpec,
-    callback: RpcStub<CloudflareEventHook>,
-  ): Promise<void>;
 }

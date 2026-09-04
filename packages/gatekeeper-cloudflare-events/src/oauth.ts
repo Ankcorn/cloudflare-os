@@ -7,25 +7,22 @@
 const CF_OAUTH_AUTH_URL = "https://dash.cloudflare.com/oauth2/auth";
 const CF_OAUTH_TOKEN_URL = "https://dash.cloudflare.com/oauth2/token";
 
-import { observabilityScopesForResources } from "./resources.js";
+import { cloudflareScopesForResources } from "./resources.js";
 
 /**
- * Scopes for the AI Gateway billing/BYOK flow: read account details and route inference
- * through the user's own AI Gateway. We deliberately do NOT request "openid" — the dashboard OAuth
- * client isn't permitted it; identity comes from user-details.read (the /user API). offline_access
- * yields a refresh token; account-settings.read is required to enumerate the user's account(s).
+ * Base scopes needed to connect a Cloudflare account. We deliberately do NOT request "openid" —
+ * the dashboard OAuth client isn't permitted it; identity comes from user-details.read. The Queue
+ * scope is added only when the Event Subscriptions resource is selected.
  */
 export const BILLING_SCOPES = [
   "offline_access",
-  "aig.read",
-  "aig.run",
   "user-details.read",
   "account-settings.read",
 ];
 
-/** Persistent billing scopes plus the explicitly selected gadget resources. */
+/** Persistent account scopes plus the explicitly selected Event Subscriptions resource. */
 export function persistentScopesForResources(resourceUrlPatterns?: string[]): string[] {
-  return [...BILLING_SCOPES, ...observabilityScopesForResources(resourceUrlPatterns)];
+  return [...BILLING_SCOPES, ...cloudflareScopesForResources(resourceUrlPatterns)];
 }
 
 /**

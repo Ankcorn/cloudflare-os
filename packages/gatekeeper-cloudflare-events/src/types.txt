@@ -1,0 +1,37 @@
+/** A JSON value carried by Cloudflare Event Subscriptions. */
+export type CloudflareJson = null | boolean | number | string | CloudflareJson[] | {
+  [key: string]: CloudflareJson;
+};
+
+/** A validated Cloudflare Event Subscription event. */
+export interface CloudflareEvent {
+  id: string;
+  type: string;
+  source: { [key: string]: CloudflareJson };
+  metadata: {
+    accountId: string;
+    eventSubscriptionId: string;
+    eventSchemaVersion: number;
+    eventTimestamp: string;
+  };
+  payload: CloudflareJson;
+}
+
+/** The source and event names requested by a Gadget. */
+export interface CloudflareEventSubscriptionSpec {
+  source: { service: string; [key: string]: CloudflareJson };
+  events: string[];
+}
+
+/** The callback invoked for each validated event. */
+export interface CloudflareEventHook {
+  onEvent(event: CloudflareEvent): Promise<void>;
+}
+
+/** Managed Cloudflare Event Subscriptions for one selected account. */
+export interface CloudflareEventSubscriptionSession {
+  subscribe(
+    subscription: CloudflareEventSubscriptionSpec,
+    callback: RpcStub<CloudflareEventHook>,
+  ): Promise<void>;
+}

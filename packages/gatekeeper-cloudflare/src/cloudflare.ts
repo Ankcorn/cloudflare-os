@@ -13,14 +13,13 @@ import {
 } from "./oauth";
 import { fetchIdentity } from "./cloudflare-api";
 import {
-  CLOUDFLARE_RESOURCES,
+  OBSERVABILITY_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
-  EVENT_SUBSCRIPTIONS_RESOURCE,
-  grantedCloudflareResourcePatterns,
+  grantedObservabilityResourcePatterns,
   accountObservabilityUrl,
   workerObservabilityUrl,
-  parseCloudflareResourceUrl,
+  parseObservabilityResourceUrl,
 } from "./resources.js";
 import { CloudflareObservabilityApi, deniesAccess } from "./observability-api.js";
 import { CloudflareObservabilitySessionImpl } from "./observability-session.js";
@@ -30,18 +29,10 @@ import {
 } from "./cloudflare-configurators.js";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/cloudflare-account-configurator-ui.txt";
 import WORKER_CONFIGURATOR_HTML from "./generated/cloudflare-worker-configurator-ui.txt";
-import EVENT_SUBSCRIPTIONS_CONFIGURATOR_HTML from
-  "./generated/cloudflare-event-subscriptions-configurator-ui.txt";
 import type { CloudflareObservabilitySession } from "./types.js";
 import { VENDOR_ID } from "./vendor.js";
 import TYPES_CODE from "./types.txt";
 import { obsContext } from "./observability.js";
-
-export {
-  CloudflareEventHookController,
-  CloudflareEventSubscriptionsGatekeeper,
-  CloudflareEventSubscriptionPoller,
-} from "./event-subscriptions.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
@@ -208,7 +199,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return CLOUDFLARE_RESOURCES;
+    return OBSERVABILITY_RESOURCES;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -407,7 +398,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       displayName: identity?.displayName,
       uniqueName: identity?.email,
       avatar: { url: CLOUDFLARE_LOGO_URL },
-      grantedResourceUrlPatterns: grantedCloudflareResourcePatterns(grantedScopes),
+      grantedResourceUrlPatterns: grantedObservabilityResourcePatterns(grantedScopes),
     };
   }
 
@@ -420,7 +411,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {
     const account = this.#account();
-    const grantedPatterns = new Set(grantedCloudflareResourcePatterns(await account.getGrantedScopes()));
+    const grantedPatterns = new Set(grantedObservabilityResourcePatterns(await account.getGrantedScopes()));
     if (resourceUrlPatterns.every(pattern => grantedPatterns.has(pattern))) return {};
 
     const union = [...new Set([...grantedPatterns, ...resourceUrlPatterns])];
@@ -434,28 +425,19 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return CLOUDFLARE_RESOURCES;
+    return OBSERVABILITY_RESOURCES;
   }
 
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
-    const parsed = parseCloudflareResourceUrl(url);
-    if (parsed.kind === "eventSubscriptions") {
-      return {
-        class: this.ctx.exports.CloudflareEventSubscriptionsGatekeeper({
-          props: { userObjectId: this.ctx.props.userObjectId, accountId: parsed.accountId },
-        }),
-        resource: EVENT_SUBSCRIPTIONS_RESOURCE,
-      };
-    }
-    const workerName = parsed.kind === "workerObservability" ? parsed.workerName : undefined;
+    const parsed = parseObservabilityResourceUrl(url);
     return {
       class: this.ctx.exports.CloudflareObservabilityGatekeeper({
-        props: { userObjectId: this.ctx.props.userObjectId, accountId: parsed.accountId, workerName },
+        props: { userObjectId: this.ctx.props.userObjectId, ...parsed },
       }),
-      resource: workerName ? WORKER_OBSERVABILITY_RESOURCE : ACCOUNT_OBSERVABILITY_RESOURCE,
+      resource: parsed.workerName ? WORKER_OBSERVABILITY_RESOURCE : ACCOUNT_OBSERVABILITY_RESOURCE,
     };
   }
 
@@ -471,12 +453,6 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: WORKER_CONFIGURATOR_HTML,
         ui: new RpcStub(new CloudflareWorkerConfiguratorUI(getToken)),
-      };
-    }
-    if (resourceUrlPattern === EVENT_SUBSCRIPTIONS_RESOURCE.urlPattern) {
-      return {
-        iframeHtml: EVENT_SUBSCRIPTIONS_CONFIGURATOR_HTML,
-        ui: new RpcStub(new CloudflareAccountConfiguratorUI(getToken)),
       };
     }
     throw new Error(`Unsupported Cloudflare resource configurator type: ${resourceUrlPattern}`);
