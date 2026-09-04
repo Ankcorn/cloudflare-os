@@ -1,0 +1,23 @@
+packages/gatekeeper-cloudflare/README.md
+  s_bab3bdd042e5b4::t_e7e1854329d96c 23-25
+packages/gatekeeper-cloudflare/src/real-time-issues-event.ts
+  s_bab3bdd042e5b4::t_21c75e25a72a3f 21
+packages/gatekeeper-cloudflare/src/real-time-issues.ts
+  s_bab3bdd042e5b4::t_d6f52bb0090629 33-36,141-181,246,255,263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "72cc8deb2b39a9526047f86e08ebd980fed69123",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
