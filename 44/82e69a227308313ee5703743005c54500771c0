@@ -1,0 +1,59 @@
+packages/gatekeeper-cloudflare-events/__tests__/env.d.ts
+  s_bab3bdd042e5b4::t_10ab6d6fb7c6bc 1-17
+packages/gatekeeper-cloudflare-events/package.json
+  s_bab3bdd042e5b4::t_f3686b3b3083be 1-27
+packages/gatekeeper-cloudflare-events/src/cloudflare-api.ts
+  s_bab3bdd042e5b4::t_df040db5db22ef 1-121
+packages/gatekeeper-cloudflare-events/src/configurator/cloudflare-configurator-types.d.ts
+  s_bab3bdd042e5b4::t_31b3ed15d1a6a3 1-18
+packages/gatekeeper-cloudflare-events/src/observability.ts
+  s_bab3bdd042e5b4::t_c14331885d1dff 1-21
+packages/gatekeeper-cloudflare-events/src/resources.ts
+  s_bab3bdd042e5b4::t_48e43f19f6f216 1-152
+packages/gatekeeper-cloudflare-events/src/types.d.ts
+  s_bab3bdd042e5b4::t_b7ae07d821cc73 1-32
+packages/gatekeeper-cloudflare-events/src/types.txt
+  s_bab3bdd042e5b4::t_5e985c9235dcc4 1-37
+packages/gatekeeper-cloudflare-events/tsconfig.json
+  s_bab3bdd042e5b4::t_973223836cdbec 1-18
+packages/gatekeeper-cloudflare-events/vite.config.ts
+  s_bab3bdd042e5b4::t_65127e7923a328 1-7
+packages/gatekeeper-cloudflare-events/vitest.config.ts
+  s_bab3bdd042e5b4::t_ba856496790ca0 1-2
+packages/gatekeeper-cloudflare-events/vitest.worker.config.ts
+  s_bab3bdd042e5b4::t_ad1c5760e9952b 1-24
+packages/gatekeeper-cloudflare-events/worker-configuration.d.ts
+  s_bab3bdd042e5b4::t_5dc4dd0fe06cca 1-15085
+packages/gatekeeper-cloudflare-events/wrangler.jsonc
+  s_bab3bdd042e5b4::t_bea0c64c4fc5cd 1-16
+packages/gatekeeper-cloudflare/README.md
+  s_bab3bdd042e5b4::t_716db1540a4d0c 21-25
+packages/gatekeeper-cloudflare/__tests__/worker.ts
+  s_bab3bdd042e5b4::t_c17a4a8e1137ac 9-11
+packages/gatekeeper-cloudflare/src/cloudflare.ts
+  s_bab3bdd042e5b4::t_47c265f17bea64 16,19,22,202,401,414,428,435,438,440
+packages/gatekeeper-cloudflare/src/oauth.ts
+  s_bab3bdd042e5b4::t_17b2f663d5d121 10,28
+packages/gatekeeper-cloudflare/src/resources.ts
+  s_bab3bdd042e5b4::t_34ac706b7c0e84 27,69
+packages/gatekeeper-cloudflare/src/types.d.ts
+  s_bab3bdd042e5b4::t_dc9cca277923dc 28-29,34-35
+packages/gatekeeper-cloudflare/worker-configuration.d.ts
+  s_bab3bdd042e5b4::t_46dfd615d63d19 2-3,9,41,48,54,60,118,124,130,136,142,148,154,160,166,172,190,196,202,215,381,652,659,665,671,708,714,727,733,740,747,753,759,765,786,799,805,837,850,862,868,884,897,903,910,949,967,973,990,996,1013,1046,1053,1081,1099,1117,1135,1141,1149,1156,1162,1284,1301,1308,1314,1385,1391,1397,1403,1409,1419,1425,1431,1438,1445,1451,1457,1463,1469,1475,1481,1487,1493,1499,1504,1509,1511,1590,1596,1602,1611,1618,1625,1631,1637,1643,1649,1655,1660,1662,1725,1743,1751,1782,1788,1800,1826,1832,2221,2239,2245,2257,2263,2275,2307,2316,2322,2341,2367,2373,2385,2391,2398,2404,2410,2422,2435,2447,2472,2494,2501,2513,2519,2526,2533,2539,2545,2551,2557,2563,2569,2576,2583,2589,2608,2616,2624,2633,2802,2827,2833,2839,2845,2851,2857,2863,2869,2875,2881,2887,2893,2899,2905,2911,2917,2923,2929,2935,2941,2961,2967,3017,3023,3028,3033,3035,3089,3108,3126,3143,3150,3156,3176,3182,3269,3275,3281,3287,3372,3378,3387,3393,3399,3415,3421,3511,3524,10981,10986,10988,11112,11114,12684,13175-13176,13182-13184,13189-13191,13970,14136,14140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4482e69a227308313ee5703743005c54500771c0",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
