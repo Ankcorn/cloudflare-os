@@ -1,0 +1,19 @@
+packages/gatekeeper-cloudflare/src/real-time-issues.ts
+  s_bab3bdd042e5b4::t_d8d70e88757515 23-24,41,54-55,67,69-70,83,90-91,98-99,120,122,128,195,230,262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3862624072ecc9ea7a5a36d6985fd54cd6b3a09f",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
