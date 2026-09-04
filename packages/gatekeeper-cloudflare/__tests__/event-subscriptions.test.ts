@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseCloudflareEvent,
   parseEventSubscriptionSpec,
-} from "../src/real-time-issues-event";
+} from "../src/event-subscriptions-event";
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 const SUBSCRIPTION_ID = "subscription-1";
@@ -15,7 +15,7 @@ function event() {
   return {
     id: "event-1",
     type: "cf.observability.issue.automation-triggered",
-    source: { service: "real-time-issues" },
+    source: { type: "worker", name: "api" },
     metadata: {
       accountId: ACCOUNT_ID,
       eventSubscriptionId: SUBSCRIPTION_ID,
@@ -31,11 +31,19 @@ describe("Cloudflare Event Subscription validation", () => {
     expect(parseEventSubscriptionSpec(SPEC)).toEqual(SPEC);
   });
 
+  it("supports source-specific resource selection", () => {
+    const spec = {
+      source: { service: "r2", account: ACCOUNT_ID, buckets: ["logs"] },
+      events: ["object.created"],
+    };
+    expect(parseEventSubscriptionSpec(spec)).toEqual(spec);
+  });
+
   it("rejects empty, duplicate, or malformed event selections", () => {
     expect(() => parseEventSubscriptionSpec({ ...SPEC, events: [] })).toThrow("source or events");
     expect(() => parseEventSubscriptionSpec({ ...SPEC, events: ["issue.created", "issue.created"] }))
       .toThrow("source or events");
-    expect(() => parseEventSubscriptionSpec({ source: { service: "observability", extra: true }, events: ["issue.created"] }))
+    expect(() => parseEventSubscriptionSpec({ ...SPEC, unexpected: true }))
       .toThrow("source or events");
   });
 

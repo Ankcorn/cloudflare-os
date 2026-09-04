@@ -8,6 +8,7 @@ import {
   grantedCloudflareResourcePatterns,
   grantedObservabilityResourcePatterns,
   observabilityScopesForResources,
+  parseCloudflareResourceUrl,
   parseObservabilityResourceUrl,
   parseEventSubscriptionsUrl,
   eventSubscriptionsUrl,
@@ -44,6 +45,22 @@ describe("Cloudflare observability resources", () => {
       `https://dash.cloudflare.com/${ACCOUNT_ID}/workers/queues/event-subscriptions`,
     );
     expect(parseEventSubscriptionsUrl(url)).toEqual({ accountId: ACCOUNT_ID });
+  });
+
+  it("dispatches configured URLs to an explicit resource kind", () => {
+    expect(parseCloudflareResourceUrl(eventSubscriptionsUrl(ACCOUNT_ID))).toEqual({
+      kind: "eventSubscriptions",
+      accountId: ACCOUNT_ID,
+    });
+    expect(parseCloudflareResourceUrl(accountObservabilityUrl(ACCOUNT_ID))).toEqual({
+      kind: "accountObservability",
+      accountId: ACCOUNT_ID,
+    });
+    expect(parseCloudflareResourceUrl(workerObservabilityUrl(ACCOUNT_ID, "api"))).toEqual({
+      kind: "workerObservability",
+      accountId: ACCOUNT_ID,
+      workerName: "api",
+    });
   });
 
   it("accepts harmless dashboard state and a trailing slash", () => {

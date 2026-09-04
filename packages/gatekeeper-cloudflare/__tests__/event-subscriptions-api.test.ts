@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  acknowledgeRealTimeIssueMessages,
-  provisionRealTimeIssuesQueue,
-  pullRealTimeIssueMessages,
-  removeRealTimeIssuesQueue,
-} from "../src/real-time-issues-api";
+  acknowledgeCloudflareEventMessages,
+  provisionEventSubscription,
+  pullCloudflareEventMessages,
+  removeEventSubscription,
+} from "../src/event-subscriptions-api";
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 const SUBSCRIPTION = {
@@ -31,11 +31,9 @@ describe("Cloudflare Events Queue API", () => {
       return responses.shift()!;
     }));
 
-    await expect(provisionRealTimeIssuesQueue("oauth-token", ACCOUNT_ID, "install-1", SUBSCRIPTION))
+    await expect(provisionEventSubscription("oauth-token", ACCOUNT_ID, "install-1", SUBSCRIPTION))
       .resolves.toEqual({
         queueId: "queue-1",
-        queueName: "cloudflare-os-events-install-1",
-        consumerId: "consumer-1",
         subscriptionId: "subscription-1",
       });
 
@@ -62,10 +60,8 @@ describe("Cloudflare Events Queue API", () => {
       return envelope(null);
     }));
 
-    await removeRealTimeIssuesQueue("token", ACCOUNT_ID, {
+    await removeEventSubscription("token", ACCOUNT_ID, {
       queueId: "queue-1",
-      queueName: "managed",
-      consumerId: "consumer-1",
       subscriptionId: "subscription-1",
     });
 
@@ -73,6 +69,23 @@ describe("Cloudflare Events Queue API", () => {
       `/client/v4/accounts/${ACCOUNT_ID}/event_subscriptions/subscriptions/subscription-1`,
       `/client/v4/accounts/${ACCOUNT_ID}/queues/queue-1`,
     ]);
+  });
+
+  it("continues cleanup when the Event Subscription was already removed", async () => {
+    const paths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      paths.push(new URL(String(input)).pathname);
+      return paths.length === 1
+        ? new Response("missing", { status: 404 })
+        : envelope(null);
+    }));
+
+    await removeEventSubscription("token", ACCOUNT_ID, {
+      queueId: "queue-1",
+      subscriptionId: "subscription-1",
+    });
+
+    expect(paths.at(-1)).toBe(`/client/v4/accounts/${ACCOUNT_ID}/queues/queue-1`);
   });
 
   it("decodes base64 JSON pull bodies and acknowledges their leases", async () => {
@@ -92,11 +105,11 @@ describe("Cloudflare Events Queue API", () => {
       return envelope(null);
     }));
 
-    await expect(pullRealTimeIssueMessages("token", ACCOUNT_ID, "queue-1")).resolves.toEqual({
+    await expect(pullCloudflareEventMessages("token", ACCOUNT_ID, "queue-1")).resolves.toEqual({
       backlog: 1,
       messages: [{ id: "message-1", leaseId: "lease-1", body: { id: "event-1" } }],
     });
-    await acknowledgeRealTimeIssueMessages("token", ACCOUNT_ID, "queue-1", ["lease-1"]);
+    await acknowledgeCloudflareEventMessages("token", ACCOUNT_ID, "queue-1", ["lease-1"]);
 
     expect(JSON.parse(String(calls[1]!.init.body))).toEqual({
       acks: [{ lease_id: "lease-1" }],
@@ -113,7 +126,7 @@ describe("Cloudflare Events Queue API", () => {
       return envelope(null);
     }));
 
-    await expect(provisionRealTimeIssuesQueue("token", ACCOUNT_ID, "install", SUBSCRIPTION))
+    await expect(provisionEventSubscription("token", ACCOUNT_ID, "install", SUBSCRIPTION))
       .rejects.toThrow("enabling Queue HTTP pull (HTTP 403)");
     expect(calls.at(-1)).toContain(`/accounts/${ACCOUNT_ID}/queues/queue-1`);
   });

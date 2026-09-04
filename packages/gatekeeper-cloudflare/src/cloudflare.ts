@@ -20,8 +20,7 @@ import {
   grantedCloudflareResourcePatterns,
   accountObservabilityUrl,
   workerObservabilityUrl,
-  parseObservabilityResourceUrl,
-  parseEventSubscriptionsUrl,
+  parseCloudflareResourceUrl,
 } from "./resources.js";
 import { CloudflareObservabilityApi, deniesAccess } from "./observability-api.js";
 import { CloudflareObservabilitySessionImpl } from "./observability-session.js";
@@ -40,9 +39,9 @@ import { obsContext } from "./observability.js";
 
 export {
   CloudflareEventHookController,
-  CloudflareRealTimeIssuesGatekeeper,
-  RealTimeIssuePoller,
-} from "./real-time-issues.js";
+  CloudflareEventSubscriptionsGatekeeper,
+  CloudflareEventSubscriptionPoller,
+} from "./event-subscriptions.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
@@ -442,23 +441,22 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
-    try {
-      const parsed = parseEventSubscriptionsUrl(url);
+    const parsed = parseCloudflareResourceUrl(url);
+    if (parsed.kind === "eventSubscriptions") {
       return {
-        class: this.ctx.exports.CloudflareRealTimeIssuesGatekeeper({
-          props: { userObjectId: this.ctx.props.userObjectId, ...parsed },
+        class: this.ctx.exports.CloudflareEventSubscriptionsGatekeeper({
+          props: { userObjectId: this.ctx.props.userObjectId, accountId: parsed.accountId },
         }),
         resource: EVENT_SUBSCRIPTIONS_RESOURCE,
       };
-    } catch {
-      const parsed = parseObservabilityResourceUrl(url);
-      return {
-        class: this.ctx.exports.CloudflareObservabilityGatekeeper({
-          props: { userObjectId: this.ctx.props.userObjectId, ...parsed },
-        }),
-        resource: parsed.workerName ? WORKER_OBSERVABILITY_RESOURCE : ACCOUNT_OBSERVABILITY_RESOURCE,
-      };
     }
+    const workerName = parsed.kind === "workerObservability" ? parsed.workerName : undefined;
+    return {
+      class: this.ctx.exports.CloudflareObservabilityGatekeeper({
+        props: { userObjectId: this.ctx.props.userObjectId, accountId: parsed.accountId, workerName },
+      }),
+      resource: workerName ? WORKER_OBSERVABILITY_RESOURCE : ACCOUNT_OBSERVABILITY_RESOURCE,
+    };
   }
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {

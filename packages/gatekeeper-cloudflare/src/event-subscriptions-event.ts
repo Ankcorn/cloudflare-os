@@ -11,19 +11,32 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function isJson(value: unknown, depth = 0): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (depth >= 10) return false;
+  if (Array.isArray(value)) return value.length <= 100 && value.every(item => isJson(item, depth + 1));
+  const record = asRecord(value);
+  return record !== null && Object.keys(record).length <= 100 &&
+    Object.values(record).every(item => isJson(item, depth + 1));
+}
+
 /** Validate and canonicalize the source and events requested by Gadget code. */
 export function parseEventSubscriptionSpec(value: unknown): CloudflareEventSubscriptionSpec {
   const spec = asRecord(value);
   const source = asRecord(spec?.source);
   const events = spec?.events;
-  if (!spec || !source || Object.keys(source).length !== 1 ||
+  if (!spec || Object.keys(spec).length !== 2 || !source || !isJson(source) ||
       typeof source.service !== "string" || !EVENT_NAME_PATTERN.test(source.service) ||
       !Array.isArray(events) || events.length === 0 || events.length > 20 ||
       events.some(event => typeof event !== "string" || !EVENT_NAME_PATTERN.test(event)) ||
-      new Set(events).size !== events.length) {
+      new Set(events).size !== events.length || JSON.stringify(source).length > 4_096) {
     throw new Error("Invalid Cloudflare Event Subscription source or events.");
   }
-  return { source: { service: source.service }, events: [...events] as string[] };
+  return {
+    source: structuredClone(source) as CloudflareEventSubscriptionSpec["source"],
+    events: [...events] as string[],
+  };
 }
 
 /** Validate the Event Hub envelope before it crosses into Gadget code. */

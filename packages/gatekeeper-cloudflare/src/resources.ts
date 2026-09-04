@@ -99,6 +99,23 @@ export function parseEventSubscriptionsUrl(url: string): { accountId: string } {
   throw new Error(`Unsupported Cloudflare Event Subscriptions URL: ${url}`);
 }
 
+export type ParsedCloudflareResource =
+  | { kind: "eventSubscriptions"; accountId: string }
+  | { kind: "accountObservability"; accountId: string }
+  | { kind: "workerObservability"; accountId: string; workerName: string };
+
+/** Parse a configured URL once into the resource kind owned by the Cloudflare vendor. */
+export function parseCloudflareResourceUrl(url: string): ParsedCloudflareResource {
+  try {
+    return { kind: "eventSubscriptions", ...parseEventSubscriptionsUrl(url) };
+  } catch {
+    const observability = parseObservabilityResourceUrl(url);
+    return observability.workerName
+      ? { kind: "workerObservability", ...observability, workerName: observability.workerName }
+      : { kind: "accountObservability", accountId: observability.accountId };
+  }
+}
+
 export function observabilityScopesForResources(resourceUrlPatterns?: string[]): string[] {
   if (resourceUrlPatterns?.some(pattern => !OBSERVABILITY_RESOURCE_PATTERNS.has(pattern))) {
     throw new Error("Unsupported Cloudflare resource type.");

@@ -21,7 +21,7 @@
     },
     {
       "tag": "v2",
-      "new_sqlite_classes": [ "CloudflareRealTimeIssuesGatekeeper", "RealTimeIssuePoller" ]
+      "new_sqlite_classes": [ "CloudflareEventSubscriptionsGatekeeper", "CloudflareEventSubscriptionPoller" ]
     }
   ],
   "observability": {

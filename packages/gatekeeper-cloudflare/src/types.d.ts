@@ -25,14 +25,17 @@
 // the sampling level, but do not call that number the exact total or claim that every matching event
 // was found. Use `calculate()` for aggregate questions and still report its sampling metadata.
 
-/** A JSON value stored in a custom log field or event source. */
-export type CloudflareObservabilityJson =
+/** A value represented by Cloudflare's JSON APIs. */
+export type CloudflareJson =
   | null
   | boolean
   | number
   | string
-  | CloudflareObservabilityJson[]
-  | { [key: string]: CloudflareObservabilityJson };
+  | CloudflareJson[]
+  | { [key: string]: CloudflareJson };
+
+/** A JSON value stored in a custom Workers Observability field. */
+export type CloudflareObservabilityJson = CloudflareJson;
 
 /** The indexed primitive types supported by Workers Observability. */
 export type CloudflareObservabilityValueType = "string" | "number" | "boolean";
@@ -513,7 +516,7 @@ export interface CloudflareObservabilitySession {
     Promise<CloudflareObservabilityCalculationResult>;
 }
 
-export type CloudflareEventJson = CloudflareObservabilityJson;
+export type CloudflareEventJson = CloudflareJson;
 
 /** A structured event delivered by a managed Cloudflare Event Subscription. */
 export interface CloudflareEvent {
@@ -533,7 +536,7 @@ export interface CloudflareEvent {
 
 /** Source and event types requested by a Gadget for one immutable subscription. */
 export interface CloudflareEventSubscriptionSpec {
-  source: { service: string };
+  source: { service: string; [key: string]: CloudflareEventJson };
   events: string[];
 }
 

@@ -12,12 +12,12 @@ import type {
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  acknowledgeRealTimeIssueMessages,
-  provisionRealTimeIssuesQueue,
-  pullRealTimeIssueMessages,
-  removeRealTimeIssuesQueue,
-  type QueueInstallation,
-} from "./real-time-issues-api.js";
+  acknowledgeCloudflareEventMessages,
+  provisionEventSubscription,
+  pullCloudflareEventMessages,
+  removeEventSubscription,
+  type EventSubscriptionInstallation,
+} from "./event-subscriptions-api.js";
 import { eventSubscriptionsUrl } from "./resources.js";
 import type {
   CloudflareEventHook,
@@ -28,7 +28,7 @@ import TYPES_CODE from "./types.txt";
 import {
   parseCloudflareEvent,
   parseEventSubscriptionSpec,
-} from "./real-time-issues-event.js";
+} from "./event-subscriptions-event.js";
 import { VENDOR_ID } from "./vendor.js";
 import { obsContext } from "./observability.js";
 
@@ -36,8 +36,6 @@ const IDLE_POLL_INTERVAL_MS = 30_000;
 const RETRY_POLL_INTERVAL_MS = 10_000;
 const PROCESSED_EVENT_TTL_MS = 15 * 24 * 60 * 60 * 1_000;
 const PROCESSED_EVENT_CLEANUP_LIMIT = 100;
-const PROCESSED_EVENT_PREFIX = "processed-event:";
-const PROCESSED_EVENT_INDEX_PREFIX = "processed-event-index:";
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare.events", vendorId: VENDOR_ID,
 });
@@ -49,7 +47,7 @@ type EventSubscriptionsProps = {
   accountId: string;
 };
 
-type RealTimeIssuesProps = EventSubscriptionsProps & {
+type EventSubscriptionInstallationProps = EventSubscriptionsProps & {
   installationId: string;
   subscription: CloudflareEventSubscriptionSpec;
 };
@@ -77,7 +75,7 @@ class CloudflareEventSubscriptionSessionImpl extends RpcTarget
     callback: RpcStub<CloudflareEventHookTarget>,
   ): Promise<void> {
     const subscription = parseEventSubscriptionSpec(requestedSubscription);
-    const props: RealTimeIssuesProps = {
+    const props: EventSubscriptionInstallationProps = {
       ...this.ctx.props,
       installationId: installationId(),
       subscription,
@@ -87,13 +85,14 @@ class CloudflareEventSubscriptionSessionImpl extends RpcTarget
     // @ts-ignore Cap'n Web loses the callback intersection while mapping this generic RPC.
     await this.approvalQueue.bindHook(controller, callback, {
       title: `Subscribe to ${subscription.source.service} events`,
-      description: `Receive ${subscription.events.join(", ")} from the selected Cloudflare account.`,
+      description: `Receive ${subscription.events.join(", ")} from ` +
+        `${JSON.stringify(subscription.source)} in the selected Cloudflare account.`,
     });
   }
 }
 
 @validateRpc()
-export class CloudflareRealTimeIssuesGatekeeper
+export class CloudflareEventSubscriptionsGatekeeper
     extends DurableObject<Cloudflare.Env, EventSubscriptionsProps>
     implements Gatekeeper<CloudflareEventSubscriptionSession> {
   async describe(): Promise<ResourceDescription> {
@@ -133,10 +132,10 @@ export class CloudflareRealTimeIssuesGatekeeper
 
 @validateRpc()
 export class CloudflareEventHookController
-    extends WorkerEntrypoint<Cloudflare.Env, RealTimeIssuesProps>
+    extends WorkerEntrypoint<Cloudflare.Env, EventSubscriptionInstallationProps>
     implements HookController<CloudflareEventHookTarget> {
-  #poller(): DurableObjectStub<RealTimeIssuePoller> {
-    return this.ctx.exports.RealTimeIssuePoller.getByName(this.ctx.props.installationId);
+  #poller(): DurableObjectStub<CloudflareEventSubscriptionPoller> {
+    return this.ctx.exports.CloudflareEventSubscriptionPoller.getByName(this.ctx.props.installationId);
   }
 
   async enable(
@@ -152,50 +151,42 @@ export class CloudflareEventHookController
 }
 
 /** Owns one managed Queue installation and wakes itself to pull events. */
-export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
-  #processedEventKey(eventId: string): string {
-    return `${PROCESSED_EVENT_PREFIX}${eventId}`;
+export class CloudflareEventSubscriptionPoller extends DurableObject<Cloudflare.Env> {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS processed_events (
+        id TEXT PRIMARY KEY,
+        processed_at INTEGER NOT NULL
+      )
+    `);
   }
 
   #hasProcessedEvent(eventId: string): boolean {
-    return this.ctx.storage.kv.get<number>(this.#processedEventKey(eventId)) !== undefined;
+    return [...this.ctx.storage.sql.exec(
+      "SELECT 1 FROM processed_events WHERE id = ? LIMIT 1", eventId,
+    )].length > 0;
   }
 
   #recordProcessedEvent(eventId: string): void {
-    const processedAt = Date.now();
-    const indexKey = `${PROCESSED_EVENT_INDEX_PREFIX}${String(processedAt).padStart(13, "0")}:` +
-      crypto.randomUUID();
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.kv.put(this.#processedEventKey(eventId), processedAt);
-      this.ctx.storage.kv.put(indexKey, eventId);
-    });
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO processed_events (id, processed_at) VALUES (?, ?)",
+      eventId,
+      Date.now(),
+    );
   }
 
   #cleanupProcessedEvents(): void {
-    const cutoff = Date.now() - PROCESSED_EVENT_TTL_MS;
-    const expired: Array<[string, string]> = [];
-    for (const [indexKey, eventId] of this.ctx.storage.kv.list<string>({
-      prefix: PROCESSED_EVENT_INDEX_PREFIX,
-      limit: PROCESSED_EVENT_CLEANUP_LIMIT,
-    })) {
-      const timestampEnd = indexKey.indexOf(":", PROCESSED_EVENT_INDEX_PREFIX.length);
-      const processedAt = Number(indexKey.slice(PROCESSED_EVENT_INDEX_PREFIX.length, timestampEnd));
-      if (!Number.isSafeInteger(processedAt) || processedAt > cutoff) break;
-      expired.push([indexKey, eventId]);
-    }
-    if (expired.length === 0) return;
-    this.ctx.storage.transactionSync(() => {
-      for (const [indexKey, eventId] of expired) {
-        if ((this.ctx.storage.kv.get<number>(this.#processedEventKey(eventId)) ?? Infinity) <= cutoff) {
-          this.ctx.storage.kv.delete(this.#processedEventKey(eventId));
-        }
-        this.ctx.storage.kv.delete(indexKey);
-      }
-    });
+    this.ctx.storage.sql.exec(`
+      DELETE FROM processed_events WHERE id IN (
+        SELECT id FROM processed_events WHERE processed_at <= ?
+        ORDER BY processed_at LIMIT ?
+      )
+    `, Date.now() - PROCESSED_EVENT_TTL_MS, PROCESSED_EVENT_CLEANUP_LIMIT);
   }
 
-  #props(): RealTimeIssuesProps {
-    const props = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
+  #props(): EventSubscriptionInstallationProps {
+    const props = this.ctx.storage.kv.get<EventSubscriptionInstallationProps>("props");
     if (!props) throw new Error("Event Subscription poller is not configured.");
     return props;
   }
@@ -206,25 +197,22 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
   }
 
   async enable(
-    props: RealTimeIssuesProps,
+    props: EventSubscriptionInstallationProps,
     initiator: Fetcher<HookInitiator<CloudflareEventHookTarget>>,
   ): Promise<void> {
-    const storedProps = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
-    if (storedProps && JSON.stringify(storedProps) !== JSON.stringify(props)) {
-      throw new Error("Event Subscription poller configuration cannot be changed.");
-    }
-    let installation = this.ctx.storage.kv.get<QueueInstallation>("installation");
-    if (!installation) {
+    if (!this.ctx.storage.kv.get<EventSubscriptionInstallation>("installation")) {
       const token = await this.#account(props).getAccessToken();
       if (!token) throw new Error("Cloudflare OAuth credentials are unavailable while enabling hook.");
-      installation = await provisionRealTimeIssuesQueue(
+      const created = await provisionEventSubscription(
         token,
         props.accountId,
         props.installationId,
         props.subscription,
       );
-      this.ctx.storage.kv.put("props", props);
-      this.ctx.storage.kv.put("installation", installation);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.kv.put("props", props);
+        this.ctx.storage.kv.put("installation", created);
+      });
     }
     this.ctx.storage.kv.put("initiator", initiator);
     await this.ctx.storage.setAlarm(Date.now());
@@ -233,20 +221,24 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
   async disable(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
     this.ctx.storage.kv.delete("initiator");
-    const installation = this.ctx.storage.kv.get<QueueInstallation>("installation");
+    const installation = this.ctx.storage.kv.get<EventSubscriptionInstallation>("installation");
     if (!installation) return;
     const props = this.#props();
     const token = await this.#account(props).getAccessToken();
     if (!token) throw new Error("Cloudflare OAuth credentials are unavailable while disabling hook.");
-    await removeRealTimeIssuesQueue(token, props.accountId, installation);
-    this.ctx.storage.deleteAll();
+    await removeEventSubscription(token, props.accountId, installation);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.delete("props");
+      this.ctx.storage.kv.delete("installation");
+    });
+    this.ctx.storage.sql.exec("DELETE FROM processed_events");
   }
 
   async alarm(): Promise<void> {
     const initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<CloudflareEventHookTarget>>>(
       "initiator",
     );
-    const installation = this.ctx.storage.kv.get<QueueInstallation>("installation");
+    const installation = this.ctx.storage.kv.get<EventSubscriptionInstallation>("installation");
     if (!initiator || !installation) return;
 
     const props = this.#props();
@@ -254,7 +246,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
     try {
       const token = await this.#account(props).getAccessToken();
       if (!token) throw new Error("Cloudflare OAuth credentials are unavailable while polling.");
-      const batch = await pullRealTimeIssueMessages(
+      const batch = await pullCloudflareEventMessages(
         token,
         props.accountId,
         installation.queueId,
@@ -282,14 +274,14 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
           acknowledged.push(message.leaseId);
         } catch (error) {
           logger.warn("Cloudflare event delivery failed", {
-            event: "real_time_issues.delivery.failed",
+            event: "cloudflare_events.delivery.failed",
             accountId: props.accountId,
             queueId: installation.queueId,
             error,
           });
         }
       }
-      await acknowledgeRealTimeIssueMessages(
+      await acknowledgeCloudflareEventMessages(
         token,
         props.accountId,
         installation.queueId,
@@ -298,7 +290,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
       nextPoll = batch.backlog > batch.messages.length ? 0 : IDLE_POLL_INTERVAL_MS;
     } catch (error) {
       logger.error("Cloudflare Events Queue poll failed", {
-        event: "real_time_issues.poll.failed",
+        event: "cloudflare_events.poll.failed",
         accountId: props.accountId,
         queueId: installation.queueId,
         error,

@@ -13,10 +13,8 @@ interface CloudflareEnvelope {
   result?: unknown;
 }
 
-export interface QueueInstallation {
+export interface EventSubscriptionInstallation {
   queueId: string;
-  queueName: string;
-  consumerId: string;
   subscriptionId: string;
 }
 
@@ -46,6 +44,7 @@ async function request(
   path: string,
   context: string,
   init: RequestInit = {},
+  notFoundIsSuccess = false,
 ): Promise<unknown> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -55,10 +54,14 @@ async function request(
       ...init.headers,
     },
   });
+  if (notFoundIsSuccess && response.status === 404) {
+    response.body?.cancel();
+    return null;
+  }
   if (!response.ok) {
     response.body?.cancel();
     logger.error("Cloudflare Events API request failed", {
-      event: "real_time_issues.api.failed",
+      event: "cloudflare_events.api.failed",
       path,
       status: response.status,
       statusText: response.statusText,
@@ -91,12 +94,12 @@ function decodeBody(value: unknown): unknown {
 }
 
 /** Provision the dedicated Queue, HTTP pull consumer, and Event Subscription for one hook. */
-export async function provisionRealTimeIssuesQueue(
+export async function provisionEventSubscription(
   token: string,
   accountId: string,
   installationId: string,
   requestedSubscription: CloudflareEventSubscriptionSpec,
-): Promise<QueueInstallation> {
+): Promise<EventSubscriptionInstallation> {
   const queueName = `cloudflare-os-events-${installationId}`;
   const queue = record(await request(token, `/accounts/${accountId}/queues`, "creating Queue", {
     method: "POST",
@@ -105,13 +108,12 @@ export async function provisionRealTimeIssuesQueue(
   const queueId = stringField(queue, "queue_id", "creating Queue");
 
   try {
-    const consumer = record(await request(
+    await request(
       token,
       `/accounts/${accountId}/queues/${queueId}/consumers`,
       "enabling Queue HTTP pull",
       { method: "POST", body: JSON.stringify({ type: "http_pull", settings: {} }) },
-    ), "enabling Queue HTTP pull");
-    const consumerId = stringField(consumer, "consumer_id", "enabling Queue HTTP pull");
+    );
 
     const subscription = record(await request(
       token,
@@ -129,14 +131,12 @@ export async function provisionRealTimeIssuesQueue(
     ), "creating Event Subscription");
     return {
       queueId,
-      queueName,
-      consumerId,
       subscriptionId: stringField(subscription, "id", "creating Event Subscription"),
     };
   } catch (error) {
     await deleteQueue(token, accountId, queueId).catch(cleanupError =>
       logger.warn("failed to clean up Queue after provisioning failure", {
-        event: "real_time_issues.provision.cleanup.failed",
+        event: "cloudflare_events.provision.cleanup.failed",
         accountId,
         queueId,
         error: cleanupError,
@@ -146,16 +146,17 @@ export async function provisionRealTimeIssuesQueue(
 }
 
 /** Remove only the exact Event Subscription and Queue recorded for this hook installation. */
-export async function removeRealTimeIssuesQueue(
+export async function removeEventSubscription(
   token: string,
   accountId: string,
-  installation: QueueInstallation,
+  installation: EventSubscriptionInstallation,
 ): Promise<void> {
   await request(
     token,
     `/accounts/${accountId}/event_subscriptions/subscriptions/${installation.subscriptionId}`,
     "deleting Event Subscription",
     { method: "DELETE" },
+    true,
   );
   await deleteQueue(token, accountId, installation.queueId);
 }
@@ -163,11 +164,11 @@ export async function removeRealTimeIssuesQueue(
 async function deleteQueue(token: string, accountId: string, queueId: string): Promise<void> {
   await request(token, `/accounts/${accountId}/queues/${queueId}`, "deleting Queue", {
     method: "DELETE",
-  });
+  }, true);
 }
 
 /** Pull a bounded batch from the installation's dedicated Queue. */
-export async function pullRealTimeIssueMessages(
+export async function pullCloudflareEventMessages(
   token: string,
   accountId: string,
   queueId: string,
@@ -201,7 +202,7 @@ export async function pullRealTimeIssueMessages(
 }
 
 /** Acknowledge messages only after their Gadget hook delivery completed. */
-export async function acknowledgeRealTimeIssueMessages(
+export async function acknowledgeCloudflareEventMessages(
   token: string,
   accountId: string,
   queueId: string,
