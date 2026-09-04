@@ -18,13 +18,17 @@ import {
   removeRealTimeIssuesQueue,
   type QueueInstallation,
 } from "./real-time-issues-api.js";
-import { realTimeIssuesAutomationUrl } from "./resources.js";
+import { eventSubscriptionsUrl } from "./resources.js";
 import type {
   CloudflareEventHook,
   CloudflareEventSubscriptionSession,
+  CloudflareEventSubscriptionSpec,
 } from "./types.js";
 import TYPES_CODE from "./types.txt";
-import { parseRealTimeIssueEvent } from "./real-time-issues-event.js";
+import {
+  parseCloudflareEvent,
+  parseEventSubscriptionSpec,
+} from "./real-time-issues-event.js";
 import { VENDOR_ID } from "./vendor.js";
 import { obsContext } from "./observability.js";
 
@@ -35,15 +39,19 @@ const PROCESSED_EVENT_CLEANUP_LIMIT = 100;
 const PROCESSED_EVENT_PREFIX = "processed-event:";
 const PROCESSED_EVENT_INDEX_PREFIX = "processed-event-index:";
 const logger = obsContext.createLogger({
-  component: "gatekeeper.cloudflare.real-time-issues", vendorId: VENDOR_ID,
+  component: "gatekeeper.cloudflare.events", vendorId: VENDOR_ID,
 });
 
 type CloudflareEventHookTarget = RpcTarget & CloudflareEventHook;
 
-type RealTimeIssuesProps = {
+type EventSubscriptionsProps = {
   userObjectId: string;
   accountId: string;
+};
+
+type RealTimeIssuesProps = EventSubscriptionsProps & {
   installationId: string;
+  subscription: CloudflareEventSubscriptionSpec;
 };
 
 function installationId(): string {
@@ -54,7 +62,7 @@ function installationId(): string {
 class CloudflareEventSubscriptionSessionImpl extends RpcTarget
     implements CloudflareEventSubscriptionSession {
   constructor(
-    private readonly ctx: DurableObjectState<Omit<RealTimeIssuesProps, "installationId">>,
+    private readonly ctx: DurableObjectState<EventSubscriptionsProps>,
     private readonly approvalQueue: RpcStub<ApprovalQueue>,
   ) {
     super();
@@ -64,29 +72,36 @@ class CloudflareEventSubscriptionSessionImpl extends RpcTarget
     this.approvalQueue[Symbol.dispose]();
   }
 
-  async subscribe(callback: RpcStub<CloudflareEventHookTarget>): Promise<void> {
-    const props: RealTimeIssuesProps = { ...this.ctx.props, installationId: installationId() };
+  async subscribe(
+    requestedSubscription: CloudflareEventSubscriptionSpec,
+    callback: RpcStub<CloudflareEventHookTarget>,
+  ): Promise<void> {
+    const subscription = parseEventSubscriptionSpec(requestedSubscription);
+    const props: RealTimeIssuesProps = {
+      ...this.ctx.props,
+      installationId: installationId(),
+      subscription,
+    };
     const controller: Fetcher<HookController<CloudflareEventHookTarget>> =
       this.ctx.exports.CloudflareEventHookController({ props });
     // @ts-ignore Cap'n Web loses the callback intersection while mapping this generic RPC.
     await this.approvalQueue.bindHook(controller, callback, {
-      title: "Investigate Cloudflare Real-Time Issues",
-      description: "Receive new Real-Time Issues from the selected Cloudflare account through a " +
-        "dedicated Queue and Event Subscription.",
+      title: `Subscribe to ${subscription.source.service} events`,
+      description: `Receive ${subscription.events.join(", ")} from the selected Cloudflare account.`,
     });
   }
 }
 
 @validateRpc()
 export class CloudflareRealTimeIssuesGatekeeper
-    extends DurableObject<Cloudflare.Env, Omit<RealTimeIssuesProps, "installationId">>
+    extends DurableObject<Cloudflare.Env, EventSubscriptionsProps>
     implements Gatekeeper<CloudflareEventSubscriptionSession> {
   async describe(): Promise<ResourceDescription> {
     return {
-      url: realTimeIssuesAutomationUrl(this.ctx.props.accountId),
-      title: "Real-Time Issues automation",
-      snippet: "Receive new Workers issues through a managed Queue and Event Subscription.",
-      suggestedBindingName: "CLOUDFLARE_REAL_TIME_ISSUES",
+      url: eventSubscriptionsUrl(this.ctx.props.accountId),
+      title: "Cloudflare Event Subscriptions",
+      snippet: "Receive selected account events through managed Event Subscriptions.",
+      suggestedBindingName: "CLOUDFLARE_EVENTS",
       tsType: "CloudflareEventSubscriptionSession",
       hookTsType: "CloudflareEventHook",
     };
@@ -106,13 +121,13 @@ export class CloudflareRealTimeIssuesGatekeeper
   async removeObserver(_id: string): Promise<void> {}
 
   async applyAction(_action: number, _cache: RpcStub<GitCache>): Promise<void> {
-    throw new Error("Real-Time Issues automation exposes hooks, not actions.");
+    throw new Error("Cloudflare Event Subscriptions expose hooks, not actions.");
   }
   async rejectAction(_action: number): Promise<void> {
-    throw new Error("Real-Time Issues automation exposes hooks, not actions.");
+    throw new Error("Cloudflare Event Subscriptions expose hooks, not actions.");
   }
   async revertAction(_action: number): Promise<void> {
-    throw new Error("Real-Time Issues automation exposes hooks, not actions.");
+    throw new Error("Cloudflare Event Subscriptions expose hooks, not actions.");
   }
 }
 
@@ -181,7 +196,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
 
   #props(): RealTimeIssuesProps {
     const props = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
-    if (!props) throw new Error("Real-Time Issues poller is not configured.");
+    if (!props) throw new Error("Event Subscription poller is not configured.");
     return props;
   }
 
@@ -196,7 +211,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
   ): Promise<void> {
     const storedProps = this.ctx.storage.kv.get<RealTimeIssuesProps>("props");
     if (storedProps && JSON.stringify(storedProps) !== JSON.stringify(props)) {
-      throw new Error("Real-Time Issues poller configuration cannot be changed.");
+      throw new Error("Event Subscription poller configuration cannot be changed.");
     }
     let installation = this.ctx.storage.kv.get<QueueInstallation>("installation");
     if (!installation) {
@@ -206,6 +221,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
         token,
         props.accountId,
         props.installationId,
+        props.subscription,
       );
       this.ctx.storage.kv.put("props", props);
       this.ctx.storage.kv.put("installation", installation);
@@ -247,24 +263,25 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
       const acknowledged: string[] = [];
       for (const message of batch.messages) {
         try {
-          const event = parseRealTimeIssueEvent(
+          const event = parseCloudflareEvent(
             message.body,
             props.accountId,
             installation.subscriptionId,
+            props.subscription,
           );
           if (!this.#hasProcessedEvent(event.id)) {
             // @ts-expect-error Worker RPC's mapped return type wraps the disposable hook result.
             using hook = initiator.startHook();
             await hook.approvalQueue.authorizeObservation({
-              title: "Cloudflare Real-Time Issue",
-              description: `Received Real-Time Issue event ${event.id} from the bound account.`,
+              title: "Cloudflare event",
+              description: `Received ${event.type} event ${event.id} from the bound account.`,
             });
             await hook.callback.onEvent(event);
             this.#recordProcessedEvent(event.id);
           }
           acknowledged.push(message.leaseId);
         } catch (error) {
-          logger.warn("Real-Time Issue message delivery failed", {
+          logger.warn("Cloudflare event delivery failed", {
             event: "real_time_issues.delivery.failed",
             accountId: props.accountId,
             queueId: installation.queueId,
@@ -280,7 +297,7 @@ export class RealTimeIssuePoller extends DurableObject<Cloudflare.Env> {
       );
       nextPoll = batch.backlog > batch.messages.length ? 0 : IDLE_POLL_INTERVAL_MS;
     } catch (error) {
-      logger.error("Real-Time Issues Queue poll failed", {
+      logger.error("Cloudflare Events Queue poll failed", {
         event: "real_time_issues.poll.failed",
         accountId: props.accountId,
         queueId: installation.queueId,

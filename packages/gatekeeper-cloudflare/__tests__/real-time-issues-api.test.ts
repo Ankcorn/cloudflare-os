@@ -7,6 +7,10 @@ import {
 } from "../src/real-time-issues-api";
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+const SUBSCRIPTION = {
+  source: { service: "observability" },
+  events: ["issue.automation-triggered"],
+};
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -14,11 +18,11 @@ function envelope(result: unknown): Response {
   return Response.json({ success: true, errors: [], messages: [], result });
 }
 
-describe("Real-Time Issues Queue API", () => {
+describe("Cloudflare Events Queue API", () => {
   it("provisions a dedicated Queue, pull consumer, and Event Subscription", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const responses = [
-      envelope({ queue_id: "queue-1", queue_name: "cloudflare-os-real-time-issues-install-1" }),
+      envelope({ queue_id: "queue-1", queue_name: "cloudflare-os-events-install-1" }),
       envelope({ consumer_id: "consumer-1" }),
       envelope({ id: "subscription-1" }),
     ];
@@ -27,10 +31,10 @@ describe("Real-Time Issues Queue API", () => {
       return responses.shift()!;
     }));
 
-    await expect(provisionRealTimeIssuesQueue("oauth-token", ACCOUNT_ID, "install-1"))
+    await expect(provisionRealTimeIssuesQueue("oauth-token", ACCOUNT_ID, "install-1", SUBSCRIPTION))
       .resolves.toEqual({
         queueId: "queue-1",
-        queueName: "cloudflare-os-real-time-issues-install-1",
+        queueName: "cloudflare-os-events-install-1",
         consumerId: "consumer-1",
         subscriptionId: "subscription-1",
       });
@@ -41,10 +45,10 @@ describe("Real-Time Issues Queue API", () => {
       ["POST", `/client/v4/accounts/${ACCOUNT_ID}/event_subscriptions/subscriptions`],
     ]);
     expect(JSON.parse(String(calls[2]!.init.body))).toEqual({
-      name: "Cloudflare OS Real-Time Issues install-1",
-      source: { service: "observability" },
+      name: "Cloudflare OS Events install-1",
+      source: SUBSCRIPTION.source,
       destination: { service: "queues", queue_id: "queue-1" },
-      events: ["issue.automation-triggered"],
+      events: SUBSCRIPTION.events,
     });
     for (const call of calls) {
       expect((call.init.headers as Record<string, string>).Authorization).toBe("Bearer oauth-token");
@@ -109,7 +113,7 @@ describe("Real-Time Issues Queue API", () => {
       return envelope(null);
     }));
 
-    await expect(provisionRealTimeIssuesQueue("token", ACCOUNT_ID, "install"))
+    await expect(provisionRealTimeIssuesQueue("token", ACCOUNT_ID, "install", SUBSCRIPTION))
       .rejects.toThrow("enabling Queue HTTP pull (HTTP 403)");
     expect(calls.at(-1)).toContain(`/accounts/${ACCOUNT_ID}/queues/queue-1`);
   });

@@ -531,13 +531,22 @@ export interface CloudflareEvent {
   payload: CloudflareEventJson;
 }
 
+/** Source and event types requested by a Gadget for one immutable subscription. */
+export interface CloudflareEventSubscriptionSpec {
+  source: { service: string };
+  events: string[];
+}
+
 /** Persistent Gadget callback invoked when an event reaches the managed Queue. */
 export interface CloudflareEventHook {
   onEvent(event: CloudflareEvent): Promise<void>;
 }
 
-/** A managed Cloudflare Event Subscription. */
+/** Managed Cloudflare Event Subscriptions for one selected account. */
 export interface CloudflareEventSubscriptionSession {
-  /** Register a persistent callback. Delivery starts only after the user enables the hook. */
-  subscribe(callback: RpcStub<CloudflareEventHook>): Promise<void>;
+  /** Register a persistent callback. Delivery starts only after the user approves the hook. */
+  subscribe(
+    subscription: CloudflareEventSubscriptionSpec,
+    callback: RpcStub<CloudflareEventHook>,
+  ): Promise<void>;
 }

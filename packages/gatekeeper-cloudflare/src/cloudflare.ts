@@ -16,12 +16,12 @@ import {
   CLOUDFLARE_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
-  REAL_TIME_ISSUES_RESOURCE,
+  EVENT_SUBSCRIPTIONS_RESOURCE,
   grantedCloudflareResourcePatterns,
   accountObservabilityUrl,
   workerObservabilityUrl,
   parseObservabilityResourceUrl,
-  parseRealTimeIssuesAutomationUrl,
+  parseEventSubscriptionsUrl,
 } from "./resources.js";
 import { CloudflareObservabilityApi, deniesAccess } from "./observability-api.js";
 import { CloudflareObservabilitySessionImpl } from "./observability-session.js";
@@ -31,8 +31,8 @@ import {
 } from "./cloudflare-configurators.js";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/cloudflare-account-configurator-ui.txt";
 import WORKER_CONFIGURATOR_HTML from "./generated/cloudflare-worker-configurator-ui.txt";
-import REAL_TIME_ISSUES_CONFIGURATOR_HTML from
-  "./generated/cloudflare-real-time-issues-configurator-ui.txt";
+import EVENT_SUBSCRIPTIONS_CONFIGURATOR_HTML from
+  "./generated/cloudflare-event-subscriptions-configurator-ui.txt";
 import type { CloudflareObservabilitySession } from "./types.js";
 import { VENDOR_ID } from "./vendor.js";
 import TYPES_CODE from "./types.txt";
@@ -443,12 +443,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     resource: SupportedResource;
   }> {
     try {
-      const parsed = parseRealTimeIssuesAutomationUrl(url);
+      const parsed = parseEventSubscriptionsUrl(url);
       return {
         class: this.ctx.exports.CloudflareRealTimeIssuesGatekeeper({
           props: { userObjectId: this.ctx.props.userObjectId, ...parsed },
         }),
-        resource: REAL_TIME_ISSUES_RESOURCE,
+        resource: EVENT_SUBSCRIPTIONS_RESOURCE,
       };
     } catch {
       const parsed = parseObservabilityResourceUrl(url);
@@ -475,9 +475,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         ui: new RpcStub(new CloudflareWorkerConfiguratorUI(getToken)),
       };
     }
-    if (resourceUrlPattern === REAL_TIME_ISSUES_RESOURCE.urlPattern) {
+    if (resourceUrlPattern === EVENT_SUBSCRIPTIONS_RESOURCE.urlPattern) {
       return {
-        iframeHtml: REAL_TIME_ISSUES_CONFIGURATOR_HTML,
+        iframeHtml: EVENT_SUBSCRIPTIONS_CONFIGURATOR_HTML,
         ui: new RpcStub(new CloudflareAccountConfiguratorUI(getToken)),
       };
     }

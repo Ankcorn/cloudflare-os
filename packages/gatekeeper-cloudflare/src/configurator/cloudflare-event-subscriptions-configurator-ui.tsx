@@ -13,7 +13,7 @@ export default {
 
   resourceUrl({ values }) {
     return `https://dash.cloudflare.com/${encodeURIComponent(values.accountId!)}` +
-      "/workers-and-pages/observability/issues/automation";
+      "/workers/queues/event-subscriptions";
   },
 
   render({ values, setValues, ui }) {

@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { parseRealTimeIssueEvent } from "../src/real-time-issues-event";
+import {
+  parseCloudflareEvent,
+  parseEventSubscriptionSpec,
+} from "../src/real-time-issues-event";
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 const SUBSCRIPTION_ID = "subscription-1";
+const SPEC = {
+  source: { service: "observability" },
+  events: ["issue.automation-triggered"],
+};
 
 function event() {
   return {
@@ -19,33 +26,39 @@ function event() {
   };
 }
 
-describe("Real-Time Issues event validation", () => {
-  it("accepts an event bound to the configured account and subscription", () => {
-    expect(parseRealTimeIssueEvent(event(), ACCOUNT_ID, SUBSCRIPTION_ID)).toEqual(event());
+describe("Cloudflare Event Subscription validation", () => {
+  it("accepts a source and explicit event selection", () => {
+    expect(parseEventSubscriptionSpec(SPEC)).toEqual(SPEC);
   });
 
-  it("rejects a message from another account", () => {
-    const value = event();
-    value.metadata.accountId = "ffffffffffffffffffffffffffffffff";
-
-    expect(() => parseRealTimeIssueEvent(value, ACCOUNT_ID, SUBSCRIPTION_ID))
-      .toThrow("not a valid Real-Time Issues automation event");
+  it("rejects empty, duplicate, or malformed event selections", () => {
+    expect(() => parseEventSubscriptionSpec({ ...SPEC, events: [] })).toThrow("source or events");
+    expect(() => parseEventSubscriptionSpec({ ...SPEC, events: ["issue.created", "issue.created"] }))
+      .toThrow("source or events");
+    expect(() => parseEventSubscriptionSpec({ source: { service: "observability", extra: true }, events: ["issue.created"] }))
+      .toThrow("source or events");
   });
 
-  it("rejects a message injected through another subscription", () => {
-    const value = event();
-    value.metadata.eventSubscriptionId = "other-subscription";
-
-    expect(() => parseRealTimeIssueEvent(value, ACCOUNT_ID, SUBSCRIPTION_ID))
-      .toThrow("not a valid Real-Time Issues automation event");
+  it("accepts an approved event bound to the configured account and subscription", () => {
+    expect(parseCloudflareEvent(event(), ACCOUNT_ID, SUBSCRIPTION_ID, SPEC)).toEqual(event());
   });
 
-  it("rejects malformed or unexpected event types", () => {
-    expect(() => parseRealTimeIssueEvent({ ...event(), type: "queue.created" }, ACCOUNT_ID, SUBSCRIPTION_ID))
-      .toThrow("not a valid Real-Time Issues automation event");
-    expect(() => parseRealTimeIssueEvent({ ...event(), id: "x".repeat(257) }, ACCOUNT_ID, SUBSCRIPTION_ID))
-      .toThrow("not a valid Real-Time Issues automation event");
-    expect(() => parseRealTimeIssueEvent(null, ACCOUNT_ID, SUBSCRIPTION_ID))
-      .toThrow("not a valid Real-Time Issues automation event");
+  it("rejects a message from another account or subscription", () => {
+    const wrongAccount = event();
+    wrongAccount.metadata.accountId = "ffffffffffffffffffffffffffffffff";
+    expect(() => parseCloudflareEvent(wrongAccount, ACCOUNT_ID, SUBSCRIPTION_ID, SPEC))
+      .toThrow("not a valid event");
+
+    const wrongSubscription = event();
+    wrongSubscription.metadata.eventSubscriptionId = "other-subscription";
+    expect(() => parseCloudflareEvent(wrongSubscription, ACCOUNT_ID, SUBSCRIPTION_ID, SPEC))
+      .toThrow("not a valid event");
+  });
+
+  it("rejects events which were not selected by the Gadget", () => {
+    expect(() => parseCloudflareEvent({ ...event(), type: "cf.observability.issue.resolved" },
+      ACCOUNT_ID, SUBSCRIPTION_ID, SPEC)).toThrow("not a valid event");
+    expect(() => parseCloudflareEvent({ ...event(), id: "x".repeat(257) },
+      ACCOUNT_ID, SUBSCRIPTION_ID, SPEC)).toThrow("not a valid event");
   });
 });

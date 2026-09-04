@@ -1,10 +1,11 @@
 import { VENDOR_ID } from "./vendor.js";
 import { obsContext } from "./observability.js";
+import type { CloudflareEventSubscriptionSpec } from "./types.js";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 
 const logger = obsContext.createLogger({
-  component: "gatekeeper.cloudflare.real-time-issues-api", vendorId: VENDOR_ID,
+  component: "gatekeeper.cloudflare.events-api", vendorId: VENDOR_ID,
 });
 
 interface CloudflareEnvelope {
@@ -56,7 +57,7 @@ async function request(
   });
   if (!response.ok) {
     response.body?.cancel();
-    logger.error("Cloudflare Real-Time Issues API request failed", {
+    logger.error("Cloudflare Events API request failed", {
       event: "real_time_issues.api.failed",
       path,
       status: response.status,
@@ -94,8 +95,9 @@ export async function provisionRealTimeIssuesQueue(
   token: string,
   accountId: string,
   installationId: string,
+  requestedSubscription: CloudflareEventSubscriptionSpec,
 ): Promise<QueueInstallation> {
-  const queueName = `cloudflare-os-real-time-issues-${installationId}`;
+  const queueName = `cloudflare-os-events-${installationId}`;
   const queue = record(await request(token, `/accounts/${accountId}/queues`, "creating Queue", {
     method: "POST",
     body: JSON.stringify({ queue_name: queueName }),
@@ -118,10 +120,10 @@ export async function provisionRealTimeIssuesQueue(
       {
         method: "POST",
         body: JSON.stringify({
-          name: `Cloudflare OS Real-Time Issues ${installationId}`,
-          source: { service: "observability" },
+          name: `Cloudflare OS Events ${installationId}`,
+          source: requestedSubscription.source,
           destination: { service: "queues", queue_id: queueId },
-          events: ["issue.automation-triggered"],
+          events: requestedSubscription.events,
         }),
       },
     ), "creating Event Subscription");

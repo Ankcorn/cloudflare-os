@@ -17,22 +17,22 @@ This package provides Cloudflare OAuth integration for Gadgets. It serves three 
   defensively discard foreign-service events. Distributed trace summaries are account-only because
   their names, timing, services, and counts describe the whole cross-service trace; a Worker binding
   can still retrieve its own events for a known trace ID.
-- **Real-Time Issues automation (prototype):** an account-scoped hook provisions a dedicated Queue,
-  HTTP pull consumer, and Event Subscription using the connected account's OAuth grant. A poller
-  Durable Object validates each Event Hub envelope and invokes a persistent Gadget callback before
-  acknowledging the message. Processed event IDs are retained for 15 days (longer than Queue
-  retention) and cleaned up in bounded alarm batches. Queue credentials and generic Queue operations
-  are never exposed to Gadget or agent code.
+- **Event Subscriptions (prototype):** an account-scoped hook lets a Gadget declare a Cloudflare
+  event source and event names. It provisions a dedicated Queue and Event Subscription using the
+  connected account's OAuth grant. A poller Durable Object validates each Event Hub envelope against
+  the approved selection and invokes the Gadget callback before acknowledging the message. Processed
+  event IDs are retained for 15 days and cleaned up in bounded alarm batches. Queue credentials and
+  generic Queue operations are never exposed to Gadget or agent code.
 
-Observability connections request `workers-observability.read`. Real-Time Issues automation requests
+Observability connections request `workers-observability.read`. Event Subscriptions request
 `queues:write`, but only when that resource is selected. The OAuth client must allow the relevant
 scope or Cloudflare will omit/reject it. Existing billing-only connections can add grants when the
 user first selects a resource. Cloudflare exposes account and Worker observability choices that map
 to one indivisible read scope; resource bindings provide the finer capability boundary after
 connection.
 
-The Event Subscription source (`observability`) and event name
-(`issue.automation-triggered`) are prototype contract values pending onboarding in the Event Router.
+The Real-Time Issues Gadget requests the `observability` source and
+`issue.automation-triggered` event. Those contract values are pending onboarding in Event Router.
 A live spike on 2026-09-04 verified that a dashboard OAuth grant carrying `queues:write` can create a
 Queue and HTTP pull consumer, publish, pull, acknowledge, and delete in `baselime-dev`. The Event
 Subscriptions discovery endpoint returned HTTP 404 for that account, so subscription creation still

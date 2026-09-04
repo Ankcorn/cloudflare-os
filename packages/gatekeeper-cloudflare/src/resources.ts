@@ -20,10 +20,10 @@ export const WORKER_OBSERVABILITY_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
-export const REAL_TIME_ISSUES_RESOURCE: SupportedResource = {
-  urlPattern: `${DASHBOARD_ORIGIN}/:accountId/workers-and-pages/observability/issues/automation`,
-  title: "Cloudflare Real-Time Issues automation",
-  description: "Receive Real-Time Issues through a managed Queue and Event Subscription.",
+export const EVENT_SUBSCRIPTIONS_RESOURCE: SupportedResource = {
+  urlPattern: `${DASHBOARD_ORIGIN}/:accountId/workers/queues/event-subscriptions`,
+  title: "Cloudflare Event Subscriptions",
+  description: "Deliver selected Cloudflare account events through managed Event Subscriptions.",
   grantable: true,
 };
 
@@ -32,7 +32,7 @@ export const OBSERVABILITY_RESOURCES = [
   WORKER_OBSERVABILITY_RESOURCE,
 ];
 
-export const CLOUDFLARE_RESOURCES = [...OBSERVABILITY_RESOURCES, REAL_TIME_ISSUES_RESOURCE];
+export const CLOUDFLARE_RESOURCES = [...OBSERVABILITY_RESOURCES, EVENT_SUBSCRIPTIONS_RESOURCE];
 
 const OBSERVABILITY_RESOURCE_PATTERNS = new Set(
   OBSERVABILITY_RESOURCES.map(resource => resource.urlPattern),
@@ -54,9 +54,9 @@ export function workerObservabilityUrl(accountId: string, workerName: string): s
     `${encodeURIComponent(workerName)}/production/observability`;
 }
 
-export function realTimeIssuesAutomationUrl(accountId: string): string {
+export function eventSubscriptionsUrl(accountId: string): string {
   return `${DASHBOARD_ORIGIN}/${assertCloudflareAccountId(accountId)}` +
-    "/workers-and-pages/observability/issues/automation";
+    "/workers/queues/event-subscriptions";
 }
 
 export function parseObservabilityResourceUrl(url: string): {
@@ -83,21 +83,20 @@ export function parseObservabilityResourceUrl(url: string): {
   throw new Error(`Unsupported Cloudflare observability URL: ${url}`);
 }
 
-export function parseRealTimeIssuesAutomationUrl(url: string): { accountId: string } {
+export function parseEventSubscriptionsUrl(url: string): { accountId: string } {
   try {
     const parsed = new URL(url);
     if (parsed.origin !== DASHBOARD_ORIGIN) throw new Error();
     const segments = parsed.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     const accountId = assertCloudflareAccountId(segments[0] ?? "");
-    if (segments.length === 5 && segments[1] === "workers-and-pages" &&
-        segments[2] === "observability" && segments[3] === "issues" &&
-        segments[4] === "automation") {
+    if (segments.length === 4 && segments[1] === "workers" &&
+        segments[2] === "queues" && segments[3] === "event-subscriptions") {
       return { accountId };
     }
   } catch {
     // Normalize all parse failures to the public resource error.
   }
-  throw new Error(`Unsupported Cloudflare Real-Time Issues automation URL: ${url}`);
+  throw new Error(`Unsupported Cloudflare Event Subscriptions URL: ${url}`);
 }
 
 export function observabilityScopesForResources(resourceUrlPatterns?: string[]): string[] {
@@ -119,13 +118,13 @@ export function cloudflareScopesForResources(resourceUrlPatterns?: string[]): st
   if (selected.some(pattern => OBSERVABILITY_RESOURCE_PATTERNS.has(pattern))) {
     scopes.push(OBSERVABILITY_SCOPE);
   }
-  if (selected.includes(REAL_TIME_ISSUES_RESOURCE.urlPattern)) scopes.push(QUEUES_SCOPE);
+  if (selected.includes(EVENT_SUBSCRIPTIONS_RESOURCE.urlPattern)) scopes.push(QUEUES_SCOPE);
   return scopes;
 }
 
 export function grantedCloudflareResourcePatterns(scopes: string[]): string[] {
   const patterns = grantedObservabilityResourcePatterns(scopes);
-  if (scopes.includes(QUEUES_SCOPE)) patterns.push(REAL_TIME_ISSUES_RESOURCE.urlPattern);
+  if (scopes.includes(QUEUES_SCOPE)) patterns.push(EVENT_SUBSCRIPTIONS_RESOURCE.urlPattern);
   return patterns;
 }
 
