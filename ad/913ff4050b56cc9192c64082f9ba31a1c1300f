@@ -1,0 +1,29 @@
+packages/gatekeeper-cloudflare/__tests__/workerd/notifications-auth.test.ts
+  s_f1258fa8566ea2::t_b938c64399016a 1-16
+packages/gatekeeper-cloudflare/src/types.d.ts
+  s_bab3bdd042e5b4::t_6a80e2b0a34845 515-554
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ad913ff4050b56cc9192c64082f9ba31a1c1300f",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    },
+    "s_f1258fa8566ea2": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a071d8-77b5-767e-ad6f-44204b19a66c",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
