@@ -1,0 +1,27 @@
+packages/gatekeeper-cloudflare/README.md
+  s_bab3bdd042e5b4::t_66460190ac88c8 21-23
+packages/gatekeeper-cloudflare/__tests__/worker.ts
+  s_bab3bdd042e5b4::t_751b59d82a0e11 12,65-84
+packages/gatekeeper-cloudflare/__tests__/workerd/notifications-lifecycle.test.ts
+  s_bab3bdd042e5b4::t_396255396f1f54 1-17
+packages/gatekeeper-cloudflare/src/notifications.ts
+  s_bab3bdd042e5b4::t_eb268123386068 274-278
+packages/gatekeeper-cloudflare/vitest.worker.config.ts
+  s_bab3bdd042e5b4::t_ca07b22f7705c7 30-33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e7b898932865a9a60843fc3d279bddee088c43ef",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
