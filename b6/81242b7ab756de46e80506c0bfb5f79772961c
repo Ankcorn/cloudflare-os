@@ -1,0 +1,61 @@
+AGENTS.md
+  s_bab3bdd042e5b4::t_e7441fdcf11cea 34
+packages/gatekeeper-cf-notifications/__tests__/notifications-api.test.ts
+  s_bab3bdd042e5b4::t_94c0686c642cd6 1-82
+packages/gatekeeper-cf-notifications/__tests__/notifications-webhook.test.ts
+  s_bab3bdd042e5b4::t_1088f2d9873c00 1-52
+packages/gatekeeper-cf-notifications/__tests__/workerd/notifications-auth.test.ts
+  s_bab3bdd042e5b4::t_77c0ff21ae4b33 1-16
+packages/gatekeeper-cf-notifications/__tests__/workerd/notifications-lifecycle.test.ts
+  s_bab3bdd042e5b4::t_162693a7860dd6 1-17
+packages/gatekeeper-cf-notifications/src/cloudflare-api.ts
+  s_bab3bdd042e5b4::t_b7eca645bf80bb 1-121
+packages/gatekeeper-cf-notifications/src/cloudflare-configurator.ts
+  s_bab3bdd042e5b4::t_91044258729228 1-19
+packages/gatekeeper-cf-notifications/src/configurator/cloudflare-configurator-types.d.ts
+  s_bab3bdd042e5b4::t_40fc06c9b22a5e 1-18
+packages/gatekeeper-cf-notifications/src/configurator/cloudflare-notifications-configurator-ui.tsx
+  s_bab3bdd042e5b4::t_b857688c697391 1-34
+packages/gatekeeper-cf-notifications/src/notifications-api.ts
+  s_bab3bdd042e5b4::t_3f40ba6b5bb5f0 1-122
+packages/gatekeeper-cf-notifications/src/notifications-webhook.ts
+  s_bab3bdd042e5b4::t_e2ad39d2d3fa0c 1-112
+packages/gatekeeper-cf-notifications/src/observability.ts
+  s_bab3bdd042e5b4::t_9d5a4e1a65d511 1-21
+packages/gatekeeper-cf-notifications/src/types.txt
+  s_bab3bdd042e5b4::t_93f1db6058dcac 1-23
+packages/gatekeeper-cf-notifications/tsconfig.json
+  s_bab3bdd042e5b4::t_0d2a636de69a90 1-18
+packages/gatekeeper-cf-notifications/vite.config.ts
+  s_bab3bdd042e5b4::t_f2822b2976c4c8 1-7
+packages/gatekeeper-cf-notifications/vitest.config.ts
+  s_bab3bdd042e5b4::t_5ed96711712f3e 1-2
+packages/gatekeeper-cf-notifications/worker-configuration.d.ts
+  s_bab3bdd042e5b4::t_f804e005785a0b 1-15370
+packages/gatekeeper-cf-notifications/wrangler.jsonc
+  s_bab3bdd042e5b4::t_1861e79108e8f9 1-23
+pnpm-lock.yaml
+  s_bab3bdd042e5b4::t_bbbe543473b5f6 110-146
+scripts/release/testdata/fixture-bundles/gatekeeper-cf-notifications/cloudflare.js
+  s_bab3bdd042e5b4::t_56f20812de3f5d 1
+scripts/release/testdata/golden-manifest.json
+  s_bab3bdd042e5b4::t_638ec7183f1163 21-89
+scripts/run-dev-server.ts
+  s_bab3bdd042e5b4::t_cd8202df4066d1 472-475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b681242b7ab756de46e80506c0bfb5f79772961c",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
