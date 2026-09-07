@@ -1,0 +1,37 @@
+packages/gatekeeper-cloudflare/__tests__/notifications-api.test.ts
+  s_bab3bdd042e5b4::t_3aa5e645dafa0b 20-26,28-36,38-43,59-65,67-75,77
+packages/gatekeeper-cloudflare/__tests__/notifications-webhook.test.ts
+  s_bab3bdd042e5b4::t_1745e6f7b6a8c3 5,16,21-22,25-28,32-41,44
+packages/gatekeeper-cloudflare/__tests__/workerd/notifications-auth.test.ts
+  s_70a27aa1e06965::t_2c727d223b611b 6,9
+packages/gatekeeper-cloudflare/src/cloudflare.ts
+  s_bab3bdd042e5b4::t_1caf49bd21a7a9 43
+packages/gatekeeper-cloudflare/src/notifications-webhook.ts
+  s_bab3bdd042e5b4::t_df0bdb24198a87 3,5-7,9-52,73,86-89,98-101,107-110
+packages/workshop-backend/format-blueprints/real-time-issues/files/server.js
+  s_bab3bdd042e5b4::t_aac046f8881642 13-19,21,23,29,39-40,42,44,61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "adf6013b4c9e1941ced1bf3487b1ba832d38c187",
+  "prompts": {},
+  "sessions": {
+    "s_70a27aa1e06965": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a072f7-b3d0-7761-99e2-b77a8db63eea",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    },
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
