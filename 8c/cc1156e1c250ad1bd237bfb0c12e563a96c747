@@ -1,0 +1,23 @@
+packages/workshop-backend/format-blueprints/real-time-issues/files/README.md
+  s_bab3bdd042e5b4::t_c7648ba827f11f 1-9
+packages/workshop-backend/format-blueprints/real-time-issues/files/server.js
+  s_bab3bdd042e5b4::t_16c09dcb7f848e 1-64
+packages/workshop-backend/format-blueprints/real-time-issues/blueprint.json
+  s_bab3bdd042e5b4::t_1170d7d86a9c78 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8ccc1156e1c250ad1bd237bfb0c12e563a96c747",
+  "prompts": {},
+  "sessions": {
+    "s_bab3bdd042e5b4": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a0677b-3944-7f94-812a-795e1bcc75c3",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "Thomas Ankcorn <tankcorn@cloudflare.com>"
+    }
+  }
+}
