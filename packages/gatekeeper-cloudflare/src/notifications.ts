@@ -422,7 +422,7 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
       return false;
     } finally {
       active = false;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 }

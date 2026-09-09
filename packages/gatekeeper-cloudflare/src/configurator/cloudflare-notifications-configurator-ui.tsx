@@ -7,14 +7,15 @@ import type {
 let selection = 0;
 
 export default {
-  initial: { accountId: null, status: null },
+  initial: { accountId: null, status: null, statusDetails: null },
 
   async initialValuesFromResourceUrl({ resourceUrl, ui }) {
     const url = new URL(resourceUrl);
     const accountId = url.pathname.split("/")[1];
     if (url.origin !== "https://dash.cloudflare.com" || !/^[a-f0-9]{32}$/i.test(accountId ?? ""))
       return {};
-    return { accountId, status: await ui.getSetupStatus(accountId!) };
+    const status = await ui.getSetupStatus(accountId!);
+    return { accountId, status: status.summary, statusDetails: status.details ?? null };
   },
 
   isReady({ values }) {
@@ -41,19 +42,19 @@ export default {
               const current = ++selection;
               setValues({
                 accountId,
-                status: accountId ? { summary: "Checking connection…" } : null,
+                status: accountId ? "Checking connection…" : null,
+                statusDetails: null,
               });
               if (!accountId) return;
               try {
                 const status = await ui.getSetupStatus(accountId);
-                if (selection === current) setValues({ status });
+                if (selection === current)
+                  setValues({ status: status.summary, statusDetails: status.details ?? null });
               } catch {
                 if (selection === current)
                   setValues({
-                    status: {
-                      summary: "Could not check connection",
-                      details: "Reopen this connection to try again.",
-                    },
+                    status: "Could not check connection",
+                    statusDetails: "Reopen this connection to try again.",
                   });
               }
             }}
@@ -61,7 +62,7 @@ export default {
         </Field>
         {values.status && (
           <p className="field-label" role="status" style={{ margin: "0" }}>
-            {values.status.summary}
+            {values.status}
           </p>
         )}
         <p className="field-description" style={{ margin: "0" }}>
@@ -76,9 +77,9 @@ export default {
             Enabling your first hook creates the destination. Notifications Write access is
             required.
           </p>
-          {values.status?.details && (
+          {values.statusDetails && (
             <p className="field-description" style={{ overflowWrap: "anywhere" }}>
-              {values.status.details}
+              {values.statusDetails}
             </p>
           )}
         </details>

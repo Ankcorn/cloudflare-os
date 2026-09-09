@@ -77,5 +77,5 @@ it("round-trips and prefills a notification account with its setup status", asyn
   expect(parseNotificationsResourceUrl(url)).toEqual({ accountId: ACCOUNT_ID });
   expect(notifications.isReady({ values: { accountId: "not-an-account" } })).toBe(false);
   expect(await notifications.initialValuesFromResourceUrl({ resourceUrl: url, resourceUrlPattern: "",
-    ui: { listAccounts: async () => [], getSetupStatus: async () => ({ summary: "Ready" }) } })).toEqual({ accountId: ACCOUNT_ID, status: { summary: "Ready" } });
+    ui: { listAccounts: async () => [], getSetupStatus: async () => ({ summary: "Ready" }) } })).toEqual({ accountId: ACCOUNT_ID, status: "Ready", statusDetails: null });
 });
