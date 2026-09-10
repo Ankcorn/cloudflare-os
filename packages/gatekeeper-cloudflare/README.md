@@ -285,6 +285,21 @@ successful subscribers are not invoked again.
 Local development remains useful for UI changes and automated tests; live webhook verification runs
 against the deployed instance.
 
+### Optional mutual TLS
+
+API-key verification is always required. Deployments can additionally set `NOTIFICATIONS_MTLS_SHA256`
+to a comma-separated allowlist of client-certificate SHA-256 fingerprints. The receiver requires trusted
+`request.cf.tlsClientAuth` metadata indicating a presented, verified, non-revoked, pinned certificate.
+Missing metadata, an invalid pin list, or an unrecognized certificate fails closed with 403. Caller
+headers cannot substitute for edge TLS metadata. Multiple pins support overlapping certificate rotation.
+
+Configure client certificate validation on the public webhook hostname and arrange for the sender to
+present that certificate **before** enabling enforcement. Certificate issuance and sender configuration
+are deployment-owned: the public Notifications webhook-create API does not document a client-certificate
+parameter, so this integration does not invent one or claim to provision sender mTLS. Quick tunnels/local
+HTTP cannot validate this edge metadata; test certificate enforcement on a configured HTTPS hostname.
+Leave the setting unset for normal API-key-authenticated webhook delivery.
+
 References: [generic webhook schema](https://developers.cloudflare.com/notifications/reference/webhook-payload-schema/),
 [webhook setup](https://developers.cloudflare.com/notifications/get-started/configure-webhooks/),
 [OAuth clients](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/),

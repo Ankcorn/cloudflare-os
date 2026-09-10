@@ -39,7 +39,8 @@ import { obsContext } from "./observability.js";
 import { NONCE_BYTES, INITIATION_NONCE_LIFETIME_MS, OAUTH_NONCE_LIFETIME_MS,
   generateNonce, constantTimeEqual } from "@gadgets/gatekeeper-kit/connect-nonce";
 import { readTextCapped, ResponseTooLargeError } from "@gadgets/gatekeeper-kit/response-body";
-import { parseNotificationWebhookPath, notificationReceiverName, MAX_NOTIFICATION_BODY_BYTES } from "./notifications-webhook.js";
+import { parseNotificationWebhookPath, notificationReceiverName, MAX_NOTIFICATION_BODY_BYTES,
+  acceptsNotificationMtls } from "./notifications-webhook.js";
 import NOTIFICATIONS_CONFIGURATOR_HTML from "./generated/cloudflare-notifications-configurator-ui.txt";
 export { CloudflareNotificationsGatekeeper, CloudflareNotificationHookController,
   CloudflareNotificationReceiver } from "./notifications.js";
@@ -77,6 +78,7 @@ type Env = Cloudflare.Env & {
   BASE_URL?: string;
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  NOTIFICATIONS_MTLS_SHA256?: string;
   NOTIFICATIONS_WEBHOOK_BASE_URL?: string;
 };
 
@@ -120,6 +122,9 @@ export default {
     const notificationPath = parseNotificationWebhookPath(url.pathname, basePath);
     if (notificationPath) {
       if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+      if (!acceptsNotificationMtls(req.cf?.tlsClientAuth, env.NOTIFICATIONS_MTLS_SHA256)) {
+        return new Response(null, { status: 403 });
+      }
       if (!req.headers.get("cf-webhook-auth")) return new Response(null, { status: 401 });
       try {
         const body = await readTextCapped(new Response(req.body, { headers: req.headers }), MAX_NOTIFICATION_BODY_BYTES);
