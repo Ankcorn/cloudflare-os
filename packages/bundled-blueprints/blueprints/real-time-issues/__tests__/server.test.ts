@@ -46,7 +46,7 @@ describe("Real-Time Issues Investigator webhook ingress", () => {
 
     expect(f.spawn).toHaveBeenCalledOnce();
     expect(f.spawn.mock.calls[0]![0]).toContain(notification.payload.issue.id);
-    expect(f.spawn.mock.calls[0]![1]).toContain("Do not merge or deploy");
+    expect(f.spawn.mock.calls[0]![1]).toContain("Do not deploy or make external changes");
     expect(f.spawn.mock.calls[0]![1]).toContain(JSON.stringify(notification.payload));
     expect(f.stored.get(`investigation:${notification.payload.issue.id}`)).toEqual({
       eventId: notification.id,

@@ -1,7 +1,7 @@
 {
   "blueprintId": "real-time-issues",
   "title": "Real-Time Issues Investigator",
-  "description": "Starts a constrained coding-agent investigation when Workers Observability reports a Real-Time Issue.",
+  "description": "Starts a constrained investigation from a local JSON webhook.",
   "output": {
     "id": "real-time-issue",
     "noun": "Investigation",
@@ -26,28 +26,11 @@
       "typeUrlPattern": "webhook://local/:name",
       "resourceUrl": "webhook://local/investigator"
     },
-    "CLOUDFLARE_OBSERVABILITY": {
-      "title": "Workers Observability",
-      "description": "Read-only telemetry for the account that produced the issue.",
-      "type": "gatekeeper",
-      "gatekeeperName": "cloudflare",
-      "typeUrlPattern": "https://dash.cloudflare.com/:accountId/workers-and-pages/observability"
-    },
-    "GIT_REPOSITORY": {
-      "title": "GitHub repository",
-      "description": "The only repository the investigator may inspect or modify.",
-      "type": "gatekeeper",
-      "gatekeeperName": "github",
-      "typeUrlPattern": "https://github.com/:owner/:repo"
-    },
     "INVESTIGATOR": {
       "title": "Investigation agent",
-      "description": "Agent Spawner restricted to the selected Observability and repository bindings.",
+      "description": "Agent Spawner that investigates the supplied webhook evidence.",
       "type": "agentSpawner",
-      "env": {
-        "CLOUDFLARE_OBSERVABILITY": { "type": "binding", "name": "CLOUDFLARE_OBSERVABILITY" },
-        "GIT_REPOSITORY": { "type": "binding", "name": "GIT_REPOSITORY" }
-      }
+      "env": {}
     }
   }
 }
