@@ -4,9 +4,8 @@
 // command. Every shipping public gatekeeper can do that only at a cost that would dominate the test:
 // the OAuth ones need a whole vendor's auth surface mocked before an account exists at all, and the
 // Context Library only refuses once an observation has been *recorded*, which takes a gadget read
-// session (so a Worker Loader), a slash-command invocation, or an AI-chat catalog snapshot. It is also
-// a singleton, so it can never produce the two simultaneously-failing bindings one of these cases
-// needs.
+// session (so a Worker Loader) or a slash-command invocation. It is also a singleton, so it can never
+// produce the two simultaneously-failing bindings one of these cases needs.
 //
 // So the overseer's own logic -- collect every failure, re-prompt once, then name what failed -- is
 // tested against this fixture, where an outcome is one HTTP call away. Realism about a *particular*
@@ -23,9 +22,9 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
-  SupportedResource, VendorDescription,
+  AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, Gatekeeper,
+  GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, ResourceDescription,
+  ResourceConfiguratorFrame, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {
   ChatGatewayRpcTarget, GadgetResponse,
@@ -270,6 +269,10 @@ export class TestAccount
     throw new Error("The test gatekeeper has no resource configurator; bind a URL directly.");
   }
 
+  commitReconnect(_stageId: string): Promise<void> {
+    throw new Error("The test gatekeeper has no credentials to reconnect.");
+  }
+
   reconnect(): Promise<{ url: string }> {
     throw new Error("The test gatekeeper has no credentials to reconnect.");
   }
@@ -298,7 +301,8 @@ export class TestVerifier
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
 export interface TestSession {
-  readValue(): Promise<number>;
+  /** `restricted` marks the observation `containsRestrictedData`. */
+  readValue(restricted?: boolean): Promise<number>;
   writeValue(value: number): Promise<number>;
   writeValues(values: number[]): Promise<number[]>;
 }
@@ -315,10 +319,11 @@ class TestSessionTarget extends RpcTarget implements TestSession {
     this.approvalQueue = approvalQueue.dup();
   }
 
-  async readValue(): Promise<number> {
+  async readValue(restricted?: boolean): Promise<number> {
     await this.approvalQueue.authorizeObservation({
       title: "Read the test value",
       description: "Read the deterministic value exposed by the integration-test gatekeeper.",
+      ...(restricted ? { containsRestrictedData: true } : {}),
     });
     return 42;
   }
@@ -384,6 +389,11 @@ export class TestGatekeeper
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
     return new TestSessionTarget(
         approvalQueue, control(this.ctx.exports), this.ctx.props.label);
+  }
+
+  /** No discovery index: the ambient fixture is reached through its session alone. */
+  async getAgentCatalog(): Promise<AgentCatalog | null> {
+    return null;
   }
 
   /**

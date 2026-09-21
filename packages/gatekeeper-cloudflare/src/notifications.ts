@@ -111,7 +111,7 @@ class CloudflareNotificationsSessionImpl
     await this.#queue.authorizeObservation({
       title: "Cloudflare notification delivery status",
       description: "Read setup and delivery health for the bound account.",
-      prohibitAllSharing: true,
+      containsRestrictedData: true,
     });
     return status;
   }
@@ -384,7 +384,7 @@ export class CloudflareNotificationReceiver extends DurableObject<NotificationEn
           await hook.approvalQueue.authorizeObservation({
             title: "Cloudflare notification",
             description: "Received an alert from the bound Cloudflare account.",
-            prohibitAllSharing: true,
+            containsRestrictedData: true,
           });
           if (
             !active ||
