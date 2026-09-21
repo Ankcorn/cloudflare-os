@@ -9,10 +9,12 @@
     "clean": "rm -rf .wrangler"
   },
   "dependencies": {
+    "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb-validate": "catalog:"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
     "typescript": "catalog:",
     "wrangler": "catalog:"
   }

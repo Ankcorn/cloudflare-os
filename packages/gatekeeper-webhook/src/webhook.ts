@@ -1,9 +1,11 @@
 import {DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub} from "cloudflare:workers";
 import {skipRpcValidation, validateRpc} from "capnweb-validate";
+import {connectHandoffPageHtml, htmlResponse} from "@gadgets/gatekeeper-kit/connect-pages";
 import type {
   AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
   GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator, HookTargetMetadata,
-  ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription,
+  ConnectHandoff, ResourceConfiguratorFrame, ResourceDescription, SupportedResource,
+  VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {WebhookEvent, WebhookHook, WebhookJson, WebhookSession} from "./types.js";
 
@@ -48,8 +50,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> {
     return this.ctx.exports.WebhookAccount({props: {accountId: crypto.randomUUID()}}) as unknown as
       Fetcher<GatekeeperUser>;
   }
-  connectAccount(_callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
-    throw new Error("Local Webhook is auto-provisioned.");
+  async connectAccount(_callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
+    const id = this.ctx.exports.WebhookConnect.newUniqueId();
+    const nonce = crypto.randomUUID();
+    await this.ctx.exports.WebhookConnect.get(id).begin(_callback, nonce);
+    return {url: `${baseUrl(this.env)}/connect/${id}/${nonce}`};
   }
   async getSupportedResources(): Promise<SupportedResource[]> { return [RESOURCE]; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
@@ -93,6 +98,24 @@ export class WebhookAccount extends WorkerEntrypoint<Env, AccountProps> implemen
 @validateRpc()
 export class WebhookVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
   verify(): void {}
+}
+
+export class WebhookConnect extends DurableObject<Env> {
+  async begin(callback: Fetcher<GatekeeperConnectCallback>, nonce: string): Promise<void> {
+    this.ctx.storage.kv.put("callback", callback);
+    this.ctx.storage.kv.put("nonce", nonce);
+    this.ctx.storage.setAlarm(Date.now() + 10 * 60_000);
+  }
+  async complete(nonce: string): Promise<ConnectHandoff | null> {
+    if (this.ctx.storage.kv.get<string>("nonce") !== nonce) return null;
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) return null;
+    this.ctx.storage.kv.delete("nonce");
+    this.ctx.storage.kv.delete("callback");
+    this.ctx.storage.deleteAlarm();
+    return callback.complete(this.ctx.exports.WebhookAccount({props: {accountId: crypto.randomUUID()}}));
+  }
+  async alarm(): Promise<void> { await this.ctx.storage.deleteAll(); }
 }
 
 @validateRpc()
@@ -165,8 +188,15 @@ export class WebhookDispatcher extends DurableObject<Env> {
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-    const path = new URL(baseUrl(env)).pathname + "/trigger";
-    if (url.pathname !== path) return new Response("Not Found", {status: 404});
+    const root = new URL(baseUrl(env)).pathname;
+    const connect = new RegExp(`^${root}/connect/([0-9a-f]{64})/([0-9a-f-]{36})$`, "i").exec(url.pathname);
+    if (connect && req.method === "GET") {
+      const handoff = await ctx.exports.WebhookConnect
+        .get(ctx.exports.WebhookConnect.idFromString(connect[1]!)).complete(connect[2]!);
+      return handoff ? htmlResponse(connectHandoffPageHtml(handoff))
+        : new Response("Connection link expired", {status: 400});
+    }
+    if (url.pathname !== `${root}/trigger`) return new Response("Not Found", {status: 404});
     if (req.method !== "POST") return new Response("Method Not Allowed", {status: 405, headers: {Allow: "POST"}});
     let payload: unknown;
     try { payload = await req.json(); } catch { return new Response("Body must be JSON", {status: 400}); }

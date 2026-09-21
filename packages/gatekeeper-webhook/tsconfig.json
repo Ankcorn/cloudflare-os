@@ -5,7 +5,8 @@
     "lib": ["ESNext"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["./worker-configuration.d.ts"]
+    "types": ["@cloudflare/workers-types/experimental"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [".wrangler", "node_modules"]
 }
