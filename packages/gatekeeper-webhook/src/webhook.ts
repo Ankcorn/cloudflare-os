@@ -22,14 +22,15 @@ const ICON = {url: "data:image/svg+xml," + encodeURIComponent(
 )};
 type Env = Cloudflare.Env & {BASE_URL?: string};
 type HookTarget = RpcTarget & WebhookHook;
-const RESOURCE: SupportedResource = {
-  urlPattern: "webhook://local/:name",
-  title: "Local Webhook",
-  description: "A named local-only JSON webhook trigger.",
-};
-
 function baseUrl(env: Env): string {
   return (env.BASE_URL ?? "http://localhost:8787/gatekeeper/webhook").replace(/\/$/, "");
+}
+function resource(env: Env): SupportedResource {
+  return {
+    urlPattern: `${baseUrl(env)}/hooks/:name`,
+    title: "Local Webhook",
+    description: "A named local-only JSON webhook trigger.",
+  };
 }
 function dispatcher(exports: Cloudflare.Exports): DurableObjectStub<WebhookDispatcher> {
   return exports.WebhookDispatcher.getByName("local");
@@ -56,7 +57,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> {
     await this.ctx.exports.WebhookConnect.get(id).begin(_callback, nonce);
     return {url: `${baseUrl(this.env)}/connect/${id}/${nonce}`};
   }
-  async getSupportedResources(): Promise<SupportedResource[]> { return [RESOURCE]; }
+  async getSupportedResources(): Promise<SupportedResource[]> { return [resource(this.env)]; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
 }
 
@@ -69,21 +70,28 @@ export class WebhookAccount extends WorkerEntrypoint<Env, AccountProps> implemen
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<WebhookSession>>> {
     return this.ctx.exports.WebhookGatekeeper({props: this.ctx.props});
   }
-  async getSupportedResources(): Promise<SupportedResource[]> { return [RESOURCE]; }
+  async getSupportedResources(): Promise<SupportedResource[]> { return [resource(this.env)]; }
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<WebhookSession>>; resource: SupportedResource;
   }> {
     const parsed = new URL(url);
-    if (parsed.protocol !== "webhook:" || parsed.hostname !== "local" || parsed.pathname.length < 2) {
+    const base = new URL(baseUrl(this.env));
+    if (parsed.origin !== base.origin || !parsed.pathname.startsWith(`${base.pathname}/hooks/`) ||
+        parsed.pathname.length <= `${base.pathname}/hooks/`.length) {
       throw new Error(`Invalid local webhook resource URL: ${url}`);
     }
-    return {class: this.ctx.exports.WebhookGatekeeper({props: this.ctx.props}), resource: RESOURCE};
+    return {
+      class: this.ctx.exports.WebhookGatekeeper({props: this.ctx.props}),
+      resource: resource(this.env),
+    };
   }
   startResourceConfigurator(_pattern: string): Promise<ResourceConfiguratorFrame> {
     throw new Error("Local Webhook has no resource configurator.");
   }
   async ensureResources(patterns: string[]): Promise<{url?: string}> {
-    return patterns.includes(RESOURCE.urlPattern) ? {url: "webhook://local/investigator"} : {};
+    return patterns.includes(resource(this.env).urlPattern)
+      ? {url: `${baseUrl(this.env)}/hooks/investigator`}
+      : {};
   }
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
   async revoke(): Promise<void> { await dispatcher(this.ctx.exports).setHook(null); }

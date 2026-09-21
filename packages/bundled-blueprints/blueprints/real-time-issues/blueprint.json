@@ -23,8 +23,8 @@
       "description": "Receives plain local JSON webhooks for quick Investigator testing.",
       "type": "gatekeeper",
       "gatekeeperName": "webhook",
-      "typeUrlPattern": "webhook://local/:name",
-      "resourceUrl": "webhook://local/investigator"
+      "typeUrlPattern": "http://localhost:8788/gatekeeper/webhook/hooks/:name",
+      "resourceUrl": "http://localhost:8788/gatekeeper/webhook/hooks/investigator"
     },
     "INVESTIGATOR": {
       "title": "Investigation agent",
