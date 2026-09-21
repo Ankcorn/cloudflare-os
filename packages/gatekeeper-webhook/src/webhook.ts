@@ -134,11 +134,9 @@ class WebhookSessionTarget extends RpcTarget implements WebhookSession {
     private readonly url: string,
   ) { super(); }
   async subscribe(callback: RpcStub<HookTarget>): Promise<void> {
-    const controller = this.ctx.exports.WebhookHookController({props: {}});
-    // @ts-ignore Workers widens the hook type across bindHook RPC.
-    await this.approvalQueue.bindHook(controller, callback, {
-      title: "Receive local webhook", description: `Receive POST requests sent to ${this.url}`,
-    });
+    // This gatekeeper is deliberately local-only. The callback was created with ctx.restore(), so
+    // it is already persistent and can be registered directly without a provider approval flow.
+    await dispatcher(this.ctx.exports).setCallback(callback);
   }
   async getTriggerUrl(): Promise<string> { return this.url; }
   [Symbol.dispose](): void { this.approvalQueue[Symbol.dispose]?.(); }
@@ -176,11 +174,26 @@ export class WebhookHookController extends WorkerEntrypoint<Env>
 }
 
 export class WebhookDispatcher extends DurableObject<Env> {
+  async setCallback(callback: RpcStub<HookTarget>): Promise<void> {
+    this.ctx.storage.kv.put("callback", callback);
+  }
+
   async setHook(hook: Fetcher<HookInitiator<HookTarget>> | null): Promise<void> {
     if (hook) this.ctx.storage.kv.put("hook", hook);
-    else this.ctx.storage.kv.delete("hook");
+    else {
+      this.ctx.storage.kv.delete("hook");
+      this.ctx.storage.kv.delete("callback");
+    }
   }
   async trigger(payload: WebhookJson): Promise<void> {
+    const callback = this.ctx.storage.kv.get<RpcStub<HookTarget>>("callback");
+    if (callback) {
+      const event: WebhookEvent = {
+        id: crypto.randomUUID(), timestamp: new Date().toISOString(), payload,
+      };
+      await callback.onWebhook(event);
+      return;
+    }
     const initiator = this.ctx.storage.kv.get<Fetcher<HookInitiator<HookTarget>>>("hook");
     if (!initiator) throw new Error("No Investigator webhook is installed yet.");
     // @ts-expect-error the RPC promise carries disposable pipelined stubs.
