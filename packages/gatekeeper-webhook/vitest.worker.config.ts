@@ -15,6 +15,8 @@ export default defineConfig({
         kvNamespaces: ["WEBHOOK_ENDPOINTS"],
         durableObjects: {
           WEBHOOK_RECEIVER: { className: "WebhookReceiver", useSQLite: true },
+          TEST_GADGET: { className: "TestGadget", useSQLite: true },
+          TEST_WORKSHOP: { className: "TestWorkshop", useSQLite: true },
         },
         serviceBindings: {
           TEST_HOOKS: { name: kCurrentWorker, entrypoint: "TestHooks" },
