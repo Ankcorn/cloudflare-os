@@ -6,7 +6,7 @@ import { Gadget } from "../files/server.ts";
 const restore = (workers as unknown as {restore: symbol}).restore;
 
 const notification = {
-  id: "10000000-0000-4000-8000-000000000001",
+  id: "1".repeat(64),
   accountId: "account-1",
   alertType: "workers_observability_real_time_issue",
   timestamp: "2026-09-21T12:00:00.000Z",

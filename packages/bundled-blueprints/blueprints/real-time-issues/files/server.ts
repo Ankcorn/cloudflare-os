@@ -7,6 +7,7 @@ const restore = (workers as unknown as {restore: symbol}).restore;
 
 const ALERT_TYPE = "workers_observability_real_time_issue";
 const CALLBACK_TYPE = "real-time-issue";
+const DELIVERY_ID_PATTERN = /^[0-9a-f]{64}$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type Notification = {
@@ -28,7 +29,7 @@ class RealTimeIssueCallback extends RpcTarget {
 
   async onNotification(notification: Notification): Promise<void> {
     if (notification?.alertType !== ALERT_TYPE ||
-        typeof notification.id !== "string" || !UUID_PATTERN.test(notification.id)) {
+        typeof notification.id !== "string" || !DELIVERY_ID_PATTERN.test(notification.id)) {
       throw new Error("Unexpected Real-Time Issue notification");
     }
     const data = notification.data as {issue?: {id?: unknown}} | null;
