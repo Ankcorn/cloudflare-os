@@ -1,0 +1,21 @@
+{
+  "name": "@gadgets/gatekeeper-webhook",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/webhook.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "build": "tsc",
+    "clean": "rm -rf .wrangler"
+  },
+  "dependencies": {
+    "@gadgets/gatekeeper-kit": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "typescript": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

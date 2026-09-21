@@ -1,0 +1,36 @@
+{
+  "blueprintId": "real-time-issues",
+  "title": "Real-Time Issues Investigator",
+  "description": "Starts a constrained investigation from a local JSON webhook.",
+  "output": {
+    "id": "real-time-issue",
+    "noun": "Investigation",
+    "plural": "Investigations",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "created": "2026-09-04T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-09-04T00:00:00.000Z",
+  "bindings": {
+    "INCOMING_WEBHOOK": {
+      "title": "Local Webhook",
+      "description": "Receives plain local JSON webhooks for quick Investigator testing.",
+      "type": "gatekeeper",
+      "gatekeeperName": "webhook",
+      "typeUrlPattern": "http://localhost:8788/gatekeeper/webhook/hooks/:name",
+      "resourceUrl": "http://localhost:8788/gatekeeper/webhook/hooks/investigator"
+    },
+    "INVESTIGATOR": {
+      "title": "Investigation agent",
+      "description": "Agent Spawner that investigates the supplied webhook evidence.",
+      "type": "agentSpawner",
+      "env": {}
+    }
+  }
+}
