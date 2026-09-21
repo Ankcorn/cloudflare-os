@@ -1,18 +1,17 @@
-/** A value accepted in an inbound webhook JSON document. */
-export type WebhookJson =
-  | null | boolean | number | string | WebhookJson[] | { [key: string]: WebhookJson };
-
 /** A normalized inbound webhook delivery. */
 export interface WebhookEvent {
-  /** Stable delivery identifier derived from Idempotency-Key, or from the request body. */
+  /** Stable across retries only when the sender supplies `Idempotency-Key`; otherwise unique. */
   id: string;
   /** Time the gatekeeper accepted the delivery, in ISO 8601 format. */
   timestamp: string;
   /** The complete JSON document sent by the webhook caller. */
-  payload: WebhookJson;
+  payload: unknown;
 }
 
-/** Callback implemented by a Gadget that receives webhook deliveries. */
+/**
+ * Persistent callback implemented by a Gadget. Delivery is at least once: if callback work takes
+ * effect but its reply is lost, the sender may retry with the same event ID.
+ */
 export interface WebhookHook {
   onWebhook(event: WebhookEvent): Promise<void>;
 }
@@ -35,19 +34,27 @@ export interface WebhookCredential {
   headerValue: string;
 }
 
-/** Capability for an HTTP webhook endpoint. */
+/**
+ * Capability for an HTTP webhook endpoint.
+ *
+ * `subscribe()` registers a disabled hook. The user must enable it in Connections before requests
+ * can invoke the callback. Make callback effects idempotent using `event.id`; delivery is at least
+ * once when a sender retries with an `Idempotency-Key`.
+ */
 export interface WebhookSession {
   /**
    * Subscribes to inbound webhook deliveries.
    *
-   * @param callback A persistent stub created with `ctx.restore()` that implements WebhookHook.
+   * The hook remains disabled until the user enables it in Connections.
+   * @param callback A persistent `WebhookHook` stub.
    */
   subscribe(callback: RpcStub<WebhookHook>): Promise<void>;
   /** Returns the HTTP endpoint to which callers should POST JSON. */
   getTriggerUrl(): Promise<string>;
   /**
    * Issues this endpoint's credential once. Create a new endpoint when rotation is required.
-   * The returned header value is shown only once and should be passed directly to the webhook sender.
+   * The returned header value is shown only once. Pass it directly to the sender or its provider
+   * gatekeeper; do not log it, display it in agent output, or persist it in Gadget storage.
    */
   issueCredential(options?: WebhookCredentialOptions): Promise<WebhookCredential>;
 }

@@ -3,15 +3,19 @@ import type { WebhookConfiguratorRpc, WebhookConfiguratorValues } from "./webhoo
 
 export default {
   initial: { endpointId: crypto.randomUUID(), label: null },
-  isReady: () => true,
+  isReady: ({ values }) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(values.endpointId ?? ""),
   async initialValuesFromResourceUrl({ resourceUrl, ui }) {
     const endpointId = new URL(resourceUrl).pathname.split("/").filter(Boolean).at(-1);
     if (!endpointId) return {};
     const decodedEndpointId = decodeURIComponent(endpointId);
-    return {
-      endpointId: decodedEndpointId,
-      label: await ui.getLabel(decodedEndpointId),
-    };
+    try {
+      return { endpointId: decodedEndpointId, label: await ui.getLabel(decodedEndpointId) };
+    } catch {
+      // Do not leave the randomly-generated default ready after a concrete URL failed to load.
+      return { endpointId: null, label: null };
+    }
   },
   resourceUrl: ({ values, ui }) => ui.resourceUrl(values.endpointId, values.label),
   render({ values, setValues }) {

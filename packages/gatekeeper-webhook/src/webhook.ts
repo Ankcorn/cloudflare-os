@@ -47,8 +47,12 @@ const VENDOR_ID = "webhook";
 const ENDPOINT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_ENDPOINT_LABEL_LENGTH = 80;
 const MAX_CREDENTIAL_PREFIX_LENGTH = 128;
+const CREDENTIAL_RESERVATION_MS = 5 * 60 * 1000;
 const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const HEADER_VALUE_PREFIX_RE = /^[\x20-\x7e]*$/;
+const RESERVED_CREDENTIAL_HEADERS = new Set([
+  "connection", "content-length", "content-type", "host", "idempotency-key", "transfer-encoding",
+]);
 const RECEIPT_RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
 const MAX_RECEIPTS = 10_000;
 const ICON = {
@@ -62,16 +66,32 @@ const logger = createLogger<{ vendorId: string; deliveryId?: string }>({
   vendorId: VENDOR_ID,
 });
 
-type Env = Cloudflare.Env & { BASE_URL?: string };
+type Env = Cloudflare.Env & { BASE_URL?: string; WEBHOOK_ENDPOINTS: KVNamespace };
 type AccountProps = { accountId: string };
 type EndpointRecord = { endpointId: string; label: string };
 type EndpointProps = AccountProps & EndpointRecord;
 type HookProps = EndpointProps & { hookId: string };
 type HookTarget = RpcTarget & WebhookHook;
 type StoredCredential = { headerName: string; valueHash: string };
+type CredentialReservation = { id: string; expiresAt: number };
+type EndpointState = {
+  ownerAccountId: string;
+  status: "active" | "revoked";
+  credential?: StoredCredential;
+  credentialReservation?: CredentialReservation;
+};
 
 function baseUrl(env: Env): string {
-  return stripTrailingSlashes(env.BASE_URL ?? "http://localhost:8787/gatekeeper/webhook");
+  const value = stripTrailingSlashes(
+    env.BASE_URL ?? "http://localhost:8787/gatekeeper/webhook",
+  );
+  const url = new URL(value);
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !local) {
+    throw new Error("Webhook BASE_URL must use HTTPS outside local development.");
+  }
+  return value;
 }
 
 function basePath(env: Env): string {
@@ -95,14 +115,12 @@ function receiver(exports: Cloudflare.Exports, endpointId: string) {
   return exports.WebhookReceiver.getByName(endpointId);
 }
 
+function endpointIndexKey(endpointId: string): string { return `endpoint:${endpointId}`; }
+
 async function sha256Hex(value: string): Promise<string> {
   return hexEncode(new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
   ));
-}
-
-async function matchesCredential(value: string, expectedHash: string): Promise<boolean> {
-  return constantTimeEqual(await sha256Hex(value), expectedHash);
 }
 
 function credentialOptions(options?: WebhookCredentialOptions): {
@@ -111,6 +129,9 @@ function credentialOptions(options?: WebhookCredentialOptions): {
   const headerName = options?.headerName?.trim() || "Authorization";
   if (headerName.length > 128 || !HEADER_NAME_RE.test(headerName)) {
     throw new Error("Use a valid HTTP credential header name of at most 128 characters.");
+  }
+  if (RESERVED_CREDENTIAL_HEADERS.has(headerName.toLowerCase())) {
+    throw new Error(`${headerName} is reserved by the webhook protocol and cannot carry a credential.`);
   }
   const valuePrefix = options?.valuePrefix
     ?? (headerName.toLowerCase() === "authorization" ? "Bearer " : "");
@@ -156,12 +177,11 @@ function parseWebhookJson(text: string): WebhookEvent["payload"] {
   return JSON.parse(text) as WebhookEvent["payload"];
 }
 
-async function eventId(request: Request, body: string): Promise<string> {
+async function eventId(request: Request): Promise<string> {
   const idempotencyKey = request.headers.get("idempotency-key");
-  const source = idempotencyKey && idempotencyKey.length <= 200
-    ? `key:${idempotencyKey}`
-    : `body:${body}`;
-  return sha256Hex(source);
+  return idempotencyKey && idempotencyKey.length <= 200
+    ? sha256Hex(`key:${idempotencyKey}`)
+    : crypto.randomUUID();
 }
 
 export default {
@@ -184,10 +204,13 @@ export default {
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
     }
-    const endpointReceiver = receiver(ctx.exports, endpointId);
-    const headerName = await endpointReceiver.getCredentialHeaderName();
-    const presented = headerName ? request.headers.get(headerName) : null;
-    if (!presented) {
+    const indexed = await env.WEBHOOK_ENDPOINTS.get<StoredCredential>(
+      endpointIndexKey(endpointId), "json",
+    );
+    const presented = indexed ? request.headers.get(indexed.headerName) : null;
+    const presentedHash = presented ? await sha256Hex(presented) : null;
+    if (!indexed || !presentedHash ||
+        !constantTimeEqual(presentedHash, indexed.valueHash)) {
       return new Response("Unauthorized", { status: 401 });
     }
     if ((request.headers.get("content-type") ?? "").split(";", 1)[0]!.trim().toLowerCase() !== "application/json") {
@@ -209,11 +232,11 @@ export default {
     }
 
     const event: WebhookEvent = {
-      id: await eventId(request, text),
+      id: await eventId(request),
       timestamp: new Date().toISOString(),
       payload,
     };
-    const status = await endpointReceiver.deliver(presented, event);
+    const status = await receiver(ctx.exports, endpointId).deliver(presentedHash, event);
     const message = status === 204
       ? null
       : status === 401
@@ -267,11 +290,13 @@ export class UserAccount extends DurableObject<Env> {
       if (!isLiveNonce(stored, nonce, Date.now())) return null;
       const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
       if (!callback) return null;
+      // Completion is exactly once. If the reply is lost, the user starts a fresh connection;
+      // retrying this account could otherwise leave two Workshop handoffs able to revoke it.
+      this.ctx.storage.kv.delete("nonce");
       try {
         const handoff = await callback.complete(this.ctx.exports.GatekeeperUserImpl({
           props: { accountId: this.ctx.id.toString() },
         }));
-        this.ctx.storage.kv.delete("nonce");
         this.ctx.storage.kv.delete("callback");
         this.ctx.storage.deleteAlarm();
         return handoff;
@@ -282,8 +307,13 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> { await this.ctx.storage.deleteAll(); }
-  async putEndpoint(endpoint: EndpointRecord): Promise<void> {
+  async registerEndpoint(endpoint: EndpointRecord): Promise<boolean> {
+    if (this.ctx.storage.kv.get<boolean>("revoked")) return false;
     this.ctx.storage.kv.put(`endpoint:${endpoint.endpointId}`, endpoint);
+    return true;
+  }
+  async removeEndpoint(endpointId: string): Promise<void> {
+    this.ctx.storage.kv.delete(`endpoint:${endpointId}`);
   }
   async getEndpoint(endpointId: string): Promise<EndpointRecord | null> {
     return this.ctx.storage.kv.get<EndpointRecord>(`endpoint:${endpointId}`) ?? null;
@@ -291,6 +321,10 @@ export class UserAccount extends DurableObject<Env> {
   async listEndpoints(): Promise<EndpointRecord[]> {
     return [...this.ctx.storage.kv.list({ prefix: "endpoint:" })]
       .map(([, endpoint]) => endpoint as EndpointRecord);
+  }
+  async revokeAndListEndpoints(): Promise<EndpointRecord[]> {
+    this.ctx.storage.kv.put("revoked", true);
+    return this.listEndpoints();
   }
 }
 
@@ -328,10 +362,13 @@ class WebhookConfiguratorUI extends RpcTarget implements WebhookConfiguratorRpc 
     const account = exports.UserAccount.get(
       exports.UserAccount.idFromString(accountId),
     );
+    if (!(await account.registerEndpoint(endpoint))) {
+      throw new Error("This webhook connection has been revoked.");
+    }
     if (!(await receiver(exports, endpoint.endpointId).claim(accountId))) {
+      await account.removeEndpoint(endpoint.endpointId);
       throw new Error("This webhook endpoint is already owned by another account.");
     }
-    await account.putEndpoint(endpoint);
     return webhookUrl(env, endpoint.endpointId);
   }
 }
@@ -380,9 +417,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, AccountProps> impl
     const account = this.ctx.exports.UserAccount.get(
       this.ctx.exports.UserAccount.idFromString(this.ctx.props.accountId),
     );
-    const endpoints = await account.listEndpoints();
+    const endpoints = await account.revokeAndListEndpoints();
     await Promise.all(endpoints.map(endpoint =>
-      receiver(this.ctx.exports, endpoint.endpointId).disableAll()));
+      receiver(this.ctx.exports, endpoint.endpointId)
+        .disableAll(this.ctx.props.accountId, endpoint.endpointId)));
   }
   reconnect(): Promise<{ url: string }> { throw new Error("This connection has no user credentials."); }
   commitReconnect(_stageId: string): Promise<void> { throw new Error("No reconnect is pending."); }
@@ -401,6 +439,7 @@ export class WebhookVerifier extends WorkerEntrypoint<Env> implements Gatekeeper
 class WebhookSessionImpl extends RpcTarget implements WebhookSession {
   constructor(
     private readonly ctx: DurableObjectState<EndpointProps>,
+    private readonly env: Env,
     private readonly queue: RpcStub<ApprovalQueue>,
     private readonly url: string,
   ) { super(); }
@@ -417,18 +456,36 @@ class WebhookSessionImpl extends RpcTarget implements WebhookSession {
   }
   async getTriggerUrl(): Promise<string> { return this.url; }
   async issueCredential(options?: WebhookCredentialOptions): Promise<WebhookCredential> {
-    await this.queue.authorizeObservation({
-      title: "Issue webhook credential",
-      description: "Create a new credential for configuring this webhook sender.",
-      containsRestrictedData: true,
-    });
     const { headerName, valuePrefix } = credentialOptions(options);
-    const headerValue = await receiver(this.ctx.exports, this.ctx.props.endpointId)
-      .issueCredential(this.ctx.props.accountId, headerName, valuePrefix);
-    if (!headerValue) {
+    const endpointReceiver = receiver(this.ctx.exports, this.ctx.props.endpointId);
+    const reservationId = await endpointReceiver.reserveCredential(this.ctx.props.accountId);
+    if (!reservationId) {
       throw new Error("This webhook endpoint already has a credential. Create a new endpoint to rotate it.");
     }
-    return { url: this.url, headerName, headerValue };
+    try {
+      await this.queue.authorizeObservation({
+        title: "Issue webhook credential",
+        description: "Create a new credential for configuring this webhook sender.",
+      });
+      const headerValue = `${valuePrefix}${generateNonce()}`;
+      const credential = { headerName, valueHash: await sha256Hex(headerValue) };
+      if (!(await endpointReceiver.commitCredential(
+        this.ctx.props.accountId, reservationId, credential,
+      ))) throw new Error("Webhook credential issuance expired. Please try again.");
+      try {
+        await this.env.WEBHOOK_ENDPOINTS.put(
+          endpointIndexKey(this.ctx.props.endpointId), JSON.stringify(credential),
+        );
+      } catch (error) {
+        await endpointReceiver.rollbackCredential(this.ctx.props.accountId, credential.valueHash);
+        throw error;
+      }
+      return { url: this.url, headerName, headerValue };
+    } finally {
+      await endpointReceiver.releaseCredentialReservation(
+        this.ctx.props.accountId, reservationId,
+      );
+    }
   }
   [Symbol.dispose](): void { this.queue[Symbol.dispose](); }
 }
@@ -451,6 +508,7 @@ export class WebhookGatekeeper extends DurableObject<Env, EndpointProps>
   async startSession(queue: RpcStub<ApprovalQueue>): Promise<WebhookSession> {
     return new WebhookSessionImpl(
       this.ctx,
+      this.env,
       queue.dup(),
       webhookUrl(this.env, this.ctx.props.endpointId),
     );
@@ -472,6 +530,7 @@ export class WebhookHookController extends WorkerEntrypoint<Env, HookProps>
     _target: HookTargetMetadata,
   ): Promise<void> {
     await receiver(this.ctx.exports, this.ctx.props.endpointId).enable(
+      this.ctx.props.accountId,
       this.ctx.props.hookId,
       initiator,
     );
@@ -485,48 +544,86 @@ export class WebhookReceiver extends DurableObject<Env> {
   #mutations = new SerialTaskQueue();
   #inFlight = new Map<string, Promise<number>>();
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS webhook_receipts (
-      event_id TEXT PRIMARY KEY, delivered_at INTEGER NOT NULL
-    )`);
-  }
-
   async claim(accountId: string): Promise<boolean> {
     return this.#mutations.run(() => {
-      const owner = this.ctx.storage.kv.get<string>("ownerAccountId");
-      if (owner && owner !== accountId) return false;
-      if (!owner) this.ctx.storage.kv.put("ownerAccountId", accountId);
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (state?.status === "revoked" || (state && state.ownerAccountId !== accountId)) return false;
+      if (!state) {
+        this.ctx.storage.kv.put<EndpointState>("state", {
+          ownerAccountId: accountId, status: "active",
+        });
+        // Unknown UUIDs never reach this write: the table is created only after registration.
+        this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS webhook_receipts (
+          event_id TEXT PRIMARY KEY, delivered_at INTEGER NOT NULL
+        )`);
+      }
       return true;
     });
   }
 
-  async issueCredential(
-    accountId: string,
-    headerName = "Authorization",
-    valuePrefix = "Bearer ",
-  ): Promise<string | null> {
-    return this.#mutations.run(async () => {
-      if (this.ctx.storage.kv.get<string>("ownerAccountId") !== accountId) return null;
-      if (this.ctx.storage.kv.get<StoredCredential>("credential")) return null;
-      const headerValue = `${valuePrefix}${generateNonce()}`;
-      const valueHash = await sha256Hex(headerValue);
-      this.ctx.storage.kv.put<StoredCredential>("credential", { headerName, valueHash });
-      return headerValue;
+  async reserveCredential(accountId: string): Promise<string | null> {
+    return this.#mutations.run(() => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (!state || state.ownerAccountId !== accountId || state.status !== "active" ||
+          state.credential) return null;
+      const now = Date.now();
+      if (state.credentialReservation && state.credentialReservation.expiresAt > now) return null;
+      const id = generateNonce();
+      this.ctx.storage.kv.put<EndpointState>("state", {
+        ...state, credentialReservation: { id, expiresAt: now + CREDENTIAL_RESERVATION_MS },
+      });
+      return id;
     });
   }
 
-  async getCredentialHeaderName(): Promise<string | null> {
-    return this.ctx.storage.kv.get<StoredCredential>("credential")?.headerName ?? null;
+  async commitCredential(
+    accountId: string,
+    reservationId: string,
+    credential: StoredCredential,
+  ): Promise<boolean> {
+    return this.#mutations.run(() => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (!state || state.ownerAccountId !== accountId || state.status !== "active" ||
+          state.credential || state.credentialReservation?.id !== reservationId ||
+          state.credentialReservation.expiresAt <= Date.now()) return false;
+      const { credentialReservation: _, ...rest } = state;
+      this.ctx.storage.kv.put<EndpointState>("state", { ...rest, credential });
+      return true;
+    });
   }
 
-  async enable(hookId: string, initiator: Fetcher<HookInitiator<HookTarget>>): Promise<void> {
+  async rollbackCredential(accountId: string, valueHash: string): Promise<void> {
     await this.#mutations.run(() => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (!state || state.ownerAccountId !== accountId ||
+          state.credential?.valueHash !== valueHash) return;
+      const { credential: _, ...rest } = state;
+      this.ctx.storage.kv.put<EndpointState>("state", rest);
+    });
+  }
+
+  async releaseCredentialReservation(accountId: string, reservationId: string): Promise<void> {
+    await this.#mutations.run(() => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (!state || state.ownerAccountId !== accountId ||
+          state.credentialReservation?.id !== reservationId) return;
+      const { credentialReservation: _, ...rest } = state;
+      this.ctx.storage.kv.put<EndpointState>("state", rest);
+    });
+  }
+
+  async enable(
+    accountId: string,
+    hookId: string,
+    initiator: Fetcher<HookInitiator<HookTarget>>,
+  ): Promise<void> {
+    await this.#mutations.run(() => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (!state || state.ownerAccountId !== accountId || state.status !== "active") {
+        throw new Error("This webhook endpoint has been revoked.");
+      }
       const stored = this.ctx.storage.kv.get<StoredHook>("hook");
       try {
-        if (stored && stored.hookId !== hookId) {
-          throw new Error("This webhook endpoint already has an enabled subscriber.");
-        }
         this.ctx.storage.kv.put<StoredHook>("hook", { hookId, initiator });
       } finally {
         disposeStub(stored?.initiator);
@@ -543,23 +640,26 @@ export class WebhookReceiver extends DurableObject<Env> {
       }
     });
   }
-  async disableAll(): Promise<void> {
-    await this.#mutations.run(() => {
+  async disableAll(accountId: string, endpointId: string): Promise<void> {
+    await this.#mutations.run(async () => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (state && state.ownerAccountId !== accountId) return;
       const stored = this.ctx.storage.kv.get<StoredHook>("hook");
+      this.ctx.storage.kv.put<EndpointState>("state", {
+        ownerAccountId: accountId, status: "revoked",
+      });
       this.ctx.storage.kv.delete("hook");
-      this.ctx.storage.kv.delete("credential");
-      this.ctx.storage.sql.exec("DELETE FROM webhook_receipts");
+      if (state) this.ctx.storage.sql.exec("DELETE FROM webhook_receipts");
+      await this.env.WEBHOOK_ENDPOINTS.delete(endpointIndexKey(endpointId));
       disposeStub(stored?.initiator);
     });
+    await Promise.allSettled(this.#inFlight.values());
   }
 
-  async authenticate(headerValue: string): Promise<boolean> {
-    const credential = this.ctx.storage.kv.get<StoredCredential>("credential");
-    return credential !== undefined && matchesCredential(headerValue, credential.valueHash);
-  }
-
-  async deliver(headerValue: string, event: WebhookEvent): Promise<number> {
-    if (!(await this.authenticate(headerValue))) return 401;
+  async deliver(credentialHash: string, event: WebhookEvent): Promise<number> {
+    const state = this.ctx.storage.kv.get<EndpointState>("state");
+    if (state?.status !== "active" || !state.credential ||
+        !constantTimeEqual(credentialHash, state.credential.valueHash)) return 401;
     if (this.#wasDelivered(event.id)) return 204;
     const running = this.#inFlight.get(event.id);
     if (running) return running;
@@ -572,12 +672,12 @@ export class WebhookReceiver extends DurableObject<Env> {
     const stored = this.ctx.storage.kv.get<StoredHook>("hook");
     if (!stored) return 409;
     try {
-      // @ts-expect-error RPC promises carry disposable pipelined stubs.
-      using hook = stored.initiator.startHook();
+      // Await admission so a rejected start is handled here rather than becoming an unobserved
+      // pipelined-stub rejection. The returned aggregate stub owns both capabilities.
+      using hook = await stored.initiator.startHook();
       await hook.approvalQueue.authorizeObservation({
         title: "Webhook received",
         description: "Received an authenticated JSON webhook request.",
-        containsRestrictedData: true,
       });
       await hook.callback.onWebhook(event);
       this.ctx.storage.sql.exec(
@@ -585,11 +685,10 @@ export class WebhookReceiver extends DurableObject<Env> {
       );
       this.#trimReceipts();
       return 204;
-    } catch (error) {
+    } catch {
       logger.error("webhook callback failed", {
         event: "webhook.callback.failed",
         deliveryId: event.id,
-        error,
       });
       return 502;
     } finally {
@@ -599,7 +698,11 @@ export class WebhookReceiver extends DurableObject<Env> {
 
   #wasDelivered(deliveryId: string): boolean {
     return this.ctx.storage.sql
-      .exec("SELECT 1 FROM webhook_receipts WHERE event_id = ?", deliveryId)
+      .exec(
+        "SELECT 1 FROM webhook_receipts WHERE event_id = ? AND delivered_at >= ?",
+        deliveryId,
+        Date.now() - RECEIPT_RETENTION_MS,
+      )
       .toArray().length > 0;
   }
 

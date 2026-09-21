@@ -853,6 +853,9 @@ importers:
       '@gadgets/scripts':
         specifier: workspace:*
         version: link:../../scripts
+      miniflare:
+        specifier: 5.20260801.0-alpha
+        version: 5.20260801.0-alpha
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
