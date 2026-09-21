@@ -13,6 +13,7 @@
     "./connect-nonce": "./src/connect-nonce.ts",
     "./connect-pages": "./src/connect-pages.ts",
     "./credential-expiry": "./src/credential-expiry.ts",
+    "./credential-stage": "./src/credential-stage.ts",
     "./credentials": "./src/credentials.ts",
     "./cursors": "./src/cursors.ts",
     "./endpoint": "./src/endpoint.ts",
@@ -30,7 +31,7 @@
   "dependencies": {
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "jose": "^6.2.8"
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",

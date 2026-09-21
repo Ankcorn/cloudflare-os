@@ -294,7 +294,7 @@ function runBuild(
   });
 }
 
-// Everything Wrangler needs generated before it bundles: the backend's format blueprint module
+// Everything Wrangler needs generated before it bundles: the backend's bundled blueprint module
 // (gitignored, so absent on a clean checkout) and each gatekeeper's UI.
 //
 // The UI groups go through `vp` rather than a loop over `gatekeepers` so they run in parallel and
@@ -326,9 +326,9 @@ const vpEnv = vpRunEnv({ concurrentRuns: VP_PREFLIGHT_BUILDS.length });
 try {
   await Promise.all([
     runBuild(
-      "format blueprints",
+      "bundled blueprints",
       process.execPath,
-      [join(WORKSHOP_BACKEND_DIR, "scripts", "build-format-blueprints.ts")],
+      [join(WORKSHOP_BACKEND_DIR, "scripts", "build-bundled-blueprints.ts")],
       WORKSHOP_BACKEND_DIR,
     ),
     ...VP_PREFLIGHT_BUILDS.map(({ label, args }) =>
@@ -486,6 +486,7 @@ const SHARED_GATEKEEPER_CREDS: Record<string, { id: string; secret: string }> = 
 // `.dev.vars` is gitignored, so it cannot leave the machine. Secrets travel the same way
 // `CLIENT_SECRET` already does, via SHARED_GATEKEEPER_CREDS above.
 const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
+  "gatekeeper-cloudflare": ["NOTIFICATIONS_WEBHOOK_BASE_URL", "NOTIFICATIONS_MTLS_SHA256"],
   "gatekeeper-mcp-portal": [
     "MCP_PORTAL_URL", "MCP_PORTAL_NAME", "MCP_PORTAL_AUTH", "MCP_PORTAL_TOKEN",
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_PORTAL_HIDDEN_SERVER_IDS", "MCP_ALLOW_INSECURE",
@@ -553,6 +554,15 @@ for (const gk of gatekeepers) {
   // they are injected into the gatekeeper Workers (see SHARED_GATEKEEPER_CREDS below).
   for (const name of OPTIONAL_FEATURE_VARS) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
+  }
+
+  // Account connect flows post their completion ticket to the Workshop *origin* named here (see
+  // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
+  // it. Default to wherever the frontend is served from: Vite in normal dev, the backend itself in
+  // run-local mode.
+  if (config.vars.PUBLIC_BASE_URL === undefined) {
+    config.vars.PUBLIC_BASE_URL =
+        serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
   }
 
   for (const gk of gatekeepers) {

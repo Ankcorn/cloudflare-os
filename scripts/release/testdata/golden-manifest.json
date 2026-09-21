@@ -63,6 +63,13 @@
             "CloudflareObservabilityGatekeeper"
           ],
           "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "CloudflareNotificationsGatekeeper",
+            "CloudflareNotificationReceiver"
+          ],
+          "tag": "v2"
         }
       ],
       "modules": [
@@ -1114,6 +1121,12 @@
             "PendingLogin"
           ],
           "tag": "v2"
+        },
+        {
+          "new_sqlite_classes": [
+            "UserDirectoryDurableObject"
+          ],
+          "tag": "v3"
         }
       ],
       "modules": [
