@@ -24,6 +24,8 @@ export class DurableObject<E = unknown, P = unknown> {
 // oxlint-disable-next-line typescript/no-extraneous-class -- empty on purpose: only so `extends` resolves
 export class RpcTarget {}
 
+export const restore = Symbol("restore");
+
 export class WorkerEntrypoint<E = unknown, P = unknown> {
   readonly ctx: unknown;
   readonly env: E;

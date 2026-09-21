@@ -1,24 +1,38 @@
-import { DurableObject, RpcTarget, restore } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
+import * as workers from "cloudflare:workers";
 
+// ctx.restore() is a Workshop runtime extension; Workers' experimental package has not yet
+// published the symbol in its declarations.
+const restore = (workers as unknown as {restore: symbol}).restore;
+
+const ALERT_TYPE = "workers_observability_real_time_issue";
 const CALLBACK_TYPE = "real-time-issue";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-class RealTimeIssueCallback extends RpcTarget {
-  constructor(storage, investigator) {
-    super();
-    this.storage = storage;
-    this.investigator = investigator;
-  }
+type Notification = {
+  id: string;
+  alertType: string;
+  data: unknown;
+  [key: string]: unknown;
+};
 
-  async onNotification(notification) {
-    if (
-      notification?.alertType !== "workers_observability_real_time_issue" ||
-      typeof notification.id !== "string" ||
-      !UUID_PATTERN.test(notification.id)
-    ) {
+type Storage = Pick<DurableObjectStorage, "get" | "put" | "delete">;
+type Investigator = { spawn(title: string, prompt: string): Promise<void> };
+type Notifications = {
+  subscribe(callback: RpcTarget, filter: {alertTypes: string[]}): Promise<void>;
+};
+type Env = { INVESTIGATOR: Investigator; CLOUDFLARE_NOTIFICATIONS: Notifications };
+
+class RealTimeIssueCallback extends RpcTarget {
+  constructor(private storage: Storage, private investigator: Investigator) { super(); }
+
+  async onNotification(notification: Notification): Promise<void> {
+    if (notification?.alertType !== ALERT_TYPE ||
+        typeof notification.id !== "string" || !UUID_PATTERN.test(notification.id)) {
       throw new Error("Unexpected Real-Time Issue notification");
     }
-    const issueId = notification?.data?.issue?.id;
+    const data = notification.data as {issue?: {id?: unknown}} | null;
+    const issueId = data?.issue?.id;
     if (typeof issueId !== "string" || !UUID_PATTERN.test(issueId)) {
       throw new Error("Real-Time Issue notification has an invalid data.issue.id");
     }
@@ -49,16 +63,16 @@ ${JSON.stringify(notification)}`,
   }
 }
 
-export class Gadget extends DurableObject {
-  [restore](params) {
+export class Gadget extends DurableObject<Env> {
+  [restore](params: {type?: string}): RpcTarget {
     if (params?.type !== CALLBACK_TYPE) throw new Error("Unknown callback type");
     return new RealTimeIssueCallback(this.ctx.storage, this.env.INVESTIGATOR);
   }
 
-  async install() {
+  async install(): Promise<void> {
     if (await this.ctx.storage.get("hookRegistered")) return;
     const callback = await this.ctx.restore({ type: CALLBACK_TYPE });
-    await this.env.CLOUDFLARE_NOTIFICATIONS.subscribe(callback);
+    await this.env.CLOUDFLARE_NOTIFICATIONS.subscribe(callback, {alertTypes: [ALERT_TYPE]});
     await this.ctx.storage.put("hookRegistered", true);
   }
 }
