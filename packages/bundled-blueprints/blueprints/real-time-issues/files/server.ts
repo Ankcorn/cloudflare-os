@@ -52,6 +52,11 @@ ${JSON.stringify(event.payload)}`,
 }
 
 export class Gadget extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(() => this.install());
+  }
+
   [restore](params: {type?: string}): RpcTarget {
     if (params?.type !== CALLBACK_TYPE) throw new Error("Unknown callback type");
     return new RealTimeIssueCallback(this.ctx.storage, this.env.INVESTIGATOR);

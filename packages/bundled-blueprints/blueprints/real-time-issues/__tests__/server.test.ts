@@ -27,6 +27,7 @@ function fixture() {
   const state = {
     storage,
     restore: async (params: {type?: string}) => gadget[restore](params),
+    blockConcurrencyWhile: (task: () => Promise<void>) => task(),
   } as unknown as DurableObjectState;
   gadget = new Gadget(state, {
     INVESTIGATOR: {spawn},
