@@ -45,7 +45,6 @@
       "description": "Agent Spawner restricted to the selected Observability and repository bindings.",
       "type": "agentSpawner",
       "env": {
-        "INCOMING_WEBHOOK": { "type": "binding", "name": "INCOMING_WEBHOOK" },
         "CLOUDFLARE_OBSERVABILITY": { "type": "binding", "name": "CLOUDFLARE_OBSERVABILITY" },
         "GIT_REPOSITORY": { "type": "binding", "name": "GIT_REPOSITORY" }
       }
