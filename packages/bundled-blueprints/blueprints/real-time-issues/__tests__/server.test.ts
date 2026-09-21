@@ -6,11 +6,9 @@ import { Gadget } from "../files/server.ts";
 const restore = (workers as unknown as {restore: symbol}).restore;
 
 const notification = {
-  id: "1".repeat(64),
-  accountId: "account-1",
-  alertType: "workers_observability_real_time_issue",
+  id: "10000000-0000-4000-8000-000000000001",
   timestamp: "2026-09-21T12:00:00.000Z",
-  data: { issue: { id: "20000000-0000-4000-8000-000000000002" } },
+  payload: { issue: { id: "issue-42" }, symptom: "worker errors" },
 };
 
 function fixture() {
@@ -21,12 +19,9 @@ function fixture() {
     delete: async (key: string) => stored.delete(key),
   };
   const spawn = vi.fn(async (_title: string, _prompt: string) => {});
-  let callback: {onNotification(value: typeof notification): Promise<void>} | undefined;
-  const subscribe = vi.fn(async (
-    value: InstanceType<typeof workers.RpcTarget>, filter: {alertTypes: string[]},
-  ) => {
+  let callback: {onWebhook(value: typeof notification): Promise<void>} | undefined;
+  const subscribe = vi.fn(async (value: InstanceType<typeof workers.RpcTarget>) => {
     callback = value as unknown as typeof callback;
-    expect(filter).toEqual({alertTypes: ["workers_observability_real_time_issue"]});
   });
   let gadget: Gadget;
   const state = {
@@ -35,7 +30,7 @@ function fixture() {
   } as unknown as DurableObjectState;
   gadget = new Gadget(state, {
     INVESTIGATOR: {spawn},
-    CLOUDFLARE_NOTIFICATIONS: {subscribe},
+    INCOMING_WEBHOOK: {subscribe},
   });
   return {gadget, stored, spawn, subscribe, get callback() { return callback; }};
 }
@@ -46,15 +41,15 @@ describe("Real-Time Issues Investigator webhook ingress", () => {
     await f.gadget.install();
     expect(f.callback).toBeDefined();
 
-    await f.callback!.onNotification(notification);
-    await f.callback!.onNotification(notification);
+    await f.callback!.onWebhook(notification);
+    await f.callback!.onWebhook(notification);
 
     expect(f.spawn).toHaveBeenCalledOnce();
-    expect(f.spawn.mock.calls[0]![0]).toContain(notification.data.issue.id);
+    expect(f.spawn.mock.calls[0]![0]).toContain(notification.payload.issue.id);
     expect(f.spawn.mock.calls[0]![1]).toContain("Do not merge or deploy");
-    expect(f.spawn.mock.calls[0]![1]).toContain(JSON.stringify(notification));
-    expect(f.stored.get(`investigation:${notification.data.issue.id}`)).toEqual({
-      notificationId: notification.id,
+    expect(f.spawn.mock.calls[0]![1]).toContain(JSON.stringify(notification.payload));
+    expect(f.stored.get(`investigation:${notification.payload.issue.id}`)).toEqual({
+      eventId: notification.id,
       state: "spawned",
     });
   });
@@ -63,7 +58,7 @@ describe("Real-Time Issues Investigator webhook ingress", () => {
     const f = fixture();
     f.spawn.mockRejectedValueOnce(new Error("spawn failed"));
     await f.gadget.install();
-    await expect(f.callback!.onNotification(notification)).rejects.toThrow("spawn failed");
-    expect(f.stored.has(`investigation:${notification.data.issue.id}`)).toBe(false);
+    await expect(f.callback!.onWebhook(notification)).rejects.toThrow("spawn failed");
+    expect(f.stored.has(`investigation:${notification.payload.issue.id}`)).toBe(false);
   });
 });

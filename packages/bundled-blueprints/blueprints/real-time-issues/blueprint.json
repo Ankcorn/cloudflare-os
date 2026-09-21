@@ -18,12 +18,13 @@
   "version": 1,
   "lastUpdated": "2026-09-04T00:00:00.000Z",
   "bindings": {
-    "CLOUDFLARE_NOTIFICATIONS": {
-      "title": "Cloudflare Notifications",
-      "description": "Receives Real-Time Issue notifications for the selected account.",
+    "INCOMING_WEBHOOK": {
+      "title": "Local Webhook",
+      "description": "Receives plain local JSON webhooks for quick Investigator testing.",
       "type": "gatekeeper",
-      "gatekeeperName": "cloudflare_notifications",
-      "typeUrlPattern": "https://dash.cloudflare.com/:accountId/notifications"
+      "gatekeeperName": "webhook",
+      "typeUrlPattern": "webhook://local/:name",
+      "resourceUrl": "webhook://local/investigator"
     },
     "CLOUDFLARE_OBSERVABILITY": {
       "title": "Workers Observability",
@@ -44,6 +45,7 @@
       "description": "Agent Spawner restricted to the selected Observability and repository bindings.",
       "type": "agentSpawner",
       "env": {
+        "INCOMING_WEBHOOK": { "type": "binding", "name": "INCOMING_WEBHOOK" },
         "CLOUDFLARE_OBSERVABILITY": { "type": "binding", "name": "CLOUDFLARE_OBSERVABILITY" },
         "GIT_REPOSITORY": { "type": "binding", "name": "GIT_REPOSITORY" }
       }
