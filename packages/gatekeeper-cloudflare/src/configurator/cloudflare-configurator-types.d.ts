@@ -18,7 +18,8 @@ export interface CloudflareWorkerConfiguratorRpc extends CloudflareAccountConfig
 }
 
 export type CloudflareNotificationsConfiguratorValues = CloudflareAccountConfiguratorValues & {
-  status?: CloudflareNotificationsSetupStatus | null;
+  status?: string | null;
+  statusDetails?: string | null;
 };
 export type CloudflareNotificationsSetupStatus = {
   summary: string;

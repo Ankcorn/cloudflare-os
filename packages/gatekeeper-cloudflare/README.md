@@ -242,7 +242,8 @@ A crash or timeout after a callback commits can still cause redelivery: use `not
 side effects idempotent. Delivery order is not guaranteed, and delivery stops if ANS exhausts its retries.
 
 A connection supports 100 hooks. Each callback is preceded by Workshop observation authorization.
-Notifications bindings are private to their owner. Disabling a hook stops future handoffs but preserves
+Notification status and delivered alerts are marked as restricted data, so observing either latches
+the workspace against sharing. Notifications bindings are private to their owner. Disabling a hook stops future handoffs but preserves
 the webhook so existing notification policies retain their destination. Disconnecting Cloudflare stops ingress and delivery,
 then removes this connection's provider resources. Cleanup failures retain credentials for retry;
 reconnect first if credentials have expired. Signing in again preserves resource connections, including
