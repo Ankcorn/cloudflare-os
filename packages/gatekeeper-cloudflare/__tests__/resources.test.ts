@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
+  NOTIFICATIONS_RESOURCE,
+  accountNotificationsUrl,
+  cloudflareScopesForResources,
+  grantedCloudflareResourcePatterns,
   accountObservabilityUrl,
   grantedObservabilityResourcePatterns,
   observabilityScopesForResources,
   parseObservabilityResourceUrl,
+  parseNotificationsResourceUrl,
   workerObservabilityUrl,
 } from "../src/resources";
 import { BILLING_SCOPES, persistentScopesForResources } from "../src/oauth";
@@ -52,6 +57,20 @@ describe("Cloudflare observability resources", () => {
     expect(() => parseObservabilityResourceUrl(
       "https://dash.cloudflare.com/%EA/workers-and-pages/observability",
     )).toThrow("Unsupported Cloudflare observability URL");
+  });
+});
+
+describe("Cloudflare Notifications resources", () => {
+  it("round-trips account notification URLs", () => {
+    const url = accountNotificationsUrl(ACCOUNT_ID);
+    expect(parseNotificationsResourceUrl(url)).toEqual({ accountId: ACCOUNT_ID });
+  });
+
+  it("maps the resource to its least-privilege OAuth scope", () => {
+    expect(cloudflareScopesForResources([NOTIFICATIONS_RESOURCE.urlPattern]))
+      .toEqual(["notifications.write"]);
+    expect(grantedCloudflareResourcePatterns(["notifications.write"]))
+      .toEqual([NOTIFICATIONS_RESOURCE.urlPattern]);
   });
 });
 

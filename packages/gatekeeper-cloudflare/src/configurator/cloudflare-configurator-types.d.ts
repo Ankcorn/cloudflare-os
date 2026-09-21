@@ -9,6 +9,8 @@ export type CloudflareWorkerConfiguratorValues = {
   workerName?: string | null;
 };
 
+export type CloudflareNotificationsConfiguratorValues = CloudflareAccountConfiguratorValues;
+
 export interface CloudflareAccountConfiguratorRpc {
   listAccounts(query: string): Promise<ConfiguratorUIOption[]>;
 }

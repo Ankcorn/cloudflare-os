@@ -17,8 +17,13 @@ This package provides Cloudflare OAuth integration for Gadgets. It serves three 
   defensively discard foreign-service events. Distributed trace summaries are account-only because
   their names, timing, services, and counts describe the whole cross-service trace; a Worker binding
   can still retrieve its own events for a known trace ID.
+- **Notifications destinations:** gadgets can submit an approval-gated request to configure a
+  generic webhook destination in one account. The receiving webhook owns delivery and callbacks;
+  this gatekeeper only holds the Cloudflare OAuth token and calls the Notifications API after
+  approval.
 
-Observability connections request `workers-observability.read`. The OAuth client must allow that
+Observability connections request `workers-observability.read`; notification destination
+connections request `notifications.write`. The OAuth client must allow the selected
 scope or Cloudflare will omit/reject it. Existing billing-only connections can add the grant when the
 user first selects an observability resource. Cloudflare exposes account and Worker resource choices,
 but both map to this one indivisible OAuth scope; resource bindings provide the finer capability

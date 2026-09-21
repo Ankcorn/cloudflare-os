@@ -512,3 +512,21 @@ export interface CloudflareObservabilitySession {
   calculate(query: CloudflareObservabilityCalculationQuery):
     Promise<CloudflareObservabilityCalculationResult>;
 }
+
+/** Authenticated webhook destination accepted by Cloudflare Notifications. */
+export interface CloudflareNotificationDestination {
+  /** Public HTTPS callback URL. */
+  url: string;
+  /** Must be `cf-webhook-auth`, the header sent by Cloudflare Notifications. */
+  headerName: string;
+  /** One-time secret issued by the receiving webhook gatekeeper. */
+  headerValue: string;
+  /** Optional destination name shown in the Cloudflare dashboard. */
+  name?: string;
+}
+
+/** Notification destination management scoped to one Cloudflare account. */
+export interface CloudflareNotificationsSession {
+  /** Stage creation or reconciliation of an authenticated webhook destination for approval. */
+  provisionNotificationInstallation(destination: CloudflareNotificationDestination): Promise<void>;
+}

@@ -15,13 +15,16 @@ import {
 } from "./oauth";
 import { fetchIdentity } from "./cloudflare-api";
 import {
-  OBSERVABILITY_RESOURCES,
+  CLOUDFLARE_RESOURCES,
   ACCOUNT_OBSERVABILITY_RESOURCE,
   WORKER_OBSERVABILITY_RESOURCE,
-  grantedObservabilityResourcePatterns,
+  NOTIFICATIONS_RESOURCE,
+  NOTIFICATIONS_SCOPE,
+  grantedCloudflareResourcePatterns,
   accountObservabilityUrl,
   workerObservabilityUrl,
   parseObservabilityResourceUrl,
+  parseNotificationsResourceUrl,
 } from "./resources.js";
 import { CloudflareObservabilityApi, deniesAccess } from "./observability-api.js";
 import { CloudflareObservabilitySessionImpl } from "./observability-session.js";
@@ -31,10 +34,12 @@ import {
 } from "./cloudflare-configurators.js";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/cloudflare-account-configurator-ui.txt";
 import WORKER_CONFIGURATOR_HTML from "./generated/cloudflare-worker-configurator-ui.txt";
+import NOTIFICATIONS_CONFIGURATOR_HTML from "./generated/cloudflare-notifications-configurator-ui.txt";
 import type { CloudflareObservabilitySession } from "./types.js";
 import { VENDOR_ID } from "./vendor.js";
 import TYPES_CODE from "./types.txt";
 import { obsContext } from "./observability.js";
+export { CloudflareNotificationsGatekeeper } from "./notifications.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
@@ -181,7 +186,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://cloudflare.com",
       logo: { url: CLOUDFLARE_LOGO_URL },
       color: "#fbece0",
-      tagline: "Sign in, use AI Gateway, and inspect Workers Observability",
+      tagline: "Sign in, use AI Gateway, inspect Workers, and configure Notifications",
       description:
           "Sign in with your Cloudflare account and use your own Cloudflare AI Gateway credits for " +
           "usage beyond the free tier. You can also connect Workers Observability to inspect logs, " +
@@ -204,7 +209,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return OBSERVABILITY_RESOURCES;
+    return CLOUDFLARE_RESOURCES;
   }
 
   async getTypeScriptTypes(): Promise<string> {
@@ -421,7 +426,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       displayName: identity?.displayName,
       uniqueName: identity?.email,
       avatar: { url: CLOUDFLARE_LOGO_URL },
-      grantedResourceUrlPatterns: grantedObservabilityResourcePatterns(grantedScopes),
+      grantedResourceUrlPatterns: grantedCloudflareResourcePatterns(grantedScopes),
     };
   }
 
@@ -434,7 +439,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {
     const account = this.#account();
-    const grantedPatterns = new Set(grantedObservabilityResourcePatterns(await account.getGrantedScopes()));
+    const grantedPatterns = new Set(grantedCloudflareResourcePatterns(await account.getGrantedScopes()));
     if (resourceUrlPatterns.every(pattern => grantedPatterns.has(pattern))) return {};
 
     const union = [...new Set([...grantedPatterns, ...resourceUrlPatterns])];
@@ -448,13 +453,26 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return OBSERVABILITY_RESOURCES;
+    return CLOUDFLARE_RESOURCES;
   }
 
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
   }> {
+    let notifications: { accountId: string } | undefined;
+    try { notifications = parseNotificationsResourceUrl(url); } catch { /* Try observability. */ }
+    if (notifications) {
+      if (!(await this.#account().getGrantedScopes()).includes(NOTIFICATIONS_SCOPE)) {
+        throw new Error("Reconnect Cloudflare with Notifications access first.");
+      }
+      return {
+        class: this.ctx.exports.CloudflareNotificationsGatekeeper({
+          props: { userObjectId: this.ctx.props.userObjectId, accountId: notifications.accountId },
+        }),
+        resource: NOTIFICATIONS_RESOURCE,
+      };
+    }
     const parsed = parseObservabilityResourceUrl(url);
     return {
       class: this.ctx.exports.CloudflareObservabilityGatekeeper({
@@ -466,6 +484,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     const getToken = () => this.#account().getAccessToken();
+    if (resourceUrlPattern === NOTIFICATIONS_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: NOTIFICATIONS_CONFIGURATOR_HTML,
+        ui: new RpcStub(new CloudflareAccountConfiguratorUI(getToken)),
+      };
+    }
     if (resourceUrlPattern === ACCOUNT_OBSERVABILITY_RESOURCE.urlPattern) {
       return {
         iframeHtml: ACCOUNT_CONFIGURATOR_HTML,

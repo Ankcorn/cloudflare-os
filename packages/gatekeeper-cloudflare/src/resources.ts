@@ -24,7 +24,16 @@ export const OBSERVABILITY_RESOURCES = [
   WORKER_OBSERVABILITY_RESOURCE,
 ];
 
-const RESOURCE_PATTERNS = new Set(OBSERVABILITY_RESOURCES.map(resource => resource.urlPattern));
+export const NOTIFICATIONS_RESOURCE: SupportedResource = {
+  urlPattern: `${DASHBOARD_ORIGIN}/:accountId/notifications`,
+  title: "Cloudflare Notifications destination",
+  description: "Configure a webhook destination for this Cloudflare account.",
+  grantable: true,
+};
+
+export const NOTIFICATIONS_SCOPE = "notifications.write";
+export const CLOUDFLARE_RESOURCES = [...OBSERVABILITY_RESOURCES, NOTIFICATIONS_RESOURCE];
+const RESOURCE_PATTERNS = new Set(CLOUDFLARE_RESOURCES.map(resource => resource.urlPattern));
 
 /** Validate and normalize a Cloudflare account ID at an external input boundary. */
 export function assertCloudflareAccountId(accountId: string): string {
@@ -39,6 +48,23 @@ export function accountObservabilityUrl(accountId: string): string {
 export function workerObservabilityUrl(accountId: string, workerName: string): string {
   return `${DASHBOARD_ORIGIN}/${assertCloudflareAccountId(accountId)}/workers/services/view/` +
     `${encodeURIComponent(workerName)}/production/observability`;
+}
+
+export function accountNotificationsUrl(accountId: string): string {
+  return `${DASHBOARD_ORIGIN}/${assertCloudflareAccountId(accountId)}/notifications`;
+}
+
+export function parseNotificationsResourceUrl(url: string): { accountId: string } {
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    const accountId = assertCloudflareAccountId(segments[0] ?? "");
+    if (parsed.origin === DASHBOARD_ORIGIN && segments.length === 2 &&
+        segments[1] === "notifications") return { accountId };
+  } catch {
+    // Normalize parsing and account-ID failures to the public resource error.
+  }
+  throw new Error(`Unsupported Cloudflare Notifications URL: ${url}`);
 }
 
 export function parseObservabilityResourceUrl(url: string): {
@@ -66,10 +92,11 @@ export function parseObservabilityResourceUrl(url: string): {
 }
 
 export function observabilityScopesForResources(resourceUrlPatterns?: string[]): string[] {
-  if (resourceUrlPatterns?.some(pattern => !RESOURCE_PATTERNS.has(pattern))) {
+  const patterns = resourceUrlPatterns?.filter(pattern => pattern !== NOTIFICATIONS_RESOURCE.urlPattern);
+  if (patterns?.some(pattern => !RESOURCE_PATTERNS.has(pattern))) {
     throw new Error("Unsupported Cloudflare resource type.");
   }
-  return resourceUrlPatterns === undefined || resourceUrlPatterns.length > 0
+  return patterns === undefined || patterns.length > 0
     ? [OBSERVABILITY_SCOPE]
     : [];
 }
@@ -78,4 +105,23 @@ export function grantedObservabilityResourcePatterns(scopes: string[]): string[]
   return scopes.includes(OBSERVABILITY_SCOPE)
     ? OBSERVABILITY_RESOURCES.map(resource => resource.urlPattern)
     : [];
+}
+
+export function cloudflareScopesForResources(resourceUrlPatterns?: string[]): string[] {
+  if (resourceUrlPatterns?.some(pattern => !RESOURCE_PATTERNS.has(pattern))) {
+    throw new Error("Unsupported Cloudflare resource type.");
+  }
+  return [
+    ...observabilityScopesForResources(resourceUrlPatterns),
+    ...(resourceUrlPatterns === undefined || resourceUrlPatterns.includes(NOTIFICATIONS_RESOURCE.urlPattern)
+      ? [NOTIFICATIONS_SCOPE]
+      : []),
+  ];
+}
+
+export function grantedCloudflareResourcePatterns(scopes: string[]): string[] {
+  return [
+    ...grantedObservabilityResourcePatterns(scopes),
+    ...(scopes.includes(NOTIFICATIONS_SCOPE) ? [NOTIFICATIONS_RESOURCE.urlPattern] : []),
+  ];
 }
