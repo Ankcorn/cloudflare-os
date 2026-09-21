@@ -35,6 +35,30 @@ export function parseNotificationWebhookPath(
   return { userObjectId: match[1]!.toLowerCase(), accountId: match[2]!.toLowerCase() };
 }
 
+/** Optional mTLS pins use trusted edge metadata, never caller-supplied headers.
+ * A comma-separated pin set allows certificate rotation without an outage.
+ */
+export function acceptsNotificationMtls(metadata: unknown, pins?: string): boolean {
+  if (pins === undefined) return true;
+  if (!metadata || typeof metadata !== "object") return false;
+  const tls = metadata as Record<string, unknown>;
+  const allowed = pins.split(",").map((pin) => pin.trim().replaceAll(":", "").toLowerCase());
+  if (!allowed.length || allowed.some((pin) => !/^[a-f0-9]{64}$/.test(pin))) return false;
+  return (
+    tls?.certPresented === "1" &&
+    tls.certVerified === "SUCCESS" &&
+    tls.certRevoked !== "1" &&
+    allowed.some(
+      (pin) =>
+        pin ===
+        (typeof tls.certFingerprintSHA256 === "string"
+          ? tls.certFingerprintSHA256
+          : ""
+        ).toLowerCase(),
+    )
+  );
+}
+
 /** Recognize Cloudflare's documented destination-test message, which is not an alert. */
 export function isWebhookTest(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;

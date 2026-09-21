@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptsNotificationMtls,
   isWebhookTest,
   parseNotificationWebhook,
   parseNotificationWebhookPath,
@@ -101,5 +102,30 @@ describe("Cloudflare's documented webhook envelope", () => {
         "/gatekeeper/cloudflare",
       ),
     ).toBeNull();
+  });
+});
+
+describe("optional pinned mTLS", () => {
+  const pin = "a".repeat(64);
+  const tls = {
+    certPresented: "1",
+    certVerified: "SUCCESS",
+    certRevoked: "0",
+    certFingerprintSHA256: pin,
+  };
+  it("is optional, but a configured pin fails closed", () => {
+    expect(acceptsNotificationMtls(undefined)).toBe(true);
+    expect(acceptsNotificationMtls(undefined, pin)).toBe(false);
+    expect(acceptsNotificationMtls(tls, "")).toBe(false);
+    expect(acceptsNotificationMtls(tls, "bad-config")).toBe(false);
+    expect(acceptsNotificationMtls(tls, pin)).toBe(true);
+    expect(acceptsNotificationMtls({ ...tls, certVerified: "FAILED" }, pin)).toBe(false);
+    expect(acceptsNotificationMtls({ ...tls, certRevoked: "1" }, pin)).toBe(false);
+    expect(acceptsNotificationMtls({ ...tls, certFingerprintSHA256: "b".repeat(64) }, pin)).toBe(
+      false,
+    );
+  });
+  it("allows overlapping pins for rotation", () => {
+    expect(acceptsNotificationMtls(tls, `${"b".repeat(64)}, ${pin}`)).toBe(true);
   });
 });
