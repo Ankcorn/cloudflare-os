@@ -326,15 +326,21 @@ describe("Webhook delivery lifecycle", () => {
     expect(await receiver.reserveCredential(accountId)).toBeNull();
   });
 
-  it("waits for an admitted callback before revocation completes", async () => {
+  it("clears receipts after an admitted keyed callback finishes during revocation", async () => {
     const { endpointId, receiver, credential } = await configured();
     await env.TEST_HOOKS.blockCallback();
-    const delivery = post(endpointId, credential);
+    const delivery = post(endpointId, credential, { "Idempotency-Key": "revoked-delivery" });
     await env.TEST_HOOKS.waitUntilCallbackBlocked();
     const revocation = Promise.resolve(receiver.disableAll(accountId, endpointId));
+    await expect.poll(() => runInDurableObject(receiver, (_instance, state) =>
+      (state.storage.kv.get("state") as { status?: string } | undefined)?.status))
+      .toBe("revoked");
     await env.TEST_HOOKS.releaseCallback();
     expect((await delivery).status).toBe(204);
     await revocation;
+    const receipts = await runInDurableObject(receiver, (_instance, state) =>
+      state.storage.sql.exec("SELECT COUNT(*) AS count FROM webhook_receipts").one().count);
+    expect(receipts).toBe(0);
     expect((await post(endpointId, credential)).status).toBe(401);
   });
 

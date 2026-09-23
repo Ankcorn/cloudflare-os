@@ -348,12 +348,14 @@ class WebhookConfiguratorUI extends RpcTarget implements WebhookConfiguratorRpc 
     configuratorAccounts.set(this, accountId);
     configuratorExports.set(this, exports);
   }
-  async getLabel(endpointIdValue: string): Promise<string | null> {
+  async getLabel(endpointIdValue: string): Promise<string> {
     const accountId = configuratorAccounts.get(this);
     const exports = configuratorExports.get(this);
     if (!accountId || !exports) throw new Error("Webhook configurator is not initialized.");
     const account = exports.UserAccount.get(exports.UserAccount.idFromString(accountId));
-    return (await account.getEndpoint(validateEndpointId(endpointIdValue)))?.label ?? null;
+    const endpoint = await account.getEndpoint(validateEndpointId(endpointIdValue));
+    if (!endpoint) throw new Error("This webhook endpoint does not belong to the connected account.");
+    return endpoint.label;
   }
   async resourceUrl(
     endpointIdValue: string | null | undefined,
@@ -647,22 +649,27 @@ export class WebhookReceiver extends DurableObject<Env> {
     });
   }
   async disableAll(accountId: string, endpointId: string): Promise<void> {
-    await this.#mutations.run(async () => {
+    const owned = await this.#mutations.run(async () => {
       const state = this.ctx.storage.kv.get<EndpointState>("state");
-      if (state && (state.ownerAccountId !== accountId || state.endpointId !== endpointId)) return;
+      if (state && (state.ownerAccountId !== accountId || state.endpointId !== endpointId)) return false;
       const stored = this.ctx.storage.kv.get<StoredHook>("hook");
       try {
         this.ctx.storage.kv.put<EndpointState>("state", {
           endpointId, ownerAccountId: accountId, status: "revoked",
         });
         this.ctx.storage.kv.delete("hook");
-        if (state) this.ctx.storage.sql.exec("DELETE FROM webhook_receipts");
         await registry(this.ctx.exports, endpointId).deleteCredential(endpointId);
       } finally {
         disposeStub(stored?.initiator);
       }
+      return true;
     });
     await Promise.allSettled(this.#activeDeliveries);
+    if (owned && this.ctx.storage.sql.exec(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'webhook_receipts'",
+    ).toArray().length) {
+      this.ctx.storage.sql.exec("DELETE FROM webhook_receipts");
+    }
   }
 
   async deliver(credentialHash: string, event: WebhookEvent, keyed = true): Promise<number> {
