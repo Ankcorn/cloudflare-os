@@ -9,10 +9,12 @@
   "compatibility_date": "2026-09-04",
   "compatibility_flags": ["allow_irrevocable_stub_storage", "nodejs_als"],
   "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
-  "kv_namespaces": [{ "binding": "WEBHOOK_ENDPOINTS" }],
   "migrations": [{
     "tag": "v1",
     "new_sqlite_classes": ["UserAccount", "WebhookGatekeeper", "WebhookReceiver"]
+  }, {
+    "tag": "v2",
+    "new_sqlite_classes": ["WebhookEndpointRegistry"]
   }],
   "observability": {
     "enabled": true,

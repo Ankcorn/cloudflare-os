@@ -6,7 +6,6 @@ import type { TestHooks } from "../worker.js";
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     WEBHOOK_RECEIVER: DurableObjectNamespace<WebhookReceiver>;
-    WEBHOOK_ENDPOINTS: KVNamespace;
     TEST_HOOKS: Fetcher<TestHooks>;
   }
 }
@@ -20,19 +19,15 @@ async function issue(
   headerName = "Authorization",
   valuePrefix = "Bearer ",
 ): Promise<string> {
-  expect(await receiver.claim(accountId)).toBe(true);
+  expect(await receiver.claim(accountId, endpointName)).toBe(true);
   const reservation = await receiver.reserveCredential(accountId);
   expect(reservation).not.toBeNull();
   const headerValue = `${valuePrefix}${crypto.randomUUID()}`;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(headerValue));
   const valueHash = [...new Uint8Array(digest)]
     .map(value => value.toString(16).padStart(2, "0")).join("");
-  expect(await receiver.commitCredential(accountId, reservation!, { headerName, valueHash }))
+  expect(await receiver.commitCredential(accountId, endpointName, reservation!, { headerName, valueHash }))
     .toBe(true);
-  await env.WEBHOOK_ENDPOINTS.put(
-    `endpoint:${endpointName}`,
-    JSON.stringify({ headerName, valueHash }),
-  );
   return headerValue;
 }
 
@@ -50,17 +45,19 @@ async function post(
 }
 
 describe("WebhookReceiver credentials", () => {
-  it("issues each endpoint credential only once", async () => {
+  it("rotates endpoint credentials when issuance is retried", async () => {
     const receiver = env.WEBHOOK_RECEIVER.getByName(receiverName);
     const first = await issue(receiver, receiverName);
     expect((await post(receiverName, first)).status).toBe(409);
     expect((await post(receiverName, "0".repeat(64))).status).toBe(401);
-    expect(await receiver.reserveCredential(accountId)).toBeNull();
+    const second = await issue(receiver, receiverName);
+    expect((await post(receiverName, first)).status).toBe(401);
+    expect((await post(receiverName, second)).status).toBe(409);
   });
 
   it("serializes concurrent credential issuance", async () => {
     const receiver = env.WEBHOOK_RECEIVER.getByName(`${receiverName}:concurrent`);
-    await receiver.claim(accountId);
+    await receiver.claim(accountId, `${receiverName}:concurrent`);
     const results = await Promise.allSettled([
       Promise.resolve(receiver.reserveCredential(accountId)),
       Promise.resolve(receiver.reserveCredential(accountId)),
@@ -74,9 +71,9 @@ describe("WebhookReceiver credentials", () => {
     const receiver = env.WEBHOOK_RECEIVER.getByName(
       "00000000-0000-4000-8000-000000000007",
     );
-    expect(await receiver.claim(accountId)).toBe(true);
-    expect(await receiver.claim(accountId)).toBe(true);
-    expect(await receiver.claim("account-two")).toBe(false);
+    expect(await receiver.claim(accountId, "00000000-0000-4000-8000-000000000007")).toBe(true);
+    expect(await receiver.claim(accountId, "00000000-0000-4000-8000-000000000007")).toBe(true);
+    expect(await receiver.claim("account-two", "00000000-0000-4000-8000-000000000007")).toBe(false);
     expect(await receiver.reserveCredential("account-two")).toBeNull();
   });
 
@@ -219,6 +216,23 @@ describe("Webhook delivery lifecycle", () => {
     expect((await env.TEST_HOOKS.read()).deliveries).toHaveLength(1);
   });
 
+  it("deduplicates retries with long idempotency keys", async () => {
+    const { endpointId, credential } = await configured();
+    const headers = { "Idempotency-Key": "k".repeat(201) };
+    expect((await post(endpointId, credential, headers)).status).toBe(204);
+    expect((await post(endpointId, credential, headers)).status).toBe(204);
+    expect((await env.TEST_HOOKS.read()).deliveries).toHaveLength(1);
+  });
+
+  it("does not store receipts for unkeyed requests", async () => {
+    const { endpointId, receiver, credential } = await configured();
+    expect((await post(endpointId, credential)).status).toBe(204);
+    expect((await post(endpointId, credential)).status).toBe(204);
+    const count = await runInDurableObject(receiver, (_instance, state) =>
+      state.storage.sql.exec("SELECT COUNT(*) AS count FROM webhook_receipts").one().count);
+    expect(count).toBe(0);
+  });
+
   it("coalesces concurrent retries while a callback is running", async () => {
     const { endpointId, credential } = await configured();
     await env.TEST_HOOKS.blockCallback();
@@ -269,6 +283,7 @@ describe("Webhook delivery lifecycle", () => {
     const response = await post(endpointId, "wrong", {}, "[not-json");
     expect(response.status).toBe(401);
     expect((await env.TEST_HOOKS.read()).events).toEqual([]);
+    expect((await post(endpointId, "x".repeat(1_000), {}, "[not-json")).status).toBe(401);
   });
 
   it("rejects unknown endpoint IDs without initializing their receiver", async () => {
@@ -299,6 +314,7 @@ describe("Webhook delivery lifecycle", () => {
       );
     });
     expect((await post(endpointId, credential, { "Idempotency-Key": key })).status).toBe(204);
+    expect((await post(endpointId, credential, { "Idempotency-Key": key })).status).toBe(204);
     expect((await env.TEST_HOOKS.read()).deliveries).toHaveLength(1);
   });
 
@@ -306,7 +322,7 @@ describe("Webhook delivery lifecycle", () => {
     const { endpointId, receiver, credential } = await configured();
     await receiver.disableAll(accountId, endpointId);
     expect((await post(endpointId, credential)).status).toBe(401);
-    expect(await receiver.claim(accountId)).toBe(false);
+    expect(await receiver.claim(accountId, endpointId)).toBe(false);
     expect(await receiver.reserveCredential(accountId)).toBeNull();
   });
 

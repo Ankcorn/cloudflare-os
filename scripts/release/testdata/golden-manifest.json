@@ -916,13 +916,7 @@
       }
     },
     "gatekeeper-webhook": {
-      "bindings": [
-        {
-          "name": "WEBHOOK_ENDPOINTS",
-          "namespace_id": "$KV_WEBHOOK_ENDPOINTS_ID",
-          "type": "kv_namespace"
-        }
-      ],
+      "bindings": [],
       "compatibilityDate": "2026-09-04",
       "compatibilityFlags": [
         "allow_irrevocable_stub_storage",
@@ -940,6 +934,12 @@
             "WebhookReceiver"
           ],
           "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "WebhookEndpointRegistry"
+          ],
+          "tag": "v2"
         }
       ],
       "modules": [

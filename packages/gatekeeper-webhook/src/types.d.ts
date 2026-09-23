@@ -52,8 +52,8 @@ export interface WebhookSession {
   /** Returns the HTTP endpoint to which callers should POST JSON. */
   getTriggerUrl(): Promise<string>;
   /**
-   * Issues this endpoint's credential once. Create a new endpoint when rotation is required.
-   * The returned header value is shown only once. Pass it directly to the sender or its provider
+   * Issues or rotates this endpoint's credential. Rotation invalidates the previous value.
+   * Each returned header value is shown only once. Pass it directly to the sender or its provider
    * gatekeeper; do not log it, display it in agent output, or persist it in Gadget storage.
    */
   issueCredential(options?: WebhookCredentialOptions): Promise<WebhookCredential>;

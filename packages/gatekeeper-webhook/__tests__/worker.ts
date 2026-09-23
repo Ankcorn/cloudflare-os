@@ -174,7 +174,8 @@ class WorkshopApprovalQueue extends RpcTarget implements ApprovalQueue {
 export class TestWorkshop extends DurableObject<TestEnv>
   implements HookInitiator<RpcTarget & WebhookHook> {
   async configure(endpointId: string): Promise<WebhookCredential> {
-    if (!(await this.env.WEBHOOK_RECEIVER.getByName(endpointId).claim("integration-account"))) {
+    if (!(await this.env.WEBHOOK_RECEIVER.getByName(endpointId)
+      .claim("integration-account", endpointId))) {
       throw new Error("Could not claim integration webhook endpoint");
     }
     const gadget = this.env.TEST_GADGET.getByName("integration-gadget");

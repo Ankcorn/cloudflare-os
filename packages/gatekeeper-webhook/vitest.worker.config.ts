@@ -12,9 +12,9 @@ export default defineConfig({
         compatibilityDate: "2026-09-04",
         compatibilityFlags: ["allow_irrevocable_stub_storage", "nodejs_als"],
         modulesRules: [{ type: "Text", include: ["**/*.txt"] }],
-        kvNamespaces: ["WEBHOOK_ENDPOINTS"],
         durableObjects: {
           WEBHOOK_RECEIVER: { className: "WebhookReceiver", useSQLite: true },
+          WEBHOOK_ENDPOINT_REGISTRY: { className: "WebhookEndpointRegistry", useSQLite: true },
           TEST_GADGET: { className: "TestGadget", useSQLite: true },
           TEST_WORKSHOP: { className: "TestWorkshop", useSQLite: true },
         },
