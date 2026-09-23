@@ -7,6 +7,11 @@
   },
   "compatibility_date": "2026-09-04",
   "compatibility_flags": ["allow_irrevocable_stub_storage", "nodejs_als"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "NOTIFICATION_REGISTRY", "class_name": "CloudflareNotificationRegistry" }
+    ]
+  },
   "rules": [
     { "type": "Text", "globs": ["**/*.txt", "**/*.svg"], "fallthrough": false }
   ],
@@ -18,6 +23,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": [ "CloudflareObservabilityGatekeeper" ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [ "CloudflareNotificationsGatekeeper", "CloudflareNotificationReceiver" ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": [ "CloudflareNotificationRegistry" ]
     }
   ],
   "observability": {
