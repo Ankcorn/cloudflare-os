@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { runInDurableObject, SELF } from "cloudflare:test";
 import { beforeEach, expect, it } from "vitest";
-import { hashWebhookApiKey } from "../../src/notifications-webhook.js";
+import { hashWebhookApiKey, notificationReceiverName } from "../../src/notifications-webhook.js";
 import type { NotificationTestHooks } from "../worker.js";
 const accountId = "a".repeat(32);
 const userObjectId = env.USER_ACCOUNT.idFromName("notification-test-account").toString();
@@ -9,6 +9,8 @@ const secret = "c".repeat(64);
 const payload = JSON.stringify({
   account_id: accountId,
   alert_type: "test_alert",
+  policy_id: "b".repeat(32),
+  alert_event: "ALERT_STATE_EVENT_START",
   ts: 1234567890,
   data: { evidence: "test" },
 });
@@ -64,7 +66,7 @@ async function receivedAlerts() {
 it("tests the destination, receives matching alerts once, and ignores other alert types", async () => {
   const stub = await setup("subscribe", { alertTypes: ["test_alert"] });
   expect(
-    await stub.receiveWebhook(secret, "application/json", JSON.stringify({ text: "Hello World!" })),
+    await stub.receiveWebhook(secret, "application/json", JSON.stringify({ text: "Hello World! This is a test message sent from https://cloudflare.com. If you can see this, your webhook is configured properly." })),
   ).toBe(204);
   expect((await stub.getStatus()).lastTestAt).toBeDefined();
   expect(await receivedAlerts()).toEqual([]);
@@ -85,9 +87,33 @@ it("tests the destination, receives matching alerts once, and ignores other aler
     "authorize",
     `callback:${JSON.stringify(alerts[0])}`,
   ]);
+  expect(await env.NOTIFICATION_TEST_HOOKS.readObservations()).toEqual([
+    expect.objectContaining({
+      title: "Cloudflare notification: test_alert",
+      description: expect.stringContaining(`policy ID: ${"b".repeat(32)}; event state: ALERT_STATE_EVENT_START`),
+      containsRestrictedData: true,
+    }),
+  ]);
+  expect((await env.NOTIFICATION_TEST_HOOKS.readObservations())[0]!.description)
+    .toContain(`account ${accountId}`);
 
   await sendAlert(stub);
   expect(await receivedAlerts()).toEqual(alerts);
+});
+
+it("delivers an authenticated notification with no optional account or alert type", async () => {
+  const stub = await setup("optional-fields");
+  expect(await sendAlert(stub, JSON.stringify({ ts: 1234567890, data: { signal: "degraded" } })))
+    .toBe(204);
+  const [alert] = await receivedAlerts();
+  expect(alert).toMatchObject({ accountId, data: { signal: "degraded" } });
+  expect(alert.alertType).toBeUndefined();
+  expect(await env.NOTIFICATION_TEST_HOOKS.readObservations()).toEqual([
+    expect.objectContaining({
+      title: "Cloudflare notification: not provided",
+      containsRestrictedData: true,
+    }),
+  ]);
 });
 
 it("rejects unauthenticated or invalid deliveries without invoking the Gadget", async () => {
@@ -101,6 +127,31 @@ it("rejects unauthenticated or invalid deliveries without invoking the Gadget", 
     expect(await stub.receiveWebhook(key, type, body)).toBe(status);
   }
   expect(await receivedAlerts()).toEqual([]);
+});
+
+it("authenticates the routed webhook before admitting its body to a receiver", async () => {
+  const name = notificationReceiverName(userObjectId, accountId);
+  const registry = env.NOTIFICATION_REGISTRY.getByName(name.slice(0, 2));
+  const stub = await setup(name);
+  await registry.register(name, await hashWebhookApiKey(secret));
+  const url = `http://localhost/notifications/webhooks/${userObjectId}/${accountId}`;
+  const send = (key: string, body: string) => SELF.fetch(url, {
+    method: "POST",
+    headers: { "cf-webhook-auth": key, "content-type": "application/json" },
+    body,
+  });
+
+  expect((await send("wrong", "not json")).status).toBe(401);
+  expect((await SELF.fetch(url.replace(userObjectId, "f".repeat(64)), {
+    method: "POST",
+    headers: { "cf-webhook-auth": secret, "content-type": "application/json" },
+    body: "not json",
+  })).status).toBe(401);
+  expect((await send(secret, payload)).status).toBe(204);
+  expect(await receivedAlerts()).toHaveLength(1);
+  await registry.remove(name);
+  expect((await send(secret, payload)).status).toBe(401);
+  expect((await stub.getStatus()).installed).toBe(true);
 });
 
 it("returns failure until authorization and the Gadget recover on ANS redelivery", async () => {
@@ -143,6 +194,22 @@ it("stops handing off after a hook is disabled or the connection is disconnected
   await stub.suspend();
   expect(await sendAlert(stub)).toBe(410);
   expect((await stub.getStatus()).suspended).toBe(true);
+});
+
+it("clears a late successful receipt after disabling its hook", async () => {
+  const stub = await setup("disable-race");
+  await env.NOTIFICATION_TEST_HOOKS.blockCallback();
+  const delivery = sendAlert(stub);
+  await env.NOTIFICATION_TEST_HOOKS.waitUntilCallbackBlocked();
+  const disabled = Promise.resolve(stub.disable("hook-1"));
+  await expect.poll(() => runInDurableObject(stub, (_instance, state) =>
+    state.storage.kv.get("hook:hook-1") === undefined)).toBe(true);
+  await env.NOTIFICATION_TEST_HOOKS.releaseCallback();
+  expect(await delivery).toBe(204);
+  await disabled;
+  const receipts = await runInDurableObject(stub, (_instance, state) =>
+    state.storage.sql.exec("SELECT COUNT(*) AS count FROM notification_receipts").one().count);
+  expect(receipts).toBe(0);
 });
 
 it("rejects delivery when notification credentials are removed", async () => {

@@ -41,10 +41,10 @@ import { obsContext } from "./observability.js";
 import { NONCE_BYTES, INITIATION_NONCE_LIFETIME_MS, OAUTH_NONCE_LIFETIME_MS,
   generateNonce, constantTimeEqual } from "@gadgets/gatekeeper-kit/connect-nonce";
 import { readTextCapped, ResponseTooLargeError } from "@gadgets/gatekeeper-kit/response-body";
-import { parseNotificationWebhookPath, notificationReceiverName, MAX_NOTIFICATION_BODY_BYTES } from "./notifications-webhook.js";
+import { parseNotificationWebhookPath, notificationReceiverName, notificationWebhookBaseUrl, MAX_NOTIFICATION_BODY_BYTES } from "./notifications-webhook.js";
 import NOTIFICATIONS_CONFIGURATOR_HTML from "./generated/cloudflare-notifications-configurator-ui.txt";
 export { CloudflareNotificationsGatekeeper, CloudflareNotificationHookController,
-  CloudflareNotificationReceiver } from "./notifications.js";
+  CloudflareNotificationReceiver, CloudflareNotificationRegistry } from "./notifications.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.cloudflare", vendorId: VENDOR_ID,
@@ -118,23 +118,34 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(req.url);
     const basePath = getBasePath(env);
-    if (!url.pathname.startsWith(basePath + "/") && url.pathname !== basePath) {
-      throw new Error(`Request path ${url.pathname} does not match BASE_URL path ${basePath}`);
+    let notificationPath: ReturnType<typeof parseNotificationWebhookPath> = null;
+    try {
+      const webhookBasePath = new URL(stripTrailingSlashes(
+        env.NOTIFICATIONS_WEBHOOK_BASE_URL ?? getBaseUrl(env))).pathname.replace(/\/$/, "");
+      notificationPath = parseNotificationWebhookPath(url.pathname, webhookBasePath);
+    } catch {
+      // A misconfigured notification address must not break OAuth and other Cloudflare routes.
     }
-    const notificationPath = parseNotificationWebhookPath(url.pathname, basePath);
     if (notificationPath) {
       if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
-      if (!req.headers.get("cf-webhook-auth")) return new Response(null, { status: 401 });
+      const apiKey = req.headers.get("cf-webhook-auth");
+      if (!apiKey) return new Response(null, { status: 401 });
       try {
+        const name = notificationReceiverName(notificationPath.userObjectId, notificationPath.accountId);
+        const registry = env.NOTIFICATION_REGISTRY.getByName(name.slice(0, 2));
+        if (!(await registry.authorize(name, apiKey))) return new Response(null, { status: 401 });
         const body = await readTextCapped(new Response(req.body, { headers: req.headers }), MAX_NOTIFICATION_BODY_BYTES);
         const receiver = ctx.exports.CloudflareNotificationReceiver.getByName(
-          notificationReceiverName(notificationPath.userObjectId, notificationPath.accountId));
-        const status = await receiver.receiveWebhook(req.headers.get("cf-webhook-auth")!,
+          name);
+        const status = await receiver.receiveWebhook(apiKey,
           req.headers.get("content-type") ?? "", body);
         return new Response(null, { status });
       } catch (error) {
         return new Response(null, { status: error instanceof ResponseTooLargeError ? 413 : 500 });
       }
+    }
+    if (!url.pathname.startsWith(basePath + "/") && url.pathname !== basePath) {
+      throw new Error(`Request path ${url.pathname} does not match BASE_URL path ${basePath}`);
     }
     const relPath = url.pathname.slice(basePath.length);
     const path = relPath.slice(1).split("/");
@@ -523,10 +534,12 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
             details: `Destination ${status.webhookId}. ` +
               (status.lastTestAt ? `Last webhook test: ${status.lastTestAt}.` : "No webhook test received yet."),
           };
-          if (new URL(this.env.NOTIFICATIONS_WEBHOOK_BASE_URL ?? getBaseUrl(this.env)).protocol !== "https:") {
+          try {
+            notificationWebhookBaseUrl(this.env.NOTIFICATIONS_WEBHOOK_BASE_URL ?? getBaseUrl(this.env));
+          } catch {
             return {
               summary: "Public webhook address needed",
-              details: "Ask the deployment administrator to configure a public HTTPS notification address before enabling this connection.",
+              details: "Ask the deployment administrator to configure a public HTTPS notification address on port 443 before enabling this connection.",
             };
           }
           return { summary: "Ready to connect" };

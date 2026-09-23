@@ -5,7 +5,7 @@
 // without a cast.
 
 import type { UserAccount } from "../src/cloudflare.js";
-import type { CloudflareNotificationReceiver } from "../src/notifications.js";
+import type { CloudflareNotificationReceiver, CloudflareNotificationRegistry } from "../src/notifications.js";
 import type { NotificationTestHooks } from "./worker.js";
 import type { TestHooks } from "./worker.js";
 
@@ -16,6 +16,7 @@ declare global {
       // generated `worker-configuration.d.ts`.
       USER_ACCOUNT: DurableObjectNamespace<UserAccount>;
       NOTIFICATION_RECEIVER: DurableObjectNamespace<CloudflareNotificationReceiver>;
+      NOTIFICATION_REGISTRY: DurableObjectNamespace<CloudflareNotificationRegistry>;
       NOTIFICATION_TEST_HOOKS: Fetcher<NotificationTestHooks>;
       TEST_HOOKS: DurableObjectNamespace<TestHooks>;
     }

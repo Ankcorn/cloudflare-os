@@ -1,9 +1,22 @@
 import { assertCloudflareAccountId } from "./resources.js";
 import { constantTimeEqual, generateNonce, hexEncode } from "@gadgets/gatekeeper-kit/connect-nonce";
-import type { CloudflareJson, CloudflareNotification } from "./types.js";
+import { stripTrailingSlashes } from "@gadgets/workshop-shared/gatekeeper";
+import type { CloudflareNotification } from "./types.js";
 
 const API_KEY_BYTES = 32;
 export const MAX_NOTIFICATION_BODY_BYTES = 512 * 1024;
+
+/** Cloudflare generic webhooks require a public HTTP(S) endpoint on port 80 or 443. */
+export function notificationWebhookBaseUrl(value: string): string {
+  const base = stripTrailingSlashes(value);
+  let url: URL;
+  try { url = new URL(base); } catch { throw new Error("Configure a valid public HTTPS notification address."); }
+  if (url.protocol !== "https:" || url.port || url.username || url.password ||
+      url.search || url.hash || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+    throw new Error("Configure a public HTTPS notification address on port 443 without URL credentials, query, or fragment.");
+  }
+  return base;
+}
 
 export function generateWebhookApiKey(): string {
   return generateNonce();
@@ -38,7 +51,9 @@ export function parseNotificationWebhookPath(
 /** Recognize Cloudflare's documented destination-test message, which is not an alert. */
 export function isWebhookTest(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  return Object.keys(value).length === 1 && "text" in value && typeof value.text === "string";
+  return Object.keys(value).length === 1 && "text" in value &&
+    typeof value.text === "string" &&
+    value.text.startsWith("Hello World! This is a test message sent from https://cloudflare.com.");
 }
 
 /** Parse the generic ANS envelope. No fixed alert-type enumeration or event_id assumption. */
@@ -50,13 +65,14 @@ export async function parseNotificationWebhook(
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid notification envelope.");
   const payload = value as Record<string, unknown>;
-  if (
+  if (payload.account_id !== undefined && (
     typeof payload.account_id !== "string" ||
     assertCloudflareAccountId(payload.account_id) !== expectedAccountId
-  ) {
+  )) {
     throw new Error("Notification account does not match the binding.");
   }
-  if (typeof payload.alert_type !== "string" || payload.alert_type.length === 0) {
+  if (payload.alert_type !== undefined &&
+      (typeof payload.alert_type !== "string" || payload.alert_type.length === 0)) {
     throw new Error("Invalid notification alert type.");
   }
   if (typeof payload.ts !== "number" || payload.ts < 0) {
@@ -64,16 +80,17 @@ export async function parseNotificationWebhook(
   }
   const timestamp = new Date(payload.ts * 1000);
   if (Number.isNaN(timestamp.valueOf())) throw new Error("Invalid notification timestamp.");
-  if (!("data" in payload)) throw new Error("Missing notification evidence.");
+  if (!("data" in payload) || !payload.data || typeof payload.data !== "object" ||
+      Array.isArray(payload.data)) throw new Error("Invalid notification evidence.");
   // JSON.parse has validated JSON recursively; hashing the entire envelope distinguishes policy,
   // event state and evidence even when correlation IDs are shared. Identical retries collapse.
   const id = await hashWebhookApiKey(JSON.stringify(payload));
   const result: CloudflareNotification = {
     id,
     accountId: expectedAccountId,
-    alertType: payload.alert_type,
+    ...(payload.alert_type === undefined ? {} : { alertType: payload.alert_type }),
     timestamp: timestamp.toISOString(),
-    data: payload.data as CloudflareJson,
+    data: payload.data,
   };
   const fields = {
     policy_id: "policyId",

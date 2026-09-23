@@ -18,8 +18,10 @@ export default defineConfig({
         // Kept in step with wrangler.jsonc; a drift here tests a runtime we do not deploy.
         compatibilityDate: "2026-09-04",
         compatibilityFlags: ["allow_irrevocable_stub_storage", "nodejs_als"],
+        bindings: { NOTIFICATIONS_WEBHOOK_BASE_URL: "https://hooks.example/notifications" },
         serviceBindings: { NOTIFICATION_TEST_HOOKS: { name: kCurrentWorker, entrypoint: "NotificationTestHooks" } },
         durableObjects: {
+          NOTIFICATION_REGISTRY: { className: "CloudflareNotificationRegistry", useSQLite: true },
           NOTIFICATION_RECEIVER: { className: "CloudflareNotificationReceiver", useSQLite: true },
           USER_ACCOUNT: { className: "UserAccount", useSQLite: true },
           OBSERVABILITY_GATEKEEPER: {
