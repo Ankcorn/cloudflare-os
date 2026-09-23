@@ -244,7 +244,7 @@ export default {
       timestamp: new Date().toISOString(),
       payload,
     };
-    const status = await receiver(ctx.exports, endpointId).deliver(event, keyed);
+    const status = await receiver(ctx.exports, endpointId).deliver(presentedHash, event, keyed);
     const message = status === 204
       ? null
       : status === 401
@@ -555,6 +555,7 @@ export class WebhookEndpointRegistry extends DurableObject<Env> {
 export class WebhookReceiver extends DurableObject<Env> {
   #mutations = new SerialTaskQueue();
   #inFlight = new Map<string, Promise<number>>();
+  #activeDeliveries = new Set<Promise<number>>();
 
   async claim(accountId: string, endpointId: string): Promise<boolean> {
     return this.#mutations.run(() => {
@@ -661,20 +662,30 @@ export class WebhookReceiver extends DurableObject<Env> {
         disposeStub(stored?.initiator);
       }
     });
-    await Promise.allSettled(this.#inFlight.values());
+    await Promise.allSettled(this.#activeDeliveries);
   }
 
-  async deliver(event: WebhookEvent, keyed = true): Promise<number> {
-    const state = this.ctx.storage.kv.get<EndpointState>("state");
-    if (state?.status !== "active") return 401;
-    if (keyed && this.#wasDelivered(event.id)) return 204;
-    const running = keyed ? this.#inFlight.get(event.id) : undefined;
-    if (running) return running;
-    const delivery = this.#deliver(event, keyed).finally(() => {
-      if (keyed) this.#inFlight.delete(event.id);
+  async deliver(credentialHash: string, event: WebhookEvent, keyed = true): Promise<number> {
+    const admitted = await this.#mutations.run(async () => {
+      const state = this.ctx.storage.kv.get<EndpointState>("state");
+      if (state?.status !== "active") return { status: 401 };
+      const current = await registry(this.ctx.exports, state.endpointId)
+        .getCredential(state.endpointId);
+      if (!current || !constantTimeEqual(credentialHash, current.valueHash)) {
+        return { status: 401 };
+      }
+      if (keyed && this.#wasDelivered(event.id)) return { status: 204 };
+      const running = keyed ? this.#inFlight.get(event.id) : undefined;
+      if (running) return { delivery: running };
+      const delivery = this.#deliver(event, keyed).finally(() => {
+        if (keyed) this.#inFlight.delete(event.id);
+        this.#activeDeliveries.delete(delivery);
+      });
+      if (keyed) this.#inFlight.set(event.id, delivery);
+      this.#activeDeliveries.add(delivery);
+      return { delivery };
     });
-    if (keyed) this.#inFlight.set(event.id, delivery);
-    return delivery;
+    return admitted.delivery ?? admitted.status;
   }
 
   async #deliver(event: WebhookEvent, keyed: boolean): Promise<number> {

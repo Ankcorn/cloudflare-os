@@ -337,4 +337,34 @@ describe("Webhook delivery lifecycle", () => {
     await revocation;
     expect((await post(endpointId, credential)).status).toBe(401);
   });
+
+  it("waits for an unkeyed callback before revocation completes", async () => {
+    const { endpointId, receiver, credential } = await configured();
+    await env.TEST_HOOKS.blockCallback();
+    const delivery = post(endpointId, credential);
+    await env.TEST_HOOKS.waitUntilCallbackBlocked();
+    let revoked = false;
+    const revocation = Promise.resolve(receiver.disableAll(accountId, endpointId))
+      .then(() => { revoked = true; });
+    await expect.poll(() => runInDurableObject(receiver, (_instance, state) =>
+      (state.storage.kv.get("state") as { status?: string } | undefined)?.status))
+      .toBe("revoked");
+    expect(revoked).toBe(false);
+    await env.TEST_HOOKS.releaseCallback();
+    expect((await delivery).status).toBe(204);
+    await revocation;
+    expect(revoked).toBe(true);
+  });
+
+  it("rejects a credential rotated after the router admitted a request", async () => {
+    const { endpointId, receiver, credential } = await configured();
+    const replacement = await issue(receiver, endpointId);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(credential));
+    const oldHash = [...new Uint8Array(digest)]
+      .map(value => value.toString(16).padStart(2, "0")).join("");
+    expect(await receiver.deliver(oldHash, {
+      id: crypto.randomUUID(), timestamp: new Date().toISOString(), payload: {},
+    })).toBe(401);
+    expect((await post(endpointId, replacement)).status).toBe(204);
+  });
 });
