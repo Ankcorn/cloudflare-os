@@ -13,6 +13,7 @@ export default defineConfig({
         compatibilityFlags: ["allow_irrevocable_stub_storage", "nodejs_als"],
         modulesRules: [{ type: "Text", include: ["**/*.txt"] }],
         durableObjects: {
+          WEBHOOK_ACCOUNT: { className: "UserAccount", useSQLite: true },
           WEBHOOK_RECEIVER: { className: "WebhookReceiver", useSQLite: true },
           WEBHOOK_ENDPOINT_REGISTRY: { className: "WebhookEndpointRegistry", useSQLite: true },
           TEST_GADGET: { className: "TestGadget", useSQLite: true },
